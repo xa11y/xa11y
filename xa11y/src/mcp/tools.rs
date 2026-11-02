@@ -1484,21 +1484,35 @@ fn tool_action_parsed(
     selector: &str,
     action_args: &cli::ActionArgs,
 ) -> CliResult<ToolOutput> {
+    // An unknown verb is refused before the auto-wait can spend its timeout
+    // on a call that could never be made.
+    if !cli::ACTION_NAMES.contains(&action) {
+        return Err(usage(format!(
+            "unknown action: {action} (expected one of: {})",
+            cli::ACTION_NAMES.join(", ")
+        )));
+    }
     let locator = target.locator(selector);
     // The schema promises "must match exactly one element", so enforce it here
     // rather than letting the locator's document-order first-match stand in
     // for it: a model told "exactly one" that silently gets the first of
     // several has no way to notice it pressed the wrong control.
     //
-    // Zero matches deliberately falls through to the action, whose auto-wait
-    // is what gives an element still being built time to appear — and whose
-    // timeout carries the richer "never matched" diagnosis.
-    let matches = locator.elements()?;
-    if matches.len() > 1 {
-        return Err(ambiguous(selector, &matches));
-    }
-
-    cli::perform_action(&locator, action, action_args)?;
+    // The count and the action share one resolution: `auto_wait_unique`
+    // hands back the single element it counted, and that element is what is
+    // acted on. Counting and then calling the locator's action re-resolved in
+    // between, so a UI changing in that gap got the action on an element that
+    // was never counted — possibly one of several (#528).
+    //
+    // Zero matches and a not-yet-actionable match keep polling, which is
+    // what gives an element still being built time to appear, and the
+    // timeout carries the "never matched" diagnosis. Several matches refuse
+    // at once rather than waiting for the UI to settle into one.
+    let element = match locator.auto_wait_unique(&action.replace('-', "_"))? {
+        Ok(element) => element,
+        Err(matches) => return Err(ambiguous(selector, &matches)),
+    };
+    cli::perform_action_on(&element, action, action_args)?;
 
     // `ok` reports that the platform accepted the call. Whether the
     // application did anything with it is only knowable by re-reading, which
@@ -3389,6 +3403,55 @@ mod tests {
                 .any(|(_, name, data)| name == "resize_to" && data.as_deref() == Some("800x600")),
             "the dispatching must reach the resize_to verb with the parsed size: {actions:?}"
         );
+    }
+
+    #[test]
+    fn action_refuses_several_matches_and_touches_none_of_them() {
+        let (target, provider) = mock_target_app();
+        let err = tool_action_parsed(&target, "press", "button", &cli::ActionArgs::default())
+            .expect_err("two buttons match");
+        let CliError::Ambiguous { count, .. } = err else {
+            panic!("expected ambiguous_selector, got {err:?}");
+        };
+        assert_eq!(count, 2);
+        assert!(provider.actions().is_empty(), "{:?}", provider.actions());
+    }
+
+    #[test]
+    fn action_acts_on_the_element_it_counted() {
+        let (target, provider) = mock_target_app();
+        let selector = r#"button[name="Back"]"#;
+        let counted = target.locator(selector).elements().expect("resolve");
+        assert_eq!(counted.len(), 1);
+        tool_action_parsed(&target, "press", selector, &cli::ActionArgs::default())
+            .expect("one actionable match");
+        let actions = provider.actions();
+        assert_eq!(
+            actions,
+            vec![(counted[0].handle, "press".to_string(), None)],
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_verb_is_refused_before_anything_is_resolved() {
+        let (target, provider) = mock_target_app();
+        // A selector that never matches: reaching the auto-wait would spend
+        // the default timeout before the verb was ever looked at.
+        let start = std::time::Instant::now();
+        let err = tool_action_parsed(
+            &target,
+            "frobnicate",
+            r#"button[name="Nope"]"#,
+            &cli::ActionArgs::default(),
+        )
+        .expect_err("not a verb");
+        assert!(
+            matches!(err, CliError::Usage(ref m) if m.contains("unknown action")),
+            "{err:?}"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert!(provider.actions().is_empty());
     }
 
     #[test]

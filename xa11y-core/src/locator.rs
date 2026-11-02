@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -107,6 +109,23 @@ impl Actionability {
             "visible && enabled"
         } else {
             "enabled"
+        }
+    }
+
+    /// The gate the locator action named `action` waits on.
+    ///
+    /// One table rather than a gate argument at each call site, so the
+    /// named action methods and [`Locator::auto_wait_unique`] — which is
+    /// handed a verb by name — cannot disagree about a verb's gate.
+    fn for_action(action: &str) -> Self {
+        match action {
+            // Making an off-screen element visible is this verb's purpose.
+            "scroll_into_view" => Self::ENABLED,
+            // A minimized window is legitimately invisible; see the window
+            // management section below.
+            "activate" | "minimize" | "maximize" | "enter_fullscreen" | "restore" | "close"
+            | "move_to" | "resize_to" => Self::ENABLED,
+            _ => Self::VISIBLE_AND_ENABLED,
         }
     }
 }
@@ -655,7 +674,8 @@ impl Locator {
     /// failed `press()` reports *what* was being attempted and what the
     /// last poll observed.
     ///
-    /// `gate` states which conditions the action requires. Most verbs use
+    /// `action` also selects the gate ([`Actionability::for_action`]): the
+    /// conditions the action requires. Most verbs use
     /// [`Actionability::VISIBLE_AND_ENABLED`]; `scroll_into_view` uses
     /// [`Actionability::ENABLED`], because gating it on `visible` is circular —
     /// it is the one verb whose purpose is to make an off-screen element
@@ -665,26 +685,100 @@ impl Locator {
     /// Always performs at least one attempt before checking the deadline, so
     /// `Duration::ZERO` means "single attempt, no polling" — the same
     /// contract as `poll_lookup` in `app.rs`.
-    fn auto_wait(&self, action: &str, gate: Actionability) -> Result<Element> {
+    fn auto_wait(&self, action: &str) -> Result<Element> {
+        let first_match = || match self.resolve_data() {
+            Ok(data) => Ok(ControlFlow::Continue(Some(data))),
+            // Not yet present — poll again.
+            Err(Error::SelectorNotMatched { .. }) => Ok(ControlFlow::Continue(None)),
+            Err(e) => Err(e),
+        };
+        match self.auto_wait_with::<Infallible>(action, first_match)? {
+            ControlFlow::Continue(element) => Ok(element),
+            ControlFlow::Break(never) => match never {},
+        }
+    }
+
+    /// Auto-wait for `action` as the named action methods do, but over the
+    /// whole match set, and hand back the element to act on instead of
+    /// acting.
+    ///
+    /// Returns `Ok(Ok(element))` once the selector matches exactly one
+    /// element and that element passes the action's gate, and `Ok(Err(all))`
+    /// as soon as a poll sees more than one match. The caller then acts on
+    /// the returned [`Element`] itself, so the element that was counted is
+    /// the element acted on: counting with [`Self::elements`] and then
+    /// calling an action method re-resolves in between, and a UI that changes
+    /// in that gap gets the action on an element nobody counted. Zero matches
+    /// and a not-yet-actionable match keep polling, and the timeout carries
+    /// the same diagnosis as the action methods'.
+    ///
+    /// `action` is the action method's name (`press`, `show_menu`,
+    /// `move_to`, …), which selects its gate. An explicit [`Self::nth`]
+    /// already picks one match, so it is honoured rather than checked.
+    ///
+    /// Hidden: this exists for consumers that promise "exactly one" (the MCP
+    /// `action` tool), and is not part of the binding surface.
+    #[doc(hidden)]
+    pub fn auto_wait_unique(
+        &self,
+        action: &str,
+    ) -> Result<std::result::Result<Element, Vec<Element>>> {
+        if self.nth.is_some() {
+            return self.auto_wait(action).map(Ok);
+        }
+        let only_match = || {
+            let group = SelectorGroup::parse(&self.selector)?;
+            let mut all = self.resolve_group(&group, None)?;
+            if all.len() > 1 {
+                return Ok(ControlFlow::Break(all));
+            }
+            Ok(ControlFlow::Continue(all.pop()))
+        };
+        Ok(match self.auto_wait_with(action, only_match)? {
+            ControlFlow::Continue(element) => Ok(element),
+            ControlFlow::Break(all) => Err(all
+                .into_iter()
+                .map(|d| Element::new(d, Arc::clone(&self.provider)))
+                .collect()),
+        })
+    }
+
+    /// The poll loop behind [`Self::auto_wait`] and [`Self::auto_wait_unique`].
+    ///
+    /// `resolve` is one poll: `Continue(Some(data))` is a candidate to gate,
+    /// `Continue(None)` is "not present yet", and `Break(b)` ends the wait
+    /// with `b` immediately.
+    fn auto_wait_with<B>(
+        &self,
+        action: &str,
+        mut resolve: impl FnMut() -> Result<ControlFlow<B, Option<ElementData>>>,
+    ) -> Result<ControlFlow<B, Element>> {
+        let gate = Actionability::for_action(action);
         let timeout = self.effective_timeout()?;
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
         let mut ever_matched = false;
 
         loop {
+            let resolved = match resolve()? {
+                ControlFlow::Continue(resolved) => resolved,
+                ControlFlow::Break(b) => return Ok(ControlFlow::Break(b)),
+            };
+
             // This poll's observation, for the timeout diagnosis.
-            let observed = match self.resolve_data() {
-                Ok(data) if gate.is_met(&data) => {
-                    return Ok(Element::new(data, Arc::clone(&self.provider)));
+            let observed = match resolved {
+                Some(data) if gate.is_met(&data) => {
+                    return Ok(ControlFlow::Continue(Element::new(
+                        data,
+                        Arc::clone(&self.provider),
+                    )));
                 }
-                Ok(data) => {
+                Some(data) => {
                     // Matched but not yet actionable — poll again.
                     ever_matched = true;
                     Some(data)
                 }
-                // Not yet present — poll again.
-                Err(Error::SelectorNotMatched { .. }) => None,
-                Err(e) => return Err(e),
+                None => None,
             };
 
             let elapsed = start.elapsed();
@@ -710,62 +804,52 @@ impl Locator {
 
     /// Click / invoke the matched element.
     pub fn press(&self) -> Result<()> {
-        self.auto_wait("press", Actionability::VISIBLE_AND_ENABLED)?
-            .press()
+        self.auto_wait("press")?.press()
     }
 
     /// Set keyboard focus on the matched element.
     pub fn focus(&self) -> Result<()> {
-        self.auto_wait("focus", Actionability::VISIBLE_AND_ENABLED)?
-            .focus()
+        self.auto_wait("focus")?.focus()
     }
 
     /// Remove keyboard focus from the matched element.
     pub fn blur(&self) -> Result<()> {
-        self.auto_wait("blur", Actionability::VISIBLE_AND_ENABLED)?
-            .blur()
+        self.auto_wait("blur")?.blur()
     }
 
     /// Toggle the matched element (checkbox, switch).
     pub fn toggle(&self) -> Result<()> {
-        self.auto_wait("toggle", Actionability::VISIBLE_AND_ENABLED)?
-            .toggle()
+        self.auto_wait("toggle")?.toggle()
     }
 
     /// Select the matched element (list item, etc.).
     pub fn select(&self) -> Result<()> {
-        self.auto_wait("select", Actionability::VISIBLE_AND_ENABLED)?
-            .select()
+        self.auto_wait("select")?.select()
     }
 
     /// Expand the matched element.
     pub fn expand(&self) -> Result<()> {
-        self.auto_wait("expand", Actionability::VISIBLE_AND_ENABLED)?
-            .expand()
+        self.auto_wait("expand")?.expand()
     }
 
     /// Collapse the matched element.
     pub fn collapse(&self) -> Result<()> {
-        self.auto_wait("collapse", Actionability::VISIBLE_AND_ENABLED)?
-            .collapse()
+        self.auto_wait("collapse")?.collapse()
     }
 
     /// Show the context menu for the matched element.
     pub fn show_menu(&self) -> Result<()> {
-        self.auto_wait("show_menu", Actionability::VISIBLE_AND_ENABLED)?
-            .show_menu()
+        self.auto_wait("show_menu")?.show_menu()
     }
 
     /// Increment the matched element (slider, spinner).
     pub fn increment(&self) -> Result<()> {
-        self.auto_wait("increment", Actionability::VISIBLE_AND_ENABLED)?
-            .increment()
+        self.auto_wait("increment")?.increment()
     }
 
     /// Decrement the matched element (slider, spinner).
     pub fn decrement(&self) -> Result<()> {
-        self.auto_wait("decrement", Actionability::VISIBLE_AND_ENABLED)?
-            .decrement()
+        self.auto_wait("decrement")?.decrement()
     }
 
     /// Scroll the matched element into view.
@@ -776,14 +860,12 @@ impl Locator {
     /// visibility would be circular and would time out on the elements that
     /// most need scrolling (issue #350).
     pub fn scroll_into_view(&self) -> Result<()> {
-        self.auto_wait("scroll_into_view", Actionability::ENABLED)?
-            .scroll_into_view()
+        self.auto_wait("scroll_into_view")?.scroll_into_view()
     }
 
     /// Set the text value of the matched element.
     pub fn set_value(&self, value: &str) -> Result<()> {
-        self.auto_wait("set_value", Actionability::VISIBLE_AND_ENABLED)?
-            .set_value(value)
+        self.auto_wait("set_value")?.set_value(value)
     }
 
     /// Set the numeric value of the matched element (slider, spinner).
@@ -795,14 +877,13 @@ impl Locator {
                 message: format!("set_numeric_value requires a finite value, got {}", value),
             });
         }
-        self.auto_wait("set_numeric_value", Actionability::VISIBLE_AND_ENABLED)?
+        self.auto_wait("set_numeric_value")?
             .set_numeric_value(value)
     }
 
     /// Type text at the current cursor position on the matched element.
     pub fn type_text(&self, text: &str) -> Result<()> {
-        self.auto_wait("type_text", Actionability::VISIBLE_AND_ENABLED)?
-            .type_text(text)
+        self.auto_wait("type_text")?.type_text(text)
     }
 
     /// Select a text range within the matched element.
@@ -812,8 +893,7 @@ impl Locator {
                 message: format!("select_text start ({}) must be <= end ({})", start, end),
             });
         }
-        self.auto_wait("select_text", Actionability::VISIBLE_AND_ENABLED)?
-            .select_text(start, end)
+        self.auto_wait("select_text")?.select_text(start, end)
     }
 
     /// Perform an action by name (with auto-wait).
@@ -839,8 +919,7 @@ impl Locator {
             "close" => return self.close(),
             _ => {}
         }
-        self.auto_wait("perform_action", Actionability::VISIBLE_AND_ENABLED)?
-            .perform_action(action)
+        self.auto_wait("perform_action")?.perform_action(action)
     }
 
     // ── Window management ─────────────────────────────────────────
@@ -856,14 +935,12 @@ impl Locator {
     /// Activate the matched window: bring it to the foreground and give it
     /// focus.
     pub fn activate(&self) -> Result<()> {
-        self.auto_wait("activate", Actionability::ENABLED)?
-            .activate()
+        self.auto_wait("activate")?.activate()
     }
 
     /// Minimize the matched window.
     pub fn minimize(&self) -> Result<()> {
-        self.auto_wait("minimize", Actionability::ENABLED)?
-            .minimize()
+        self.auto_wait("minimize")?.minimize()
     }
 
     /// Maximize the matched window.
@@ -871,8 +948,7 @@ impl Locator {
     /// Distinct from [`Self::enter_fullscreen`]: this drives the platform's
     /// maximized state, not native fullscreen.
     pub fn maximize(&self) -> Result<()> {
-        self.auto_wait("maximize", Actionability::ENABLED)?
-            .maximize()
+        self.auto_wait("maximize")?.maximize()
     }
 
     /// Put the matched window in native fullscreen.
@@ -880,8 +956,7 @@ impl Locator {
     /// Distinct from [`Self::maximize`]: fullscreen is the platform's native
     /// fullscreen state (macOS `AXFullScreen`); [`Self::restore`] leaves it.
     pub fn enter_fullscreen(&self) -> Result<()> {
-        self.auto_wait("enter_fullscreen", Actionability::ENABLED)?
-            .enter_fullscreen()
+        self.auto_wait("enter_fullscreen")?.enter_fullscreen()
     }
 
     /// Restore the matched window to its normal state (from minimized,
@@ -893,18 +968,17 @@ impl Locator {
     /// leaving fullscreen is the same absolute state write this performs, not
     /// a distinct operation.
     pub fn restore(&self) -> Result<()> {
-        self.auto_wait("restore", Actionability::ENABLED)?.restore()
+        self.auto_wait("restore")?.restore()
     }
 
     /// Close the matched window.
     pub fn close(&self) -> Result<()> {
-        self.auto_wait("close", Actionability::ENABLED)?.close()
+        self.auto_wait("close")?.close()
     }
 
     /// Move the matched window to the given **logical** screen coordinates.
     pub fn move_to(&self, x: i32, y: i32) -> Result<()> {
-        self.auto_wait("move_to", Actionability::ENABLED)?
-            .move_to(x, y)
+        self.auto_wait("move_to")?.move_to(x, y)
     }
 
     /// Resize the matched window to the given **logical** dimensions.
@@ -919,8 +993,7 @@ impl Locator {
                 ),
             });
         }
-        self.auto_wait("resize_to", Actionability::ENABLED)?
-            .resize_to(width, height)
+        self.auto_wait("resize_to")?.resize_to(width, height)
     }
 
     // ── Wait operations ─────────────────────────────────────────────
@@ -1887,5 +1960,161 @@ mod tests {
         assert!(capped.ends_with("… (+7 more lines truncated)"), "{capped}");
         // Under the cap: unchanged, no marker.
         assert_eq!(truncate_lines("a\nb", 3), "a\nb");
+    }
+
+    // ── auto_wait_unique ───────────────────────────────────────────
+
+    /// A provider whose tree changes after the first resolution: from the
+    /// second `list_apps` on, a second, unrelated "Back" button sits ahead of
+    /// the real one in the toolbar. A caller that counts in one resolution
+    /// and acts in another acts on the intruder.
+    struct ShiftingProvider {
+        inner: Arc<crate::mock::MockProvider>,
+        resolutions: std::sync::atomic::AtomicUsize,
+    }
+
+    const INTRUDER_HANDLE: u64 = 9_999;
+
+    macro_rules! forward {
+        ($($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+            $(fn $name(&self, e: &ElementData $(, $arg: $ty)*) -> Result<$ret> {
+                self.inner.$name(e $(, $arg)*)
+            })*
+        };
+    }
+
+    impl Provider for ShiftingProvider {
+        fn list_apps(&self) -> Result<Vec<ElementData>> {
+            self.resolutions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.list_apps()
+        }
+        fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+            let mut children = self.inner.get_children(element)?;
+            let shifted = self.resolutions.load(std::sync::atomic::Ordering::SeqCst) > 1;
+            if shifted && element.is_some_and(|e| e.name.as_deref() == Some("Navigation")) {
+                let mut intruder = children[0].clone();
+                intruder.handle = INTRUDER_HANDLE;
+                children.insert(0, intruder);
+            }
+            Ok(children)
+        }
+        fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+            self.inner.get_parent(element)
+        }
+        fn focused_app(&self) -> Result<ElementData> {
+            self.inner.focused_app()
+        }
+        fn list_shell_surfaces(
+            &self,
+        ) -> Result<Vec<(crate::shell::ShellSurfaceKind, ElementData)>> {
+            self.inner.list_shell_surfaces()
+        }
+        forward! {
+            press() -> (); focus() -> (); blur() -> (); toggle() -> (); select() -> ();
+            expand() -> (); collapse() -> (); show_menu() -> (); increment() -> ();
+            decrement() -> (); scroll_into_view() -> (); set_value(v: &str) -> ();
+            set_numeric_value(v: f64) -> (); type_text(t: &str) -> ();
+            set_text_selection(s: u32, f: u32) -> (); perform_action(a: &str) -> ();
+            activate() -> (); minimize() -> (); maximize() -> (); enter_fullscreen() -> ();
+            restore() -> (); close() -> (); move_to(x: i32, y: i32) -> ();
+            resize_to(w: u32, h: u32) -> ();
+            subscribe() -> crate::event_provider::Subscription;
+        }
+    }
+
+    #[test]
+    fn auto_wait_unique_counts_and_returns_from_one_resolution() {
+        let provider = Arc::new(ShiftingProvider {
+            inner: build_provider(),
+            resolutions: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let loc = Locator::new(provider.clone(), None, r#"button[name="Back"]"#)
+            .with_timeout(Duration::ZERO);
+        let element = loc
+            .auto_wait_unique("press")
+            .expect("the wait succeeds")
+            .expect("one Back button when it was counted");
+        assert_ne!(
+            element.handle, INTRUDER_HANDLE,
+            "acted on an uncounted element"
+        );
+        assert_eq!(
+            provider
+                .resolutions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the count and the element to act on must come from one resolution"
+        );
+        // The hazard is real: the tree now holds two, and a re-resolve sees both.
+        assert_eq!(loc.count().expect("count"), 2);
+    }
+
+    #[test]
+    fn auto_wait_unique_refuses_several_matches_without_waiting() {
+        let loc = root_locator("button").with_timeout(Duration::from_secs(30));
+        let start = std::time::Instant::now();
+        let all = loc
+            .auto_wait_unique("press")
+            .expect("not an error")
+            .expect_err("two buttons match");
+        assert_eq!(names(&all), vec!["Back", "Forward"]);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "must not wait it out"
+        );
+    }
+
+    #[test]
+    fn auto_wait_unique_applies_the_named_actions_gate() {
+        // "Status" is invisible: `press` waits on visibility and times out,
+        // `scroll_into_view` does not wait on it and gets the element.
+        let loc = root_locator(r#"static_text[name="Status"]"#).with_timeout(Duration::ZERO);
+        let err = loc.auto_wait_unique("press").expect_err("invisible");
+        let Error::Timeout { .. } = &err else {
+            panic!("expected a timeout, got {err:?}");
+        };
+        let d = err.diagnosis().expect("timeouts carry a diagnosis");
+        assert_eq!(
+            d.condition.as_deref(),
+            Some("press target actionable (visible && enabled)")
+        );
+        assert!(
+            d.last_observed
+                .as_deref()
+                .is_some_and(|o| o.contains("visible=false")),
+            "{d:?}"
+        );
+        loc.auto_wait_unique("scroll_into_view")
+            .expect("enabled is enough")
+            .expect("one match");
+    }
+
+    #[test]
+    fn auto_wait_unique_times_out_with_a_diagnosis_when_nothing_matches() {
+        let loc = root_locator(r#"button[name="Nope"]"#).with_timeout(Duration::ZERO);
+        let err = loc.auto_wait_unique("press").expect_err("no match");
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        let d = err.diagnosis().expect("diagnosis");
+        assert_eq!(d.last_observed.as_deref(), Some("selector never matched"));
+        assert!(!d.candidates.is_empty(), "near misses are listed: {d:?}");
+    }
+
+    #[test]
+    fn auto_wait_unique_honours_an_explicit_nth() {
+        let el = root_locator("button")
+            .nth(2)
+            .with_timeout(Duration::ZERO)
+            .auto_wait_unique("focus")
+            .map(|r| r.map(|e| e.name.clone()));
+        // `Forward` is disabled, so the second button never becomes actionable.
+        assert!(matches!(el, Err(Error::Timeout { .. })), "{el:?}");
+        let el = root_locator("button")
+            .nth(1)
+            .with_timeout(Duration::ZERO)
+            .auto_wait_unique("press")
+            .expect("the first button is actionable")
+            .expect("nth picks one");
+        assert_eq!(el.name.as_deref(), Some("Back"));
     }
 }
