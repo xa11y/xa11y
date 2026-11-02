@@ -1449,16 +1449,19 @@ def test_gtk4_element_bounds_follow_the_window(app: xa11y.App) -> None:
         return button.element().bounds
 
     def assert_inside_window(inner) -> None:
-        # Absolute, not just relative: the button lies within the window's
-        # own bounds, which the window backend reads from the X server.
+        # Absolute, not just relative: the button lies on the window, whose
+        # bounds the window backend reads from the X server. Horizontally it
+        # is inside; vertically it need only overlap, because the app's
+        # content is in a ScrolledWindow that earlier suites may have
+        # scrolled, leaving OK partly above the viewport.
         outer = app.windows()[0].bounds
         assert outer is not None, "GTK 4 window has no bounds on X11"
         assert (
             outer.x <= inner.x
-            and outer.y <= inner.y
             and inner.x + inner.width <= outer.x + outer.width
-            and inner.y + inner.height <= outer.y + outer.height
-        ), f"button {inner} is not inside window {outer}"
+            and inner.y < outer.y + outer.height
+            and outer.y < inner.y + inner.height
+        ), f"button {inner} is not on window {outer}"
 
     before = ok_bounds()
     assert before is not None, "GTK 4 button has no bounds on X11"

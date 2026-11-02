@@ -758,8 +758,11 @@ impl LinuxProvider {
     ///
     /// An unreadable answer is an error, not "no": treating it as "not
     /// GTK 4" would report GTK 4's raw SCREEN extents. Errors are not
-    /// cached, so a transient failure is retried. A toolkit name other than
-    /// GTK settles the answer without reading the version.
+    /// cached, so a transient failure is retried. Two answers settle it
+    /// without the version: a toolkit name other than GTK, and a bus whose
+    /// root object has no `Application` interface at all. GTK 4 always
+    /// exports one there; WebKitGTK's web process, which serves a Tauri
+    /// app's page content, does not.
     fn is_gtk4(&self, bus: &str) -> Result<bool> {
         if let Some(known) = self
             .gtk4
@@ -779,7 +782,20 @@ impl LinuxProvider {
                     message: format!("Application.{property} on {bus}: {e}"),
                 })
         };
-        let name = read("ToolkitName")?;
+        let name = match read("ToolkitName") {
+            Ok(name) => name,
+            Err(error) => {
+                if self.root_exports_application(bus)? {
+                    return Err(error);
+                }
+                self.gtk4
+                    .is_gtk4
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(bus.to_owned(), false);
+                return Ok(false);
+            }
+        };
         let gtk4 = if name.eq_ignore_ascii_case("GTK") {
             // The toolkit's version is the `Version` property (GTK 4 has no
             // `ToolkitVersion`; `AtspiVersion` is the protocol's).
@@ -839,6 +855,27 @@ impl LinuxProvider {
             }
         };
         extents_to_rect(x.checked_add(ox)?, y.checked_add(oy)?, w, h)
+    }
+
+    /// Whether `bus`'s root object lists `org.a11y.atspi.Application` in
+    /// its introspection data. An error when the introspection itself
+    /// cannot be read, so "unknown" never reads as "absent".
+    fn root_exports_application(&self, bus: &str) -> Result<bool> {
+        let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.freedesktop.DBus.Introspectable")?;
+        let reply = proxy
+            .call_method("Introspect", &())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"),
+            })?;
+        let xml: String = reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"),
+        })?;
+        Ok(introspection_lists_interface(
+            &xml,
+            "org.a11y.atspi.Application",
+        ))
     }
 
     /// The process id behind a GTK 4 application bus, cached per bus.
@@ -3785,6 +3822,11 @@ pub(crate) fn atspi_visible(bits: u64) -> bool {
 /// The application object's path on every AT-SPI application connection.
 const APP_ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
 
+/// Whether introspection `xml` declares `interface` on its node.
+fn introspection_lists_interface(xml: &str, interface: &str) -> bool {
+    xml.contains(&format!("<interface name=\"{interface}\""))
+}
+
 /// Whether `Application.ToolkitName` / `Version` name GTK 4.
 fn is_gtk4_toolkit(name: &str, version: &str) -> bool {
     name.eq_ignore_ascii_case("GTK") && version.trim().split('.').next() == Some("4")
@@ -4407,6 +4449,28 @@ mod tests {
         assert!(!is_listable_top_level(SHOWING));
         // Minimized: no SHOWING, but ICONIFIED keeps it listed.
         assert!(is_listable_top_level(ICONIFIED));
+    }
+
+    #[test]
+    fn application_interface_is_found_in_introspection_only_when_declared() {
+        let gtk = r#"<node><interface name="org.a11y.atspi.Accessible"></interface>
+            <interface name="org.a11y.atspi.Application"><property name="ToolkitName" type="s" access="read"/></interface></node>"#;
+        assert!(introspection_lists_interface(
+            gtk,
+            "org.a11y.atspi.Application"
+        ));
+        // A root path no object is registered at: children only.
+        let bare = r#"<node><node name="org"/></node>"#;
+        assert!(!introspection_lists_interface(
+            bare,
+            "org.a11y.atspi.Application"
+        ));
+        let other =
+            r#"<node><interface name="org.a11y.atspi.ApplicationExtra"></interface></node>"#;
+        assert!(!introspection_lists_interface(
+            other,
+            "org.a11y.atspi.Application"
+        ));
     }
 
     #[test]
