@@ -57,11 +57,19 @@ impl WindowsScreenshot {
 
 #[cfg(not(target_os = "windows"))]
 impl ScreenshotProvider for WindowsScreenshot {
+    // `WindowsScreenshot` is a public unit struct, so it is constructible
+    // without `new()`; these must fail through their `Result`, not panic.
     fn capture_full(&self) -> Result<(Screenshot, Point)> {
-        unreachable!()
+        Err(Error::Platform {
+            code: -1,
+            message: "Windows screenshot backend only available on Windows".into(),
+        })
     }
     fn capture_region(&self, _: Rect) -> Result<Screenshot> {
-        unreachable!()
+        Err(Error::Platform {
+            code: -1,
+            message: "Windows screenshot backend only available on Windows".into(),
+        })
     }
 }
 
