@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Package manifest for the xa11y UWP test app. build.ps1 copies it into the
+  package layout and makeappx packs it as-is.
+
+  EntryPoint is what makes this a UWP app rather than a packaged desktop app:
+  anything other than "Windows.FullTrustApplication" runs the executable in an
+  app container with a CoreWindow, hosted by ApplicationFrameHost.
+
+  Identity Name + Publisher fix the package family name, and with Application
+  Id the AppUserModelID the harness launches by. Publisher must equal the
+  subject of the signing certificate build.ps1 generates.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  IgnorableNamespaces="uap">
+
+  <Identity
+    Name="xa11y.UwpTestApp"
+    Publisher="CN=xa11y Test"
+    Version="1.0.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>xa11y UWP Test</DisplayName>
+    <PublisherDisplayName>xa11y</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App" Executable="xa11y-uwp-test-app.exe" EntryPoint="Xa11y.UwpTestApp.App">
+      <uap:VisualElements
+        DisplayName="xa11y UWP Test"
+        Description="xa11y UWP integration test app"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+    </Application>
+  </Applications>
+</Package>
