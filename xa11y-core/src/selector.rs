@@ -235,9 +235,11 @@ impl Selector {
         if first.simple.nth == Some(0) {
             return invalid("segment 0 has :nth(0); :nth is 1-based".to_string());
         }
-        check_tail_segments(&self.segments[1..], 1).map_err(|message| Error::InvalidSelector {
-            selector: format!("{self:?}"),
-            message,
+        check_tail_segments(&self.segments[1..], "segment", 1).map_err(|message| {
+            Error::InvalidSelector {
+                selector: format!("{self:?}"),
+                message,
+            }
         })
     }
 
@@ -447,27 +449,30 @@ impl Selector {
 /// [`Selector::validate`] applies the same rule to everything past segment 0;
 /// this is the entry-point check for callers holding only the tail.
 pub fn validate_tail_segments(segments: &[SelectorSegment]) -> Result<()> {
-    check_tail_segments(segments, 0).map_err(|message| Error::InvalidSelector {
+    check_tail_segments(segments, "tail segment", 0).map_err(|message| Error::InvalidSelector {
         selector: format!("{segments:?}"),
         message,
     })
 }
 
-/// Shared by [`Selector::validate`] and [`validate_tail_segments`]. `offset`
-/// is the index of `segments[0]` in the full selector, for the message.
+/// Shared by [`Selector::validate`] and [`validate_tail_segments`].
+/// `label` names the indexing in the message: `"segment"` with `offset` 1
+/// for a full selector's tail, `"tail segment"` with `offset` 0 for a bare
+/// tail slice, so the reported index matches what the caller holds.
 fn check_tail_segments(
     segments: &[SelectorSegment],
+    label: &str,
     offset: usize,
 ) -> std::result::Result<(), String> {
     for (i, segment) in segments.iter().enumerate() {
         let i = i + offset;
         if segment.combinator == Combinator::Root {
             return Err(format!(
-                "segment {i} uses Combinator::Root; only a selector's first segment may"
+                "{label} {i} uses Combinator::Root; only a selector's first segment may"
             ));
         }
         if segment.simple.nth == Some(0) {
-            return Err(format!("segment {i} has :nth(0); :nth is 1-based"));
+            return Err(format!("{label} {i} has :nth(0); :nth is 1-based"));
         }
     }
     Ok(())
@@ -2903,7 +2908,7 @@ mod tests {
         let tail = root_after_first().segments[1..].to_vec();
         assert_invalid(
             provider.narrow_multi_segment(vec![app.clone()], &tail, 10, None),
-            "segment 0 uses Combinator::Root",
+            "tail segment 0 uses Combinator::Root",
         );
     }
 
