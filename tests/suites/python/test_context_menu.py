@@ -69,6 +69,33 @@ def _contains(outer, x: float, y: float) -> bool:
     )
 
 
+_WINDOW_TITLE_BAR = 28
+
+
+def _locate_target(app: xa11y.App):
+    """Re-read the label and its window; their bounds and the label's centre."""
+    target = app.locator('[name="Context Target"]').element()
+    window = app.windows()[0]
+    bounds, win_bounds = target.bounds, window.bounds
+    assert bounds is not None and win_bounds is not None, (
+        f"no bounds to click: target={_rect(bounds)} window={_rect(win_bounds)}"
+    )
+    cx, cy = bounds.x + bounds.width / 2, bounds.y + bounds.height / 2
+    return target, bounds, win_bounds, cx, cy
+
+
+def _visible(win_bounds, desktop, x: float, y: float) -> bool:
+    """Whether a point is in the window's content area and on the display."""
+    in_window = (
+        win_bounds.x <= x < win_bounds.x + win_bounds.width
+        and win_bounds.y + _WINDOW_TITLE_BAR <= y < win_bounds.y + win_bounds.height
+    )
+    if not isinstance(desktop, tuple):
+        return in_window
+    left, top, right, bottom = desktop
+    return in_window and left <= x < right and top <= y < bottom
+
+
 # The right-click is a synthesized event: without the frontmost slot the
 # click lands behind Finder and no menu opens.
 @pytest.mark.xa11y_requires("input_sim")
@@ -77,26 +104,45 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
     if sys.platform != "darwin" or app_name != "cocoa":
         pytest.skip("the native context-menu fixture belongs to the macOS Cocoa cell")
 
-    target = app.locator('[name="Context Target"]').element()
-    # A pointer event lands wherever the label is drawn, so the label must be
-    # inside the window's visible area, not scrolled out of the document view.
-    if "scroll_into_view" in target.actions:
-        target.scroll_into_view()
-        target = app.locator('[name="Context Target"]').element()
     window = app.windows()[0]
     desktop = _desktop_bounds()
+    # The fixture's document scrolls, and on a display shorter than the
+    # window AppKit shrinks the window, so the label can sit outside the
+    # visible viewport. Neither scroll_into_view (labels do not advertise
+    # AXScrollToVisible) nor a pointer can be relied on to fix that, so the
+    # document is scrolled semantically through the scroll bar's AXValue.
+    # The window's own scroll view is its first child; its scroll bar is a
+    # direct child of that, unlike the bars of the nested text and table views.
+    scroll_bars = [
+        bar
+        for area in window.children()[:1]
+        for bar in area.children()
+        if bar.role == "scroll_bar"
+    ]
+    scroll_bar = scroll_bars[0] if scroll_bars else None
+    original_scroll = scroll_bar.numeric_value if scroll_bar is not None else None
     original_origin = None
     menu_closed = False
+    tried: list[str] = []
     try:
-        bounds, win_bounds = target.bounds, window.bounds
-        assert bounds is not None and win_bounds is not None, (
-            f"no bounds to click: target={_rect(bounds)} window={_rect(win_bounds)}"
-        )
-        cx, cy = bounds.x + bounds.width / 2, bounds.y + bounds.height / 2
-        # A runner display smaller than the fixture window leaves part of it off
-        # screen, and a click there reaches nothing. Bring the label on screen by
-        # moving the window, and put the window back afterwards.
-        if isinstance(desktop, tuple) and "move_to" in window.actions:
+        target, bounds, win_bounds, cx, cy = _locate_target(app)
+        for value in (None, 0.5, 0.25, 0.75, 0.0, 1.0):
+            if _visible(win_bounds, desktop, cx, cy):
+                break
+            if value is None or scroll_bar is None:
+                tried.append(f"scroll={original_scroll!r}: centre ({cx}, {cy})")
+                continue
+            scroll_bar.set_numeric_value(value)
+            time.sleep(0.2)
+            target, bounds, win_bounds, cx, cy = _locate_target(app)
+            tried.append(f"scroll={value}: centre ({cx}, {cy})")
+        # A runner display smaller than the fixture window can still leave the
+        # label below the screen edge. Bring it on screen by moving the
+        # window, and put the window back afterwards.
+        window = app.windows()[0]
+        if not _visible(win_bounds, desktop, cx, cy) and (
+            isinstance(desktop, tuple) and "move_to" in window.actions
+        ):
             left, top, right, bottom = desktop
             dx = max(0.0, left + 40 - cx) - max(0.0, cx - (right - 40))
             dy = max(0.0, top + 60 - cy) - max(0.0, cy - (bottom - 40))
@@ -104,19 +150,13 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
                 original_origin = (int(win_bounds.x), int(win_bounds.y))
                 window.move_to(int(win_bounds.x + dx), int(win_bounds.y + dy))
                 time.sleep(0.3)
-                target = app.locator('[name="Context Target"]').element()
+                target, bounds, win_bounds, cx, cy = _locate_target(app)
                 window = app.windows()[0]
-                bounds, win_bounds = target.bounds, window.bounds
-                assert bounds is not None and win_bounds is not None, (
-                    f"no bounds to click after moving the window from "
-                    f"{original_origin!r}: target={_rect(bounds)} "
-                    f"window={_rect(win_bounds)} desktop={desktop!r}"
-                )
-                cx, cy = bounds.x + bounds.width / 2, bounds.y + bounds.height / 2
         geometry = (
             f"target={_rect(bounds)} actions={target.actions!r}; "
             f"window={_rect(win_bounds)} actions={window.actions!r}; "
-            f"desktop={desktop!r}; moved from={original_origin!r}"
+            f"desktop={desktop!r}; moved from={original_origin!r}; "
+            f"scroll attempts={tried!r}"
         )
         assert _contains(win_bounds, cx, cy), (
             f"the context target's centre ({cx}, {cy}) is outside its window: {geometry}"
@@ -162,6 +202,11 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
                 xa11y.input_sim().press("Escape")
             except xa11y.XA11yError:
                 pass  # Preserve the discovery failure if cleanup also fails.
+        if scroll_bar is not None and original_scroll is not None:
+            try:
+                scroll_bar.set_numeric_value(original_scroll)
+            except xa11y.XA11yError:
+                pass  # Preserve the test's own failure if the restore also fails.
         if original_origin is not None:
             try:
                 app.windows()[0].move_to(*original_origin)
