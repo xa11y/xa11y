@@ -106,6 +106,20 @@ fn cached<T: Clone>(
 }
 
 fn get_provider_ref() -> Result<&'static dyn Provider> {
+    // The provider is leaked deliberately and must never be dropped.
+    //
+    // On Windows it owns COM interfaces (the `IUIAutomation` instance, cached
+    // UIA elements, event handlers). During process shutdown COM can be
+    // uninitialized before Rust teardown runs, and calling `Release` on
+    // those interfaces then crashes the process at exit. Leaking means
+    // `Release` is never called and the OS reclaims everything when the
+    // process ends. Other backends gain nothing from being dropped at exit
+    // either.
+    //
+    // So: do not replace this with an owned `Box`/`Arc` that can reach zero
+    // references, or with a provider built per call. `provider()` below hands
+    // out `Arc<&'static dyn Provider>`, so dropping those `Arc`s drops only
+    // the reference, never the provider.
     cached(&PROVIDER, || {
         create_provider_boxed().map(|b| &*Box::leak(b))
     })
