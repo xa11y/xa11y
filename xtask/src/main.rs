@@ -48,6 +48,7 @@ COMMANDS:
     sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
     sync-agent-guide [--check]  Render xa11y/AGENT_GUIDE.md into the docs site
     check-macos-ffi     Verify xa11y-macos/src/ax.rs only uses safe_* CF/AX wrappers
+    check-windows-dpi   Verify coordinate-bearing Win32/UIA calls go through xa11y-windows/src/coords.rs
     check-mcp-stdout    Verify xa11y/src/mcp writes nothing to stdout but protocol
     check-workspace-pins   Verify intra-workspace deps keep their `=` version pins
     check-versions [--expect X.Y.Z]  Verify every release version field (crates, bindings, lockfiles) agrees
@@ -95,6 +96,7 @@ fn main() -> ExitCode {
         "sync-readmes" => do_sync_readmes(rest),
         "sync-agent-guide" => do_sync_agent_guide(rest),
         "check-macos-ffi" => do_check_macos_ffi(),
+        "check-windows-dpi" => do_check_windows_dpi(),
         "check-mcp-stdout" => do_check_mcp_stdout(),
         "check-workspace-pins" => do_check_workspace_pins(),
         "check-versions" => do_check_versions(rest),
@@ -1264,6 +1266,238 @@ fn contains_macro_call(code: &str, name: &str) -> bool {
     false
 }
 
+/// Every coordinate-bearing Win32 / UIA call in `xa11y-windows` must go
+/// through a wrapper in `src/coords.rs`, each of which takes `&DpiScope`.
+///
+/// Windows answers these calls in the calling thread's DPI awareness, and a
+/// host can pin a lower awareness than the Per-Monitor V2 xa11y reports in
+/// (issue #506). The wrappers make a call without a scope fail to compile;
+/// this check makes a call that bypasses the wrappers fail the build. The
+/// third layer, a `debug_assert!` in each wrapper, runs in
+/// `tests/dpi_system_aware.rs`.
+fn do_check_windows_dpi() -> bool {
+    heading("Windows DPI-scope check");
+
+    // Coordinate-bearing Win32 / UIA symbols. Matched as *identifier tokens*
+    // anywhere in the code, so a `use ... as alias`, a fully qualified path,
+    // a reference without a call, and a property-ID constant are all caught;
+    // comments and string literals are not code and never match.
+    const FORBIDDEN_IDENTS: &[&str] = &[
+        // UIA bounds and points.
+        "CachedBoundingRectangle",
+        "CurrentBoundingRectangle",
+        "UIA_BoundingRectanglePropertyId",
+        "UIA_ClickablePointPropertyId",
+        "GetClickablePoint",
+        "GetBoundingRectangles",
+        "RangeFromPoint",
+        "ElementFromPoint",
+        "ElementFromPointBuildCache",
+        // Input.
+        "SendInput",
+        "mouse_event",
+        "GetCursorPos",
+        "GetPhysicalCursorPos",
+        "SetCursorPos",
+        "SetPhysicalCursorPos",
+        "GetCursorInfo",
+        // Capture and screen DCs.
+        "BitBlt",
+        "GetDIBits",
+        "GetDC",
+        // Monitors and DPI.
+        "EnumDisplayMonitors",
+        "MonitorFromPoint",
+        "MonitorFromRect",
+        "MonitorFromWindow",
+        "GetMonitorInfo",
+        "GetMonitorInfoA",
+        "GetMonitorInfoW",
+        "GetDpiForMonitor",
+        "GetDpiForWindow",
+        "GetDpiForSystem",
+        "GetSystemMetrics",
+        "GetSystemMetricsForDpi",
+        // Window geometry.
+        "GetWindowRect",
+        "GetClientRect",
+        "WindowFromPoint",
+        "WindowFromPhysicalPoint",
+        "ChildWindowFromPoint",
+        "ChildWindowFromPointEx",
+        "RealChildWindowFromPoint",
+        "ClientToScreen",
+        "ScreenToClient",
+        "MapWindowPoints",
+        "SetWindowPos",
+        "MoveWindow",
+        "GetWindowPlacement",
+        "SetWindowPlacement",
+        "AdjustWindowRect",
+        "AdjustWindowRectEx",
+        "AdjustWindowRectExForDpi",
+        "DwmGetWindowAttribute",
+        "LogicalToPhysicalPoint",
+        "PhysicalToLogicalPoint",
+        "LogicalToPhysicalPointForPerMonitorDPI",
+        "PhysicalToLogicalPointForPerMonitorDPI",
+        "GetWindowInfo",
+        "GetTitleBarInfo",
+        "GetWindowRgnBox",
+        "GetCaretPos",
+        "GetMessagePos",
+        "GetGUIThreadInfo",
+        // More capture and display-mode calls.
+        "GetWindowDC",
+        "GetDCEx",
+        "CreateDCW",
+        "CreateDCA",
+        "StretchBlt",
+        "PrintWindow",
+        "EnumDisplaySettingsW",
+        "EnumDisplaySettingsExW",
+        "SystemParametersInfoW",
+        // MSAA geometry.
+        "accLocation",
+        "accHitTest",
+    ];
+    // Building a property ID from its number (`UIA_PROPERTY_ID(30001)`)
+    // would reach the bounds property without naming its constant, so the
+    // newtype's constructor is flagged. The type name on its own, in a
+    // signature, is fine.
+    const FORBIDDEN_CONSTRUCTORS: &[&str] = &["UIA_PROPERTY_ID"];
+    // TransformPattern's methods share names with others, so they are
+    // matched as a method (`.Move`) or a path segment (`X::Move`) with any
+    // spacing. The one non-coordinate `Move` in use, a text range's
+    // character count, is allowed by its exact path.
+    const FORBIDDEN_METHODS: &[&str] = &["Move", "Resize"];
+    const ALLOWED_PATH_OWNERS: &[&str] = &["IUIAutomationTextRange"];
+
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                rust_files(&path, out)?;
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn scan(ts: proc_macro2::TokenStream, hits: &mut Vec<(usize, String)>) {
+        use proc_macro2::TokenTree;
+        let tokens: Vec<TokenTree> = ts.into_iter().collect();
+        for (i, t) in tokens.iter().enumerate() {
+            match t {
+                TokenTree::Group(g) => scan(g.stream(), hits),
+                TokenTree::Ident(id) => {
+                    let name = id.to_string();
+                    let line = id.span().start().line;
+                    if FORBIDDEN_IDENTS.contains(&name.as_str()) {
+                        hits.push((line, name));
+                        continue;
+                    }
+                    if FORBIDDEN_CONSTRUCTORS.contains(&name.as_str()) {
+                        if let Some(TokenTree::Group(g)) = tokens.get(i + 1) {
+                            if g.delimiter() == proc_macro2::Delimiter::Parenthesis {
+                                hits.push((line, format!("{name}(..)")));
+                            }
+                        }
+                        continue;
+                    }
+                    if !FORBIDDEN_METHODS.contains(&name.as_str()) {
+                        continue;
+                    }
+                    let punct = |k: usize| match i.checked_sub(k).map(|j| &tokens[j]) {
+                        Some(TokenTree::Punct(p)) => Some(p.as_char()),
+                        _ => None,
+                    };
+                    if punct(1) == Some('.') {
+                        hits.push((line, format!(".{name}")));
+                    } else if punct(1) == Some(':') && punct(2) == Some(':') {
+                        let owner = match i.checked_sub(3).map(|j| &tokens[j]) {
+                            Some(TokenTree::Ident(o)) => o.to_string(),
+                            _ => String::new(),
+                        };
+                        if !ALLOWED_PATH_OWNERS.contains(&owner.as_str()) {
+                            hits.push((line, format!("{owner}::{name}")));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let dir = project_root().join("xa11y-windows/src");
+    // Exempt the wrapper module by its full path: a `coords.rs` anywhere
+    // else under src/ (a submodule's own) gets no pass.
+    let wrapper_module = dir.join("coords.rs");
+    let mut files = Vec::new();
+    if let Err(e) = rust_files(&dir, &mut files) {
+        eprintln!("Failed to read {}: {e}", dir.display());
+        return false;
+    }
+    files.sort();
+
+    let mut violations: Vec<(String, usize, String, String)> = Vec::new();
+    let mut checked = 0;
+    for path in &files {
+        if *path == wrapper_module {
+            continue;
+        }
+        let src = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to read {}: {e}", path.display());
+                return false;
+            }
+        };
+        let tokens: proc_macro2::TokenStream = match src.parse() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Failed to lex {} as Rust: {e}", path.display());
+                return false;
+            }
+        };
+        checked += 1;
+        let mut hits = Vec::new();
+        scan(tokens, &mut hits);
+        let lines: Vec<&str> = src.lines().collect();
+        for (line, sym) in hits {
+            let text = lines
+                .get(line.saturating_sub(1))
+                .copied()
+                .unwrap_or("")
+                .trim();
+            violations.push((path.display().to_string(), line, sym, text.to_string()));
+        }
+    }
+
+    if violations.is_empty() {
+        eprintln!(
+            "OK: xa11y-windows names coordinate-bearing APIs only in coords.rs \
+             ({checked} file(s), {} forbidden symbols checked).",
+            FORBIDDEN_IDENTS.len() + FORBIDDEN_METHODS.len() + FORBIDDEN_CONSTRUCTORS.len()
+        );
+        return true;
+    }
+    eprintln!(
+        "!! {} coordinate-bearing symbol(s) outside xa11y-windows/src/coords.rs:",
+        violations.len()
+    );
+    for (file, lineno, sym, line) in &violations {
+        eprintln!("  {file}:{lineno}: {sym}  ->  {line}");
+    }
+    eprintln!(
+        "\n  Windows answers these in the calling thread's DPI awareness. Use the\n  \
+         wrapper in xa11y-windows/src/coords.rs, which takes &DpiScope; if there\n  \
+         is none for this API yet, add one there (issue #506)."
+    );
+    false
+}
+
 fn do_check_macos_ffi() -> bool {
     heading("macOS FFI exception-safety check");
 
@@ -1664,6 +1898,12 @@ fn do_check() -> bool {
     heading("PRE-PR CHECK: macos-ffi");
     if !do_check_macos_ffi() {
         eprintln!("!! macOS FFI check failed. See above for details.");
+        ok = false;
+    }
+
+    heading("PRE-PR CHECK: windows-dpi");
+    if !do_check_windows_dpi() {
+        eprintln!("!! Windows DPI-scope check failed. See above for details.");
         ok = false;
     }
 
