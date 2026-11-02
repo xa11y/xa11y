@@ -58,6 +58,16 @@ class TestWindow(Gtk.ApplicationWindow):
         btn_group.append(self.ok_button)
         btn_group.append(self.cancel_button)
 
+        # "Rebuild" replaces itself with a fresh button of the same name on
+        # every click: the re-render shape of issue #491. A handle read before
+        # the click names a destroyed widget, and acting on it must fail as
+        # stale rather than report success. The rebuild count is in the
+        # button's description so a test can tell when the swap has happened.
+        self.btn_group = btn_group
+        self.rebuilds = 0
+        self.rebuild_button = self._make_rebuild_button()
+        btn_group.append(self.rebuild_button)
+
         # ── Checkboxes ───────────────────────────────────────────────
         chk_group = self._make_group("Checkboxes")
         box.append(chk_group)
@@ -247,6 +257,24 @@ class TestWindow(Gtk.ApplicationWindow):
 
     def _on_ok_clicked(self, _btn: Gtk.Button) -> None:
         self.cancel_button.set_sensitive(True)
+
+    def _make_rebuild_button(self) -> Gtk.Button:
+        btn = Gtk.Button(label="Rebuild")
+        btn.update_property(
+            [Gtk.AccessibleProperty.DESCRIPTION], [f"rebuilds: {self.rebuilds}"]
+        )
+        btn.connect("clicked", self._on_rebuild_clicked)
+        return btn
+
+    def _on_rebuild_clicked(self, btn: Gtk.Button) -> None:
+        # A click queued on the old widget after its swap is a no-op.
+        if btn is not self.rebuild_button:
+            return
+        self.rebuilds += 1
+        fresh = self._make_rebuild_button()
+        self.btn_group.insert_child_after(fresh, btn)
+        self.btn_group.remove(btn)
+        self.rebuild_button = fresh
 
     # ── Dynamic widget handlers ──────────────────────────────────────
 
