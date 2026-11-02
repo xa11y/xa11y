@@ -28,6 +28,20 @@ def _context_menus(app: xa11y.App) -> list[xa11y.Element]:
     ]
 
 
+def _ancestry(element: xa11y.Element, limit: int = 12) -> str:
+    """The element's parent chain up to the application, bounded."""
+    chain = []
+    node: xa11y.Element | None = element
+    while node is not None and len(chain) < limit:
+        chain.append(f"{node.role} {node.name!r}")
+        try:
+            node = node.parent()
+        except xa11y.XA11yError as exc:
+            chain.append(f"<parent() failed: {exc}>")
+            break
+    return " <- ".join(chain)
+
+
 def _rect(r) -> str:
     return "None" if r is None else f"({r.x}, {r.y}, {r.width}x{r.height})"
 
@@ -183,11 +197,14 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
             f"children={[(c.role, c.name) for c in app.children()]!r}; "
             f"app tree:\n{app.dump(max_depth=3)}"
         )
-        assert len(listed) == 1, (
-            "search found the open context menu's item, but App.children() "
-            f"lists {len(listed)} menus holding it; children="
-            f"{[(c.role, c.name) for c in app.children()]!r}"
-        )
+        if len(listed) != 1:
+            found_item = app.locator(CONTEXT_ACTION).element()
+            raise AssertionError(
+                "search found the open context menu's item, but App.children() "
+                f"lists {len(listed)} menus holding it; children="
+                f"{[(c.role, c.name) for c in app.children()]!r}; "
+                f"the found item's ancestry: {_ancestry(found_item)}"
+            )
         # The listing is a navigable route to the item, not just a node.
         item = listed[0].locator(CONTEXT_ACTION).element()
         # Not a window, so App.windows() keeps leaving it out.
