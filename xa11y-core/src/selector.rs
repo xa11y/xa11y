@@ -204,6 +204,43 @@ impl Selector {
         Ok(Selector { segments })
     }
 
+    /// Check the structural invariants the matchers rely on.
+    ///
+    /// [`Selector::parse`] only produces selectors that pass, but the AST's
+    /// fields are public, so a selector built or edited in Rust can break
+    /// them. Every matcher calls this before traversal so a malformed AST is
+    /// reported as [`Error::InvalidSelector`] instead of panicking, or being
+    /// quietly read as a different query. The invariants:
+    ///
+    /// - there is at least one segment;
+    /// - the first segment's combinator is [`Combinator::Root`], and no other
+    ///   segment's is;
+    /// - no `:nth` is zero (it is 1-based).
+    pub fn validate(&self) -> Result<()> {
+        let invalid = |message: String| {
+            Err(Error::InvalidSelector {
+                selector: format!("{self:?}"),
+                message,
+            })
+        };
+        let Some(first) = self.segments.first() else {
+            return invalid("selector has no segments".to_string());
+        };
+        if first.combinator != Combinator::Root {
+            return invalid(format!(
+                "first segment must use Combinator::Root, found Combinator::{:?}",
+                first.combinator
+            ));
+        }
+        if first.simple.nth == Some(0) {
+            return invalid("segment 0 has :nth(0); :nth is 1-based".to_string());
+        }
+        check_tail_segments(&self.segments[1..], 1).map_err(|message| Error::InvalidSelector {
+            selector: format!("{self:?}"),
+            message,
+        })
+    }
+
     fn parse_combinator(chars: &[char], mut pos: usize) -> (Combinator, usize) {
         let mut has_space = false;
         while pos < chars.len() && chars[pos] == ' ' {
@@ -403,6 +440,39 @@ impl Selector {
     }
 }
 
+/// Validate the segments that follow a selector's first one, as passed to
+/// [`Provider::narrow_multi_segment`](crate::Provider::narrow_multi_segment):
+/// none may use [`Combinator::Root`], and none may carry `:nth(0)`.
+///
+/// [`Selector::validate`] applies the same rule to everything past segment 0;
+/// this is the entry-point check for callers holding only the tail.
+pub fn validate_tail_segments(segments: &[SelectorSegment]) -> Result<()> {
+    check_tail_segments(segments, 0).map_err(|message| Error::InvalidSelector {
+        selector: format!("{segments:?}"),
+        message,
+    })
+}
+
+/// Shared by [`Selector::validate`] and [`validate_tail_segments`]. `offset`
+/// is the index of `segments[0]` in the full selector, for the message.
+fn check_tail_segments(
+    segments: &[SelectorSegment],
+    offset: usize,
+) -> std::result::Result<(), String> {
+    for (i, segment) in segments.iter().enumerate() {
+        let i = i + offset;
+        if segment.combinator == Combinator::Root {
+            return Err(format!(
+                "segment {i} uses Combinator::Root; only a selector's first segment may"
+            ));
+        }
+        if segment.simple.nth == Some(0) {
+            return Err(format!("segment {i} has :nth(0); :nth is 1-based"));
+        }
+    }
+    Ok(())
+}
+
 /// A comma-separated alternation of [`Selector`] clauses.
 ///
 /// Mirrors CSS selector lists: matching produces the union of each clause's
@@ -447,6 +517,22 @@ impl SelectorGroup {
         // `split_top_level_commas` always returns at least one part, so the
         // emptiness check above guarantees we have ≥1 clause here.
         Ok(SelectorGroup { clauses })
+    }
+
+    /// Check the structural invariants the matchers rely on: at least one
+    /// clause, and every clause passes [`Selector::validate`].
+    ///
+    /// [`SelectorGroup::parse`] only produces groups that pass. Matchers call
+    /// this before traversal so a hand-built group is rejected with
+    /// [`Error::InvalidSelector`] rather than panicking.
+    pub fn validate(&self) -> Result<()> {
+        if self.clauses.is_empty() {
+            return Err(Error::InvalidSelector {
+                selector: format!("{self:?}"),
+                message: "selector group has no clauses".to_string(),
+            });
+        }
+        self.clauses.iter().try_for_each(Selector::validate)
     }
 
     /// True if the group has exactly one clause (no top-level comma).
@@ -688,9 +774,7 @@ pub fn find_elements_in_tree(
     limit: Option<usize>,
     max_depth: Option<u32>,
 ) -> Result<Vec<ElementData>> {
-    if selector.segments.is_empty() {
-        return Ok(vec![]);
-    }
+    selector.validate()?;
 
     let max_depth = max_depth.unwrap_or(crate::MAX_TREE_DEPTH);
 
@@ -763,7 +847,8 @@ pub fn find_elements_in_tree(
                         None,
                     )?;
                 }
-                Combinator::Root => unreachable!(),
+                // `selector.validate()` above rejects a Root past segment 0.
+                Combinator::Root => unreachable!("validated: Root only at segment 0"),
             }
         }
         // Deduplicate by handle, preserving order
@@ -808,6 +893,7 @@ pub fn find_elements_in_tree_group<F>(
 where
     F: Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
 {
+    group.validate()?;
     if group.clauses.len() == 1 {
         return find_elements_in_tree(get_children_fn, root, &group.clauses[0], limit, max_depth);
     }
@@ -873,9 +959,7 @@ pub fn find_elements_in_tree_with_paths<F>(
 where
     F: Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
 {
-    if selector.segments.is_empty() {
-        return Ok(vec![]);
-    }
+    selector.validate()?;
 
     let max_depth = max_depth.unwrap_or(crate::MAX_TREE_DEPTH);
     let first = &selector.segments[0].simple;
@@ -939,7 +1023,8 @@ where
                         next.push((p, se));
                     }
                 }
-                Combinator::Root => unreachable!(),
+                // `selector.validate()` above rejects a Root past segment 0.
+                Combinator::Root => unreachable!("validated: Root only at segment 0"),
             }
         }
         // Dedup by path, preserving order — same shape as
@@ -2738,5 +2823,140 @@ mod tests {
         // "Clear" (contains "ear"), "Search" (contains "ear"), "Password"
         // (contains "ass"). Doc order: Clear, Search, Password.
         assert_eq!(names(&results), vec!["Clear", "Search", "Password"]);
+    }
+
+    // ── hand-built AST validation (issue #474) ──────────────────────────────
+
+    /// A populated tree plus a selector whose second segment was mutated to
+    /// `Combinator::Root` — a shape only reachable through the public fields.
+    fn root_after_first() -> Selector {
+        let mut sel = Selector::parse("window button").unwrap();
+        sel.segments[1].combinator = Combinator::Root;
+        sel
+    }
+
+    fn assert_invalid<T: std::fmt::Debug>(result: Result<T>, needle: &str) {
+        match result {
+            Err(Error::InvalidSelector { message, .. }) => assert!(
+                message.contains(needle),
+                "message {message:?} should mention {needle:?}"
+            ),
+            other => panic!("expected InvalidSelector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hand_built_root_after_first_is_invalid_in_single_matcher() {
+        use crate::Provider;
+        let provider = crate::mock::build_provider();
+        let get_children = |p: Option<&ElementData>| provider.get_children(p);
+        // Sanity: the unmutated query reaches phase 2 on this tree, so the
+        // mutated one would hit the Root arm if validation were missing.
+        let ok = find_elements_in_tree(
+            get_children,
+            None,
+            &Selector::parse("window button").unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!ok.is_empty(), "fixture must match window button");
+
+        let sel = root_after_first();
+        assert_invalid(
+            find_elements_in_tree(get_children, None, &sel, None, None),
+            "segment 1 uses Combinator::Root",
+        );
+        assert_invalid(
+            find_elements_in_tree_with_paths(get_children, None, &sel, None),
+            "segment 1 uses Combinator::Root",
+        );
+    }
+
+    #[test]
+    fn hand_built_root_after_first_is_invalid_in_group_matcher() {
+        use crate::Provider;
+        let provider = crate::mock::build_provider();
+        let get_children = |p: Option<&ElementData>| provider.get_children(p);
+        // Single-clause and multi-clause groups take different code paths.
+        for clauses in [
+            vec![root_after_first()],
+            vec![Selector::parse("button").unwrap(), root_after_first()],
+        ] {
+            let group = SelectorGroup { clauses };
+            assert_invalid(
+                find_elements_in_tree_group(get_children, None, &group, None, None),
+                "segment 1 uses Combinator::Root",
+            );
+        }
+    }
+
+    #[test]
+    fn hand_built_root_after_first_is_invalid_through_provider() {
+        use crate::Provider;
+        let provider = crate::mock::build_provider();
+        let app = provider.list_apps().unwrap().into_iter().next().unwrap();
+        assert_invalid(
+            provider.find_elements(&app, &root_after_first(), None, None),
+            "segment 1 uses Combinator::Root",
+        );
+        let tail = root_after_first().segments[1..].to_vec();
+        assert_invalid(
+            provider.narrow_multi_segment(vec![app.clone()], &tail, 10, None),
+            "segment 0 uses Combinator::Root",
+        );
+    }
+
+    #[test]
+    fn hand_built_malformed_shapes_are_invalid() {
+        use crate::Provider;
+        let provider = crate::mock::build_provider();
+        let get_children = |p: Option<&ElementData>| provider.get_children(p);
+
+        let empty = Selector { segments: vec![] };
+        assert_invalid(
+            find_elements_in_tree(get_children, None, &empty, None, None),
+            "no segments",
+        );
+
+        let mut child_first = Selector::parse("window button").unwrap();
+        child_first.segments[0].combinator = Combinator::Child;
+        assert_invalid(
+            find_elements_in_tree(get_children, None, &child_first, None, None),
+            "first segment must use Combinator::Root",
+        );
+
+        // `:nth(0)` would underflow the 1-based index in `apply_nth`.
+        for i in 0..2 {
+            let mut nth0 = Selector::parse("window button").unwrap();
+            nth0.segments[i].simple.nth = Some(0);
+            assert_invalid(
+                find_elements_in_tree(get_children, None, &nth0, None, None),
+                ":nth(0)",
+            );
+        }
+
+        assert_invalid(
+            find_elements_in_tree_group(
+                get_children,
+                None,
+                &SelectorGroup { clauses: vec![] },
+                None,
+                None,
+            ),
+            "no clauses",
+        );
+    }
+
+    #[test]
+    fn parsed_selectors_validate() {
+        for s in ["button", "window button", "a *", "*", "x:nth(2) > y"] {
+            Selector::parse(s).unwrap().validate().unwrap();
+            SelectorGroup::parse(s).unwrap().validate().unwrap();
+        }
+        SelectorGroup::parse("button, window > list_item")
+            .unwrap()
+            .validate()
+            .unwrap();
     }
 }

@@ -3919,14 +3919,10 @@ impl Provider for MacOSProvider {
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        if group.clauses.is_empty() {
-            return Ok(vec![]);
-        }
-        // Reject any clause with zero segments early — `clause.segments[0]`
-        // below would otherwise panic.
-        if group.clauses.iter().any(|c| c.segments.is_empty()) {
-            return Ok(vec![]);
-        }
+        // The AST's fields are public, so a hand-built group can break the
+        // invariants the walk below indexes on (`clause.segments[0]`, Root
+        // only first, 1-based `:nth`). Reject it before traversal.
+        group.validate()?;
 
         // ONE AX walk that evaluates every clause's first SimpleSelector
         // inline. Each match is tagged with its clause index; per-clause
