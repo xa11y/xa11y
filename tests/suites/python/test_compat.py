@@ -296,6 +296,24 @@ def test_textfield_found(app, app_config):
         assert el.value == initial
 
 
+def test_password_field_is_flagged(app, app_config):
+    """A password entry keeps the text_field role and sets `password` (#522).
+
+    The selector form matches exactly the password entry, and the ordinary
+    text field next to it is not flagged.
+    """
+    name = app_config.get("password_field_name")
+    if not name:
+        pytest.skip("app has no password entry")
+    el = app.locator(f'text_field[name="{name}"]').element()
+    assert el.role == "text_field"
+    assert el.password is True
+    flagged = app.locator('text_field[password="true"]').elements()
+    assert [e.name for e in flagged] == [name]
+    plain = app.locator(app_config["textfield_selector"]).element()
+    assert plain.password is False
+
+
 # ---------------------------------------------------------------------------
 # Text area
 # ---------------------------------------------------------------------------

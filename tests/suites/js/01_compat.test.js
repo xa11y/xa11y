@@ -52,6 +52,20 @@ test('tree has the named text field', async () => {
   assert.equal(field.editable, true);
 });
 
+test('a password entry keeps text_field and sets password (#522)', async () => {
+  if (!appConfig.passwordFieldName) return; // skip if app has no password entry
+  const app = await getApp();
+  const field = await one(app, `text_field[name="${appConfig.passwordFieldName}"]`);
+  assert.equal(field.role, 'text_field');
+  assert.equal(field.password, true);
+  const flagged = await app.locator('text_field[password="true"]').elements();
+  assert.deepEqual(flagged.map((e) => e.name), [appConfig.passwordFieldName]);
+  if (appConfig.textFieldName) {
+    const plain = await one(app, `text_field[name="${appConfig.textFieldName}"]`);
+    assert.equal(plain.password, false);
+  }
+});
+
 test('tree has a Checkbox', async () => {
   if (!appConfig.hasCheckbox) return; // skip if app has no checkbox
   const app = await getApp();

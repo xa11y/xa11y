@@ -1045,6 +1045,9 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     if el.states.busy {
         states.push("busy");
     }
+    if el.states.password {
+        states.push("password");
+    }
     if let Some(checked) = &el.states.checked {
         states.push(match checked {
             Toggled::Off => "checked=off",
@@ -3116,6 +3119,16 @@ mod tests {
         el.states.expanded = Some(false);
         let out = format_element_oneline(&el);
         assert!(out.contains("collapsed"));
+    }
+
+    #[test]
+    fn format_element_password() {
+        let mut el = make_element(Role::TextField, Some("PIN"));
+        assert!(!format_element_oneline(&el).contains("password"));
+        el.states.password = true;
+        let out = format_element_oneline(&el);
+        assert!(out.starts_with("text_field"), "{out}");
+        assert!(out.contains(" password"), "{out}");
     }
 
     #[test]

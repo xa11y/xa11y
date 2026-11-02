@@ -83,6 +83,9 @@ APP_CONFIGS: dict[str, dict] = {
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         # Text field — found by name
         "textfield_selector": 'text_field[name="Search"]',
+        # Not instrumented yet: the toolkit has a password entry, the test
+        # app does not show one (#522).
+        "password_field_name": None,
         "textfield_initial_value": None,  # Qt does not guarantee specific text
         # Text area
         "textarea_selector": '[name="Notes"]',
@@ -138,6 +141,9 @@ APP_CONFIGS: dict[str, dict] = {
         "spinbutton_selector": "spin_button",
         "progress_bar_selector": "progress_bar",
         "textfield_selector": "text_field",
+        # Not instrumented yet: the toolkit has a password entry, the test
+        # app does not show one (#522).
+        "password_field_name": None,
         "textfield_initial_value": "hello world",
         "textarea_selector": "text_area",
         # Table — Gtk.ColumnView (AT-SPI "tree table"); only one table in the
@@ -182,6 +188,9 @@ APP_CONFIGS: dict[str, dict] = {
         "spinbutton_selector": 'spin_button[name="Quantity"]',
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
+        # Not instrumented yet: the toolkit has a password entry, the test
+        # app does not show one (#522).
+        "password_field_name": None,
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
         # Table — multi-column cell-based NSTableView ("Users Table").
@@ -231,6 +240,9 @@ APP_CONFIGS: dict[str, dict] = {
         "spinbutton_selector": 'spin_button[name="Quantity"]',
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
+        # Password entry (#522): `<input type="password">`, flagged by the
+        # `password` state while its role stays text_field.
+        "password_field_name": "Password",
         "textfield_initial_value": "hello world",
         # Text area — WebView2 goes through UIA, which has no distinct
         # multiline text role: <textarea> collapses to UIA_EditControlTypeId
@@ -303,6 +315,8 @@ APP_CONFIGS: dict[str, dict] = {
         "spinbutton_selector": 'spin_button[name="Quantity"]',
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
+        # Password entry (#522), mirroring the Tauri page.
+        "password_field_name": "Password",
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
         # Table — markup mirrors the Tauri test app; same descendant-based
@@ -374,6 +388,8 @@ APP_CONFIGS: dict[str, dict] = {
         # tolerates. Leave the initial value unchecked and mark the field
         # non-settable so the action tests skip rather than fail.
         "textfield_selector": 'text_field[name="Name"]',
+        # Password entry (#522): AccessKit `PasswordInput`.
+        "password_field_name": "Password",
         "textfield_initial_value": None,
         "textfield_settable": False,
         # The AccessKit app has no multiline text area.
@@ -448,6 +464,9 @@ APP_CONFIGS: dict[str, dict] = {
         # Text field — egui's `TextEdit::singleline` does not set a name, so
         # match by role (only one in the app) and verify the initial value.
         "textfield_selector": "text_field",
+        # Not instrumented yet: the toolkit has a password entry, the test
+        # app does not show one (#522).
+        "password_field_name": None,
         "textfield_initial_value": "hello world",
         # Text area — egui uses Role::MultilineTextInput which AccessKit's
         # macOS bridge maps to AXTextArea (xa11y `text_area`) but UIA on
@@ -526,6 +545,9 @@ APP_CONFIGS: dict[str, dict] = {
         # ProgressBar.ProgressBarAccessibleObject), so this one is asserted.
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
+        # Not instrumented yet: the toolkit has a password entry, the test
+        # app does not show one (#522).
+        "password_field_name": None,
         "textfield_initial_value": "hello world",
         # UIA has no multiline-edit control type: a WinForms multiline TextBox
         # is ControlType.Edit like any other, which xa11y maps to `text_field`.
@@ -623,6 +645,9 @@ APP_CONFIGS: dict[str, dict] = {
         # ProgressBarAutomationPeer also implements IRangeValueProvider.
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
+        # Not instrumented yet: the toolkit has a password entry, the test
+        # app does not show one (#522).
+        "password_field_name": None,
         "textfield_initial_value": "hello world",
         # Same UIA limitation the WinForms and egui configs note: there is no
         # multiline-edit control type, so a WPF TextBox with AcceptsReturn is

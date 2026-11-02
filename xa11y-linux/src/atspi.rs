@@ -1085,7 +1085,13 @@ impl LinuxProvider {
                 rayon::join(
                     || {
                         rayon::join(
-                            || self.parse_states_with_bits(aref, role),
+                            || {
+                                self.parse_states_with_bits(
+                                    aref,
+                                    role,
+                                    is_password_role(&role_name, role_num),
+                                )
+                            },
                             || {
                                 if role != Role::Application {
                                     self.get_extents(aref, ifaces)
@@ -1367,14 +1373,29 @@ impl LinuxProvider {
     }
 
     /// Parse AT-SPI2 state bitfield into xa11y StateSet.
+    ///
+    /// Serves only the selector fast path, which never asks it for
+    /// `password`: that flag comes from the raw AT-SPI role rather than the
+    /// state bits, so `state_attr_to_string` has no arm for it and a
+    /// `[password=..]` filter takes the full-`ElementData` route instead. The
+    /// `false` passed here is therefore never read.
     fn parse_states(&self, aref: &AccessibleRef, role: Role) -> StateSet {
-        self.parse_states_with_bits(aref, role).0
+        self.parse_states_with_bits(aref, role, false).0
     }
 
     /// Like [`parse_states`], but also returns the raw AT-SPI state bitset so
     /// callers can surface provider-only facts (notably DEFUNCT) that have no
     /// cross-platform `StateSet` field.
-    fn parse_states_with_bits(&self, aref: &AccessibleRef, role: Role) -> (StateSet, u64) {
+    ///
+    /// `password` is decided by the caller from the raw role (see
+    /// [`is_password_role`]); the mapped `Role` cannot carry it, because a
+    /// password field maps to `TextField` like any other entry.
+    fn parse_states_with_bits(
+        &self,
+        aref: &AccessibleRef,
+        role: Role,
+        password: bool,
+    ) -> (StateSet, u64) {
         let (bits, state_read_ok) = self.state_bits(aref);
 
         // AT-SPI2 state bit positions: each is `1 << ordinal` of the
@@ -1454,6 +1475,7 @@ impl LinuxProvider {
             },
             maximized: None,
             fullscreen: None,
+            password,
         }
         .into();
         (states, bits)
@@ -3171,6 +3193,19 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
     }
 }
 
+/// `AtspiRole::PasswordText` — the numeric role of a password entry.
+const ATSPI_ROLE_PASSWORD_TEXT: u32 = 40;
+
+/// Whether an AT-SPI role, by name or number, is `PasswordText`.
+///
+/// Both forms are accepted because bridges disagree on which they fill in:
+/// AccessKit reports an empty role name and only the number, GTK both. The
+/// mapped `Role` cannot answer this, since `PasswordText` maps to
+/// `TextField` so `text_field` selectors keep matching password entries.
+pub(crate) fn is_password_role(role_name: &str, role_num: u32) -> bool {
+    role_num == ATSPI_ROLE_PASSWORD_TEXT || role_name.eq_ignore_ascii_case("password text")
+}
+
 /// `AtspiRole::Frame` — the numeric role a top-level window frame reports.
 ///
 /// Named because `is_dock_frame` needs the number itself: the table below
@@ -3190,53 +3225,53 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         // Bare ColumnHeader/RowHeader (10/47): WebKit and GTK emit these for
         // <th> / column-view header cells, distinct from the
         // TableColumnHeader/TableRowHeader pair (57/58) below.
-        10 => Role::TableCell,   // ColumnHeader
-        11 => Role::ComboBox,    // ComboBox
-        13 => Role::Image,       // DesktopIcon
-        16 => Role::Dialog,      // Dialog
-        19 => Role::Dialog,      // FileChooser
-        20 => Role::Group,       // Filler
-        23 => Role::Window,      // Frame
-        26 => Role::Image,       // Icon
-        27 => Role::Image,       // Image
-        29 => Role::StaticText,  // Label
-        31 => Role::List,        // List
-        32 => Role::ListItem,    // ListItem
-        33 => Role::Menu,        // Menu
-        34 => Role::MenuBar,     // MenuBar
-        35 => Role::MenuItem,    // MenuItem
-        37 => Role::Tab,         // PageTab
-        38 => Role::TabGroup,    // PageTabList
-        39 => Role::Group,       // Panel
-        40 => Role::TextField,   // PasswordText
-        41 => Role::Menu,        // PopupMenu
-        42 => Role::ProgressBar, // ProgressBar
-        43 => Role::Button,      // Button (push button)
-        44 => Role::RadioButton, // RadioButton
-        45 => Role::RadioButton, // RadioMenuItem
-        47 => Role::TableCell,   // RowHeader
-        48 => Role::ScrollBar,   // ScrollBar
-        49 => Role::Group,       // ScrollPane
-        50 => Role::Separator,   // Separator
-        51 => Role::Slider,      // Slider
-        52 => Role::SpinButton,  // SpinButton
-        53 => Role::SplitGroup,  // SplitPane
-        54 => Role::Status,      // StatusBar
-        55 => Role::Table,       // Table
-        56 => Role::TableCell,   // TableCell
-        57 => Role::TableCell,   // TableColumnHeader
-        58 => Role::TableCell,   // TableRowHeader
-        59 => Role::MenuItem,    // TearoffMenuItem
-        60 => Role::TextArea,    // Terminal (VTE and friends — text via the Text interface)
-        61 => Role::TextArea,    // Text
-        62 => Role::Switch,      // ToggleButton
-        63 => Role::Toolbar,     // ToolBar
-        64 => Role::Tooltip,     // ToolTip
-        65 => Role::Group,       // Tree
-        66 => Role::Table,       // TreeTable
-        67 => Role::Unknown,     // Unknown
-        68 => Role::Group,       // Viewport
-        69 => Role::Window,      // Window
+        10 => Role::TableCell,                       // ColumnHeader
+        11 => Role::ComboBox,                        // ComboBox
+        13 => Role::Image,                           // DesktopIcon
+        16 => Role::Dialog,                          // Dialog
+        19 => Role::Dialog,                          // FileChooser
+        20 => Role::Group,                           // Filler
+        23 => Role::Window,                          // Frame
+        26 => Role::Image,                           // Icon
+        27 => Role::Image,                           // Image
+        29 => Role::StaticText,                      // Label
+        31 => Role::List,                            // List
+        32 => Role::ListItem,                        // ListItem
+        33 => Role::Menu,                            // Menu
+        34 => Role::MenuBar,                         // MenuBar
+        35 => Role::MenuItem,                        // MenuItem
+        37 => Role::Tab,                             // PageTab
+        38 => Role::TabGroup,                        // PageTabList
+        39 => Role::Group,                           // Panel
+        ATSPI_ROLE_PASSWORD_TEXT => Role::TextField, // PasswordText; see `is_password_role`
+        41 => Role::Menu,                            // PopupMenu
+        42 => Role::ProgressBar,                     // ProgressBar
+        43 => Role::Button,                          // Button (push button)
+        44 => Role::RadioButton,                     // RadioButton
+        45 => Role::RadioButton,                     // RadioMenuItem
+        47 => Role::TableCell,                       // RowHeader
+        48 => Role::ScrollBar,                       // ScrollBar
+        49 => Role::Group,                           // ScrollPane
+        50 => Role::Separator,                       // Separator
+        51 => Role::Slider,                          // Slider
+        52 => Role::SpinButton,                      // SpinButton
+        53 => Role::SplitGroup,                      // SplitPane
+        54 => Role::Status,                          // StatusBar
+        55 => Role::Table,                           // Table
+        56 => Role::TableCell,                       // TableCell
+        57 => Role::TableCell,                       // TableColumnHeader
+        58 => Role::TableCell,                       // TableRowHeader
+        59 => Role::MenuItem,                        // TearoffMenuItem
+        60 => Role::TextArea, // Terminal (VTE and friends — text via the Text interface)
+        61 => Role::TextArea, // Text
+        62 => Role::Switch,   // ToggleButton
+        63 => Role::Toolbar,  // ToolBar
+        64 => Role::Tooltip,  // ToolTip
+        65 => Role::Group,    // Tree
+        66 => Role::Table,    // TreeTable
+        67 => Role::Unknown,  // Unknown
+        68 => Role::Group,    // Viewport
+        69 => Role::Window,   // Window
         // Text-document containers WebKit emits for plain markup: a bare
         // <p> (no ARIA naming) is Paragraph; header/footer/caption/block
         // quote come from the matching HTML elements. Containers normalize
@@ -3866,8 +3901,8 @@ mod tests {
         assert!(!atspi_visible(SHOWING));
         assert!(!atspi_visible(0));
         // The event decoder uses the same rule.
-        assert!(!crate::events::states_from_bits(VISIBLE, Role::Button, true).visible);
-        assert!(crate::events::states_from_bits(VISIBLE | SHOWING, Role::Button, true).visible);
+        assert!(!crate::events::states_from_bits(VISIBLE, Role::Button, true, false).visible);
+        assert!(crate::events::states_from_bits(VISIBLE | SHOWING, Role::Button, true, false).visible);
     }
 
     #[test]
@@ -4362,6 +4397,26 @@ mod tests {
             .copied()
             .expect("the AtspiRole table must carry `frame`");
         assert_eq!(number, ATSPI_ROLE_FRAME, "{name} moved");
+    }
+
+    /// `is_password_role` must agree with the AtspiRole table by number and
+    /// by name, and must leave the mapped role at `TextField` so existing
+    /// `text_field` selectors keep matching password entries (#522).
+    #[test]
+    fn test_password_text_is_flagged_by_name_or_number() {
+        let (number, name) = ATSPI_ROLE_ENUM
+            .iter()
+            .find(|(_, name)| *name == "password text")
+            .copied()
+            .expect("the AtspiRole table must carry `password text`");
+        assert_eq!(number, ATSPI_ROLE_PASSWORD_TEXT, "{name} moved");
+        assert!(is_password_role("", number), "AccessKit: number only");
+        assert!(is_password_role("password text", 0), "name only");
+        assert!(is_password_role("Password Text", number));
+        assert!(!is_password_role("entry", 61));
+        assert!(!is_password_role("", 0), "an unread role is not a password");
+        assert_eq!(map_atspi_role_number(number), Role::TextField);
+        assert_eq!(map_atspi_role(name), Role::TextField);
     }
 
     /// The dock attribute only makes a surface on a top-level frame. `panel`

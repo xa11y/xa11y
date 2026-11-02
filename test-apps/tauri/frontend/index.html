@@ -221,6 +221,16 @@ Line 3</textarea>
     </div>
   </fieldset>
 
+  <!-- Password entry (#522): the `password` state. Last on the page so it is
+       never the first text_field a test picks up. -->
+  <fieldset>
+    <legend>Secret</legend>
+    <div class="row">
+      <label for="password-field">Password</label>
+      <input type="password" id="password-field" aria-label="Password" />
+    </div>
+  </fieldset>
+
   <script>
     // OK button enables Cancel
     document.getElementById('ok-button').addEventListener('click', () => {

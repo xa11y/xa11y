@@ -126,6 +126,13 @@ const READONLY_FIELD: NodeId = NodeId(76);
 // 0x0 for it, which is "no bounds", not a clickable point (issue #489).
 const ZERO_SIZE_NODE: NodeId = NodeId(77);
 
+// A password entry (#522): AccessKit's `PasswordInput` reaches each platform
+// as its native secure-text field (AXSecureTextField subrole, AT-SPI
+// `password text`, UIA `IsPassword`), which is what the `password` state
+// reads. Last in document order so it is not the first `text_field` a test
+// picks up, and shifts no `:nth(n)` index another test relies on.
+const PASSWORD_FIELD: NodeId = NodeId(79);
+
 // Dynamic items start at NodeId(100) to leave room for future static nodes
 const DYNAMIC_ITEM_BASE: u64 = 100;
 
@@ -738,8 +745,14 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         ANNOUNCE_BTN,
         ANNOUNCE_LIVE_REGION,
         READONLY_FIELD,
+        PASSWORD_FIELD,
     ]);
     nodes.push((EXTRA_PANEL, extra_panel));
+
+    let mut password = Node::new(Role::PasswordInput);
+    password.set_label("Password");
+    password.add_action(Action::Focus);
+    nodes.push((PASSWORD_FIELD, password));
 
     // Announce button + live region. Pressing the button updates the live
     // region's value, which on macOS translates to

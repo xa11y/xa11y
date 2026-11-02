@@ -184,6 +184,11 @@ def test_busy(test_app):
     assert app.busy is False
 
 
+def test_password(test_app):
+    app = test_app.element()
+    assert app.password is False
+
+
 # ── Raw platform data ────────────────────────────────────────────────────────
 
 

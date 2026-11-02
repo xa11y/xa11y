@@ -37,8 +37,8 @@ use xa11y_core::{
 };
 
 use crate::atspi::{
-    map_atspi_role, map_atspi_role_number, read_interfaces, AccessibleRef, Interfaces,
-    LinuxProvider,
+    is_password_role, map_atspi_role, map_atspi_role_number, read_interfaces, AccessibleRef,
+    Interfaces, LinuxProvider,
 };
 
 /// AT-SPI2 event-interface names we subscribe to via match rules.
@@ -488,6 +488,9 @@ fn build_event_snapshot(
     } else {
         map_atspi_role_number(role_num)
     };
+    // `role_num` is read only when the name is empty; a named role is
+    // decided by its name, which `is_password_role` also accepts.
+    let password = is_password_role(&role_name, role_num);
 
     // State bits (used both for role refinement and for StateSet).
     // A failed GetState is `None` — preserve that as `state_read_ok = false`
@@ -527,7 +530,7 @@ fn build_event_snapshot(
         (None, None, None)
     };
 
-    let states = states_from_bits(bits, role, state_read_ok);
+    let states = states_from_bits(bits, role, state_read_ok, password);
 
     let raw = {
         let raw_role = if role_name.is_empty() {
@@ -720,7 +723,10 @@ fn bits_from_u32s(state_bits: &[u32]) -> u64 {
 /// flags must stay tri-state-unknown (`None`) rather than read-as-absent —
 /// the same rule `LinuxProvider::parse_states_with_bits` applies through
 /// `state_bits`, kept in sync here.
-pub(crate) fn states_from_bits(bits: u64, role: Role, state_read_ok: bool) -> StateSet {
+///
+/// `password` comes from the raw role, not the bits (see
+/// `is_password_role`).
+pub(crate) fn states_from_bits(bits: u64, role: Role, state_read_ok: bool, password: bool) -> StateSet {
     // Same bit positions as `LinuxProvider::parse_states` — kept in sync.
     // Each constant is `1 << ordinal` of the `AtspiStateType` enum in
     // at-spi2-core's `atspi/atspi-constants.h` (e.g. ICONIFIED=15,
@@ -792,6 +798,7 @@ pub(crate) fn states_from_bits(bits: u64, role: Role, state_read_ok: bool) -> St
         },
         maximized: None,
         fullscreen: None,
+        password,
     }
     .into()
 }
@@ -1134,9 +1141,9 @@ mod tests {
         // `Checked` only makes sense on checkbox-like roles — other roles
         // should leave it as None even when the bit is set.
         const CHECKED: u64 = 1 << 4;
-        let s = states_from_bits(CHECKED, Role::Button, true);
+        let s = states_from_bits(CHECKED, Role::Button, true, false);
         assert!(s.checked.is_none());
-        let s = states_from_bits(CHECKED, Role::CheckBox, true);
+        let s = states_from_bits(CHECKED, Role::CheckBox, true, false);
         assert_eq!(s.checked, Some(Toggled::On));
     }
 
@@ -1145,9 +1152,9 @@ mod tests {
         const ENABLED: u64 = 1 << 8;
         const SENSITIVE: u64 = 1 << 24;
         // Either bit on its own should flip the enabled flag.
-        assert!(states_from_bits(ENABLED, Role::Button, true).enabled);
-        assert!(states_from_bits(SENSITIVE, Role::Button, true).enabled);
-        assert!(!states_from_bits(0, Role::Button, true).enabled);
+        assert!(states_from_bits(ENABLED, Role::Button, true, false).enabled);
+        assert!(states_from_bits(SENSITIVE, Role::Button, true, false).enabled);
+        assert!(!states_from_bits(0, Role::Button, true, false).enabled);
     }
 
     #[test]
@@ -1157,14 +1164,14 @@ mod tests {
         // contract, mirrored with `parse_states_with_bits`), not report
         // `Some(false)` from the defaulted zero bitset.
         const ICONIFIED: u64 = 1 << 15;
-        let read_ok = states_from_bits(ICONIFIED, Role::Window, true);
+        let read_ok = states_from_bits(ICONIFIED, Role::Window, true, false);
         assert_eq!(read_ok.minimized, Some(true));
-        let read_ok = states_from_bits(0, Role::Window, true);
+        let read_ok = states_from_bits(0, Role::Window, true, false);
         assert_eq!(read_ok.minimized, Some(false));
-        let failed = states_from_bits(0, Role::Window, false);
+        let failed = states_from_bits(0, Role::Window, false, false);
         assert_eq!(failed.minimized, None, "unread state must stay unknown");
         // Role guard is unchanged: a non-window role stays None regardless.
-        let failed = states_from_bits(0, Role::Group, false);
+        let failed = states_from_bits(0, Role::Group, false, false);
         assert_eq!(failed.minimized, None);
     }
 }

@@ -19,7 +19,7 @@ xa11y normalizes platform-specific APIs into a unified interface. This page docu
 | `Button` | AXButton | push button | ButtonControlType |
 | `CheckBox` | AXCheckBox | check box, check menu item | CheckBoxControlType |
 | `RadioButton` | AXRadioButton | radio button, radio menu item | RadioButtonControlType |
-| `TextField` | AXTextField, AXSecureTextField | entry, password text | EditControlType |
+| `TextField` | AXTextField, AXSecureTextField *(role or subrole)* | entry, password text | EditControlType |
 | `TextArea` | AXTextArea | text | EditControlType |
 | `StaticText` | AXStaticText | label, static, caption | TextControlType |
 | `ComboBox` | AXComboBox, AXPopUpButton | combo box | ComboBoxControlType |
@@ -54,6 +54,11 @@ xa11y normalizes platform-specific APIs into a unified interface. This page docu
 | `Navigation` | *(landmark)* | landmark, navigation | *(landmark)* |
 
 Roles not recognized by a platform map to `Unknown`.
+
+A password field keeps the `TextField` role and sets the `password` state
+instead: `AXSecureTextField` as the role or subrole on macOS, the
+`password text` role on Linux, and `IsPassword` on Windows. xa11y does not
+redact a password field's value or the text typed into it.
 
 ## Action mapping
 

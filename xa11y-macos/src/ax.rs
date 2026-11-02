@@ -2819,6 +2819,16 @@ fn settle_window_size(
 
 // ── Role Mapping ──────────────────────────────────────────────────────────────
 
+/// Whether an AX role/subrole pair is a secure (password) text field.
+///
+/// AppKit's `NSSecureTextField` reports `AXSecureTextField` as its role;
+/// WebKit and AccessKit report `AXTextField` with `AXSecureTextField` as the
+/// subrole. Both map to `Role::TextField` in [`map_ax_role`], so this is the
+/// only place the distinction survives.
+fn is_secure_text_field(role: &str, subrole: Option<&str>) -> bool {
+    role == "AXSecureTextField" || subrole == Some("AXSecureTextField")
+}
+
 fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
     match subrole {
         Some("AXDialog") => return Role::Dialog,
@@ -3463,6 +3473,7 @@ fn build_snapshot_data(
         };
 
         let role = map_ax_role(&attrs.role_str, attrs.subrole_str.as_deref());
+        let password = is_secure_text_field(&attrs.role_str, attrs.subrole_str.as_deref());
 
         // Build raw platform data map before consuming attrs fields.
         let mut raw = std::collections::HashMap::new();
@@ -3638,6 +3649,7 @@ fn build_snapshot_data(
             editable: matches!(role, Role::TextField | Role::TextArea),
             required: false,
             busy: false,
+            password,
         }
         .into();
 
@@ -6529,6 +6541,20 @@ mod tests {
         assert_ne!(err, AX_ERROR_SUCCESS);
     }
 
+    /// Both spellings of a password field are flagged, and nothing else
+    /// is (#522). The role itself stays `TextField`; see `map_ax_role`.
+    #[test]
+    fn secure_text_field_is_flagged_as_role_or_subrole() {
+        assert!(is_secure_text_field("AXSecureTextField", None));
+        assert!(is_secure_text_field(
+            "AXTextField",
+            Some("AXSecureTextField")
+        ));
+        assert!(!is_secure_text_field("AXTextField", None));
+        assert!(!is_secure_text_field("AXTextField", Some("AXSearchField")));
+        assert!(!is_secure_text_field("AXTextArea", None));
+    }
+
     #[test]
     fn map_ax_role_covers_all_known_roles() {
         assert_eq!(map_ax_role("AXSortButton", None), Role::Button);
@@ -6563,6 +6589,10 @@ mod tests {
         assert_eq!(map_ax_role("AXCheckBox", None), Role::CheckBox);
         assert_eq!(map_ax_role("AXTextField", None), Role::TextField);
         assert_eq!(map_ax_role("AXSecureTextField", None), Role::TextField);
+        assert_eq!(
+            map_ax_role("AXTextField", Some("AXSecureTextField")),
+            Role::TextField
+        );
         assert_eq!(map_ax_role("AXTextArea", None), Role::TextArea);
         assert_eq!(map_ax_role("AXStaticText", None), Role::StaticText);
         assert_eq!(map_ax_role("AXComboBox", None), Role::ComboBox);

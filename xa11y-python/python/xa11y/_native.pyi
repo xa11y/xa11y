@@ -539,6 +539,14 @@ class Element:
     @property
     def busy(self) -> bool: ...
     @property
+    def password(self) -> bool:
+        """Whether this is a password (secure text) field.
+
+        The role stays ``text_field``. xa11y redacts nothing, so a caller that
+        must keep a secret out of its logs checks this flag.
+        """
+        ...
+    @property
     def minimized(self) -> bool | None:
         """Whether the window is minimized.
 
