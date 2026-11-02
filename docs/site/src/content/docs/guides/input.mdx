@@ -37,7 +37,7 @@ The mechanisms are not bridged. A failed accessibility action never falls back t
 | macOS | Accessibility + Input Monitoring for the terminal/IDE running your code |
 | Windows | None for normal user sessions |
 | Linux (X11) | `XTest` extension enabled on the X server. Zero setup. |
-| Linux (Wayland / headless) | Membership in the `input` group (`sudo usermod -aG input $USER` then re-login). xa11y opens `/dev/uinput` and registers a virtual evdev keyboard+pointer, the same mechanism used by `xdotool --using-uinput`, `ydotool`, `wtype`, Steam Input, and Wine. **The privilege grants global input read/write access**, comparable to macOS Input Monitoring. |
+| Linux (Wayland / headless) | Write access to `/dev/uinput`: membership in the `input` group (`sudo usermod -aG input $USER` then re-login), or a udev rule that grants it. xa11y opens `/dev/uinput` and registers a virtual evdev keyboard+pointer, the same mechanism used by `xdotool --using-uinput`, `ydotool`, `wtype`, Steam Input, and Wine. **The privilege grants global input read/write access**, comparable to macOS Input Monitoring. |
 
 On macOS, input simulation usually also requires the target window to be foregrounded. Activate the window explicitly before synthesising input.
 

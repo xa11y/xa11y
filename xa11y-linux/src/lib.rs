@@ -3,9 +3,11 @@
 //! - AT-SPI2 introspection over D-Bus (`atspi`) with native EWMH/ICCCM and
 //!   Sway window management — implements the core `Provider` trait.
 //! - Input simulation (`input`, `wayland_input`) — XTest on X11 sessions,
-//!   libei via `org.freedesktop.portal.RemoteDesktop` on Wayland sessions.
-//!   Routing is per capability at runtime, with explicit environment
-//!   overrides and correct mixed Wayland/XWayland detection.
+//!   a `/dev/uinput` virtual evdev device on Wayland sessions. uinput needs
+//!   write access to `/dev/uinput`: membership in the `input` group, or a
+//!   udev rule granting it. Routing is per capability at runtime, with
+//!   explicit environment overrides and correct mixed Wayland/XWayland
+//!   detection.
 //! - Screen capture (`screenshot`) — `GetImage` on X11, the Screenshot
 //!   portal on Wayland.
 

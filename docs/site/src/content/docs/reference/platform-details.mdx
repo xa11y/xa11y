@@ -395,6 +395,8 @@ cursor --force-renderer-accessibility
 google-chrome --force-renderer-accessibility
 ```
 
+In a session with no settings daemon (CI, Xvfb, a container), also set `ACCESSIBILITY_ENABLED=1` in the app's environment. There, Chromium needs both the variable and the flag before it exposes web content.
+
 Representative node counts on Ubuntu 24.04 + GNOME 46 (Wayland):
 
 | App       | Without flag | With flag |

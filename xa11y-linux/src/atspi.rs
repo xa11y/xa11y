@@ -271,8 +271,9 @@ impl LinuxProvider {
         Err(Error::AccessibilityNotEnabled {
             app: app_name,
             instructions: "Chromium/Electron app exposes an empty accessibility tree on Linux. \
-                Relaunch with `--force-renderer-accessibility` (or set the env var \
-                `ACCESSIBILITY_ENABLED=1`) so the renderer accessibility bridge is initialised."
+                Relaunch it with `--force-renderer-accessibility`. In a session with no \
+                settings daemon (CI, Xvfb, a container), also set `ACCESSIBILITY_ENABLED=1` \
+                in its environment: there Chromium needs both before it exposes web content."
                 .to_string(),
         })
     }

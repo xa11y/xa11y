@@ -81,8 +81,13 @@ code         --force-renderer-accessibility   # VS Code
 cursor       --force-renderer-accessibility
 ```
 
-On some Chromium builds the environment variable `ACCESSIBILITY_ENABLED=1`
-has the same effect.
+In a bare session with no settings daemon (CI, Xvfb, a container), the flag
+alone is not enough. Chromium also needs `ACCESSIBILITY_ENABLED=1` in its
+environment before it exposes web content:
+
+```bash
+ACCESSIBILITY_ENABLED=1 google-chrome --force-renderer-accessibility
+```
 
 Representative node counts on Ubuntu 24.04 + GNOME 46 (Wayland):
 
