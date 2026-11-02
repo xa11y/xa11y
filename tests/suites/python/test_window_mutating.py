@@ -196,10 +196,10 @@ def _window_named(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
 def _tree_dialog(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
     """The first window/dialog element in the app's tree named `dialog_name`.
 
-    Covers toolkits whose secondary dialog appears in the accessibility tree
-    but not in ``App.windows()`` (the GTK app's AT-SPI tree has no top-level
-    window node, but its dialog is a Role::Dialog child — the same shape
-    ``test_dialog_role`` in test_compat.py relies on).
+    Covers a toolkit whose secondary dialog appears in the accessibility tree
+    as a Role::Dialog node but not in ``App.windows()`` (the shape
+    ``test_dialog_role`` in test_compat.py relies on). GTK 4 is no longer one
+    of them: its windows are listed since issue #485.
     """
     if not dialog_name:
         return None
@@ -348,9 +348,8 @@ def test_python_window_suite_resolves_the_app(app: xa11y.App) -> None:
     """The suite's smoke anchor.
 
     The harness fails a matrix cell whose suite executes zero tests. On apps
-    that expose no window-like element at all (the GTK app's AT-SPI tree has
-    no frame node) every mutating test below would skip, so this one always
-    executes and keeps the cell honest.
+    that expose no window-like element at all every mutating test below
+    would skip, so this one always executes and keeps the cell honest.
     """
     assert isinstance(app.windows(), list)
 
@@ -360,20 +359,22 @@ def test_atspi_geometry_capability_is_measured_for_gtk_and_qt(app: xa11y.App) ->
     """Pin the GTK/Qt results that decide whether geometry is advertised.
 
     Qt exports Component.SetPosition and Component.SetSize on its top-level
-    accessible, but returns ``false`` from both. GTK's adapter exposes no
-    top-level window accessible in this fixture. Neither therefore provides
-    a capability xa11y can honestly advertise.
+    accessible, but returns ``false`` from both. GTK 4's top-level window is
+    listed since role numbers take precedence over its misleading
+    ``application`` role name (issue #485), and it does not advertise AT-SPI
+    geometry either. Neither therefore provides a capability xa11y can
+    honestly advertise.
     """
     if APP not in {"gtk", "qt"}:
         pytest.skip("this probe is specifically for the GTK and Qt adapters")
     windows = app.windows()
     if APP == "gtk":
-        assert windows == [], "GTK unexpectedly gained a targetable AT-SPI window"
-        return
-    assert windows, "Qt must expose its top-level window through AT-SPI"
+        assert windows, "GTK 4 must expose its top-level window (issue #485)"
+    else:
+        assert windows, "Qt must expose its top-level window through AT-SPI"
     win = windows[0]
-    assert "move_to" not in win.actions
-    assert "resize_to" not in win.actions
+    assert "move_to" not in win.actions, win.actions
+    assert "resize_to" not in win.actions, win.actions
     bounds = win.bounds
     assert bounds is not None
     with pytest.raises(xa11y.ActionNotSupportedError):

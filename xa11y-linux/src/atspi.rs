@@ -1033,19 +1033,7 @@ impl LinuxProvider {
             },
             || self.get_interfaces(aref).unwrap_or_default(),
         );
-        let coarse_role = {
-            let by_name = if !role_name.is_empty() {
-                map_atspi_role(&role_name)
-            } else {
-                Role::Unknown
-            };
-            let coarse = if by_name != Role::Unknown {
-                by_name
-            } else {
-                map_atspi_role_number(role_num)
-            };
-            self.refine_text_role(coarse, aref)
-        };
+        let coarse_role = self.refine_text_role(role_from_atspi(role_num, &role_name), aref);
         // GTK 3 overloads AT-SPI's `menu` role: both a popup menu container
         // and the MenuItem that opens a submenu report `menu`. The entry is
         // distinguishable by its native activation action (`click`, normalized
@@ -1623,18 +1611,12 @@ impl LinuxProvider {
     /// Resolve the mapped Role for an accessible ref (1-3 D-Bus calls, plus
     /// an Action probe for AT-SPI `menu`, whose meaning is ambiguous on GTK 3).
     fn resolve_role(&self, aref: &AccessibleRef) -> Role {
-        let role_name = self.get_role_name(aref).unwrap_or_default();
-        let by_name = if !role_name.is_empty() {
-            map_atspi_role(&role_name)
-        } else {
-            Role::Unknown
-        };
-        let coarse = if by_name != Role::Unknown {
-            by_name
-        } else {
-            // Unmapped or missing role name — fall back to numeric role.
-            let role_num = self.get_role_number(aref).unwrap_or(0);
-            map_atspi_role_number(role_num)
+        let role_num = self.get_role_number(aref).unwrap_or(0);
+        // The name is only consulted when the number does not map, so it is
+        // not read at all on the common path.
+        let coarse = match try_map_atspi_role_number(role_num) {
+            Some(role) => role,
+            None => role_from_atspi(role_num, &self.get_role_name(aref).unwrap_or_default()),
         };
         let role = self.refine_text_role(coarse, aref);
         if role == Role::Menu {
@@ -1645,25 +1627,29 @@ impl LinuxProvider {
         }
     }
 
-    /// AT-SPI role-name probe for top-level decisions: is `parent` the
-    /// application node?
+    /// Top-level probe: is `parent` the application node?
     ///
-    /// AccessKit's AT-SPI bridge reports role names as empty strings and
-    /// carries the actual role as the numeric one (see `resolve_role`); an
-    /// empty name fed to `map_atspi_role` would hit the strict mapper's panic
-    /// arm — the exact failure the integration suite surfaced (every element's
-    /// snapshot went through the round-4 top-level probe and died). The empty
-    /// name is resolved numerically, exactly like `resolve_role`, so the
-    /// probe agrees with the snapshot path, and a D-Bus failure is the
-    /// caller's decision to make (propagated for the runtime guard).
+    /// Decided by the `GetRole` *number* alone (`ATSPI_ROLE_APPLICATION`),
+    /// never the role name. GTK 4 names its top-level window `application`
+    /// while numbering it a frame, so a name check took the window for the
+    /// application and its own children for top-level windows (issue #485);
+    /// AccessKit reports no role names at all. The number is the AT-SPI
+    /// contract and every bridge sets it. A D-Bus failure is the caller's
+    /// decision to make (propagated for the runtime guard).
     fn parent_role_is_application(&self, parent: &AccessibleRef) -> Result<bool> {
-        let role_name = self.get_role_name(parent)?;
-        let role = if role_name.is_empty() {
-            map_atspi_role_number(self.get_role_number(parent)?)
-        } else {
-            map_atspi_role(&role_name)
-        };
-        Ok(role == Role::Application)
+        Ok(self.get_role_number(parent)? == ATSPI_ROLE_APPLICATION)
+    }
+
+    /// Whether `aref` is an AT-SPI application object, by role *number*.
+    ///
+    /// Used to flatten nested application objects out of a window's
+    /// children. The role name cannot be trusted for this: GTK 4 names its
+    /// top-level window `application` while numbering it a frame, so a name
+    /// check flattened the window itself away (issue #485). An unreadable
+    /// role is not an application, matching the per-field tolerance of the
+    /// surrounding traversal.
+    fn is_application_object(&self, aref: &AccessibleRef) -> bool {
+        self.get_role_number(aref).ok() == Some(ATSPI_ROLE_APPLICATION)
     }
 
     fn ensure_top_level_window_target(&self, element: &ElementData, action: &str) -> Result<()> {
@@ -1682,10 +1668,10 @@ impl LinuxProvider {
         let Some(parent) = self.get_atspi_parent(&target)? else {
             return Ok(());
         };
-        // Same resolution as the advertisement probe (`is_atspi_top_level`),
-        // so a window the snapshot advertised and the runtime guard can never
-        // disagree; empty role names resolve numerically (AccessKit's bridge)
-        // instead of feeding the strict mapper's panic arm.
+        // Same probe as the advertisement (`is_top_level_window_ref`), so a window
+        // the snapshot advertised and the runtime guard can never disagree.
+        // Both key on the role number, which GTK 4 and AccessKit report
+        // correctly where their role names do not (#485).
         if self.parent_role_is_application(&parent)? {
             Ok(())
         } else {
@@ -1858,25 +1844,21 @@ impl LinuxProvider {
                 continue;
             }
 
-            if !parent_is_registry {
-                let child_role = self.get_role_name(&child).unwrap_or_default();
-                if child_role == "application" {
-                    let grandchildren = self.get_atspi_children(&child).unwrap_or_default();
-                    for gc in grandchildren {
-                        if gc.path == "/org/a11y/atspi/null"
-                            || gc.bus_name.is_empty()
-                            || gc.path.is_empty()
-                        {
-                            continue;
-                        }
-                        let gc_role = self.get_role_name(&gc).unwrap_or_default();
-                        if gc_role == "application" {
-                            continue;
-                        }
-                        to_search.push(gc);
+            if !parent_is_registry && self.is_application_object(&child) {
+                let grandchildren = self.get_atspi_children(&child).unwrap_or_default();
+                for gc in grandchildren {
+                    if gc.path == "/org/a11y/atspi/null"
+                        || gc.bus_name.is_empty()
+                        || gc.path.is_empty()
+                    {
+                        continue;
                     }
-                    continue;
+                    if self.is_application_object(&gc) {
+                        continue;
+                    }
+                    to_search.push(gc);
                 }
+                continue;
             }
             to_search.push(child);
         }
@@ -1986,8 +1968,7 @@ impl Provider for LinuxProvider {
                     {
                         continue;
                     }
-                    let child_role = self.get_role_name(child_ref).unwrap_or_default();
-                    if child_role == "application" {
+                    if self.is_application_object(child_ref) {
                         // Nested application objects can also disappear between
                         // enumeration and this read. Prune only confirmed absence.
                         let Some(grandchildren) = self.live_atspi_children(child_ref)? else {
@@ -2000,8 +1981,7 @@ impl Provider for LinuxProvider {
                             {
                                 continue;
                             }
-                            let gc_role = self.get_role_name(&gc_ref).unwrap_or_default();
-                            if gc_role == "application" {
+                            if self.is_application_object(&gc_ref) {
                                 continue;
                             }
                             to_build.push(gc_ref);
@@ -3166,9 +3146,49 @@ fn grab_focus_error(name: String, verb: &str, action: &str, role: Role) -> Error
     }
 }
 
+/// Map an accessible's AT-SPI role to an xa11y [`Role`], keyed on the
+/// `GetRole` *number*.
+///
+/// The number is the AT-SPI contract; the name is a display string, and
+/// toolkits disagree with themselves there: GTK 4 names its window
+/// `application`, containers `generic` and entries `text box` while
+/// numbering them frame, filler/panel and text. Reading the name first made
+/// GTK 4 windows nested applications that were then flattened out of the
+/// tree (issue #485). The name is consulted only when the number does not
+/// map — AccessKit reports no names at all, and a few bridges report a
+/// number this table does not know — and both unmapped is
+/// [`xa11y_core::unknown_role`] naming both. Refinements that need more than
+/// the role (GTK 3 `menu` vs menu item, text field vs area) run after this.
+pub(crate) fn role_from_atspi(role_num: u32, role_name: &str) -> Role {
+    if let Some(role) = try_map_atspi_role_number(role_num) {
+        return role;
+    }
+    if !role_name.is_empty() {
+        if let Some(role) = try_map_atspi_role(role_name) {
+            return role;
+        }
+    }
+    // `AtspiRole::Unknown` with nothing better in the name is the platform
+    // answering "unknown", not a role this table has yet to map.
+    if role_num == ATSPI_ROLE_UNKNOWN {
+        return Role::Unknown;
+    }
+    xa11y_core::unknown_role(&format!(
+        "AT-SPI role number {role_num}, role name {role_name:?}"
+    ))
+}
+
 /// Map AT-SPI2 role name to xa11y Role.
+/// Test-only: production code goes through [`role_from_atspi`].
+#[cfg(test)]
 pub(crate) fn map_atspi_role(role_name: &str) -> Role {
-    match role_name.to_lowercase().as_str() {
+    try_map_atspi_role(role_name).unwrap_or_else(|| xa11y_core::unknown_role(role_name))
+}
+
+/// [`map_atspi_role`] without the unknown-role arm: `None` for a name the
+/// table does not know.
+fn try_map_atspi_role(role_name: &str) -> Option<Role> {
+    Some(match role_name.to_lowercase().as_str() {
         "application" => Role::Application,
         "window" | "frame" => Role::Window,
         "dialog" | "file chooser" => Role::Dialog,
@@ -3226,8 +3246,8 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
         "tooltip" | "tool tip" => Role::Tooltip,
         "status bar" | "statusbar" => Role::Status,
         "landmark" | "navigation" => Role::Navigation,
-        _ => xa11y_core::unknown_role(role_name),
-    }
+        _ => return None,
+    })
 }
 
 /// `AtspiRole::PasswordText` — the numeric role of a password entry.
@@ -3251,10 +3271,27 @@ pub(crate) fn is_password_role(role_name: &str, role_num: u32) -> bool {
 /// pins it against the AtspiRole enum the tests carry.
 const ATSPI_ROLE_FRAME: u32 = 23;
 
+/// `AtspiRole::Application`.
+const ATSPI_ROLE_APPLICATION: u32 = 75;
+
+/// `AtspiRole::Unknown`.
+const ATSPI_ROLE_UNKNOWN: u32 = 67;
+
 /// Map AT-SPI2 numeric role (AtspiRole enum) to xa11y Role.
 /// Values from atspi-common Role enum (repr(u32)).
+/// Test-only: production code goes through [`role_from_atspi`].
+#[cfg(test)]
 pub(crate) fn map_atspi_role_number(role: u32) -> Role {
-    match role {
+    try_map_atspi_role_number(role)
+        .unwrap_or_else(|| xa11y_core::unknown_role(&format!("AT-SPI role number {role}")))
+}
+
+/// [`map_atspi_role_number`] without the unknown-role arm: `None` for a
+/// number the table does not map, including `Invalid` (0, also what an
+/// unreadable role defaults to) and `Unknown` (67), so the caller can fall
+/// back to the name.
+pub(crate) fn try_map_atspi_role_number(role: u32) -> Option<Role> {
+    Some(match role {
         2 => Role::Alert,    // Alert
         5 => Role::Group,    // Calendar (mirrors UIA CalendarControlType)
         7 => Role::CheckBox, // CheckBox
@@ -3306,7 +3343,6 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         64 => Role::Tooltip,  // ToolTip
         65 => Role::Group,    // Tree
         66 => Role::Table,    // TreeTable
-        67 => Role::Unknown,  // Unknown
         68 => Role::Group,    // Viewport
         69 => Role::Window,   // Window
         // Text-document containers WebKit emits for plain markup: a bare
@@ -3348,8 +3384,8 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         110 => Role::Navigation,  // Landmark
         116 => Role::StaticText,  // Static
         129 => Role::Button,      // PushButtonMenu
-        _ => xa11y_core::unknown_role(&format!("AT-SPI role number {role}")),
-    }
+        _ => return None,
+    })
 }
 
 /// Depth cap for the GTK press-fallback BFS. Wrapper patterns nest at most
@@ -3989,6 +4025,44 @@ mod tests {
         assert!(extents_to_rect(5, 5, 0, 30).is_some());
     }
 
+    // ── #485: role number before role name ───────────────────────────────
+
+    #[test]
+    fn role_number_wins_over_a_disagreeing_name() {
+        // GTK 4: a window frame named "application" is a window, not a
+        // nested application to flatten away.
+        assert_eq!(
+            role_from_atspi(ATSPI_ROLE_FRAME, "application"),
+            Role::Window
+        );
+        // GTK 4 "text box" numbered as an entry / text.
+        assert_eq!(role_from_atspi(79, "text box"), Role::TextField);
+        assert_eq!(role_from_atspi(61, "text box"), Role::TextArea);
+        // "generic" is no name we map, and the number answers first anyway.
+        assert_eq!(role_from_atspi(39, "generic"), Role::Group);
+        // The application number is still the application.
+        assert_eq!(
+            role_from_atspi(ATSPI_ROLE_APPLICATION, ""),
+            Role::Application
+        );
+    }
+
+    #[test]
+    fn role_name_is_the_fallback_for_an_unmapped_number() {
+        // AccessKit: numbers only, no names.
+        assert_eq!(role_from_atspi(43, ""), Role::Button);
+        // Unreadable role (defaults to 0, Invalid) with a readable name.
+        assert_eq!(role_from_atspi(0, "push button"), Role::Button);
+        // AtspiRole::Unknown defers to a known name…
+        assert_eq!(
+            role_from_atspi(ATSPI_ROLE_UNKNOWN, "check box"),
+            Role::CheckBox
+        );
+        // …and is otherwise the platform's own "unknown", not an unmapped role
+        // (this must not hit the strict-roles panic).
+        assert_eq!(role_from_atspi(ATSPI_ROLE_UNKNOWN, ""), Role::Unknown);
+    }
+
     #[test]
     fn hidden_top_levels_are_not_listed_but_minimized_ones_are() {
         const ICONIFIED: u64 = 1 << 15;
@@ -4059,7 +4133,7 @@ mod tests {
         // Sanity-check a few well-established numeric mappings.
         assert_eq!(map_atspi_role_number(43), Role::Button); // PushButton
         assert_eq!(map_atspi_role_number(7), Role::CheckBox);
-        assert_eq!(map_atspi_role_number(67), Role::Unknown); // AT-SPI Unknown
+        assert!(try_map_atspi_role_number(67).is_none()); // AT-SPI Unknown: defers to the name
     }
 
     #[test]
@@ -4736,6 +4810,9 @@ mod tests {
         role: &'static str,
         children: Vec<&'static str>,
         children_error: Option<&'static str>,
+        /// Overrides the role number derived from `role`, for a toolkit
+        /// whose name and number disagree (GTK 4).
+        role_number: Option<u32>,
     }
 
     #[zbus::interface(name = "org.a11y.atspi.Accessible")]
@@ -4766,6 +4843,29 @@ mod tests {
             self.role
         }
 
+        /// The number for each role name these fixtures use: the provider
+        /// keys on the number and reads the name only as a fallback.
+        fn get_role(&self) -> u32 {
+            if let Some(number) = self.role_number {
+                return number;
+            }
+            match self.role {
+                "application" => ATSPI_ROLE_APPLICATION,
+                "panel" => 39,
+                "push button" => 43,
+                other => panic!("no role number for fixture role {other:?}"),
+            }
+        }
+
+        /// Visible and showing: `App::windows` lists a top-level window only
+        /// when it is `VISIBLE` or `ICONIFIED` (#492).
+        fn get_state(&self) -> Vec<u32> {
+            const SHOWING: u64 = 1 << 25;
+            const VISIBLE: u64 = 1 << 30;
+            let bits = SHOWING | VISIBLE;
+            vec![bits as u32, (bits >> 32) as u32]
+        }
+
         #[zbus(property)]
         fn name(&self) -> &str {
             self.name
@@ -4790,6 +4890,7 @@ mod tests {
                         role: "application",
                         children: vec!["/vanished", "/survivor"],
                         children_error: None,
+                        role_number: None,
                     },
                 )
                 .expect("root interface")
@@ -4800,6 +4901,7 @@ mod tests {
                         role: vanished_role,
                         children: vec![],
                         children_error: Some(error),
+                        role_number: None,
                     },
                 )
                 .expect("vanished interface")
@@ -4810,6 +4912,7 @@ mod tests {
                         role: "push button",
                         children: vec![],
                         children_error: None,
+                        role_number: None,
                     },
                 )
                 .expect("survivor interface")
@@ -4879,6 +4982,85 @@ mod tests {
         let dump = app.dump(None).expect("nested application pruned");
         assert!(dump.contains("Survivor"));
         assert!(!dump.contains("Vanished"));
+    }
+
+    /// GTK 4 names its top-level window `application` while numbering it a
+    /// frame (23). The application flattening keys on the number, so the
+    /// window survives as a window instead of being dissolved into its
+    /// children (issue #485); a real nested application (number 75) is still
+    /// flattened.
+    #[test]
+    fn a_window_named_application_survives_window_flattening() {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let peer = |name, role, children, role_number| LiveTreePeer {
+            name,
+            role,
+            children,
+            children_error: None,
+            role_number,
+        };
+        let server = std::thread::spawn(move || {
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at(
+                    "/root",
+                    peer("App", "application", vec!["/frame", "/nested"], None),
+                )
+                .expect("root interface")
+                .serve_at(
+                    "/frame",
+                    peer(
+                        "Main Window",
+                        "application",
+                        vec!["/inner"],
+                        Some(ATSPI_ROLE_FRAME),
+                    ),
+                )
+                .expect("frame interface")
+                .serve_at("/inner", peer("Inner", "push button", vec![], None))
+                .expect("inner interface")
+                .serve_at(
+                    "/nested",
+                    peer("Nested", "application", vec!["/hoisted"], None),
+                )
+                .expect("nested interface")
+                .serve_at("/hoisted", peer("Hoisted", "push button", vec![], None))
+                .expect("hoisted interface")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        };
+        let root = provider.build_element_data(
+            &AccessibleRef {
+                bus_name: "org.test.LiveTree".into(),
+                path: "/root".into(),
+            },
+            None,
+        );
+        let windows = provider.app_windows(&root).expect("app windows");
+        let names: Vec<_> = windows
+            .iter()
+            .map(|w| (w.name.as_deref().unwrap_or(""), w.role))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("Main Window", Role::Window), ("Hoisted", Role::Button)],
+            "the frame named `application` stays a window; the real nested \
+             application is flattened into its children"
+        );
     }
 
     #[test]
