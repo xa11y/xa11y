@@ -2293,25 +2293,63 @@ fn poll_target(
 struct SettleRun {
     /// When the current run of promise-holding enumerated samples started.
     held_since: Option<Instant>,
-    /// Whether any poll found the target in the enumerated window set. Only
-    /// the timeout diagnosis reads it.
+    /// Whether any poll found the target in the enumerated window set.
     ever_enumerated: bool,
+    /// The most recent poll that found the target off the enumerated set.
+    last_absence: Option<Instant>,
+    /// The most recent poll that broke (or prevented) a hold, and why.
+    last_break: Option<(HoldBreak, Instant)>,
+    /// How many running holds were broken before the grace: a target that
+    /// flickers in and out of the promise shows up here.
+    holds_broken: u32,
+}
+
+/// Why a poll did not extend the hold. Diagnosis only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoldBreak {
+    /// The target was off the enumerated window set.
+    Absent,
+    /// The target was enumerated but read a state away from the promise.
+    WrongState,
+    /// No readable sample of the target.
+    Unreadable,
+}
+
+impl HoldBreak {
+    fn describe(self) -> &'static str {
+        match self {
+            HoldBreak::Absent => "the target was off AXWindows",
+            HoldBreak::WrongState => "the enumerated target read a state away from the promise",
+            HoldBreak::Unreadable => "the target gave no readable sample",
+        }
+    }
 }
 
 impl SettleRun {
     /// Fold one poll in. `reached` is [`TargetSample::evaluate`]'s verdict.
     fn observe(&mut self, sample: Option<&TargetSample>, reached: bool, now: Instant) {
-        if let Some(TargetSample::Enumerated { .. }) = sample {
-            self.ever_enumerated = true;
-            if reached {
-                self.held_since.get_or_insert(now);
-                return;
-            }
-        }
         // A target off the enumerated set, an unreadable sample, or a state
         // away from the promise is not evidence the caller's next read will
         // see the promise: the hold starts over.
-        self.held_since = None;
+        let cause = match sample {
+            Some(TargetSample::Enumerated { .. }) => {
+                self.ever_enumerated = true;
+                if reached {
+                    self.held_since.get_or_insert(now);
+                    return;
+                }
+                HoldBreak::WrongState
+            }
+            Some(TargetSample::Cached { .. }) => {
+                self.last_absence = Some(now);
+                HoldBreak::Absent
+            }
+            None => HoldBreak::Unreadable,
+        };
+        if self.held_since.take().is_some() {
+            self.holds_broken += 1;
+        }
+        self.last_break = Some((cause, now));
     }
 
     /// Whether the promise has held on the enumerated target for the grace,
@@ -2323,10 +2361,11 @@ impl SettleRun {
 
     /// Which half of the confirmation was missing at the deadline, for the
     /// timeout diagnosis: the target was not back in `AXWindows`, or it was
-    /// listed but the promised state did not hold there.
-    fn describe_failure(&self, last: Option<&TargetSample>) -> String {
+    /// listed but the promised state did not hold there. Every arm carries
+    /// the run's history, so a churned last sample keeps the context.
+    fn describe_failure(&self, last: Option<&TargetSample>, now: Instant) -> String {
         let state = describe_target(last);
-        match last {
+        let headline = match last {
             Some(TargetSample::Cached { .. }) if self.ever_enumerated => format!(
                 "the target window left the app's window list (AXWindows) during the \
                  transition and was not re-enumerated before the deadline; {state}"
@@ -2341,7 +2380,25 @@ impl SettleRun {
                 WINDOW_FULLSCREEN_SETTLE_GRACE.as_millis()
             ),
             None => state,
-        }
+        };
+        let ago = |at: Instant| now.saturating_duration_since(at).as_millis();
+        let absence = match self.last_absence {
+            Some(at) => format!("last off AXWindows {} ms before the deadline", ago(at)),
+            None => "never off AXWindows".to_string(),
+        };
+        let interruption = match self.last_break {
+            Some((cause, at)) => format!(
+                "last interruption {} ms before the deadline: {}",
+                ago(at),
+                cause.describe()
+            ),
+            None => "no interruption".to_string(),
+        };
+        format!(
+            "{headline} [ever enumerated: {}; {absence}; {interruption}; holds broken \
+             before the grace: {}]",
+            self.ever_enumerated, self.holds_broken
+        )
     }
 }
 
@@ -2472,7 +2529,7 @@ fn settle_window_fullscreen(
             }
         }
         if Instant::now() >= deadline {
-            let mut last = run.describe_failure(sample.as_ref());
+            let mut last = run.describe_failure(sample.as_ref(), Instant::now());
             if let Some(err) = last_set_error {
                 last = format!("{last}; the last retry set failed: {err}");
             }
@@ -5122,8 +5179,10 @@ impl Provider for MacOSProvider {
             // handle would then answer kAXErrorInvalidUIElement to the
             // minimize set. Prefer the fresh object from the app's enumerated
             // window set — the same lookup the settle follows the target
-            // with — and fall back to the cached handle when it is not
-            // listed.
+            // with. The settle only returns once the target is enumerated
+            // (see `SettleRun`), so the cached handle is used only if the
+            // window drops off the list again in the moment between the
+            // settle's last poll and this lookup.
             if let Some(fresh) = fresh_target_in_app(app.as_ptr(), target.as_ptr())? {
                 target = fresh;
             }
@@ -6067,28 +6126,55 @@ mod tests {
         // Never in the enumerated set.
         let mut run = SettleRun::default();
         run.observe(cached.as_ref(), true, t0);
-        let described = run.describe_failure(cached.as_ref());
+        let described = run.describe_failure(cached.as_ref(), t0);
         assert!(described.contains("was never enumerated"), "{described}");
         assert!(described.contains("reads AXFullScreen=true"), "{described}");
+        assert!(described.contains("ever enumerated: false"), "{described}");
 
-        // Listed, then gone at the deadline.
+        // Listed and holding, then gone at the deadline.
         let mut run = SettleRun::default();
-        run.observe(settle_poll(false, true).as_ref(), false, t0);
+        run.observe(settle_poll(true, true).as_ref(), true, t0);
         run.observe(cached.as_ref(), true, t0 + Duration::from_millis(50));
-        let described = run.describe_failure(cached.as_ref());
+        let deadline = t0 + Duration::from_millis(250);
+        let described = run.describe_failure(cached.as_ref(), deadline);
         assert!(
             described.contains("was not re-enumerated before the deadline"),
+            "{described}"
+        );
+        assert!(
+            described.contains("last off AXWindows 200 ms before the deadline"),
+            "{described}"
+        );
+        assert!(
+            described.contains("the target was off AXWindows"),
+            "{described}"
+        );
+        assert!(
+            described.contains("holds broken before the grace: 1"),
             "{described}"
         );
 
         // Listed at the deadline, but the state is wrong there.
         let wrong = settle_poll(false, true);
-        let described = run.describe_failure(wrong.as_ref());
+        run.observe(wrong.as_ref(), false, deadline);
+        let described = run.describe_failure(wrong.as_ref(), deadline);
         assert!(
             described.contains("is enumerated, but the promised state did not hold"),
             "{described}"
         );
         assert!(described.contains("AXFullScreen=false"), "{described}");
+        assert!(described.contains("away from the promise"), "{described}");
+
+        // A churned last sample keeps the run's history.
+        run.observe(None, false, deadline);
+        let described = run.describe_failure(None, deadline);
+        assert!(
+            described.contains("did not answer a readable sample"),
+            "{described}"
+        );
+        assert!(described.contains("ever enumerated: true"), "{described}");
+        assert!(described.contains("last off AXWindows"), "{described}");
+        assert!(described.contains("no readable sample"), "{described}");
     }
 
     #[test]

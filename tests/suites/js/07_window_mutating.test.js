@@ -90,8 +90,11 @@ function describeWindows(windows) {
   // tells "the window was missing from the list" from "it was listed without
   // the verb", which an empty lookup alone cannot.
   if (windows.length === 0) return '[] (the target window is not enumerated)';
+  const clip = (text, limit) =>
+    (text.length <= limit ? text : `${text.slice(0, limit - 3)}...`);
   const shown = windows.slice(0, 8).map((w) =>
-    `${w.role} ${JSON.stringify(w.name)} actions=${JSON.stringify(w.actions)} ` +
+    `${w.role} ${clip(JSON.stringify(w.name), 60)} ` +
+    `actions=${clip(w.actions.join(','), 120)} ` +
     `minimized=${w.minimized} fullscreen=${w.fullscreen}`);
   return `[${shown.join('; ')}${windows.length > 8 ? '; ...' : ''}]`;
 }

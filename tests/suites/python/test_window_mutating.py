@@ -105,8 +105,11 @@ def _describe_windows(windows: list[xa11y.Element]) -> str:
     """
     if not windows:
         return "[] (the target window is not enumerated)"
+    def clip(text: str, limit: int) -> str:
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
     shown = [
-        f"{w.role} {w.name!r} actions={list(w.actions)!r} "
+        f"{w.role} {clip(repr(w.name), 60)} actions={clip(','.join(w.actions), 120)} "
         f"minimized={w.minimized!r} fullscreen={w.fullscreen!r}"
         for w in windows[:8]
     ]
