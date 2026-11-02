@@ -117,6 +117,24 @@ pub(crate) fn subscribe_for_pid(
         }
     }
 
+    // Tell the registry which events we listen to. Toolkits that consult the
+    // registered-listener list (Qt, GTK 3's atk-bridge) emit nothing at all
+    // for an unregistered event, so without this a Qt app's subscription
+    // was silent (issue #488). Registration is tied to this connection's
+    // bus name; the cancel path deregisters, and the registry also drops it
+    // when the connection closes.
+    let registered = register_events(&conn)?;
+
+    // Seed the top-level window states. This is also the barrier that makes
+    // registration effective before `subscribe` returns: the application
+    // answers these reads on the same queue that delivered the registry's
+    // `EventListenerRegistered` signal, so by the time they return it has
+    // switched its emission on.
+    let mut windows = HashMap::new();
+    for bus in &sender_buses {
+        seed_top_level_windows(&conn, bus, &mut windows)?;
+    }
+
     let (tx, rx) = std::sync::mpsc::channel::<Event>();
     let ctx = Arc::new(EventContext {
         sender_buses: sender_buses.clone(),
@@ -124,6 +142,8 @@ pub(crate) fn subscribe_for_pid(
         app_pid: pid,
         tx: Mutex::new(tx),
         conn: conn.clone(),
+        windows: Mutex::new(windows),
+        window_snapshots: Mutex::new(HashMap::new()),
     });
 
     // Activate the broadcast receiver *before* spawning the worker. If we
@@ -162,6 +182,9 @@ pub(crate) fn subscribe_for_pid(
     let cancel_conn = conn.clone();
     let cancel = CancelHandle::new(move || {
         stop.store(true, Ordering::Relaxed);
+        // Best-effort teardown: a drop cannot report failure, and the
+        // registry drops a closed connection's registrations anyway.
+        deregister_events(&cancel_conn, &registered);
         if let Ok(dbus) = DBusProxy::new(&cancel_conn) {
             for rule in &rules {
                 let _ = dbus.remove_match_rule(rule.clone());
@@ -200,6 +223,14 @@ struct EventContext {
     /// until every `Arc<EventContext>` (including the one held by the
     /// spawned thread) is dropped.
     conn: Connection,
+    /// Whether each top-level window (keyed `bus` + `path`) is currently
+    /// listed in `App::windows()`, so `WindowOpened` / `WindowClosed` fire
+    /// once per transition however many signals report it.
+    windows: Mutex<HashMap<String, bool>>,
+    /// The last window-role snapshot of each tracked window, for the
+    /// `WindowClosed` target: a destroyed GTK 4 window no longer answers
+    /// its role or name by the time `defunct` arrives.
+    window_snapshots: Mutex<HashMap<String, ElementData>>,
 }
 
 impl EventContext {
@@ -240,17 +271,8 @@ impl EventContext {
             return;
         };
 
-        // AT-SPI2 event body signature: (s, i, i, v, a{sv}).
-        let body = msg.body();
-        let (detail, detail1, _detail2, _any, _props): (
-            String,
-            i32,
-            i32,
-            OwnedValue,
-            HashMap<String, OwnedValue>,
-        ) = match body.deserialize() {
-            Ok(v) => v,
-            Err(_) => return,
+        let Some((detail, detail1)) = event_body_fields(msg) else {
+            return;
         };
 
         let target_ref = AccessibleRef {
@@ -272,8 +294,419 @@ impl EventContext {
         );
 
         for kind in kinds {
-            self.emit(kind, target.clone());
+            match kind {
+                // `Window:Create` / `Window:Destroy`: deduplicated against
+                // the derived lifecycle below.
+                EventKind::WindowOpened => self.window_listed(&target_ref, true, target.clone()),
+                EventKind::WindowClosed => self.window_listed(&target_ref, false, target.clone()),
+                other => self.emit(other, target.clone()),
+            }
         }
+
+        self.derive_window_lifecycle(
+            iface.as_str(),
+            member.as_str(),
+            &detail,
+            detail1,
+            &target_ref,
+            target,
+        );
+    }
+
+    /// Re-read `bus`'s top-level windows after its application object's
+    /// children changed: a new listable window is opened, a known window no
+    /// longer among the children is closed. A failed read emits nothing;
+    /// the subscription has no error channel, and a later change rescans.
+    fn rescan_top_level_windows(&self, bus: &str) {
+        let mut current = HashMap::new();
+        if seed_top_level_windows(&self.conn, bus, &mut current).is_err() {
+            return;
+        }
+        let gone: Vec<String> = {
+            let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+            windows
+                .iter()
+                .filter(|(key, listed)| {
+                    **listed
+                        && key.strip_prefix(bus).is_some_and(|p| p.starts_with('/'))
+                        && !current.contains_key(*key)
+                })
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
+        for (key, listed) in current {
+            let aref = AccessibleRef {
+                bus_name: bus.to_owned(),
+                path: key[bus.len()..].to_owned(),
+            };
+            let snapshot = build_event_snapshot(&self.conn, &aref, Some(self.app_pid));
+            self.window_listed(&aref, listed, snapshot);
+        }
+        for key in gone {
+            let aref = AccessibleRef {
+                bus_name: bus.to_owned(),
+                path: key[bus.len()..].to_owned(),
+            };
+            self.window_listed(&aref, false, None);
+        }
+    }
+
+    /// Record that a top-level window entered (`listed`) or left the
+    /// window list, emitting `WindowOpened` / `WindowClosed` only on a
+    /// change. A window the subscription has not seen yet always emits.
+    fn window_listed(&self, aref: &AccessibleRef, listed: bool, target: Option<ElementData>) {
+        let key = window_key(aref);
+        let target = {
+            let mut snapshots = self
+                .window_snapshots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match target {
+                Some(t) if is_window_role(t.role) => {
+                    snapshots.insert(key.clone(), t.clone());
+                    Some(t)
+                }
+                other => snapshots.get(&key).cloned().or(other),
+            }
+        };
+        let changed = note_window(
+            &mut self.windows.lock().unwrap_or_else(|e| e.into_inner()),
+            key,
+            listed,
+        );
+        if changed {
+            let kind = if listed {
+                EventKind::WindowOpened
+            } else {
+                EventKind::WindowClosed
+            };
+            self.emit(kind, target);
+        }
+    }
+
+    /// Derive window open/close for toolkits that never emit `Window:Create`
+    /// / `Window:Destroy` (issue #488). Observed on X11:
+    ///
+    /// - GTK 4 adds a new window as a child of the application object
+    ///   (`ChildrenChanged:add` on `/org/a11y/atspi/accessible/root`) and
+    ///   marks a closed one `defunct`.
+    /// - Qt keeps a hidden window in the tree and only toggles its states
+    ///   (`showing`), so open/close is the window entering or leaving the
+    ///   set `App::windows()` lists: `VISIBLE` or `ICONIFIED` (#492).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one call site, passing the signal's fields through unchanged"
+    )]
+    fn derive_window_lifecycle(
+        &self,
+        iface: &str,
+        member: &str,
+        detail: &str,
+        detail1: i32,
+        source: &AccessibleRef,
+        target: Option<ElementData>,
+    ) {
+        if iface != "org.a11y.atspi.Event.Object" {
+            return;
+        }
+        match (member, detail.to_ascii_lowercase().as_str()) {
+            ("ChildrenChanged", "add" | "remove") if source.path == APP_ROOT_PATH => {
+                // The signal's child reference cannot be trusted here: GTK 4
+                // names the application object itself as the added child.
+                // Re-read the application's top-level windows instead and
+                // diff them against what the subscription knows.
+                self.rescan_top_level_windows(&source.bus_name);
+            }
+            ("StateChanged", "defunct") if detail1 != 0 => {
+                // A defunct object may no longer answer its role, so a window
+                // the subscription already tracks counts by membership.
+                let known = self
+                    .windows
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&window_key(source));
+                if known || target.as_ref().is_some_and(|t| is_window_role(t.role)) {
+                    self.window_listed(source, false, target);
+                }
+            }
+            ("StateChanged", "showing" | "visible" | "iconified") => {
+                if !target.as_ref().is_some_and(|t| is_window_role(t.role))
+                    || !is_top_level(&self.conn, source)
+                {
+                    return;
+                }
+                // Decide on the state as it is now, not on the signal's
+                // value: GTK 4 reports `showing`/`visible` false on a window
+                // it is in the middle of mapping. The signal and the fresh
+                // read must agree before a transition counts.
+                let Some(bits) = get_state(&self.conn, source).map(|b| bits_from_u32s(&b)) else {
+                    return;
+                };
+                let listed = is_listable_top_level(bits);
+                if listed == (detail1 != 0) {
+                    self.window_listed(source, listed, target);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The `(detail, detail1)` fields of an AT-SPI event signal.
+///
+/// The current body is `(siiva{sv})`; GTK 4 still sends some events,
+/// including `ChildrenChanged` on the application object, in the legacy
+/// `(siiv(so))` form, whose trailer is the application reference. Both are
+/// read by their signature. Any other body is not an AT-SPI event and is
+/// dropped, as before.
+fn event_body_fields(msg: &zbus::Message) -> Option<(String, i32)> {
+    let body = msg.body();
+    let signature = body.signature().to_string_no_parens();
+    let (detail, detail1) = match signature.as_str() {
+        "siiva{sv}" => {
+            let (d, d1, _d2, _any, _props): (
+                String,
+                i32,
+                i32,
+                OwnedValue,
+                HashMap<String, OwnedValue>,
+            ) = body.deserialize().ok()?;
+            (d, d1)
+        }
+        "siiv(so)" => {
+            let (d, d1, _d2, _any, _app): (
+                String,
+                i32,
+                i32,
+                OwnedValue,
+                (String, zbus::zvariant::OwnedObjectPath),
+            ) = body.deserialize().ok()?;
+            (d, d1)
+        }
+        _ => return None,
+    };
+    Some((detail, detail1))
+}
+
+/// The application object's path on every AT-SPI application connection.
+const APP_ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
+
+/// Record `listed` for `key`; whether that is a change worth an event. A
+/// window not seen before always counts.
+fn note_window(windows: &mut HashMap<String, bool>, key: String, listed: bool) -> bool {
+    windows.insert(key, listed) != Some(listed)
+}
+
+fn window_key(aref: &AccessibleRef) -> String {
+    format!("{}{}", aref.bus_name, aref.path)
+}
+
+fn is_window_role(role: Role) -> bool {
+    matches!(role, Role::Window | Role::Dialog)
+}
+
+/// Whether an AT-SPI role *number* is a window or dialog (frame, window,
+/// dialog, file chooser). Keyed on the number: GTK 4 names its window
+/// `application` (#485).
+fn is_window_role_number(role: u32) -> bool {
+    matches!(role, 16 | 19 | 23 | 69)
+}
+
+/// Whether the object's parent is its application object.
+fn is_top_level(conn: &Connection, aref: &AccessibleRef) -> bool {
+    let Some(proxy) = make_proxy(
+        conn,
+        &aref.bus_name,
+        &aref.path,
+        "org.freedesktop.DBus.Properties",
+    ) else {
+        return false;
+    };
+    let Ok(reply) = proxy.call_method("Get", &("org.a11y.atspi.Accessible", "Parent")) else {
+        return false;
+    };
+    let Ok(variant) = reply.body().deserialize::<OwnedValue>() else {
+        return false;
+    };
+    let parsed: std::result::Result<(String, zbus::zvariant::OwnedObjectPath), _> =
+        zbus::zvariant::Value::from(variant).try_into();
+    parsed.is_ok_and(|(_, path)| path.as_str() == APP_ROOT_PATH)
+}
+
+/// Whether a top-level window is listed by `App::windows()`: `VISIBLE` or
+/// `ICONIFIED` (the rule #492 applies to the listing).
+fn is_listable_top_level(bits: u64) -> bool {
+    const ICONIFIED: u64 = 1 << 15;
+    const VISIBLE: u64 = 1 << 30;
+    bits & (VISIBLE | ICONIFIED) != 0
+}
+
+/// Record each current top-level window of the application on `bus` as
+/// listed or not, so the first transition after `subscribe` is a real one.
+///
+/// A peer that left, or a window destroyed mid-read, is absence; any other
+/// failure fails the subscription.
+fn seed_top_level_windows(
+    conn: &Connection,
+    bus: &str,
+    windows: &mut HashMap<String, bool>,
+) -> Result<()> {
+    let call = |path: &str, method: &str| -> Result<Option<zbus::Message>> {
+        let proxy = zbus::blocking::Proxy::new(
+            conn,
+            bus.to_owned(),
+            path.to_owned(),
+            "org.a11y.atspi.Accessible",
+        )
+        .map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("proxy for {bus}{path}: {e}"),
+        })?;
+        match proxy.call_method(method, &()) {
+            Ok(reply) => Ok(Some(reply)),
+            Err(e) if crate::atspi::is_gone(&e) => Ok(None),
+            Err(e) => Err(Error::Platform {
+                code: -1,
+                message: format!("{method} on {bus}{path} while seeding window states: {e}"),
+            }),
+        }
+    };
+    let Some(reply) = call(APP_ROOT_PATH, "GetChildren")? else {
+        return Ok(());
+    };
+    let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
+        reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("GetChildren deserialize for {bus}: {e}"),
+        })?;
+    for (child_bus, path) in children {
+        let aref = AccessibleRef {
+            bus_name: if child_bus.is_empty() {
+                bus.to_owned()
+            } else {
+                child_bus
+            },
+            path: path.to_string(),
+        };
+        let Some(role) = call(&aref.path, "GetRole")? else {
+            continue;
+        };
+        let role: u32 = role.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("GetRole deserialize for {}: {e}", window_key(&aref)),
+        })?;
+        if !is_window_role_number(role) {
+            continue;
+        }
+        let Some(state) = call(&aref.path, "GetState")? else {
+            continue;
+        };
+        let words: Vec<u32> = state.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("GetState deserialize for {}: {e}", window_key(&aref)),
+        })?;
+        windows.insert(
+            window_key(&aref),
+            is_listable_top_level(bits_from_u32s(&words)),
+        );
+    }
+    Ok(())
+}
+
+// ── Registry event registration ─────────────────────────────────────────────
+
+/// Event classes registered with the AT-SPI registry: everything the
+/// subscription maps (object, window and focus events).
+const REGISTERED_EVENTS: &[&str] = &["object:", "window:", "focus:"];
+
+/// Which `RegisterEvent` signature the running registry has.
+#[derive(Clone, Copy)]
+enum RegisterSignature {
+    /// at-spi2-core before 2.46: `RegisterEvent(s event)`.
+    EventOnly,
+    /// 2.46 and later: `RegisterEvent(s event, as properties, s app_bus_name)`.
+    WithProperties,
+}
+
+fn registry_proxy(conn: &Connection, iface: &str) -> Result<Proxy<'static>> {
+    zbus::blocking::Proxy::new(
+        conn,
+        "org.a11y.atspi.Registry",
+        "/org/a11y/atspi/registry",
+        iface.to_owned(),
+    )
+    .map_err(|e| Error::Platform {
+        code: -1,
+        message: format!("AT-SPI registry proxy: {e}"),
+    })
+}
+
+/// Read the registry's `RegisterEvent` signature from its introspection
+/// data, so the call is made in the one form the registry accepts rather
+/// than tried in one form and retried in the other.
+fn register_signature(conn: &Connection) -> Result<RegisterSignature> {
+    let xml: String = registry_proxy(conn, "org.freedesktop.DBus.Introspectable")?
+        .call("Introspect", &())
+        .map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("introspecting the AT-SPI registry: {e}"),
+        })?;
+    register_signature_from_xml(&xml)
+}
+
+fn register_signature_from_xml(xml: &str) -> Result<RegisterSignature> {
+    let start = xml
+        .find("<method name=\"RegisterEvent\"")
+        .ok_or_else(|| Error::Platform {
+            code: -1,
+            message: "the AT-SPI registry has no RegisterEvent method, so toolkits that \
+                      emit only for registered listeners (Qt, GTK 3) would stay silent"
+                .to_string(),
+        })?;
+    let body = &xml[start..];
+    let method = &body[..body.find("</method>").unwrap_or(body.len())];
+    // Method arguments are inputs unless marked `direction="out"`.
+    let in_args = method.matches("<arg ").count() - method.matches("direction=\"out\"").count();
+    Ok(if in_args >= 3 {
+        RegisterSignature::WithProperties
+    } else {
+        RegisterSignature::EventOnly
+    })
+}
+
+/// Register [`REGISTERED_EVENTS`] for this connection. Returns what was
+/// registered, for [`deregister_events`].
+fn register_events(conn: &Connection) -> Result<Vec<&'static str>> {
+    let signature = register_signature(conn)?;
+    let registry = registry_proxy(conn, "org.a11y.atspi.Registry")?;
+    let mut done = Vec::with_capacity(REGISTERED_EVENTS.len());
+    for event in REGISTERED_EVENTS {
+        let reply = match signature {
+            RegisterSignature::EventOnly => registry.call_method("RegisterEvent", &(*event,)),
+            RegisterSignature::WithProperties => {
+                registry.call_method("RegisterEvent", &(*event, Vec::<String>::new(), ""))
+            }
+        };
+        if let Err(e) = reply {
+            deregister_events(conn, &done);
+            return Err(Error::Platform {
+                code: -1,
+                message: format!("RegisterEvent({event}) with the AT-SPI registry: {e}"),
+            });
+        }
+        done.push(*event);
+    }
+    Ok(done)
+}
+
+fn deregister_events(conn: &Connection, events: &[&'static str]) {
+    let Ok(registry) = registry_proxy(conn, "org.a11y.atspi.Registry") else {
+        return;
+    };
+    for event in events {
+        // Teardown cannot report a failure, and the registry forgets a
+        // closed connection's registrations on its own.
+        let _ = registry.call_method("DeregisterEvent", &(*event,));
     }
 }
 
@@ -1062,6 +1495,74 @@ mod tests {
             Some(Role::Slider),
         );
         assert_eq!(kinds, vec![EventKind::ValueChanged]);
+    }
+
+    // ── #488: registration and derived window lifecycle ──────────────
+
+    #[test]
+    fn register_signature_follows_the_registry_introspection() {
+        let old = r#"<node><interface name="org.a11y.atspi.Registry">
+            <method name="RegisterEvent"><arg direction="in" name="event" type="s"/></method>
+            <method name="DeregisterEvent"><arg direction="in" name="event" type="s"/></method>
+            </interface></node>"#;
+        assert!(matches!(
+            register_signature_from_xml(old),
+            Ok(RegisterSignature::EventOnly)
+        ));
+        let new = r#"<node><interface name="org.a11y.atspi.Registry">
+            <method name="RegisterEvent">
+              <arg direction="in" name="event" type="s"/>
+              <arg direction="in" name="properties" type="as"/>
+              <arg direction="in" name="app_bus_name" type="s"/>
+            </method>
+            <method name="GetRegisteredEvents"><arg direction="out" type="a(ss)"/></method>
+            </interface></node>"#;
+        assert!(matches!(
+            register_signature_from_xml(new),
+            Ok(RegisterSignature::WithProperties)
+        ));
+        // No RegisterEvent at all is an error naming the consequence, not a
+        // subscription that silently hears nothing from Qt.
+        assert!(matches!(
+            register_signature_from_xml("<node/>"),
+            Err(Error::Platform { message, .. }) if message.contains("RegisterEvent")
+        ));
+    }
+
+    #[test]
+    fn window_transitions_fire_once_per_change() {
+        let mut windows = HashMap::new();
+        // Unseen window: both directions count.
+        assert!(note_window(&mut windows, "a".into(), true));
+        // GTK 4 ChildrenChanged:add and a later showing re-read agree: once.
+        assert!(!note_window(&mut windows, "a".into(), true));
+        assert!(note_window(&mut windows, "a".into(), false));
+        // Defunct after the hide: no second close.
+        assert!(!note_window(&mut windows, "a".into(), false));
+        // A seeded hidden window (Qt's dialog before it is first shown).
+        windows.insert("b".into(), false);
+        assert!(note_window(&mut windows, "b".into(), true));
+    }
+
+    #[test]
+    fn listable_top_level_matches_the_window_list_rule() {
+        const ICONIFIED: u64 = 1 << 15;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        assert!(is_listable_top_level(VISIBLE | SHOWING));
+        assert!(is_listable_top_level(ICONIFIED));
+        assert!(!is_listable_top_level(SHOWING));
+        assert!(!is_listable_top_level(0));
+    }
+
+    #[test]
+    fn window_role_numbers_are_frame_window_dialog_and_file_chooser() {
+        for n in [16, 19, 23, 69] {
+            assert!(is_window_role_number(n), "{n}");
+        }
+        // The application object (GTK 4 *names* its window "application").
+        assert!(!is_window_role_number(75));
+        assert!(!is_window_role_number(43));
     }
 
     #[test]
