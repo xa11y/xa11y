@@ -1328,9 +1328,23 @@ impl LinuxProvider {
         )?;
         let reply = proxy
             .call_method("Get", &("org.a11y.atspi.Accessible", "Parent"))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Get Parent property failed: {}", e),
+            .map_err(|e| {
+                // `Parent` is a mandatory property of every AT-SPI accessible,
+                // so a reply saying the member is absent is the object being
+                // gone, not a bridge that skipped it: zbus answers a destroyed
+                // object with `UnknownObject`, and GDBus (GTK 4) with
+                // `UnknownMethod` "Object does not exist at path". Stale,
+                // like `children_call_error`; every other failure stays one.
+                if is_absent_member(&e) {
+                    Error::ElementStale {
+                        selector: format!("{}{}", aref.bus_name, aref.path),
+                    }
+                } else {
+                    Error::Platform {
+                        code: -1,
+                        message: format!("Get Parent property failed: {}", e),
+                    }
+                }
             })?;
         // The reply is a Variant containing (so) — a struct of (bus_name, object_path)
         let variant: zbus::zvariant::OwnedValue =
@@ -1551,8 +1565,56 @@ impl LinuxProvider {
         }
     }
 
+    /// Fail with [`Error::ElementStale`] when `aref` is no longer one of its
+    /// parent's children.
+    ///
+    /// GTK 3 keeps a destroyed widget's accessible answering D-Bus calls for
+    /// roughly 15–20 s, and `DoAction` on it returns `true` without doing
+    /// anything (issue #491). Its parent stops listing it at once, so that is
+    /// the check: one `Parent` read and one `GetChildren` on the action path
+    /// only. A top-level object (no parent, or the registry root) has nothing
+    /// to be detached from and passes. An object that is already gone
+    /// (`UnknownObject` from either read) is stale too; any other failure is
+    /// returned as is.
+    fn ensure_attached(&self, aref: &AccessibleRef) -> Result<()> {
+        let stale = |why: &str| Error::ElementStale {
+            selector: format!("{}{} ({why})", aref.bus_name, aref.path),
+        };
+        let parent = match self.get_atspi_parent(aref) {
+            Ok(Some(parent)) => parent,
+            Ok(None) => return Ok(()),
+            Err(Error::ElementStale { .. }) => {
+                return Err(stale("the accessible no longer exists"));
+            }
+            Err(e) => return Err(e),
+        };
+        let siblings = match self.get_atspi_children(&parent) {
+            Ok(children) => children,
+            Err(Error::ElementStale { .. }) => {
+                return Err(stale("its parent no longer exists"));
+            }
+            Err(e) => return Err(e),
+        };
+        if siblings
+            .iter()
+            .any(|c| c.bus_name == aref.bus_name && c.path == aref.path)
+        {
+            Ok(())
+        } else {
+            Err(stale(
+                "detached from its parent: the widget was destroyed, and the \
+                 toolkit still answers for it",
+            ))
+        }
+    }
+
     /// Perform an AT-SPI2 action by its integer index (from discovery).
+    ///
+    /// Checks first that the object is still attached to the tree
+    /// ([`Self::ensure_attached`]): a destroyed GTK 3 widget would otherwise
+    /// report the action as performed (issue #491).
     fn do_atspi_action_by_index(&self, aref: &AccessibleRef, index: i32) -> Result<()> {
+        self.ensure_attached(aref)?;
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
         let reply = proxy
             .call_method("DoAction", &(index,))
@@ -3459,15 +3521,16 @@ pub(crate) fn is_listable_top_level(bits: u64) -> bool {
     bits & (VISIBLE | ICONIFIED) != 0
 }
 
+/// The D-Bus error a peer answers for an object path it no longer serves.
+const UNKNOWN_OBJECT: &str = "org.freedesktop.DBus.Error.UnknownObject";
+
 /// Classify the structured reply before rendering it. `UnknownObject` means
 /// this exact accessible was destroyed, not that the peer timed out or that
 /// `GetChildren` is unimplemented. Direct reads retain the stale-element error;
 /// live traversals prune it through `live_atspi_children`.
 fn children_call_error(err: zbus::Error, aref: &AccessibleRef) -> Error {
     match &err {
-        zbus::Error::MethodError(name, ..)
-            if name.as_str() == "org.freedesktop.DBus.Error.UnknownObject" =>
-        {
+        zbus::Error::MethodError(name, ..) if name.as_str() == UNKNOWN_OBJECT => {
             Error::ElementStale {
                 selector: format!("{}{}", aref.bus_name, aref.path),
             }
@@ -4725,6 +4788,117 @@ mod tests {
             matches!(&err, Error::Platform { message, .. }
                 if message.contains("GetState") && message.contains("/hung")),
             "{err:?}"
+        );
+    }
+
+    /// Accessible half of the #491 fixture: a parent link and a child list
+    /// that can disagree, the way a destroyed GTK 3 widget's do.
+    struct AttachPeer {
+        parent: &'static str,
+        children: Vec<&'static str>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl AttachPeer {
+        fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            self.children
+                .iter()
+                .map(|path| {
+                    (
+                        "org.test.Attach".into(),
+                        zbus::zvariant::OwnedObjectPath::try_from(*path).expect("test path"),
+                    )
+                })
+                .collect()
+        }
+
+        #[zbus(property)]
+        fn parent(&self) -> (String, zbus::zvariant::OwnedObjectPath) {
+            (
+                "org.test.Attach".into(),
+                zbus::zvariant::OwnedObjectPath::try_from(self.parent).expect("test path"),
+            )
+        }
+    }
+
+    /// Action half: `DoAction` always claims success (GTK 3's zombie reply)
+    /// and counts the calls, so a test can tell whether it was reached.
+    struct CountingAction(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[zbus::interface(name = "org.a11y.atspi.Action")]
+    impl CountingAction {
+        fn do_action(&self, _index: i32) -> bool {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        }
+    }
+
+    /// Issue #491: a destroyed GTK 3 widget still answers `DoAction` with
+    /// `true`, but its parent no longer lists it. The action must fail as
+    /// stale without reaching `DoAction`; an attached sibling still acts.
+    #[test]
+    fn an_action_on_a_detached_object_is_stale_not_a_false_success() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            let peer = |parent, children| AttachPeer { parent, children };
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at("/panel", peer("/org/a11y/atspi/null", vec!["/live"]))
+                .expect("panel")
+                .serve_at("/live", peer("/panel", vec![]))
+                .expect("live")
+                .serve_at("/live", CountingAction(server_calls.clone()))
+                .expect("live action")
+                .serve_at("/zombie", peer("/panel", vec![]))
+                .expect("zombie")
+                .serve_at("/zombie", CountingAction(server_calls))
+                .expect("zombie action")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        };
+        let at = |path: &str| AccessibleRef {
+            bus_name: "org.test.Attach".into(),
+            path: path.into(),
+        };
+
+        provider
+            .do_atspi_action_by_index(&at("/live"), 0)
+            .expect("an attached object acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let err = provider
+            .do_atspi_action_by_index(&at("/zombie"), 0)
+            .expect_err("a detached object is stale");
+        assert!(
+            matches!(&err, Error::ElementStale { selector } if selector.contains("/zombie")
+                && selector.contains("detached")),
+            "{err:?}"
+        );
+        // An object the peer no longer serves at all is stale too.
+        assert!(matches!(
+            provider.do_atspi_action_by_index(&at("/gone"), 0),
+            Err(Error::ElementStale { .. })
+        ));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "DoAction must not be reached on a detached object"
         );
     }
 
