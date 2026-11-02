@@ -3330,9 +3330,11 @@ mod tests {
     #[test]
     fn the_agent_guide_states_the_field_cap_the_encoder_applies() {
         let guide = crate::cli::AGENT_GUIDE;
+        // Compared with whitespace collapsed: the sentence wraps, and a
+        // Windows checkout wraps it with CRLF.
+        let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            guide.contains(&format!("cut\nto {MAX_FIELD_BYTES} bytes"))
-                || guide.contains(&format!("cut to {MAX_FIELD_BYTES} bytes")),
+            flat.contains(&format!("cut to {MAX_FIELD_BYTES} bytes")),
             "the guide must state the cap as {MAX_FIELD_BYTES} bytes"
         );
         let mut data = crate::ElementData::for_role(crate::Role::StaticText);
