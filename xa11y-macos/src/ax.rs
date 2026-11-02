@@ -1961,8 +1961,9 @@ const WINDOW_FULLSCREEN_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 /// restore promise — so a confirmation shorter than the transition can
 /// confirm the pre-commit value. Measured on macOS 26.4, the transition takes
 /// ~0.5 s and the window is absent from `AXWindows` for 450–650 ms once under
-/// way; the grace is that absence plus a margin. Any unreadable sample or
-/// state change restarts the run (see [`SettleRun`]).
+/// way. The hold counts only while the target is enumerated, so the absence
+/// itself never counts toward it, however long it runs. Any unreadable sample,
+/// absence or state change restarts the run (see [`SettleRun`]).
 const WINDOW_FULLSCREEN_SETTLE_GRACE: Duration = Duration::from_millis(700);
 
 /// How long `minimize` / `restore` wait for the `AXMinimized` state to commit,
@@ -2166,8 +2167,9 @@ fn probe_settable(result: Result<bool>) -> Result<AttrProbe> {
 /// holds it in the app's enumerated window set the sample is read from the
 /// fresh object (the transition can recreate the window); while it is missing
 /// from `AXWindows` the cached handle answers instead. The two shapes are
-/// kept apart because a cached sample cannot count toward the same hold as an
-/// enumerated one (see [`SettleRun`]).
+/// kept apart because only an enumerated sample can confirm the promise (see
+/// [`SettleRun`]); a cached one still decides whether to re-issue the set and
+/// feeds the timeout diagnosis.
 enum TargetSample {
     /// The target's own sample from the app's enumerated window set. An
     /// absent `AXFullScreen` reads as `false`: a window without the surface
@@ -2276,47 +2278,70 @@ fn poll_target(
 }
 
 /// The continuous-hold bookkeeping behind [`settle_window_fullscreen`]: the
-/// promise must hold without interruption for
+/// promise must hold on the *enumerated* target, without interruption, for
 /// [`WINDOW_FULLSCREEN_SETTLE_GRACE`].
+///
+/// A sample answered by the cached handle never confirms, and it breaks a
+/// running hold. The verb's promise is what the next read observes, and that
+/// read goes through `AXWindows` (`App::windows`, a re-resolved locator): a
+/// settle that returned while the target was still off the list handed the
+/// caller a window it could not find (#591: the cached handle used to
+/// confirm on its own grace run, sized to outlast the absence measured on an
+/// idle machine, 450–650 ms; on a loaded CI runner the absence ran longer and
+/// `enter_fullscreen` returned into it).
 #[derive(Default)]
 struct SettleRun {
     /// When the current run of promise-holding enumerated samples started.
     held_since: Option<Instant>,
-    /// When the current run of promise-holding cached samples started. Kept
-    /// apart from the enumerated run: time spent in the set before the target
-    /// left must not pad the absence, because the entry transient itself
-    /// reads the restore promise and only a hold longer than the transition
-    /// rules it out.
-    cached_held_since: Option<Instant>,
+    /// Whether any poll found the target in the enumerated window set. Only
+    /// the timeout diagnosis reads it.
+    ever_enumerated: bool,
 }
 
 impl SettleRun {
     /// Fold one poll in. `reached` is [`TargetSample::evaluate`]'s verdict.
     fn observe(&mut self, sample: Option<&TargetSample>, reached: bool, now: Instant) {
-        match sample {
-            Some(TargetSample::Enumerated { .. }) if reached => {
+        if let Some(TargetSample::Enumerated { .. }) = sample {
+            self.ever_enumerated = true;
+            if reached {
                 self.held_since.get_or_insert(now);
-                self.cached_held_since = None;
-            }
-            Some(TargetSample::Cached { .. }) if reached => {
-                self.cached_held_since.get_or_insert(now);
-                self.held_since = None;
-            }
-            // An unreadable sample or a state away from the promise is
-            // unknown, not evidence of the promise: the hold starts over.
-            _ => {
-                self.held_since = None;
-                self.cached_held_since = None;
+                return;
             }
         }
+        // A target off the enumerated set, an unreadable sample, or a state
+        // away from the promise is not evidence the caller's next read will
+        // see the promise: the hold starts over.
+        self.held_since = None;
     }
 
-    /// Whether the promise has held for the grace, uninterrupted.
+    /// Whether the promise has held on the enumerated target for the grace,
+    /// uninterrupted.
     fn confirmed(&self, now: Instant) -> bool {
-        [self.held_since, self.cached_held_since]
-            .into_iter()
-            .flatten()
-            .any(|since| now.duration_since(since) >= WINDOW_FULLSCREEN_SETTLE_GRACE)
+        self.held_since
+            .is_some_and(|since| now.duration_since(since) >= WINDOW_FULLSCREEN_SETTLE_GRACE)
+    }
+
+    /// Which half of the confirmation was missing at the deadline, for the
+    /// timeout diagnosis: the target was not back in `AXWindows`, or it was
+    /// listed but the promised state did not hold there.
+    fn describe_failure(&self, last: Option<&TargetSample>) -> String {
+        let state = describe_target(last);
+        match last {
+            Some(TargetSample::Cached { .. }) if self.ever_enumerated => format!(
+                "the target window left the app's window list (AXWindows) during the \
+                 transition and was not re-enumerated before the deadline; {state}"
+            ),
+            Some(TargetSample::Cached { .. }) => format!(
+                "the target window was never enumerated in the app's window list \
+                 (AXWindows) during the wait; {state}"
+            ),
+            Some(TargetSample::Enumerated { .. }) => format!(
+                "the target window is enumerated, but the promised state did not hold \
+                 there for {} ms; {state}",
+                WINDOW_FULLSCREEN_SETTLE_GRACE.as_millis()
+            ),
+            None => state,
+        }
     }
 }
 
@@ -2363,10 +2388,12 @@ fn describe_cached_target(fullscreen: &AttrProbe, settable: &AttrProbe) -> Strin
 /// `false` after `restore` (and after the fullscreen exit `minimize` performs
 /// before it iconifies). The wait succeeds once the *target* window's own state
 /// holds the promise for [`WINDOW_FULLSCREEN_SETTLE_GRACE`] without
-/// interruption. The target is followed across the transition's window
-/// recreation through the app's enumerated window set ([`safe_cf_equal`]),
-/// and while it is missing from `AXWindows` its cached handle is read
-/// directly.
+/// interruption *while enumerated in `AXWindows`*, so a caller's next
+/// `App::windows()` finds it. The target is followed across the transition's
+/// window recreation through the app's enumerated window set
+/// ([`safe_cf_equal`]). While it is missing from `AXWindows` its cached handle
+/// is read for the re-issue decision and the diagnosis, but cannot confirm
+/// (see [`SettleRun`]).
 ///
 /// Every unconfirmed iteration re-issues `AXFullScreen = want`: a set that
 /// lands mid-transition is discarded rather than queued (see the constants),
@@ -2445,7 +2472,7 @@ fn settle_window_fullscreen(
             }
         }
         if Instant::now() >= deadline {
-            let mut last = describe_target(sample.as_ref());
+            let mut last = run.describe_failure(sample.as_ref());
             if let Some(err) = last_set_error {
                 last = format!("{last}; the last retry set failed: {err}");
             }
@@ -5992,44 +6019,76 @@ mod tests {
     }
 
     #[test]
-    fn settle_run_confirms_a_cached_target_only_on_its_own_grace_run() {
+    fn settle_run_never_confirms_on_the_cached_handle() {
+        // The target off `AXWindows` with its cached handle reading the
+        // promise is not confirmation, however long it lasts: the caller's
+        // next read goes through `AXWindows` and would not find the window.
+        // This is the "no window advertises enter_fullscreen" flake: the old
+        // run confirmed the cached handle after the grace.
         let t0 = Instant::now();
-        let promise = settle_poll(true, true);
-        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(false));
+        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(true));
         let mut run = SettleRun::default();
 
-        // Time held while the target was enumerated must not pad the cached
-        // run: the window is absent from `AXWindows` during the transition,
-        // and only a hold that starts there outlasts the absence (the entry
-        // transient reads the restore promise).
-        run.observe(promise.as_ref(), true, t0);
-        run.observe(cached.as_ref(), true, t0 + Duration::from_millis(100));
-        assert!(!run.confirmed(t0 + WINDOW_FULLSCREEN_SETTLE_GRACE));
-        assert!(!run.confirmed(
-            t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE
-                - Duration::from_millis(1)
-        ));
-        assert!(run.confirmed(t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE));
+        let mut now = t0;
+        while now < t0 + WINDOW_FULLSCREEN_SETTLE_BUDGET {
+            run.observe(cached.as_ref(), true, now);
+            assert!(
+                !run.confirmed(now),
+                "confirmed off AXWindows at {:?}",
+                now - t0
+            );
+            now += WINDOW_FULLSCREEN_SETTLE_INTERVAL;
+        }
     }
 
     #[test]
-    fn settle_run_treats_an_unanswered_cached_read_as_unknown() {
+    fn settle_run_restarts_the_enumerated_hold_after_an_absence() {
         let t0 = Instant::now();
-        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(false));
-        let churn = cached_poll(
-            AttrProbe::Churn("invalidated".to_string()),
-            AttrProbe::Value(true),
-        );
+        let promise = settle_poll(true, true);
+        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(true));
         let mut run = SettleRun::default();
 
-        run.observe(cached.as_ref(), true, t0);
-        run.observe(churn.as_ref(), false, t0 + Duration::from_millis(50));
+        // Held while enumerated, then off the list, then back: neither the
+        // time before the absence nor the absence itself counts.
+        run.observe(promise.as_ref(), true, t0);
         run.observe(cached.as_ref(), true, t0 + Duration::from_millis(100));
-        assert!(!run.confirmed(
-            t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE
-                - Duration::from_millis(1)
-        ));
-        assert!(run.confirmed(t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE));
+        assert!(!run.confirmed(t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE));
+        let back = t0 + Duration::from_millis(1500);
+        run.observe(promise.as_ref(), true, back);
+        assert!(!run.confirmed(back + WINDOW_FULLSCREEN_SETTLE_GRACE - Duration::from_millis(1)));
+        assert!(run.confirmed(back + WINDOW_FULLSCREEN_SETTLE_GRACE));
+    }
+
+    #[test]
+    fn settle_run_diagnosis_names_the_missing_half() {
+        let t0 = Instant::now();
+        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(true));
+
+        // Never in the enumerated set.
+        let mut run = SettleRun::default();
+        run.observe(cached.as_ref(), true, t0);
+        let described = run.describe_failure(cached.as_ref());
+        assert!(described.contains("was never enumerated"), "{described}");
+        assert!(described.contains("reads AXFullScreen=true"), "{described}");
+
+        // Listed, then gone at the deadline.
+        let mut run = SettleRun::default();
+        run.observe(settle_poll(false, true).as_ref(), false, t0);
+        run.observe(cached.as_ref(), true, t0 + Duration::from_millis(50));
+        let described = run.describe_failure(cached.as_ref());
+        assert!(
+            described.contains("was not re-enumerated before the deadline"),
+            "{described}"
+        );
+
+        // Listed at the deadline, but the state is wrong there.
+        let wrong = settle_poll(false, true);
+        let described = run.describe_failure(wrong.as_ref());
+        assert!(
+            described.contains("is enumerated, but the promised state did not hold"),
+            "{described}"
+        );
+        assert!(described.contains("AXFullScreen=false"), "{described}");
     }
 
     #[test]

@@ -97,6 +97,23 @@ def _wait_until(predicate, timeout: float, what: str):
     raise AssertionError(f"timed out waiting for {what}")
 
 
+def _describe_windows(windows: list[xa11y.Element]) -> str:
+    """One bounded line per window, for a settle assertion that found none.
+
+    Tells "the window was missing from the list" from "the window was listed
+    without the verb", which an empty lookup alone cannot.
+    """
+    if not windows:
+        return "[] (the target window is not enumerated)"
+    shown = [
+        f"{w.role} {w.name!r} actions={list(w.actions)!r} "
+        f"minimized={w.minimized!r} fullscreen={w.fullscreen!r}"
+        for w in windows[:8]
+    ]
+    more = "; ..." if len(windows) > 8 else ""
+    return f"[{'; '.join(shown)}{more}]"
+
+
 def _settled_window(
     app: xa11y.App, verb: str, predicate, what: str
 ) -> xa11y.Element:
@@ -118,8 +135,12 @@ def _settled_window(
         return win
 
     if MACOS:
-        win = _window_advertising(app, verb)
-        assert win is not None, f"{what}: no window advertises {verb}"
+        windows = app.windows()
+        win = next((w for w in windows if verb in w.actions), None)
+        assert win is not None, (
+            f"{what}: no window advertises {verb}; app.windows() = "
+            f"{_describe_windows(windows)}"
+        )
         assert predicate(win), (
             f"{what}: minimized={win.minimized!r} fullscreen={win.fullscreen!r} "
             f"maximized={win.maximized!r}"
