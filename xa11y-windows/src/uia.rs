@@ -11,10 +11,7 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetAncestor, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow,
-    IsWindowVisible, SetForegroundWindow, GA_ROOT,
-    GWL_EXSTYLE, STATE_SYSTEM_SELECTED, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    EnumWindows, GA_PARENT, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetDesktopWindow, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, STATE_SYSTEM_SELECTED, SetForegroundWindow, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
 use xa11y_core::{
@@ -197,6 +194,12 @@ pub struct WindowsProvider {
     raw_walker: IUIAutomationTreeWalker,
     /// UIA elements retained for action dispatch (keyed by handle ID).
     handle_cache: Mutex<BoundedHandleCache<IUIAutomationElement>>,
+    /// The nearest native window (as a raw HWND value) of each cached
+    /// element: its own HWND, or the one its parent resolved to. Lets
+    /// `get_children` decide "is this in a minimized window?" for a level
+    /// with one lookup instead of a raw-view walk (issue #501). A miss (the
+    /// element was not built through a parent here) falls back to the walk.
+    host_hwnds: Mutex<BoundedHandleCache<usize>>,
     /// Identities of the synthesized Application nodes this provider minted,
     /// keyed by their tagged handle. `get_children(Some(app))` validates the
     /// identity (creation time) before enumerating, so a stale `App` whose
@@ -259,6 +262,7 @@ impl WindowsProvider {
             batch_request,
             raw_walker,
             handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            host_hwnds: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             synthetic_apps: Mutex::new(BoundedHandleCache::new(MAX_SYNTHETIC_APPS)),
         })
     }
@@ -479,31 +483,64 @@ impl WindowsProvider {
         element: &IUIAutomationElement,
         pid: Option<u32>,
     ) -> Result<ElementData> {
-        self.build_element_data_in(element, pid, false)
+        self.build_element_data_in(element, pid, None)
     }
 
-    /// [`Self::build_element_data`] for an element the caller knows sits in
-    /// a minimized top-level window (`host_minimized`), which makes it not
+    /// [`Self::build_element_data`] for an element whose nearest native
+    /// window the caller already knows (`host_hwnd`, from its parent). An
+    /// element with an HWND of its own uses that instead. The result is
+    /// remembered for the element's handle, so its children inherit it, and
+    /// decides whether it sits in a minimized window, which makes it not
     /// visible whatever UIA's `IsOffscreen` says (issue #501).
     fn build_element_data_in(
         &self,
         element: &IUIAutomationElement,
         pid: Option<u32>,
-        host_minimized: bool,
+        host_hwnd: Option<HWND>,
     ) -> Result<ElementData> {
+        let own = unsafe { element.CachedNativeWindowHandle() }
+            .ok()
+            .filter(|h| !h.0.is_null());
+        let nearest = own.or(host_hwnd);
         let handle = self.cache_element(element.clone());
-        build_snapshot_data(element, pid, handle, Some(&self.raw_walker), host_minimized)
+        if let Some(hwnd) = nearest {
+            self.host_hwnds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(handle, hwnd.0 as usize);
+        }
+        let in_minimized_window = nearest.is_some_and(hwnd_in_minimized_window);
+        build_snapshot_data(
+            element,
+            pid,
+            handle,
+            Some(&self.raw_walker),
+            in_minimized_window,
+        )
     }
 
-    /// Whether `element`'s top-level window is minimized.
-    ///
-    /// Walks the raw view up to the nearest element with a native window
-    /// handle (the element itself when it has one) and asks Win32 about that
-    /// HWND's root. Windowless elements (WPF, WebView2, Qt) have no HWND of
-    /// their own, which is why this is a walk, and why callers run it once
-    /// per query rather than once per element. Reaching the top of the tree
-    /// without an HWND means there is no window to be minimized.
-    fn host_window_minimized(&self, element: &IUIAutomationElement) -> Result<bool> {
+    /// The nearest native window of an element this provider built, from
+    /// [`Self::host_hwnds`], or by walking the raw view on a miss.
+    fn host_hwnd_of(&self, handle: u64, element: &IUIAutomationElement) -> Result<Option<HWND>> {
+        let remembered = self
+            .host_hwnds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&handle)
+            .copied();
+        match remembered {
+            Some(raw) => Ok(Some(HWND(raw as *mut core::ffi::c_void))),
+            None => self.walk_to_host_hwnd(element),
+        }
+    }
+
+    /// The nearest native window of `element`, found by walking the raw view
+    /// up to the first element with a native window handle (the element
+    /// itself when it has one). Windowless elements (WPF, WebView2, Qt) have
+    /// no HWND of their own, which is why this is a walk; it runs only when
+    /// [`Self::host_hwnds`] has no answer. `None` when the walk reaches the top
+    /// without one: there is no window to be minimized.
+    fn walk_to_host_hwnd(&self, element: &IUIAutomationElement) -> Result<Option<HWND>> {
         let mut current = element.clone();
         for _ in 0..HOST_WINDOW_WALK_LIMIT {
             let hwnd =
@@ -514,12 +551,12 @@ impl WindowsProvider {
                     ),
                 })?;
             if !hwnd.0.is_null() {
-                return Ok(hwnd_in_minimized_window(hwnd));
+                return Ok(Some(hwnd));
             }
             current = match unsafe { self.raw_walker.GetParentElement(&current) } {
                 Ok(parent) => parent,
                 // S_OK with a null parent: the top of the tree.
-                Err(e) if e.code().0 == 0 => return Ok(false),
+                Err(e) if e.code().0 == 0 => return Ok(None),
                 Err(e) => {
                     return Err(Error::Platform {
                         code: e.code().0 as i64,
@@ -1383,7 +1420,7 @@ fn build_snapshot_data(
     pid: Option<u32>,
     handle: u64,
     walker: Option<&IUIAutomationTreeWalker>,
-    host_minimized: bool,
+    in_minimized_window: bool,
 ) -> Result<ElementData> {
     let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
     let is_table_item = (control_type == UIA_DataItemControlTypeId
@@ -1449,12 +1486,6 @@ fn build_snapshot_data(
     let description = uia_cached_bstr(element, UIA_FullDescriptionPropertyId)
         .or_else(|| uia_cached_bstr(element, UIA_HelpTextPropertyId));
 
-    // An element with its own HWND answers for itself, cheaply (two Win32
-    // calls, no COM); a windowless one relies on the caller's `host_minimized`.
-    let in_minimized_window = host_minimized
-        || unsafe { element.CachedNativeWindowHandle() }
-            .ok()
-            .is_some_and(|h| !h.0.is_null() && hwnd_in_minimized_window(h));
     let states = parse_states(element, role, &patterns, in_minimized_window);
 
     let bounds = unsafe { element.CachedBoundingRectangle() }
@@ -1663,18 +1694,33 @@ fn is_pattern_absent(err: &windows::core::Error) -> bool {
 /// Upper bound on the raw-view walk in [`WindowsProvider::host_window_minimized`].
 const HOST_WINDOW_WALK_LIMIT: usize = 256;
 
-/// Whether `hwnd` belongs to a minimized top-level window.
+/// Whether `hwnd`, or any window it is a child of, is minimized.
 ///
 /// UIA keeps `IsOffscreen = false` on the descendants of a minimized window,
-/// so the window's own iconic state is the only signal that its content
-/// cannot be seen (issue #501). `GA_ROOT` maps a child control's HWND to its
-/// top-level window; a top-level HWND maps to itself.
+/// so the windows' own iconic state is the only signal that the content
+/// cannot be seen (issue #501). The walk follows the parent chain
+/// (`GA_PARENT`) to the top-level window and checks each level, so a
+/// minimized MDI child hides its contents too.
+///
+/// Ownership is deliberately not followed: an owned window (a dialog, a tool
+/// palette) is a top-level window of its own, and Windows hides it separately
+/// when its owner is minimized, which `IsOffscreen` already reports.
 fn hwnd_in_minimized_window(hwnd: HWND) -> bool {
-    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
-    // GetAncestor returns null only for an invalid HWND, in which case the
-    // HWND itself is all there is to ask about.
-    let window = if root.0.is_null() { hwnd } else { root };
-    unsafe { IsIconic(window) }.as_bool()
+    let mut current = hwnd;
+    // Bounded against a malformed chain; real nesting is a handful deep.
+    for _ in 0..64 {
+        if unsafe { IsIconic(current) }.as_bool() {
+            return true;
+        }
+        let parent = unsafe { GetAncestor(current, GA_PARENT) };
+        // A top-level window's parent is the desktop window; null means an
+        // invalid HWND. Either way there is nothing above to check.
+        if parent.0.is_null() || parent == unsafe { GetDesktopWindow() } {
+            return false;
+        }
+        current = parent;
+    }
+    false
 }
 
 /// The stable identity of a UIA element, or `None` when it has none.
@@ -2150,16 +2196,18 @@ impl Provider for WindowsProvider {
                 if children.is_empty() {
                     return Ok(Vec::new());
                 }
-                // One walk for the whole level, not one per child. A parent
-                // that vanished mid-walk has no children to report.
-                let Some(host_minimized) = live_snapshot(self.host_window_minimized(&uia))? else {
+                // The parent's nearest window, remembered when it was built,
+                // so the whole level costs one lookup. A parent that
+                // vanished during a fallback walk has no children to report.
+                let Some(host_hwnd) = live_snapshot(self.host_hwnd_of(element_data.handle, &uia))?
+                else {
                     return Ok(Vec::new());
                 };
                 let pid = element_data.pid;
                 let mut data = Vec::with_capacity(children.len());
                 for child in children {
                     if let Some(child) =
-                        live_snapshot(self.build_element_data_in(&child, pid, host_minimized))?
+                        live_snapshot(self.build_element_data_in(&child, pid, host_hwnd))?
                     {
                         data.push(child);
                     }
@@ -2202,8 +2250,8 @@ impl Provider for WindowsProvider {
                     code: e.code().0 as i64,
                     message: format!("BuildUpdatedCache failed: {}", e),
                 })?;
-                let host_minimized = self.host_window_minimized(&parent)?;
-                let data = self.build_element_data_in(&parent, element.pid, host_minimized)?;
+                let host_hwnd = self.walk_to_host_hwnd(&parent)?;
+                let data = self.build_element_data_in(&parent, element.pid, host_hwnd)?;
                 return Ok(Some(data));
             }
         }
@@ -2657,8 +2705,6 @@ impl Provider for WindowsProvider {
             return Ok(Vec::new());
         };
         let count = uia_len(&subtree);
-        // Every element in the subtree shares the root's top-level window.
-        let host_minimized = root_hwnd.is_some_and(hwnd_in_minimized_window);
 
         // Single-pass: visit every subtree element once and check every
         // clause's first segment. Per-element results carry the array
@@ -2680,8 +2726,9 @@ impl Provider for WindowsProvider {
             };
             // Build ElementData once; reuse for every clause check. The
             // handle assigned here is stable for the rest of this call.
-            let Some(data) = live_snapshot(self.build_element_data_in(&el, pid, host_minimized))?
-            else {
+            // Windowless elements inherit the root's window; elements with an
+            // HWND of their own use it.
+            let Some(data) = live_snapshot(self.build_element_data_in(&el, pid, root_hwnd))? else {
                 continue;
             };
 
@@ -4732,14 +4779,18 @@ impl EventContext {
             unsafe { sender.BuildUpdatedCache(cache) }.unwrap_or_else(|_| sender.clone())
         };
         // Event targets are not walked to their host window: the handler
-        // must stay cheap, and an element with its own HWND is still checked
-        // inside build_snapshot_data.
+        // must stay cheap. One with its own HWND is still checked, so a
+        // windowless event target in a minimized window can report visible
+        // where a tree read of the same element would not.
+        let in_minimized_window = unsafe { cached_element.CachedNativeWindowHandle() }
+            .ok()
+            .is_some_and(|h| !h.0.is_null() && hwnd_in_minimized_window(h));
         build_snapshot_data(
             &cached_element,
             Some(self.app_pid),
             0,
             Some(&self.walker),
-            false,
+            in_minimized_window,
         )
     }
 
