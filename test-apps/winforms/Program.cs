@@ -9,6 +9,9 @@
 //     pattern (DataGridViewCell.DataGridViewCellAccessibleObject), exercising
 //     the row-vs-cell disambiguation in xa11y-windows/src/uia.rs against a
 //     Microsoft framework rather than Qt.
+//   * A "Legacy Tile" whose accessible object is an MSAA chart with a
+//     default action and no UIA activation pattern, so `press` must reach
+//     LegacyIAccessible.DoDefaultAction (issue #505).
 //   * The WinForms UIA provider surface generally: control types come from
 //     each AccessibleObject's Role via AccessibleRoleControlTypeMap, and the
 //     top-level Form's type comes from the HWND host provider.
@@ -95,6 +98,7 @@ internal sealed class TestForm : Form
         page.Controls.Add(BuildList());
         page.Controls.Add(BuildTable());
         page.Controls.Add(BuildDynamic());
+        page.Controls.Add(BuildLegacy());
 
         Controls.Add(page);
         Controls.Add(BuildToolStrip());
@@ -274,6 +278,26 @@ internal sealed class TestForm : Form
             removeItem);
     }
 
+    private static GroupBox BuildLegacy()
+    {
+        var status = MakeLabel("Legacy activations: 0");
+        int count = 0;
+        var tile = new LegacyTile(() =>
+        {
+            count++;
+            var text = $"Legacy activations: {count}";
+            status.Text = text;
+            status.AccessibleName = text;
+        })
+        {
+            AccessibleName = "Legacy Tile",
+            Size = new Size(120, 40),
+            BackColor = Color.LightSteelBlue,
+        };
+
+        return MakeGroup("Legacy", new Size(300, 110), FlowDirection.TopDown, tile, status);
+    }
+
     // ── Chrome ───────────────────────────────────────────────────────────
 
     private static MenuStrip BuildMenuStrip()
@@ -411,5 +435,44 @@ internal sealed class TestForm : Form
         };
         box.Controls.Add(flow);
         return box;
+    }
+}
+
+/// <summary>
+///  A control reachable only through its MSAA default action.
+///  <para>
+///   Its accessible object reports <see cref="AccessibleRole.Chart"/>. The
+///   MSAA proxy decides Invoke from the role and the default action together:
+///   a graphic with a default action is given Invoke, but a chart is on the
+///   proxy's never-invokable list, and a chart also implies no Toggle,
+///   SelectionItem, or ExpandCollapse. So it has a default action and no UIA
+///   activation pattern, and the only way to activate it is
+///   <c>LegacyIAccessible.DoDefaultAction</c>. That is the shape issue #505
+///   is about, and the provider's <c>press</c> must dispatch to it. The integ
+///   test asserts the pattern set, so a role that picks up a pattern fails
+///   rather than passing through Invoke.
+///  </para>
+/// </summary>
+internal sealed class LegacyTile : Control
+{
+    private readonly Action _activate;
+
+    public LegacyTile(Action activate) => _activate = activate;
+
+    protected override AccessibleObject CreateAccessibilityInstance() =>
+        new LegacyTileAccessibleObject(this);
+
+    private sealed class LegacyTileAccessibleObject : ControlAccessibleObject
+    {
+        private readonly LegacyTile _owner;
+
+        public LegacyTileAccessibleObject(LegacyTile owner)
+            : base(owner) => _owner = owner;
+
+        public override AccessibleRole Role => AccessibleRole.Chart;
+
+        public override string DefaultAction => "Activate";
+
+        public override void DoDefaultAction() => _owner._activate();
     }
 }

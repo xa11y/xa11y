@@ -1867,6 +1867,29 @@ fn build_snapshot_data(
         if let Some(ref d) = description {
             raw.insert("uia_help_text".into(), serde_json::Value::String(d.clone()));
         }
+        if let Some(framework) = uia_cached_bstr(element, UIA_FrameworkIdPropertyId) {
+            raw.insert(
+                "uia_framework_id".into(),
+                serde_json::Value::String(framework),
+            );
+        }
+        // Which UIA activation patterns `press` could dispatch to, so a
+        // caller (and the integ suite) can tell which mechanism a `press`
+        // advertisement stands for.
+        let activation: Vec<serde_json::Value> = [
+            ("invoke", patterns.invoke.is_some()),
+            ("toggle", patterns.toggle.is_some()),
+            ("selection_item", patterns.selection_item.is_some()),
+            ("expand_collapse", patterns.expand_collapse.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, present)| *present)
+        .map(|(name, _)| serde_json::Value::String(name.into()))
+        .collect();
+        raw.insert(
+            "uia_activation_patterns".into(),
+            serde_json::Value::Array(activation),
+        );
         raw
     };
 
@@ -1918,13 +1941,56 @@ fn build_snapshot_data(
 /// Build the batch request that describes which properties and patterns
 /// to pre-fetch. Created once per provider, used on every query.
 fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+    create_cache_request(automation, BATCH_PROPERTIES)
+}
+
+/// The cache request event handlers fetch their targets with.
+fn create_event_cache_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+    create_cache_request(automation, &event_cache_properties())
+}
+
+/// The batch properties minus [`EVENT_EXCLUDED_PROPERTIES`]: what event
+/// handlers pre-fetch for an event's sender.
+fn event_cache_properties() -> Vec<UIA_PROPERTY_ID> {
+    BATCH_PROPERTIES
+        .iter()
+        .copied()
+        .filter(|p| !EVENT_EXCLUDED_PROPERTIES.contains(p))
+        .collect()
+}
+
+/// Batch properties that event handlers do not pre-fetch.
+///
+/// With these in the event request, the subscribing process's heap was
+/// corrupted (0xC0000374) while the WinForms test app delivered events: in
+/// three CI runs out of three. The one run so far with both left out of this
+/// request was clean. The root cause is not known; issue #589 tracks it.
+///
+/// Leaving them out costs one thing: an event target never advertises the
+/// MSAA default action as `press` (see `legacy_default_action_is_activation`,
+/// which needs a non-empty default action), and its raw map lacks
+/// `uia_framework_id`. Re-reading the element through a query restores both.
+///
+/// The two come back together or not at all. `is_msaa_framework(None)` is
+/// true, so caching the default action without the framework id would make
+/// a native UIA event target (Chromium, WPF, ...) advertise `press` for its
+/// MSAA default action.
+const EVENT_EXCLUDED_PROPERTIES: &[UIA_PROPERTY_ID] = &[
+    UIA_LegacyIAccessibleDefaultActionPropertyId,
+    UIA_FrameworkIdPropertyId,
+];
+
+fn create_cache_request(
+    automation: &IUIAutomation,
+    properties: &[UIA_PROPERTY_ID],
+) -> Result<IUIAutomationCacheRequest> {
     let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
 
     // The property list is a fixed constant array of valid UIA property IDs.
     // If AddProperty ever fails here, something is structurally wrong with the
     // UIA environment (e.g. COM state corrupted). Propagate rather than
     // silently producing a half-configured cache request (tenet 1).
-    for prop in BATCH_PROPERTIES {
+    for prop in properties {
         unsafe { request.AddProperty(*prop) }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("AddProperty({:?}) failed: {e}", prop),
@@ -1973,6 +2039,13 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     // MSAA role — the only role signal for providers that publish no UIA
     // control type (see `map_msaa_role`).
     UIA_LegacyIAccessibleRolePropertyId,
+    // MSAA default action — advertises `press` on elements whose only
+    // activation is LegacyIAccessible.DoDefaultAction (see `get_actions`).
+    UIA_LegacyIAccessibleDefaultActionPropertyId,
+    // Which provider framework serves the element. Gates the MSAA default
+    // action as `press` to MSAA-proxied elements (see
+    // `legacy_default_action_is_activation`).
+    UIA_FrameworkIdPropertyId,
 ];
 
 /// Interfaces needed while turning a cached UIA element into ElementData.
@@ -2060,6 +2133,59 @@ fn hwnd_in_minimized_window(hwnd: HWND) -> bool {
         current = parent;
     }
     false
+}
+
+/// Acquire a live pattern, mapping "the element has no such pattern" to
+/// `Ok(None)` and every other failure to `Error::Platform` (tenet 1).
+fn current_pattern<T: windows::core::Interface>(
+    element: &IUIAutomationElement,
+    id: UIA_PATTERN_ID,
+    what: &str,
+) -> Result<Option<T>> {
+    match unsafe { element.GetCurrentPatternAs::<T>(id) } {
+        Ok(pattern) => Ok(Some(pattern)),
+        Err(e) if is_pattern_absent(&e) => Ok(None),
+        Err(e) => Err(Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("acquiring {what} failed: {e}"),
+        }),
+    }
+}
+
+/// Whether `LegacyIAccessible.DoDefaultAction` is this element's `press`.
+///
+/// Only when it is the *sole* activation of an element exposed through MSAA:
+/// the element has none of Invoke, Toggle, SelectionItem, or ExpandCollapse,
+/// MSAA reports a non-empty default action, and the element is served by the
+/// MSAA side of UIA (see [`is_msaa_framework`]). An element with a UIA
+/// activation pattern keeps that pattern as its `press`; the default action is
+/// never a second try after it (issue #505, tenet 1). A native UIA provider
+/// that withheld every activation pattern did so on purpose (Chromium's
+/// "click ancestor" default action is not this element's activation), so its
+/// default action is not promoted either.
+///
+/// Advertisement (`get_actions`) and dispatch (`press`) both call this, so
+/// they cannot disagree.
+fn legacy_default_action_is_activation(
+    has_activation_pattern: bool,
+    default_action: Option<&str>,
+    framework_id: Option<&str>,
+) -> bool {
+    !has_activation_pattern
+        && is_msaa_framework(framework_id)
+        && default_action.is_some_and(|a| !a.trim().is_empty())
+}
+
+/// Whether a UIA `FrameworkId` names an element exposed through MSAA rather
+/// than a native UIA provider: the Win32 MSAA proxy (`"Win32"`), WinForms
+/// accessible objects (`"WinForm"`), or a proxied element that reports none.
+/// Native providers name themselves (`"Chrome"`, `"XAML"`, `"WPF"`, `"Qt"`,
+/// `"DirectUI"`, …) and are excluded.
+fn is_msaa_framework(framework_id: Option<&str>) -> bool {
+    matches!(
+        framework_id.map(str::trim),
+        None | Some("" | "Win32" | "WinForm")
+    )
 }
 
 /// The stable identity of a UIA element, or `None` when it has none.
@@ -3261,11 +3387,16 @@ impl Provider for WindowsProvider {
         // applies to the *semantic* verb (`press` = "activate this element"),
         // not the underlying API — each branch below is Windows' canonical
         // implementation of that semantic for the element's pattern.
+        //
+        // Each lookup distinguishes "pattern absent" (try the next) from a
+        // real COM failure (propagate): a wedged provider must not fall
+        // through to a different activation (tenet 1).
         let uia_element = self.get_cached(element.handle)?;
-        // Try InvokePattern (buttons, menu items)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationInvokePattern>(
+            &uia_element,
+            UIA_InvokePatternId,
+            "InvokePattern",
+        )? {
             unsafe { pattern.Invoke() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -3278,10 +3409,11 @@ impl Provider for WindowsProvider {
             })?;
             return Ok(());
         }
-        // Try TogglePattern (checkboxes, switches)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationTogglePattern>(
+            &uia_element,
+            UIA_TogglePatternId,
+            "TogglePattern",
+        )? {
             unsafe { pattern.Toggle() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -3294,12 +3426,11 @@ impl Provider for WindowsProvider {
             })?;
             return Ok(());
         }
-        // Try SelectionItemPattern (list items, radio buttons)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                UIA_SelectionItemPatternId,
-            )
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationSelectionItemPattern>(
+            &uia_element,
+            UIA_SelectionItemPatternId,
+            "SelectionItemPattern",
+        )? {
             unsafe { pattern.Select() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -3312,12 +3443,11 @@ impl Provider for WindowsProvider {
             })?;
             return Ok(());
         }
-        // Try ExpandCollapsePattern (combo boxes, tree items)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-                UIA_ExpandCollapsePatternId,
-            )
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationExpandCollapsePattern>(
+            &uia_element,
+            UIA_ExpandCollapsePatternId,
+            "ExpandCollapsePattern",
+        )? {
             let state =
                 unsafe { pattern.CurrentExpandCollapseState() }.map_err(|e| Error::Platform {
                     code: e.code().0 as i64,
@@ -3338,6 +3468,47 @@ impl Provider for WindowsProvider {
                 }
             }
             return Ok(());
+        }
+        // None of the four activation patterns exists. For an element
+        // exposed only through MSAA, the MSAA default action *is* its primary
+        // activation, so `press` dispatches to it (issue #505). Reached only
+        // when every lookup above reported the pattern absent — never after
+        // one of them failed (tenet 1).
+        if let Some(pattern) = current_pattern::<IUIAutomationLegacyIAccessiblePattern>(
+            &uia_element,
+            UIA_LegacyIAccessiblePatternId,
+            "LegacyIAccessiblePattern",
+        )? {
+            let default_action =
+                unsafe { pattern.CurrentDefaultAction() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("LegacyIAccessible.CurrentDefaultAction failed: {e}"),
+                })?;
+            let framework_id =
+                unsafe { uia_element.CurrentFrameworkId() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("CurrentFrameworkId failed: {e}"),
+                })?;
+            if legacy_default_action_is_activation(
+                false,
+                Some(&default_action.to_string()),
+                Some(&framework_id.to_string()),
+            ) {
+                unsafe { pattern.DoDefaultAction() }.or_else(|e| {
+                    if is_event_subscriber_failure(&e) {
+                        Ok(())
+                    } else {
+                        Err(Error::Platform {
+                            code: e.code().0 as i64,
+                            message: format!(
+                                "LegacyIAccessible.DoDefaultAction (\"{default_action}\") \
+                                 failed: {e}"
+                            ),
+                        })
+                    }
+                })?;
+                return Ok(());
+            }
         }
         Err(Error::ActionNotSupported {
             action: "press".to_string(),
@@ -4039,6 +4210,18 @@ fn get_actions(
             actions.push("press".to_string());
         }
         actions.push("select".to_string());
+    }
+
+    let has_activation_pattern = patterns.invoke.is_some()
+        || patterns.toggle.is_some()
+        || patterns.selection_item.is_some()
+        || patterns.expand_collapse.is_some();
+    if legacy_default_action_is_activation(
+        has_activation_pattern,
+        uia_cached_bstr(element, UIA_LegacyIAccessibleDefaultActionPropertyId).as_deref(),
+        uia_cached_bstr(element, UIA_FrameworkIdPropertyId).as_deref(),
+    ) {
+        actions.push("press".to_string());
     }
 
     // Advertise `focus` iff focusing would have an observable effect: the
@@ -5702,10 +5885,11 @@ impl WindowsProvider {
         });
 
         // Dedicated cache request: ensures event handlers receive elements
-        // with our standard batch of properties pre-fetched. We clone the
-        // provider's shared request so we don't rely on a mutable handle
-        // held elsewhere.
-        let cache = create_batch_request(&self.automation)?;
+        // with our standard batch of properties pre-fetched, minus the ones
+        // that are unsafe to fetch on the event thread (see
+        // `EVENT_EXCLUDED_PROPERTIES`). A fresh request, so we don't rely on
+        // a mutable handle held elsewhere.
+        let cache = create_event_cache_request(&self.automation)?;
 
         let focus: IUIAutomationFocusChangedEventHandler = FocusHandler {
             ctx: ctx.clone(),
@@ -6252,6 +6436,101 @@ mod tests {
             );
             assert_ne!(handle, first, "a reused pid must get a distinct handle");
             assert!(cache.len() <= 3);
+        }
+    }
+
+    #[test]
+    fn legacy_default_action_is_press_only_as_the_sole_activation() {
+        // MSAA-only element with a default action: press is DoDefaultAction.
+        for framework in [Some("Win32"), Some("WinForm"), Some(""), None] {
+            assert!(
+                legacy_default_action_is_activation(false, Some("Activate"), framework),
+                "{framework:?} is MSAA-proxied"
+            );
+        }
+        // Any UIA activation pattern wins; the default action is never a
+        // second mechanism behind it.
+        assert!(!legacy_default_action_is_activation(
+            true,
+            Some("Activate"),
+            Some("Win32")
+        ));
+        // No default action, or a blank one, is nothing to press.
+        assert!(!legacy_default_action_is_activation(
+            false,
+            None,
+            Some("Win32")
+        ));
+        assert!(!legacy_default_action_is_activation(
+            false,
+            Some(""),
+            Some("Win32")
+        ));
+        assert!(!legacy_default_action_is_activation(
+            false,
+            Some("  "),
+            Some("Win32")
+        ));
+        // A native UIA provider that withheld activation keeps it withheld,
+        // whatever its MSAA default action says (Chromium's "click ancestor").
+        for framework in ["Chrome", "XAML", "WPF", "Qt", "DirectUI"] {
+            assert!(
+                !legacy_default_action_is_activation(
+                    false,
+                    Some("click ancestor"),
+                    Some(framework)
+                ),
+                "{framework} is a native UIA provider"
+            );
+        }
+    }
+
+    #[test]
+    fn default_action_is_batched_for_advertisement() {
+        assert!(
+            BATCH_PROPERTIES.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId),
+            "LegacyIAccessible.DefaultAction must be cached so get_actions can advertise press"
+        );
+    }
+
+    #[test]
+    fn event_cache_properties_are_the_batch_minus_the_two_exclusions() {
+        let props = event_cache_properties();
+        assert!(
+            !props.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId),
+            "DefaultAction must stay out of the event request (#589)"
+        );
+        assert!(
+            !props.contains(&UIA_FrameworkIdPropertyId),
+            "FrameworkId must stay out of the event request (#589)"
+        );
+        for prop in BATCH_PROPERTIES {
+            if !EVENT_EXCLUDED_PROPERTIES.contains(prop) {
+                assert!(props.contains(prop), "{prop:?} dropped from events");
+            }
+        }
+        // An exclusion that is not in the batch excludes nothing while still
+        // reading as a live workaround.
+        for prop in EVENT_EXCLUDED_PROPERTIES {
+            assert!(
+                BATCH_PROPERTIES.contains(prop),
+                "{prop:?} is excluded from the event request but not batched"
+            );
+        }
+    }
+
+    #[test]
+    fn default_action_and_framework_id_are_cached_together() {
+        // Without FrameworkId, `is_msaa_framework(None)` reads any element as
+        // MSAA-proxied, so a cached DefaultAction alone would advertise
+        // `press` on native UIA providers. Every request must carry both or
+        // neither.
+        for props in [BATCH_PROPERTIES.to_vec(), event_cache_properties()] {
+            assert_eq!(
+                props.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId),
+                props.contains(&UIA_FrameworkIdPropertyId),
+                "DefaultAction and FrameworkId must be cached together"
+            );
         }
     }
 
