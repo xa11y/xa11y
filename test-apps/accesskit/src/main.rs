@@ -152,6 +152,8 @@ struct AppState {
     /// Counter so each press produces a distinct announcement payload
     /// (AccessKit only posts AXAnnouncementRequested when the value changes).
     announcement_counter: u32,
+    /// ScrollIntoView requests received by the Cherry list item.
+    cherry_scroll_requests: u32,
 }
 
 impl AppState {
@@ -170,6 +172,7 @@ impl AppState {
             dynamic_item_count: 0,
             announcement_text: String::new(),
             announcement_counter: 0,
+            cherry_scroll_requests: 0,
         }
     }
 }
@@ -617,6 +620,24 @@ fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         item.set_label(label);
         item.add_action(Action::Click);
         item.add_action(Action::Focus);
+        if id == CHERRY_ITEM {
+            // The scroll-into-view fixture: the only node that advertises
+            // ScrollIntoView, so the others are the "not supported" case. The
+            // tree is not really scrolled, so the request count is what a
+            // test reads back to prove the platform action reached the app.
+            item.add_action(Action::ScrollIntoView);
+            item.set_description(format!("Scroll requests: {}", state.cherry_scroll_requests));
+            // AccessKit's AT-SPI bridge exposes the Component interface (and
+            // with it Component.ScrollTo) only on nodes that have bounds, so
+            // the fixture needs a rect for Linux to have a scroll action at
+            // all. Placed below the image, clear of every other bounded node.
+            item.set_bounds(Rect {
+                x0: 16.0,
+                y0: 460.0,
+                x1: 196.0,
+                y1: 480.0,
+            });
+        }
         if state.selected_list_item == Some(idx) {
             item.set_selected(true);
         }
@@ -949,7 +970,14 @@ fn handle_action(request: &ActionRequest, state: &mut AppState) -> bool {
             true
         }
 
-        // ScrollIntoView / ShowMenu — accepted no-ops
+        // ScrollIntoView on the fixture list item — counted so a test can
+        // observe that the request arrived (see `build_lists_panel`).
+        (id, Action::ScrollIntoView) if id == CHERRY_ITEM => {
+            state.cherry_scroll_requests += 1;
+            true
+        }
+
+        // ScrollIntoView elsewhere / ShowMenu — accepted no-ops
         (_, Action::ScrollIntoView) | (_, Action::ShowContextMenu) => false,
 
         _ => false,

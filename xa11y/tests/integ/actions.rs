@@ -328,6 +328,69 @@ mod tests {
         }
     }
 
+    /// The Cherry list item's request counter, from its description
+    /// ("Scroll requests: N") — see `build_lists_panel` in the test app.
+    fn cherry_scroll_requests(app: &App) -> u32 {
+        let cherry = h::one(app, r#"list_item[name="Cherry"]"#);
+        let desc = cherry.description.clone().unwrap_or_default();
+        desc.strip_prefix("Scroll requests: ")
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("Cherry description {desc:?} is not a request count"))
+    }
+
+    /// `scroll_into_view` must reach the app as the platform's scroll action
+    /// (AXScrollToVisible / Component.ScrollTo / ScrollItemPattern) — macOS
+    /// used to answer Ok without calling anything (issue #510).
+    #[test]
+    #[ignore]
+    fn action_scroll_into_view_reaches_the_app() {
+        let app = h::app_root();
+        let before = cherry_scroll_requests(&app);
+        let cherry = h::one(&app, r#"list_item[name="Cherry"]"#);
+        #[cfg(target_os = "macos")]
+        assert!(
+            cherry.actions.iter().any(|a| a == "scroll_into_view"),
+            "AXScrollToVisible should be advertised as scroll_into_view, got {:?}",
+            cherry.actions
+        );
+        cherry
+            .scroll_into_view()
+            .expect("scroll_into_view on an element that supports it");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let now = cherry_scroll_requests(&h::app_root());
+            if now == before + 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "app saw {now} scroll requests, expected {}",
+                before + 1
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// An element that does not advertise a scroll action is refused rather
+    /// than reported as scrolled. AT-SPI's `Component.ScrollTo` exists on
+    /// every component, so Linux has no "unsupported" answer to check.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    #[ignore]
+    fn action_scroll_into_view_unsupported_is_an_error() {
+        let app = h::app_root();
+        let apple = h::one(&app, r#"list_item[name="Apple"]"#);
+        let result = apple.scroll_into_view();
+        assert!(
+            matches!(
+                result,
+                Err(Error::ActionNotSupported { ref action, .. }) if action == "scroll_into_view"
+            ),
+            "expected ActionNotSupported, got {result:?}"
+        );
+    }
+
     // ════════════════════════════════════════════════════════════════
     // Complex / Stress Scenarios (5 tests)
     // ════════════════════════════════════════════════════════════════
