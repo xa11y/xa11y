@@ -567,6 +567,13 @@ APP_CONFIGS: dict[str, dict] = {
         # opt-in whole-tree guard stays off.
         "expect_no_unknown_roles": False,
         "window_name_contains": "xa11y-winforms-test-app",
+        # A panel longer than its viewport (issue #502): its first button is in
+        # view and its last is scrolled out, while UIA still reports the last
+        # one on screen. Scrolled-out *list items* are no use here: WinForms
+        # and WPF both report those offscreen themselves.
+        "scrolled_pane_name": "Long Pane",
+        "scrolled_pane_first_item": "Long Entry 1",
+        "scrolled_pane_last_item": "Long Entry 40",
         # A ComboBox in an overflowing panel: its open drop-down extends past
         # the panel and must not be clipped to it.
         "scrolled_panel_name": "Scroll Panel",
@@ -587,13 +594,6 @@ APP_CONFIGS: dict[str, dict] = {
         #
         # Unlike WinForms, WPF has AutomationProperties.IsDialog, which is
         # exactly UIA_IsDialogPropertyId — so the native-dialog role test runs.
-        # A ListBox longer than its viewport (issue #502): its first entry is
-        # in view and its last is scrolled out, while WPF still reports the
-        # last one on screen. The WinForms ListBox reports it offscreen
-        # itself, so only this cell can show the bug.
-        "scrolled_list_name": "Long List",
-        "scrolled_list_first_item": "Long Entry 1",
-        "scrolled_list_last_item": "Long Entry 40",
         "dialog_button_name": "Open Dialog",
         "dialog_name": "Sample Dialog",
         # Same-process non-modal sibling top-level window: the C1 sibling-event

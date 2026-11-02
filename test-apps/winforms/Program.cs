@@ -12,6 +12,10 @@
 //   * A ComboBox at the top of an overflowing AutoScroll panel ("Scroll
 //     Panel"): its drop-down is a popup window that extends past the panel,
 //     and must not be clipped to it.
+//   * An AutoScroll panel of forty buttons ("Long Pane"). Controls scrolled
+//     out of it keep `IsOffscreen = false`, and the provider clips them to
+//     the panel's viewport (issue #502). A ListBox cannot show this: WinForms
+//     and WPF both report scrolled-out list items offscreen themselves.
 //   * The WinForms UIA provider surface generally: control types come from
 //     each AccessibleObject's Role via AccessibleRoleControlTypeMap, and the
 //     top-level Form's type comes from the HWND host provider.
@@ -99,6 +103,7 @@ internal sealed class TestForm : Form
         page.Controls.Add(BuildTable());
         page.Controls.Add(BuildDynamic());
         page.Controls.Add(BuildScrollPanel());
+        page.Controls.Add(BuildLongPane());
 
         Controls.Add(page);
         Controls.Add(BuildToolStrip());
@@ -360,6 +365,39 @@ internal sealed class TestForm : Form
         }
 
         return list;
+    }
+
+    /// <summary>
+    ///  Forty buttons in an AutoScroll panel that shows a few, scrolled to the
+    ///  top, so "Long Entry 40" is out of view while UIA still reports it on
+    ///  screen (issue #502). Focusing a button scrolls the panel to it, which
+    ///  is how the suites move the viewport: plain buttons have no UIA
+    ///  ScrollItem pattern for `scroll_into_view`. TabStop is off so keyboard
+    ///  navigation tests never wander in. Named apart from "Item N" so no
+    ///  other selector matches them.
+    /// </summary>
+    private static GroupBox BuildLongPane()
+    {
+        var pane = new FlowLayoutPanel
+        {
+            AccessibleName = "Long Pane",
+            AutoScroll = true,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Size = new Size(260, 60),
+        };
+        for (int i = 1; i <= 40; i++)
+        {
+            pane.Controls.Add(new Button
+            {
+                Text = $"Long Entry {i}",
+                AccessibleName = $"Long Entry {i}",
+                TabStop = false,
+                AutoSize = true,
+            });
+        }
+
+        return MakeGroup("Scrolled", new Size(300, 100), FlowDirection.TopDown, pane);
     }
 
     /// <summary>

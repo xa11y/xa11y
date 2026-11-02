@@ -676,7 +676,7 @@ def test_locator_dump_shorthand(app, app_config):
     assert "button" in text
 
 
-def _scrolled_list_visibility(app, list_name: str, first: str, last: str):
+def _scrolled_pane_visibility(app, pane_name: str, first: str, last: str):
     """The first and last entries' ``visible``, read both ways the provider
     computes it: a selector search, which takes the one-pass subtree fetch,
     and ``children()``, which clips each level to its parent."""
@@ -684,25 +684,25 @@ def _scrolled_list_visibility(app, list_name: str, first: str, last: str):
         name: app.locator(f'[name="{name}"]').element().visible
         for name in (first, last)
     }
-    lst = app.locator(f'[name="{list_name}"]').element()
-    listed = {c.name: c.visible for c in lst.children() if c.name in (first, last)}
+    pane = app.locator(f'[name="{pane_name}"]').element()
+    listed = {c.name: c.visible for c in pane.children() if c.name in (first, last)}
     return found, listed
 
 
-def test_items_scrolled_out_of_a_list_are_not_visible(app, app_config):
-    """An item scrolled out of its list reports ``visible == False``.
+def test_controls_scrolled_out_of_a_pane_are_not_visible(app, app_config):
+    """A control scrolled out of its pane reports ``visible == False``.
 
-    WinForms leaves ``IsOffscreen`` false on list items scrolled out of the
-    viewport, so without the provider's own clipping they counted as visible
-    and an auto-waiting action would act on an item nobody can see (issue
+    Some UIA providers leave ``IsOffscreen`` false on content outside the
+    viewport, so without the provider's own clipping it counted as visible
+    and an auto-waiting action would act on a control nobody can see (issue
     #502). The test first asserts that premise on the scrolled-out entry's
     ``raw["uia_is_offscreen"]``, so it cannot pass with or without the fix.
     """
-    list_name = app_config.get("scrolled_list_name")
-    if not list_name:
-        pytest.skip("this app has no list longer than its viewport yet")
-    first = app_config["scrolled_list_first_item"]
-    last = app_config["scrolled_list_last_item"]
+    pane_name = app_config.get("scrolled_pane_name")
+    if not pane_name:
+        pytest.skip("this app has no pane longer than its viewport yet")
+    first = app_config["scrolled_pane_first_item"]
+    last = app_config["scrolled_pane_last_item"]
 
     # The premise: UIA itself says the scrolled-out entry is on screen.
     # Without it this test would pass with or without the fix.
@@ -711,10 +711,10 @@ def test_items_scrolled_out_of_a_list_are_not_visible(app, app_config):
         f"{last!r} reports uia_is_offscreen="
         f"{hidden.raw.get('uia_is_offscreen')!r}, so the fixture no longer "
         f"exercises issue #502 (UIA leaving IsOffscreen false on a "
-        f"scrolled-out item)"
+        f"scrolled-out control)"
     )
 
-    found, listed = _scrolled_list_visibility(app, list_name, first, last)
+    found, listed = _scrolled_pane_visibility(app, pane_name, first, last)
     expected = {first: True, last: False}
     assert found == expected, (
         f"selector search: the first entry must be visible and the last "
@@ -726,22 +726,28 @@ def test_items_scrolled_out_of_a_list_are_not_visible(app, app_config):
     )
 
 
-def test_scrolling_a_list_flips_which_items_are_visible(app, app_config):
-    """After ``scroll_into_view`` on the last entry, it reports visible and
-    the first does not: the clip follows the scroll position rather than a
-    remembered answer."""
-    list_name = app_config.get("scrolled_list_name")
-    if not list_name:
-        pytest.skip("this app has no list longer than its viewport yet")
-    first = app_config["scrolled_list_first_item"]
-    last = app_config["scrolled_list_last_item"]
+def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
+    """After the pane scrolls to the last entry, it reports visible and the
+    first does not: the clip follows the scroll position rather than a
+    remembered answer.
+
+    Focus moves the viewport: the framework scrolls a pane to the control
+    that takes focus. ``scroll_into_view`` cannot, because plain buttons
+    have no UIA ScrollItem pattern. ``Element.focus`` acts without waiting
+    for ``visible``, which the scrolled-out entry is not.
+    """
+    pane_name = app_config.get("scrolled_pane_name")
+    if not pane_name:
+        pytest.skip("this app has no pane longer than its viewport yet")
+    first = app_config["scrolled_pane_first_item"]
+    last = app_config["scrolled_pane_last_item"]
     expected = {first: False, last: True}
 
-    app.locator(f'[name="{last}"]').scroll_into_view()
+    app.locator(f'[name="{last}"]').element().focus()
     try:
         deadline = time.monotonic() + 5.0
         while True:
-            found, listed = _scrolled_list_visibility(app, list_name, first, last)
+            found, listed = _scrolled_pane_visibility(app, pane_name, first, last)
             settled = found == expected and listed == expected
             if settled or time.monotonic() > deadline:
                 break
@@ -754,7 +760,7 @@ def test_scrolling_a_list_flips_which_items_are_visible(app, app_config):
         )
     finally:
         # Put the shared app back for the test above, whatever the order.
-        app.locator(f'[name="{first}"]').scroll_into_view()
+        app.locator(f'[name="{first}"]').element().focus()
 
 
 def test_open_dropdown_in_a_scrolled_panel_is_visible(app, app_config):
