@@ -503,12 +503,12 @@ impl WindowsProvider {
             .filter(|h| !h.0.is_null());
         let nearest = own.or(host_hwnd);
         let handle = self.cache_element(element.clone());
-        if let Some(hwnd) = nearest {
-            self.host_hwnds
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(handle, hwnd.0 as usize);
-        }
+        // 0 records "no window above this element", so that answer is
+        // remembered too instead of re-walking.
+        self.host_hwnds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle, nearest.map_or(0, |h| h.0 as usize));
         let in_minimized_window = nearest.is_some_and(hwnd_in_minimized_window);
         build_snapshot_data(
             element,
@@ -529,6 +529,7 @@ impl WindowsProvider {
             .get(&handle)
             .copied();
         match remembered {
+            Some(0) => Ok(None),
             Some(raw) => Ok(Some(HWND(raw as *mut core::ffi::c_void))),
             None => self.walk_to_host_hwnd(element),
         }
@@ -1691,7 +1692,7 @@ fn is_pattern_absent(err: &windows::core::Error) -> bool {
     code == E_NOINTERFACE.0 || code == UIA_E_INVALIDOPERATION as i32 || code == 0
 }
 
-/// Upper bound on the raw-view walk in [`WindowsProvider::host_window_minimized`].
+/// Upper bound on the raw-view walk in [`WindowsProvider::walk_to_host_hwnd`].
 const HOST_WINDOW_WALK_LIMIT: usize = 256;
 
 /// Whether `hwnd`, or any window it is a child of, is minimized.
@@ -2250,7 +2251,19 @@ impl Provider for WindowsProvider {
                     code: e.code().0 as i64,
                     message: format!("BuildUpdatedCache failed: {}", e),
                 })?;
-                let host_hwnd = self.walk_to_host_hwnd(&parent)?;
+                // A windowless child shares its parent's nearest window (an
+                // HWND-bearing parent uses its own anyway), so the child's
+                // remembered answer serves; a child with its own HWND, or one
+                // not built here, needs the walk.
+                let child_has_own_hwnd = element
+                    .stable_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("hwnd:"));
+                let host_hwnd = if child_has_own_hwnd {
+                    self.walk_to_host_hwnd(&parent)?
+                } else {
+                    self.host_hwnd_of(element.handle, &uia)?
+                };
                 let data = self.build_element_data_in(&parent, element.pid, host_hwnd)?;
                 return Ok(Some(data));
             }
@@ -2705,6 +2718,28 @@ impl Provider for WindowsProvider {
             return Ok(Vec::new());
         };
         let count = uia_len(&subtree);
+
+        // Windowless elements below inherit the root's window, which is only
+        // right while no nested window under it is minimized (an MDI child):
+        // the flat array does not say which nested window an element sits
+        // in. When one is, take the level-by-level path, which tracks each
+        // element's nearest window (issue #501).
+        let root_minimized = root_hwnd.is_some_and(hwnd_in_minimized_window);
+        if !root_minimized
+            && (0..count).any(|i| {
+                uia_get(&subtree, i)
+                    .and_then(|el| unsafe { el.CachedNativeWindowHandle() }.ok())
+                    .is_some_and(|h| !h.0.is_null() && hwnd_in_minimized_window(h))
+            })
+        {
+            return xa11y_core::selector::find_elements_in_tree_group(
+                |el| self.get_children(el),
+                Some(root),
+                group,
+                limit,
+                max_depth,
+            );
+        }
 
         // Single-pass: visit every subtree element once and check every
         // clause's first segment. Per-element results carry the array
