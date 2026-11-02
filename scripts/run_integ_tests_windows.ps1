@@ -51,6 +51,14 @@ try {
         cargo test -p xa11y-windows --test sta_host -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
         if ($LASTEXITCODE -ne 0 -and $testExit -eq 0) { $testExit = $LASTEXITCODE }
     }
+
+    # UIPI from a medium-integrity sender to the (elevated) test app, issue
+    # #503. Needs the app up; its own binary, so it runs separately.
+    if (-not $testFilter) {
+        Write-Host "Running medium-integrity UIPI test..."
+        cargo test -p xa11y-windows --test uipi_medium -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0 -and $testExit -eq 0) { $testExit = $LASTEXITCODE }
+    }
 } finally {
     # 4. Cleanup
     Write-Host "Cleaning up..."

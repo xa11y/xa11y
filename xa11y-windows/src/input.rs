@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use windows::Win32::Foundation::GetLastError;
+use windows::Win32::Foundation::{GetLastError, HWND, POINT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, SendInput, VkKeyScanExW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
@@ -25,12 +25,29 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, WindowFromPoint,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
 use xa11y_core::{Error, Result};
+
+/// Where a batch of input will land, for the UIPI pre-flight in
+/// [`crate::uipi::check_target`].
+#[derive(Clone, Copy)]
+enum Target {
+    /// Keyboard input goes to the foreground window.
+    Keyboard,
+    /// Mouse input goes to the window under this desktop point.
+    PointerAt(Point),
+    /// Mouse input at wherever the pointer already is.
+    PointerHere,
+    /// No pre-flight. For release events (`pointer_up`, `key_up`), which must
+    /// never be refused: a refused release would leave a button or key held.
+    /// Also for moves while a button is down, when mouse capture, not the
+    /// window under the point, decides where the input goes.
+    Unchecked,
+}
 
 /// One notch of a physical mouse wheel. Matches Win32's `WHEEL_DELTA` macro.
 const WHEEL_DELTA: i32 = 120;
@@ -51,6 +68,9 @@ pub struct WindowsInputProvider {
     /// says would leave the original key stuck down, so `key_up` releases the
     /// key `key_down` actually pressed.
     held_chars: Mutex<HashMap<char, VIRTUAL_KEY>>,
+    /// Mouse buttons currently held through this provider. While any is
+    /// down, moves are not pre-flighted (see [`Target::Unchecked`]).
+    buttons_down: std::sync::atomic::AtomicU32,
 }
 
 impl WindowsInputProvider {
@@ -63,8 +83,9 @@ impl WindowsInputProvider {
         Ok(Self::default())
     }
 
-    fn send(&self, inputs: &[INPUT]) -> Result<()> {
+    fn send(&self, inputs: &[INPUT], target: Target) -> Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.preflight(target)?;
         let size = std::mem::size_of::<INPUT>() as i32;
         // SAFETY: `inputs` is a valid slice and `size` matches `INPUT`.
         let sent = unsafe { SendInput(inputs, size) };
@@ -80,6 +101,33 @@ impl WindowsInputProvider {
             });
         }
         Ok(())
+    }
+
+    /// UIPI drops input to a higher-integrity window while SendInput still
+    /// counts every event as sent, so check where it will land before posting
+    /// (issue #503).
+    fn preflight(&self, target: Target) -> Result<()> {
+        let (hwnd, what) = match target {
+            Target::Unchecked => (HWND::default(), "input"),
+            // SAFETY: no arguments.
+            Target::Keyboard => (unsafe { GetForegroundWindow() }, "keyboard input"),
+            Target::PointerAt(p) => (
+                // SAFETY: plain Win32 call on a value POINT.
+                unsafe { WindowFromPoint(POINT { x: p.x, y: p.y }) },
+                "mouse input",
+            ),
+            Target::PointerHere => {
+                let mut p = POINT::default();
+                // SAFETY: `p` outlives the call.
+                unsafe { GetCursorPos(&mut p) }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("GetCursorPos failed while checking the mouse target: {e}"),
+                })?;
+                // SAFETY: plain Win32 call on a value POINT.
+                (unsafe { WindowFromPoint(p) }, "mouse input")
+            }
+        };
+        crate::uipi::check_target(hwnd, what)
     }
 }
 
@@ -392,17 +440,77 @@ impl InputProvider for WindowsInputProvider {
             ay,
             0,
         );
-        self.send(&[input])
+        // While a button is held, capture routes the move, not the window
+        // under the point, and refusing it would strand the held button.
+        let target = if self.buttons_down.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            Target::Unchecked
+        } else {
+            Target::PointerAt(to)
+        };
+        self.send(&[input], target)
     }
 
     fn pointer_down(&self, button: MouseButton) -> Result<()> {
         let (down, _) = button_down_up(button);
-        self.send(&[mouse_input(down, 0, 0, 0)])
+        self.send(&[mouse_input(down, 0, 0, 0)], Target::PointerHere)?;
+        self.buttons_down
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     fn pointer_up(&self, button: MouseButton) -> Result<()> {
         let (_, up) = button_down_up(button);
-        self.send(&[mouse_input(up, 0, 0, 0)])
+        // Never refused: a release must always reach the wire.
+        let sent = self.send(&[mouse_input(up, 0, 0, 0)], Target::Unchecked);
+        // Saturating, for an up with no matching down through this provider.
+        // A compare-exchange loop rather than `fetch_update`, which newer
+        // toolchains deprecate and the MSRV has no replacement for.
+        let mut n = self.buttons_down.load(std::sync::atomic::Ordering::Acquire);
+        while let Err(current) = self.buttons_down.compare_exchange_weak(
+            n,
+            n.saturating_sub(1),
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            n = current;
+        }
+        sent
+    }
+
+    fn pointer_drag(
+        &self,
+        from: Point,
+        to: Point,
+        button: MouseButton,
+        duration: std::time::Duration,
+    ) -> Result<()> {
+        // Mirrors core's default `InputProvider::pointer_drag` (same step
+        // interval and interpolation); keep the two in step. The only
+        // addition is the pre-flight below.
+        // Pre-flight both ends before anything is pressed, so a refusal can
+        // never strand a held button mid-drag. The moves in between run
+        // unchecked once the button is down (see `pointer_move`).
+        self.preflight(Target::PointerAt(from))?;
+        self.preflight(Target::PointerAt(to))?;
+        const STEP: std::time::Duration = std::time::Duration::from_millis(16);
+        self.pointer_move(from)?;
+        self.pointer_down(button)?;
+        let steps = (duration.as_millis() / STEP.as_millis().max(1)).max(1) as i32;
+        let moved = (|| {
+            for i in 1..=steps {
+                let t = f64::from(i) / f64::from(steps);
+                let x = from.x + (f64::from(to.x - from.x) * t).round() as i32;
+                let y = from.y + (f64::from(to.y - from.y) * t).round() as i32;
+                self.pointer_move(Point::new(x, y))?;
+                if i < steps {
+                    std::thread::sleep(STEP);
+                }
+            }
+            Ok(())
+        })();
+        // Release whatever happened to the moves, then report the first error.
+        let released = self.pointer_up(button);
+        moved.and(released)
     }
 
     fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()> {
@@ -415,7 +523,10 @@ impl InputProvider for WindowsInputProvider {
         // bookkeeps the click-count (double/triple click) for us when the
         // calls arrive within the OS double-click time.
         for _ in 0..count {
-            self.send(&[mouse_input(down, 0, 0, 0), mouse_input(up, 0, 0, 0)])?;
+            self.send(
+                &[mouse_input(down, 0, 0, 0), mouse_input(up, 0, 0, 0)],
+                Target::PointerAt(at),
+            )?;
         }
         Ok(())
     }
@@ -426,10 +537,16 @@ impl InputProvider for WindowsInputProvider {
         if delta.dy != 0 {
             // `Input.dy > 0` means scroll content down per module docs, which
             // maps to a *positive* wheel delta on Win32 (wheel rolled forward).
-            self.send(&[mouse_input(MOUSEEVENTF_WHEEL.0, 0, 0, delta.dy * step)])?;
+            self.send(
+                &[mouse_input(MOUSEEVENTF_WHEEL.0, 0, 0, delta.dy * step)],
+                Target::PointerAt(at),
+            )?;
         }
         if delta.dx != 0 {
-            self.send(&[mouse_input(MOUSEEVENTF_HWHEEL.0, 0, 0, delta.dx * step)])?;
+            self.send(
+                &[mouse_input(MOUSEEVENTF_HWHEEL.0, 0, 0, delta.dx * step)],
+                Target::PointerAt(at),
+            )?;
         }
         Ok(())
     }
@@ -440,7 +557,7 @@ impl InputProvider for WindowsInputProvider {
         if extended {
             flags |= KEYEVENTF_EXTENDEDKEY;
         }
-        self.send(&[key_input(vk, flags)])?;
+        self.send(&[key_input(vk, flags)], Target::Keyboard)?;
         if let Key::Char(c) = key {
             self.held_chars
                 .lock()
@@ -469,7 +586,8 @@ impl InputProvider for WindowsInputProvider {
         if extended {
             flags |= KEYEVENTF_EXTENDEDKEY;
         }
-        self.send(&[key_input(vk, flags)])?;
+        // Never refused: a release must always reach the wire.
+        self.send(&[key_input(vk, flags)], Target::Unchecked)?;
         if let Key::Char(c) = key {
             self.held_chars
                 .lock()
@@ -500,7 +618,7 @@ impl InputProvider for WindowsInputProvider {
         if inputs.is_empty() {
             return Ok(());
         }
-        self.send(&inputs)
+        self.send(&inputs, Target::Keyboard)
     }
 }
 
