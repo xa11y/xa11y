@@ -559,10 +559,19 @@ let dragPayload = "xa11y-drag-payload"
 /// drive for an AppKit drop to happen.
 class DragSourceView: NSView, NSDraggingSource {
     private var sessionStarted = false
+    // Stage counters for the drag test's diagnosis, read through AXHelp
+    // (xa11y's `description`): which step of a synthesized drag AppKit saw.
+    private var downs = 0
+    private var dragged = 0
+    private var began = 0
+    private var ended = "none"
 
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .group }
     override func accessibilityLabel() -> String? { "Drag Source" }
+    override func accessibilityHelp() -> String? {
+        "down:\(downs) dragged:\(dragged) began:\(began) ended:\(ended)"
+    }
 
     // The headless app is never active; without this the first click on an
     // inactive window only activates it and never reaches the view.
@@ -574,10 +583,12 @@ class DragSourceView: NSView, NSDraggingSource {
     }
 
     override func mouseDown(with event: NSEvent) {
+        downs += 1
         sessionStarted = false
     }
 
     override func mouseDragged(with event: NSEvent) {
+        dragged += 1
         guard !sessionStarted else { return }
         sessionStarted = true
         let item = NSDraggingItem(pasteboardWriter: dragPayload as NSString)
@@ -591,12 +602,30 @@ class DragSourceView: NSView, NSDraggingSource {
     ) -> NSDragOperation {
         .copy
     }
+
+    func draggingSession(_ session: NSDraggingSession, willBeginAt screenPoint: NSPoint) {
+        began += 1
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        endedAt screenPoint: NSPoint,
+        operation: NSDragOperation
+    ) {
+        ended = "op=\(operation.rawValue)@(\(Int(screenPoint.x)),\(Int(screenPoint.y)))"
+    }
 }
 
 /// Accepts `dragPayload` drops and counts them in its accessibility value
 /// ("drops: N"), which is what the drag test reads back.
 class DropTargetView: NSView {
     private var drops = 0
+    // Stage counters for the drag test's diagnosis, read through AXHelp.
+    private var entered = 0
+    private var updated = 0
+    private var exited = 0
+    private var prepared = 0
+    private var performed = 0
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -611,6 +640,10 @@ class DropTargetView: NSView {
     override func accessibilityRole() -> NSAccessibility.Role? { .group }
     override func accessibilityLabel() -> String? { "Drop Target" }
     override func accessibilityValue() -> Any? { "drops: \(drops)" }
+    override func accessibilityHelp() -> String? {
+        "entered:\(entered) updated:\(updated) exited:\(exited) " +
+            "prepared:\(prepared) performed:\(performed)"
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.systemGreen.setFill()
@@ -618,10 +651,26 @@ class DropTargetView: NSView {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        .copy
+        entered += 1
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        updated += 1
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        exited += 1
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        prepared += 1
+        return true
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        performed += 1
         guard sender.draggingPasteboard.string(forType: .string) == dragPayload else {
             return false
         }

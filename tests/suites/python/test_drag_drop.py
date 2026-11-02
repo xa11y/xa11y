@@ -44,8 +44,11 @@ def test_cocoa_drag_delivers_a_drop(app_name, app):
         if after > before:
             break
         time.sleep(0.1)
+    # Each fixture reports, through its description, which steps of the drag
+    # AppKit saw, so a failure names the stage that broke.
+    source_stages = app.locator('[name="Drag Source"]').element().description
+    target_stages = app.locator('[name="Drop Target"]').element().description
     assert after == before + 1, (
         f"drag from {source.bounds} to {target.bounds} delivered {after - before} "
-        "drops; the pointer moved but AppKit never completed a drag session onto "
-        "the target"
+        f"drops; source saw [{source_stages}], target saw [{target_stages}]"
     )
