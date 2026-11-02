@@ -384,8 +384,9 @@ impl LinuxProvider {
         Err(Error::AccessibilityNotEnabled {
             app: app_name,
             instructions: "Chromium/Electron app exposes an empty accessibility tree on Linux. \
-                Relaunch with `--force-renderer-accessibility` (or set the env var \
-                `ACCESSIBILITY_ENABLED=1`) so the renderer accessibility bridge is initialised."
+                Relaunch it with `--force-renderer-accessibility`. In a session with no \
+                settings daemon (CI, Xvfb, a container), also set `ACCESSIBILITY_ENABLED=1` \
+                in its environment: there Chromium needs both before it exposes web content."
                 .to_string(),
         })
     }
@@ -459,9 +460,13 @@ impl LinuxProvider {
         ))
     }
 
-    /// `GetState` for a registry scan, as one 64-bit set. `Ok(None)` when
-    /// the object or its peer is gone; [`Error::Timeout`] naming the app when
-    /// it does not answer.
+    /// `GetState` as one 64-bit set, for a decision that must not guess (the
+    /// registry scans and the `App::windows()` filter, #492). `Ok(None)` when
+    /// the object or its peer is gone: GDBus (GTK 4) answers a destroyed
+    /// object with `UnknownMethod`, so every absent-member reply counts.
+    /// [`Error::Timeout`] naming the app when it does not answer; any other
+    /// failure is returned. Contrast [`Self::state_bits`], which the snapshot
+    /// path uses to tolerate an unreadable state per field.
     fn scan_state_bits(&self, aref: &AccessibleRef) -> Result<Option<u64>> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = match proxy.call_method("GetState", &()) {
@@ -479,7 +484,10 @@ impl LinuxProvider {
         };
         let words: Vec<u32> = reply.body().deserialize().map_err(|e| Error::Platform {
             code: -1,
-            message: format!("GetState deserialize failed: {e}"),
+            message: format!(
+                "GetState deserialize failed for {}{}: {e}",
+                aref.bus_name, aref.path
+            ),
         })?;
         Ok(Some(
             words
@@ -1085,7 +1093,13 @@ impl LinuxProvider {
                 rayon::join(
                     || {
                         rayon::join(
-                            || self.parse_states_with_bits(aref, role),
+                            || {
+                                self.parse_states_with_bits(
+                                    aref,
+                                    role,
+                                    is_password_role(&role_name, role_num),
+                                )
+                            },
                             || {
                                 if role != Role::Application {
                                     self.get_extents(aref, ifaces)
@@ -1367,14 +1381,29 @@ impl LinuxProvider {
     }
 
     /// Parse AT-SPI2 state bitfield into xa11y StateSet.
+    ///
+    /// Serves only the selector fast path, which never asks it for
+    /// `password`: that flag comes from the raw AT-SPI role rather than the
+    /// state bits, so `state_attr_to_string` has no arm for it and a
+    /// `[password=..]` filter takes the full-`ElementData` route instead. The
+    /// `false` passed here is therefore never read.
     fn parse_states(&self, aref: &AccessibleRef, role: Role) -> StateSet {
-        self.parse_states_with_bits(aref, role).0
+        self.parse_states_with_bits(aref, role, false).0
     }
 
     /// Like [`parse_states`], but also returns the raw AT-SPI state bitset so
     /// callers can surface provider-only facts (notably DEFUNCT) that have no
     /// cross-platform `StateSet` field.
-    fn parse_states_with_bits(&self, aref: &AccessibleRef, role: Role) -> (StateSet, u64) {
+    ///
+    /// `password` is decided by the caller from the raw role (see
+    /// [`is_password_role`]); the mapped `Role` cannot carry it, because a
+    /// password field maps to `TextField` like any other entry.
+    fn parse_states_with_bits(
+        &self,
+        aref: &AccessibleRef,
+        role: Role,
+        password: bool,
+    ) -> (StateSet, u64) {
         let (bits, state_read_ok) = self.state_bits(aref);
 
         // AT-SPI2 state bit positions: each is `1 << ordinal` of the
@@ -1454,6 +1483,7 @@ impl LinuxProvider {
             },
             maximized: None,
             fullscreen: None,
+            password,
         }
         .into();
         (states, bits)
@@ -2258,6 +2288,35 @@ impl Provider for LinuxProvider {
             }
         }
         Ok(surfaces)
+    }
+
+    /// The application's top-level children, minus windows that are not on
+    /// screen in any sense.
+    ///
+    /// Qt keeps a hidden top-level dialog alive in the AT-SPI tree after
+    /// `hide()`, with no native window behind it, so it was listed as a window
+    /// the user cannot see (issue #492). A top-level window or dialog is
+    /// dropped when its state set has neither `VISIBLE` nor `ICONIFIED`. A
+    /// minimized window keeps `ICONIFIED`, and an unmapped one (minimized,
+    /// or on another workspace) keeps `VISIBLE` without `SHOWING`; both stay
+    /// listed. A window destroyed since the children read is gone and
+    /// skipped; any other state-read failure fails the listing rather than
+    /// guessing either way.
+    fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        let children = self.get_children(Some(app))?;
+        let mut windows = Vec::with_capacity(children.len());
+        for child in children {
+            if matches!(child.role, Role::Window | Role::Dialog) {
+                let aref = self.get_cached(child.handle)?;
+                match self.scan_state_bits(&aref)? {
+                    Some(bits) if is_listable_top_level(bits) => {}
+                    // Hidden toolkit object, or destroyed since enumeration.
+                    _ => continue,
+                }
+            }
+            windows.push(child);
+        }
+        Ok(windows)
     }
 
     /// A single process can register several AT-SPI Application entries
@@ -3171,6 +3230,19 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
     }
 }
 
+/// `AtspiRole::PasswordText` — the numeric role of a password entry.
+const ATSPI_ROLE_PASSWORD_TEXT: u32 = 40;
+
+/// Whether an AT-SPI role, by name or number, is `PasswordText`.
+///
+/// Both forms are accepted because bridges disagree on which they fill in:
+/// AccessKit reports an empty role name and only the number, GTK both. The
+/// mapped `Role` cannot answer this, since `PasswordText` maps to
+/// `TextField` so `text_field` selectors keep matching password entries.
+pub(crate) fn is_password_role(role_name: &str, role_num: u32) -> bool {
+    role_num == ATSPI_ROLE_PASSWORD_TEXT || role_name.eq_ignore_ascii_case("password text")
+}
+
 /// `AtspiRole::Frame` — the numeric role a top-level window frame reports.
 ///
 /// Named because `is_dock_frame` needs the number itself: the table below
@@ -3190,53 +3262,53 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         // Bare ColumnHeader/RowHeader (10/47): WebKit and GTK emit these for
         // <th> / column-view header cells, distinct from the
         // TableColumnHeader/TableRowHeader pair (57/58) below.
-        10 => Role::TableCell,   // ColumnHeader
-        11 => Role::ComboBox,    // ComboBox
-        13 => Role::Image,       // DesktopIcon
-        16 => Role::Dialog,      // Dialog
-        19 => Role::Dialog,      // FileChooser
-        20 => Role::Group,       // Filler
-        23 => Role::Window,      // Frame
-        26 => Role::Image,       // Icon
-        27 => Role::Image,       // Image
-        29 => Role::StaticText,  // Label
-        31 => Role::List,        // List
-        32 => Role::ListItem,    // ListItem
-        33 => Role::Menu,        // Menu
-        34 => Role::MenuBar,     // MenuBar
-        35 => Role::MenuItem,    // MenuItem
-        37 => Role::Tab,         // PageTab
-        38 => Role::TabGroup,    // PageTabList
-        39 => Role::Group,       // Panel
-        40 => Role::TextField,   // PasswordText
-        41 => Role::Menu,        // PopupMenu
-        42 => Role::ProgressBar, // ProgressBar
-        43 => Role::Button,      // Button (push button)
-        44 => Role::RadioButton, // RadioButton
-        45 => Role::RadioButton, // RadioMenuItem
-        47 => Role::TableCell,   // RowHeader
-        48 => Role::ScrollBar,   // ScrollBar
-        49 => Role::Group,       // ScrollPane
-        50 => Role::Separator,   // Separator
-        51 => Role::Slider,      // Slider
-        52 => Role::SpinButton,  // SpinButton
-        53 => Role::SplitGroup,  // SplitPane
-        54 => Role::Status,      // StatusBar
-        55 => Role::Table,       // Table
-        56 => Role::TableCell,   // TableCell
-        57 => Role::TableCell,   // TableColumnHeader
-        58 => Role::TableCell,   // TableRowHeader
-        59 => Role::MenuItem,    // TearoffMenuItem
-        60 => Role::TextArea,    // Terminal (VTE and friends — text via the Text interface)
-        61 => Role::TextArea,    // Text
-        62 => Role::Switch,      // ToggleButton
-        63 => Role::Toolbar,     // ToolBar
-        64 => Role::Tooltip,     // ToolTip
-        65 => Role::Group,       // Tree
-        66 => Role::Table,       // TreeTable
-        67 => Role::Unknown,     // Unknown
-        68 => Role::Group,       // Viewport
-        69 => Role::Window,      // Window
+        10 => Role::TableCell,                       // ColumnHeader
+        11 => Role::ComboBox,                        // ComboBox
+        13 => Role::Image,                           // DesktopIcon
+        16 => Role::Dialog,                          // Dialog
+        19 => Role::Dialog,                          // FileChooser
+        20 => Role::Group,                           // Filler
+        23 => Role::Window,                          // Frame
+        26 => Role::Image,                           // Icon
+        27 => Role::Image,                           // Image
+        29 => Role::StaticText,                      // Label
+        31 => Role::List,                            // List
+        32 => Role::ListItem,                        // ListItem
+        33 => Role::Menu,                            // Menu
+        34 => Role::MenuBar,                         // MenuBar
+        35 => Role::MenuItem,                        // MenuItem
+        37 => Role::Tab,                             // PageTab
+        38 => Role::TabGroup,                        // PageTabList
+        39 => Role::Group,                           // Panel
+        ATSPI_ROLE_PASSWORD_TEXT => Role::TextField, // PasswordText; see `is_password_role`
+        41 => Role::Menu,                            // PopupMenu
+        42 => Role::ProgressBar,                     // ProgressBar
+        43 => Role::Button,                          // Button (push button)
+        44 => Role::RadioButton,                     // RadioButton
+        45 => Role::RadioButton,                     // RadioMenuItem
+        47 => Role::TableCell,                       // RowHeader
+        48 => Role::ScrollBar,                       // ScrollBar
+        49 => Role::Group,                           // ScrollPane
+        50 => Role::Separator,                       // Separator
+        51 => Role::Slider,                          // Slider
+        52 => Role::SpinButton,                      // SpinButton
+        53 => Role::SplitGroup,                      // SplitPane
+        54 => Role::Status,                          // StatusBar
+        55 => Role::Table,                           // Table
+        56 => Role::TableCell,                       // TableCell
+        57 => Role::TableCell,                       // TableColumnHeader
+        58 => Role::TableCell,                       // TableRowHeader
+        59 => Role::MenuItem,                        // TearoffMenuItem
+        60 => Role::TextArea, // Terminal (VTE and friends — text via the Text interface)
+        61 => Role::TextArea, // Text
+        62 => Role::Switch,   // ToggleButton
+        63 => Role::Toolbar,  // ToolBar
+        64 => Role::Tooltip,  // ToolTip
+        65 => Role::Group,    // Tree
+        66 => Role::Table,    // TreeTable
+        67 => Role::Unknown,  // Unknown
+        68 => Role::Group,    // Viewport
+        69 => Role::Window,   // Window
         // Text-document containers WebKit emits for plain markup: a bare
         // <p> (no ARIA naming) is Paragraph; header/footer/caption/block
         // quote come from the matching HTML elements. Containers normalize
@@ -3373,6 +3445,18 @@ fn extents_to_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Rect> {
         width: w as u32,
         height: h as u32,
     })
+}
+
+/// Whether a top-level window's AT-SPI state set means it exists for the
+/// user: `VISIBLE` (mapped, or unmapped but not hidden: minimized or on
+/// another workspace, where `SHOWING` is clear) or `ICONIFIED` (minimized).
+/// A window with neither is a hidden toolkit object, not a window (issue
+/// #492). `SHOWING` alone does not count, matching the provider's own
+/// definition of a hidden element.
+pub(crate) fn is_listable_top_level(bits: u64) -> bool {
+    const ICONIFIED: u64 = 1 << 15;
+    const VISIBLE: u64 = 1 << 30;
+    bits & (VISIBLE | ICONIFIED) != 0
 }
 
 /// Classify the structured reply before rendering it. `UnknownObject` means
@@ -3617,6 +3701,15 @@ fn is_peer_gone(err: &zbus::Error) -> bool {
         zbus::Error::FDO(e) => PEER_GONE_ERRORS.contains(&e.name().as_str()),
         _ => false,
     }
+}
+
+/// Whether a failed D-Bus call means the object or its application is gone:
+/// an absent member (see [`is_absent_member`]; GDBus answers a destroyed
+/// object with `UnknownMethod`) or a departed peer (see [`is_peer_gone`]).
+/// Only for members every accessible implements, where absence can mean
+/// nothing else.
+pub(crate) fn is_gone(err: &zbus::Error) -> bool {
+    is_absent_member(err) || is_peer_gone(err)
 }
 
 /// Whether a failed D-Bus call means the member is absent (see
@@ -3866,8 +3959,10 @@ mod tests {
         assert!(!atspi_visible(SHOWING));
         assert!(!atspi_visible(0));
         // The event decoder uses the same rule.
-        assert!(!crate::events::states_from_bits(VISIBLE, Role::Button, true).visible);
-        assert!(crate::events::states_from_bits(VISIBLE | SHOWING, Role::Button, true).visible);
+        assert!(!crate::events::states_from_bits(VISIBLE, Role::Button, true, false).visible);
+        assert!(
+            crate::events::states_from_bits(VISIBLE | SHOWING, Role::Button, true, false).visible
+        );
     }
 
     #[test]
@@ -3892,6 +3987,23 @@ mod tests {
         // N×0 and 0×N are thin but real (a separator), as on Windows.
         assert!(extents_to_rect(5, 5, 30, 0).is_some());
         assert!(extents_to_rect(5, 5, 0, 30).is_some());
+    }
+
+    #[test]
+    fn hidden_top_levels_are_not_listed_but_minimized_ones_are() {
+        const ICONIFIED: u64 = 1 << 15;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        // Qt's hidden dialog: none of the three.
+        assert!(!is_listable_top_level(0));
+        assert!(!is_listable_top_level(1 << 8)); // ENABLED alone
+        assert!(is_listable_top_level(VISIBLE | SHOWING));
+        // Unmapped (another workspace): VISIBLE without SHOWING.
+        assert!(is_listable_top_level(VISIBLE));
+        // SHOWING without VISIBLE is not a shown window.
+        assert!(!is_listable_top_level(SHOWING));
+        // Minimized: no SHOWING, but ICONIFIED keeps it listed.
+        assert!(is_listable_top_level(ICONIFIED));
     }
 
     #[test]
@@ -4364,6 +4476,26 @@ mod tests {
         assert_eq!(number, ATSPI_ROLE_FRAME, "{name} moved");
     }
 
+    /// `is_password_role` must agree with the AtspiRole table by number and
+    /// by name, and must leave the mapped role at `TextField` so existing
+    /// `text_field` selectors keep matching password entries (#522).
+    #[test]
+    fn test_password_text_is_flagged_by_name_or_number() {
+        let (number, name) = ATSPI_ROLE_ENUM
+            .iter()
+            .find(|(_, name)| *name == "password text")
+            .copied()
+            .expect("the AtspiRole table must carry `password text`");
+        assert_eq!(number, ATSPI_ROLE_PASSWORD_TEXT, "{name} moved");
+        assert!(is_password_role("", number), "AccessKit: number only");
+        assert!(is_password_role("password text", 0), "name only");
+        assert!(is_password_role("Password Text", number));
+        assert!(!is_password_role("entry", 61));
+        assert!(!is_password_role("", 0), "an unread role is not a password");
+        assert_eq!(map_atspi_role_number(number), Role::TextField);
+        assert_eq!(map_atspi_role(name), Role::TextField);
+    }
+
     /// The dock attribute only makes a surface on a top-level frame. `panel`
     /// (39) is the AT-SPI role for an ordinary grouping container (it maps to
     /// `Role::Group`), and `window` (69) / `dialog` (16) are not what panels
@@ -4434,6 +4566,166 @@ mod tests {
             ),
             Error::Platform { .. }
         ));
+    }
+
+    /// AT-SPI peer for the #492 window filter: a role, a state set, and a
+    /// `GetState` that can fail the way a destroyed or hung object does.
+    struct StatePeer {
+        name: &'static str,
+        role: &'static str,
+        children: Vec<&'static str>,
+        state: u64,
+        state_error: Option<&'static str>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl StatePeer {
+        fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            self.children
+                .iter()
+                .map(|path| {
+                    (
+                        "org.test.States".into(),
+                        zbus::zvariant::OwnedObjectPath::try_from(*path).expect("test path"),
+                    )
+                })
+                .collect()
+        }
+
+        fn get_role_name(&self) -> &str {
+            self.role
+        }
+
+        fn get_role(&self) -> u32 {
+            match self.role {
+                "application" => 75,
+                "frame" => 23,
+                "dialog" => 16,
+                "push button" => 43,
+                other => panic!("no role number for fixture role {other:?}"),
+            }
+        }
+
+        fn get_state(&self) -> zbus::fdo::Result<Vec<u32>> {
+            match self.state_error {
+                None => Ok(vec![self.state as u32, (self.state >> 32) as u32]),
+                Some("UnknownObject") => Err(zbus::fdo::Error::UnknownObject("destroyed".into())),
+                Some("NoReply") => Err(zbus::fdo::Error::NoReply("unresponsive".into())),
+                Some("UnknownMethod") => Err(zbus::fdo::Error::UnknownMethod(
+                    "Object does not exist at path".into(),
+                )),
+                Some(other) => panic!("unsupported test error {other:?}"),
+            }
+        }
+
+        #[zbus(property)]
+        fn name(&self) -> &str {
+            self.name
+        }
+    }
+
+    /// Serve `peers` (path, peer) under an application at `/root` and return
+    /// a provider connected to them plus the application snapshot.
+    fn state_peer_app(
+        peers: Vec<(&'static str, StatePeer)>,
+    ) -> (Connection, LinuxProvider, ElementData) {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            let root = StatePeer {
+                name: "App",
+                role: "application",
+                children: peers.iter().map(|(path, _)| *path).collect(),
+                state: 0,
+                state_error: None,
+            };
+            let mut builder =
+                zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                    .server(zbus::Guid::generate())
+                    .expect("server GUID")
+                    .p2p()
+                    .serve_at("/root", root)
+                    .expect("root interface");
+            for (path, peer) in peers {
+                builder = builder.serve_at(path, peer).expect("peer interface");
+            }
+            builder.build().expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        };
+        let root = provider.build_element_data(
+            &AccessibleRef {
+                bus_name: "org.test.States".into(),
+                path: "/root".into(),
+            },
+            None,
+        );
+        (server, provider, root)
+    }
+
+    fn state_peer(name: &'static str, role: &'static str, state: u64) -> StatePeer {
+        StatePeer {
+            name,
+            role,
+            children: vec![],
+            state,
+            state_error: None,
+        }
+    }
+
+    /// Issue #492: Qt's hidden dialog (neither VISIBLE nor ICONIFIED) is not
+    /// a window; a minimized or unmapped one is; a window destroyed since the
+    /// children read is gone, whether the peer says `UnknownObject` (zbus) or
+    /// `UnknownMethod` (GDBus); a non-window child is never filtered.
+    #[test]
+    fn app_windows_drops_hidden_top_levels_and_keeps_minimized_ones() {
+        const ICONIFIED: u64 = 1 << 15;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        let mut gone = state_peer("Gone", "frame", VISIBLE | SHOWING);
+        gone.state_error = Some("UnknownObject");
+        // GDBus (GTK 4) answers a destroyed object with UnknownMethod.
+        let mut gdbus_gone = state_peer("GdbusGone", "frame", VISIBLE | SHOWING);
+        gdbus_gone.state_error = Some("UnknownMethod");
+        let (_server, provider, app) = state_peer_app(vec![
+            ("/main", state_peer("Main", "frame", VISIBLE | SHOWING)),
+            ("/hidden", state_peer("Sample Dialog", "dialog", 1 << 8)),
+            ("/minimized", state_peer("Minimized", "frame", ICONIFIED)),
+            ("/unmapped", state_peer("Unmapped", "dialog", VISIBLE)),
+            ("/gdbus_gone", gdbus_gone),
+            ("/gone", gone),
+            ("/button", state_peer("Stray", "push button", 0)),
+        ]);
+        let windows = provider.app_windows(&app).expect("app windows");
+        let names: Vec<_> = windows
+            .iter()
+            .map(|w| w.name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(names, vec!["Main", "Minimized", "Unmapped", "Stray"]);
+    }
+
+    /// A state read that fails for any reason but a destroyed object fails
+    /// the listing: the window is neither listed nor hidden on a guess.
+    #[test]
+    fn app_windows_surfaces_a_failed_state_read() {
+        let mut hung = state_peer("Hung", "frame", 0);
+        hung.state_error = Some("NoReply");
+        let (_server, provider, app) = state_peer_app(vec![("/hung", hung)]);
+        let err = provider.app_windows(&app).expect_err("NoReply must fail");
+        assert!(
+            matches!(&err, Error::Platform { message, .. }
+                if message.contains("GetState") && message.contains("/hung")),
+            "{err:?}"
+        );
     }
 
     /// Minimal AT-SPI peer: the first child disappears when its children are

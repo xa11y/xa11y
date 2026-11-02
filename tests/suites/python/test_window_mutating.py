@@ -97,6 +97,26 @@ def _wait_until(predicate, timeout: float, what: str):
     raise AssertionError(f"timed out waiting for {what}")
 
 
+def _describe_windows(windows: list[xa11y.Element]) -> str:
+    """One bounded line per window, for a settle assertion that found none.
+
+    Tells "the window was missing from the list" from "the window was listed
+    without the verb", which an empty lookup alone cannot.
+    """
+    if not windows:
+        return "[] (the target window is not enumerated)"
+    def clip(text: str, limit: int) -> str:
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    shown = [
+        f"{w.role} {clip(repr(w.name), 60)} actions={clip(','.join(w.actions), 120)} "
+        f"minimized={w.minimized!r} fullscreen={w.fullscreen!r}"
+        for w in windows[:8]
+    ]
+    more = "; ..." if len(windows) > 8 else ""
+    return f"[{'; '.join(shown)}{more}]"
+
+
 def _settled_window(
     app: xa11y.App, verb: str, predicate, what: str
 ) -> xa11y.Element:
@@ -118,8 +138,12 @@ def _settled_window(
         return win
 
     if MACOS:
-        win = _window_advertising(app, verb)
-        assert win is not None, f"{what}: no window advertises {verb}"
+        windows = app.windows()
+        win = next((w for w in windows if verb in w.actions), None)
+        assert win is not None, (
+            f"{what}: no window advertises {verb}; app.windows() = "
+            f"{_describe_windows(windows)}"
+        )
         assert predicate(win), (
             f"{what}: minimized={win.minimized!r} fullscreen={win.fullscreen!r} "
             f"maximized={win.maximized!r}"
@@ -160,9 +184,9 @@ def _window_named(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
         raise
     # Only a *visible* window counts: the Qt fixture hides its dialog rather
     # than destroying it, and Qt keeps the hidden node in the AT-SPI tree with
-    # no X11 window behind it. Counting it would make "the dialog closed"
-    # unobservable and hand the next test a stale node before the reopened
-    # dialog is shown.
+    # no X11 window behind it. App.windows() leaves that node out since issue
+    # #492 (test_closed_dialog_is_not_listed_as_a_window pins it); the filter
+    # stays so a window caught mid-hide is not handed to the next test.
     for w in windows:
         if w.visible and w.name and dialog_name in w.name:
             return w
@@ -1121,6 +1145,28 @@ def test_close_dialog_via_locator(app: xa11y.App, app_config: dict) -> None:
         # Same rail as test_close_dialog_via_element: the dialog must be gone
         # before the next suite enumerates windows.
         _close_dialog_from_finally(app, app_config)
+
+
+def test_closed_dialog_is_not_listed_as_a_window(
+    app: xa11y.App, app_config: dict
+) -> None:
+    """A dialog the user closed does not linger in ``App.windows()``.
+
+    The Qt fixture hides its dialog rather than destroying it, and Qt keeps
+    the hidden node in the AT-SPI tree with no native window behind it. It
+    used to be listed as a window the user cannot see (issue #492). Unlike
+    the helpers above, this reads ``App.windows()`` with no ``visible``
+    filter of its own: the listing itself must leave the ghost out.
+    """
+    dialog_name = app_config.get("dialog_name", "")
+    _open_dialog(app, app_config)
+    _close_dialog(app, app_config, strict=True)
+    if _dialog_present(app, dialog_name):
+        pytest.skip("this platform cannot dispatch a close to its dialog")
+    listed = [w.name for w in app.windows() if w.name and dialog_name in w.name]
+    assert listed == [], (
+        f"a closed dialog is still listed as a window: {listed!r} (issue #492)"
+    )
 
 
 @pytest.mark.skipif(

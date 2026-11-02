@@ -411,3 +411,35 @@ def test_wait_for_event(app, app_config):
             timeout=5.0,
         )
         assert event.event_type == xa11y.EventType.VALUE_CHANGED
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="pins the AT-SPI derivation; WPF covers WindowOpened through UIA",
+)
+def test_window_opened_and_closed_for_dialog(app, app_config):
+    """Opening and closing the app's dialog delivers WindowOpened / WindowClosed.
+
+    Neither GTK 4 nor Qt emits ``Window:Create`` / ``Window:Destroy``, and Qt
+    emits nothing at all unless a listener registered with the AT-SPI
+    registry (issue #488). The events must arrive; silence fails the test
+    rather than skipping it.
+    """
+    btn = app_config.get("dialog_button_name")
+    dialog_name = app_config.get("dialog_name")
+    if not btn or not dialog_name:
+        pytest.skip("app config has no dialog")
+
+    def is_dialog_event(kind):
+        return lambda e: (
+            e.event_type == kind
+            and e.target is not None
+            and dialog_name in (e.target.name or "")
+        )
+
+    with app.subscribe() as sub:
+        app.locator(f'button[name="{btn}"]').press()
+        sub.wait_for(is_dialog_event(xa11y.EventType.WINDOW_OPENED), timeout=5.0)
+        close_btn = app_config.get("dialog_close_button_name", "Close Dialog")
+        app.locator(f'button[name="{close_btn}"]').press()
+        sub.wait_for(is_dialog_event(xa11y.EventType.WINDOW_CLOSED), timeout=5.0)

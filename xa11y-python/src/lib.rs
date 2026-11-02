@@ -239,6 +239,7 @@ fn make_py_element(
             modal: data.states.modal,
             required: data.states.required,
             busy: data.states.busy,
+            password: data.states.password,
             minimized: data.states.minimized,
             maximized: data.states.maximized,
             fullscreen: data.states.fullscreen,
@@ -355,6 +356,11 @@ struct Element {
     required: bool,
     #[pyo3(get)]
     busy: bool,
+    /// Whether this is a password (secure text) field. The role stays
+    /// ``text_field``; xa11y redacts nothing, so a caller that must keep a
+    /// secret out of its logs checks this flag.
+    #[pyo3(get)]
+    password: bool,
     /// Whether the window is minimized. ``None`` = unknown / not a window —
     /// a platform that cannot report the state says so rather than guessing.
     #[pyo3(get)]

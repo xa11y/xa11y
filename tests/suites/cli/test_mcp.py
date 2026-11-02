@@ -216,7 +216,117 @@ def test_notifications_are_not_answered(mcp):
 
 
 def test_unknown_method_is_method_not_found(mcp):
-    assert mcp.request(1, "resources/list")["error"]["code"] == -32601
+    assert mcp.request(1, "sampling/createMessage")["error"]["code"] == -32601
+
+
+# ── The agent guide: prompt, resource, and `xa11y guide` ────────────────────
+
+GUIDE_URI = "xa11y://guide"
+
+
+def _normalize(text: str) -> str:
+    """Line endings only: a Windows checkout may embed the guide with CRLF."""
+    return text.replace("\r\n", "\n")
+
+
+def _cli_guide(entry_point: list[str]) -> str:
+    result = _run(entry_point, "guide")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("# xa11y agent guide"), result.stdout[:80]
+    return _normalize(result.stdout)
+
+
+def test_both_eras_advertise_prompts_and_resources(entry_point):
+    legacy = McpSession(entry_point)
+    modern = McpSession(entry_point)
+    try:
+        caps = legacy.request(
+            1, "initialize", {"protocolVersion": LEGACY_VERSION, "capabilities": {}}
+        )["result"]["capabilities"]
+        assert {"tools", "prompts", "resources"} <= caps.keys(), caps
+        caps = modern.request(
+            1, "server/discover", {"_meta": {PROTOCOL_VERSION_META: MODERN_VERSION}}
+        )["result"]["capabilities"]
+        assert {"tools", "prompts", "resources"} <= caps.keys(), caps
+    finally:
+        legacy.kill()
+        modern.kill()
+
+
+def test_the_guide_resource_is_what_xa11y_guide_prints(mcp, entry_point):
+    """One text, three ways to reach it, from every launcher."""
+    listed = mcp.request(1, "resources/list")["result"]["resources"]
+    assert [r["uri"] for r in listed] == [GUIDE_URI]
+    assert listed[0]["mimeType"] == "text/markdown"
+    contents = mcp.request(2, "resources/read", {"uri": GUIDE_URI})["result"]["contents"]
+    assert contents[0]["uri"] == GUIDE_URI
+    assert _normalize(contents[0]["text"]) == _cli_guide(entry_point)
+
+
+def test_the_guide_prompt_is_what_xa11y_guide_prints(mcp, entry_point):
+    listed = mcp.request(1, "prompts/list")["result"]["prompts"]
+    assert [p["name"] for p in listed] == ["guide"]
+    result = mcp.request(2, "prompts/get", {"name": "guide"})["result"]
+    message = result["messages"][0]
+    assert message["role"] == "user"
+    assert _normalize(message["content"]["text"]) == _cli_guide(entry_point)
+
+
+def test_legacy_guide_results_carry_no_modern_fields(mcp):
+    for i, (method, params) in enumerate(
+        [
+            ("resources/list", None),
+            ("resources/read", {"uri": GUIDE_URI}),
+            ("prompts/list", None),
+            ("prompts/get", {"name": "guide"}),
+        ]
+    ):
+        result = mcp.request(i, method, params)["result"]
+        for key in ("resultType", "ttlMs", "cacheScope"):
+            assert key not in result, (method, key)
+
+
+def test_modern_guide_lists_and_reads_carry_the_caching_hints(entry_point):
+    session = McpSession(entry_point)
+    meta = {"_meta": {PROTOCOL_VERSION_META: MODERN_VERSION}}
+    try:
+        for i, (method, extra) in enumerate(
+            [
+                ("resources/list", {}),
+                ("resources/templates/list", {}),
+                ("resources/read", {"uri": GUIDE_URI}),
+                ("prompts/list", {}),
+            ]
+        ):
+            result = session.request(i, method, {**meta, **extra})["result"]
+            assert result["resultType"] == "complete", method
+            assert result["ttlMs"] >= 0, method
+            assert result["cacheScope"] in {"public", "private"}, method
+        got = session.request(9, "prompts/get", {**meta, "name": "guide"})["result"]
+        assert got["resultType"] == "complete"
+    finally:
+        session.kill()
+
+
+def test_an_unknown_resource_or_prompt_names_what_exists(mcp):
+    error = mcp.request(1, "resources/read", {"uri": "xa11y://nope"})["error"]
+    assert error["code"] == -32602
+    assert error["data"]["available"] == [GUIDE_URI]
+    error = mcp.request(2, "prompts/get", {"name": "nope"})["error"]
+    assert error["code"] == -32602
+    assert error["data"]["available"] == ["guide"]
+
+
+def test_the_guide_prompt_refuses_arguments(mcp):
+    """It declares none, so one sent anyway must not be silently ignored."""
+    error = mcp.request(1, "prompts/get", {"name": "guide", "arguments": {"app": "x"}})
+    assert error["error"]["code"] == -32602
+
+
+def test_xa11y_guide_takes_no_arguments_from_every_launcher(entry_point):
+    result = _run(entry_point, "guide", "--json")
+    assert result.returncode == 2, result.stderr
+    assert "usage error:" in result.stderr
 
 
 # ── Framing ──────────────────────────────────────────────────────────────────
@@ -1008,6 +1118,52 @@ def test_tree_defaults_to_a_bounded_depth(mcp, app_pid):
     assert structured["max_depth"] == 12, "the default must be bounded, not unlimited"
 
 
+def _walk(node):
+    yield node
+    for child in node.get("children", []):
+        yield from _walk(child)
+
+
+def test_a_depth_cut_is_marked_on_the_node_that_lost_its_children(mcp, app_pid):
+    """A pruned node read as a leaf is the silent shortening the bound forbids.
+
+    At `max_depth: 1` the application's top-level children are the frontier.
+    Their roles vary by toolkit (GTK's top level is not always `window`), so
+    the test goes by position: every frontier node with children must say it
+    was cut and how many it has, and one that was not cut claims no count.
+    """
+    structured = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 1})["result"][
+        "structuredContent"
+    ]
+    assert structured["truncated"]["by_depth"] is True, structured["truncated"]
+    root = structured["tree"]
+    frontier = root.get("children", [])
+    assert frontier, root
+    marked = [c for c in frontier if c.get("subtree_truncated")]
+    assert marked, "by_depth is set, so some frontier node must carry the cut"
+    for child in frontier:
+        assert "children" not in child, child
+        if child.get("subtree_truncated") is True:
+            assert child["children_count"] >= 1, child
+        else:
+            assert "children_count" not in child, child
+
+
+def test_an_uncut_tree_marks_no_node(mcp, app_pid):
+    """When neither limit bit, no node may claim it lost children."""
+    structured = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 64})["result"][
+        "structuredContent"
+    ]
+    cut = structured["truncated"]
+    marked = [n for n in _walk(structured["tree"]) if n.get("subtree_truncated")]
+    if not cut["by_depth"] and not cut["by_node_limit"]:
+        assert not marked, marked[:3]
+    else:
+        assert marked, "a reported cut must be locatable on some node"
+    for node in marked:
+        assert node["children_count"] > len(node.get("children", [])), node
+
+
 def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     """Named, because `button` alone leads with window chrome on Windows.
 
@@ -1026,6 +1182,29 @@ def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     center = first["center"]
     assert center["x"] == bounds["x"] + bounds["width"] // 2
     assert center["y"] == bounds["y"] + bounds["height"] // 2
+
+
+# Apps whose test page shows a password entry named "Password" (#522).
+PASSWORD_APPS = {"tauri", "electron"}
+
+
+def test_find_flags_a_password_entry(mcp, app_pid, app_name):
+    """A password entry keeps `text_field` and carries `states.password`."""
+    if app_name not in PASSWORD_APPS:
+        pytest.skip(f"the {app_name} test app shows no password entry")
+    result = mcp.call_tool(
+        "find", {"pid": app_pid, "selector": 'text_field[password="true"]'}
+    )["result"]
+    assert result["isError"] is False, result["content"]
+    matches = result["structuredContent"]["matches"]
+    assert [m.get("name") for m in matches] == ["Password"], matches
+    assert matches[0]["role"] == "text_field"
+    assert matches[0]["states"]["password"] is True
+    plain = mcp.call_tool(
+        "find", {"pid": app_pid, "selector": 'text_field[name="Search"]'}
+    )["result"]["structuredContent"]["matches"]
+    assert plain, "the Search field must be found"
+    assert "password" not in plain[0]["states"], plain[0]
 
 
 def test_bounds_and_center_are_reported_together_or_not_at_all(mcp, app_pid):

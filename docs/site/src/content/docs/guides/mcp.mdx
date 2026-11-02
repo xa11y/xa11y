@@ -213,6 +213,30 @@ All three report whether they truncated, so a shortened result never reads as a
 complete one. For `annotate`, `truncated` counts the matches it did not reach,
 and narrowing the selectors is the way to see the rest.
 
+`tree` also marks the cut where it happened. A node that lost children to
+`max_depth` or the node cap carries `subtree_truncated: true` and
+`children_count`, so it is never mistaken for a leaf, and it tells you which
+subtree to read next.
+
+The size of one element is bounded too. `name`, `value`, and `description` are
+each cut to 1024 bytes, so a text area holding a whole document returns a
+prefix. A cut field sits beside `<field>_truncated: true` and `<field>_bytes`,
+which gives the full length.
+
+## Hand the model the agent guide
+
+The server's instructions are short. The [agent guide](/guides/agent-guide/)
+is the longer version: selector syntax, how `action` waits, how results are
+bounded, and what to do about each failure `kind`. The server offers it in two
+forms, and you pick whichever your client surfaces:
+
+- the `guide` prompt, which a client that lists prompts can insert into the
+  conversation;
+- the `xa11y://guide` resource, which a client that lists resources can attach.
+
+For a client with neither, put the output of `xa11y guide` into the system
+prompt. All three are the same text, compiled into the binary you run.
+
 ## Read a failure instead of retrying blind
 
 A failed tool call comes back as a result with `isError: true` rather than a

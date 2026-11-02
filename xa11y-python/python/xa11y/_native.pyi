@@ -41,9 +41,10 @@ class AccessibilityNotEnabledError(XA11yError):
     """The target app advertises an accessibility tree but it is empty.
 
     Raised on Linux when a Chromium/Electron app is launched without
-    ``--force-renderer-accessibility`` (or the ``ACCESSIBILITY_ENABLED=1``
-    environment variable), so the renderer accessibility bridge never
-    populates the window's subtree.
+    ``--force-renderer-accessibility``, so the renderer accessibility bridge
+    never populates the window's subtree. In a bare session with no settings
+    daemon (CI, Xvfb, a container) the app needs both the flag and
+    ``ACCESSIBILITY_ENABLED=1`` in its environment.
     """
 
 class SelectorNotMatchedError(XA11yError):
@@ -538,6 +539,14 @@ class Element:
     def required(self) -> bool: ...
     @property
     def busy(self) -> bool: ...
+    @property
+    def password(self) -> bool:
+        """Whether this is a password (secure text) field.
+
+        The role stays ``text_field``. xa11y redacts nothing, so a caller that
+        must keep a secret out of its logs checks this flag.
+        """
+        ...
     @property
     def minimized(self) -> bool | None:
         """Whether the window is minimized.

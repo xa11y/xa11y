@@ -279,6 +279,9 @@ impl WindowsProvider {
                 code: e.code().0 as i64,
                 message: format!("Failed to create IUIAutomation: {}", e),
             })?;
+            // Before the warm-up, so the first cross-process call is
+            // already bounded.
+            set_uia_timeouts(&automation)?;
             // The warm-up call is part of the first touch: it is what races
             // when made concurrently, so it runs under the lock too. Its
             // failure is the provider's failure.
@@ -1485,6 +1488,177 @@ fn top_level_windows_of_pid_with(
     distinct_uia_roots(autom, cache, candidates)
 }
 
+/// How long UIA waits to *connect* to a provider before giving up.
+///
+/// Set explicitly rather than inherited from `CUIAutomation8`'s defaults, so
+/// the bound on a hung provider is a documented property of xa11y, not of the
+/// OS build (issue #507).
+const UIA_CONNECTION_TIMEOUT_MS: u32 = 2_000;
+/// How long one UIA call (a property read, a FindAll) may take once
+/// connected.
+const UIA_TRANSACTION_TIMEOUT_MS: u32 = 20_000;
+/// How long Windows lets a window go without pumping messages before
+/// `IsHungAppWindow` reports it hung. Reported as the `Timeout` elapsed time,
+/// since it is the wait the OS already observed.
+const OS_HUNG_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Apply [`UIA_CONNECTION_TIMEOUT_MS`] / [`UIA_TRANSACTION_TIMEOUT_MS`].
+///
+/// `CUIAutomation8` always implements `IUIAutomation2`, so a failed cast or
+/// setter is a real platform failure and propagates (tenet 1).
+fn set_uia_timeouts(automation: &IUIAutomation) -> Result<()> {
+    let automation2: IUIAutomation2 =
+        windows::core::Interface::cast(automation).map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("IUIAutomation does not implement IUIAutomation2: {e}"),
+        })?;
+    unsafe { automation2.SetConnectionTimeout(UIA_CONNECTION_TIMEOUT_MS) }.map_err(|e| {
+        Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("IUIAutomation2.SetConnectionTimeout failed: {e}"),
+        }
+    })?;
+    unsafe { automation2.SetTransactionTimeout(UIA_TRANSACTION_TIMEOUT_MS) }.map_err(|e| {
+        Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("IUIAutomation2.SetTransactionTimeout failed: {e}"),
+        }
+    })?;
+    Ok(())
+}
+
+/// Whether Windows already considers a top-level window hung.
+///
+/// `IsHungAppWindow` is the OS's own verdict (no message pumped for
+/// [`OS_HUNG_THRESHOLD`]), read without sending the window anything. A window
+/// that is merely busy for a moment is not hung by this test, so its reads go
+/// on into UIA, which the transaction timeout bounds; only a window the OS
+/// has given up on fails fast (issue #507).
+fn window_is_hung(hwnd: HWND) -> bool {
+    unsafe { IsHungAppWindow(hwnd) }.as_bool()
+}
+
+/// A top-level window Windows considers hung.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HungWindow {
+    hwnd: HWND,
+    pid: u32,
+}
+
+/// Every interactive top-level window on the desktop that Windows considers
+/// hung, found before the desktop-wide UIA enumeration so the listing can
+/// fail fast instead of stalling on one for the transaction timeout.
+fn hung_top_level_windows() -> Result<Vec<HungWindow>> {
+    unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
+        let all = unsafe { &mut *(param.0 as *mut Vec<HWND>) };
+        all.push(hwnd);
+        true.into()
+    }
+    let mut all: Vec<HWND> = Vec::new();
+    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut all) as isize)) }.map_err(|e| {
+        Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("EnumWindows failed while checking for hung windows: {e}"),
+        }
+    })?;
+    let mut hung = Vec::new();
+    for hwnd in all {
+        // Only windows a listing would read; a closed one is skipped.
+        let interactive = match is_interactive_top_level(hwnd) {
+            Ok(interactive) => interactive,
+            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => continue,
+            Err(e) => return Err(e),
+        };
+        if interactive && window_is_hung(hwnd) {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            hung.push(HungWindow { hwnd, pid });
+        }
+    }
+    Ok(hung)
+}
+
+/// Longest list of hung windows a diagnosis carries (tenet 6: bounded).
+const DIAG_HUNG_WINDOW_LIMIT: usize = 10;
+
+/// One hung window, described for a diagnosis: HWND, title, pid, executable.
+fn describe_hung_window(window: HungWindow) -> String {
+    let exe = process_image_name(window.pid)
+        .and_then(|path| {
+            std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "<executable unreadable>".to_string());
+    format!(
+        "HWND {:#x} \"{}\" (pid {}, {exe})",
+        window.hwnd.0 as usize,
+        hwnd_title(window.hwnd),
+        window.pid
+    )
+}
+
+/// The [`Error::Timeout`] for a read that needs windows Windows considers
+/// hung, the same shape the Linux backend reports for an unresponsive peer.
+fn hung_windows_error(condition: String, hung: &[HungWindow]) -> Error {
+    let mut listed: Vec<String> = hung
+        .iter()
+        .take(DIAG_HUNG_WINDOW_LIMIT)
+        .map(|w| describe_hung_window(*w))
+        .collect();
+    if hung.len() > DIAG_HUNG_WINDOW_LIMIT {
+        listed.push(format!("… (+{} more)", hung.len() - DIAG_HUNG_WINDOW_LIMIT));
+    }
+    Error::timeout(OS_HUNG_THRESHOLD).diagnose(
+        xa11y_core::Diagnosis::new()
+            .condition(condition)
+            .last_observed(format!(
+                "Windows reports {} top-level window(s) not responding (IsHungAppWindow: no \
+                 message pumped for {:?}, the OS threshold, which is the elapsed time this \
+                 error reports; xa11y did not wait): {}",
+                hung.len(),
+                OS_HUNG_THRESHOLD,
+                listed.join("; ")
+            ))
+            .candidates(listed),
+    )
+}
+
+/// Map a UIA call that ran out its transaction timeout to the same
+/// [`Error::Timeout`] form; every other error passes through unchanged.
+///
+/// Applied at the app-discovery call sites (desktop listing, a pid's
+/// windows, `app_by_pid`, `focused_app`), which are where one hung app
+/// stalls everything. Element-level calls keep reporting `UIA_E_TIMEOUT` as
+/// the `Platform` error it arrives as.
+fn uia_timeout_as_timeout(err: Error, condition: impl FnOnce() -> String) -> Error {
+    match err {
+        Error::Platform { code, message } if code == i64::from(UIA_E_TIMEOUT as i32) => {
+            Error::timeout(std::time::Duration::from_millis(u64::from(
+                UIA_TRANSACTION_TIMEOUT_MS,
+            )))
+            .diagnose(
+                xa11y_core::Diagnosis::new()
+                    .condition(condition())
+                    .last_observed(format!(
+                        "no answer within the {UIA_TRANSACTION_TIMEOUT_MS} ms UIA transaction \
+                         timeout (UIA_E_TIMEOUT): {message}"
+                    )),
+            )
+        }
+        other => other,
+    }
+}
+
+/// A window's title without sending it a message (`GetWindowTextW` reads
+/// another process's caption from the window manager), so it is safe on a
+/// hung window. Empty when untitled or unreadable; the HWND identifies it.
+fn hwnd_title(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    String::from_utf16_lossy(&buf[..usize::try_from(len).unwrap_or(0).min(buf.len())])
+}
+
 /// Resolve every interactive top-level HWND of a process through UIA. The
 /// returned set is native-window discovery, before UIA tree deduplication.
 fn native_windows_of_pid_with(
@@ -1522,10 +1696,27 @@ fn native_windows_of_pid_with(
         if !interactive {
             continue;
         }
+        // Reading a window Windows already considers hung blocks for the
+        // transaction timeout and then fails anyway; fail now, naming it
+        // (issue #507). A merely busy window goes on into UIA.
+        if window_is_hung(hwnd) {
+            return Err(hung_windows_error(
+                format!("the top-level windows of pid {pid} to respond"),
+                &[HungWindow { hwnd, pid }],
+            ));
+        }
         match uia_call(|| unsafe { autom.ElementFromHandleBuildCache(hwnd, cache) }) {
             Ok(el) => out.push(el),
             Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => {}
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Err(uia_timeout_as_timeout(e, || {
+                    format!(
+                        "HWND {:#x} \"{}\" of pid {pid} to answer UIA",
+                        hwnd.0 as usize,
+                        hwnd_title(hwnd)
+                    )
+                }))
+            }
         }
     }
     Ok(out)
@@ -1986,6 +2177,29 @@ fn build_snapshot_data(
         if let Some(ref d) = description {
             raw.insert("uia_help_text".into(), serde_json::Value::String(d.clone()));
         }
+        if let Some(framework) = uia_cached_bstr(element, UIA_FrameworkIdPropertyId) {
+            raw.insert(
+                "uia_framework_id".into(),
+                serde_json::Value::String(framework),
+            );
+        }
+        // Which UIA activation patterns `press` could dispatch to, so a
+        // caller (and the integ suite) can tell which mechanism a `press`
+        // advertisement stands for.
+        let activation: Vec<serde_json::Value> = [
+            ("invoke", patterns.invoke.is_some()),
+            ("toggle", patterns.toggle.is_some()),
+            ("selection_item", patterns.selection_item.is_some()),
+            ("expand_collapse", patterns.expand_collapse.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, present)| *present)
+        .map(|(name, _)| serde_json::Value::String(name.into()))
+        .collect();
+        raw.insert(
+            "uia_activation_patterns".into(),
+            serde_json::Value::Array(activation),
+        );
         raw
     };
 
@@ -2052,13 +2266,56 @@ fn create_scroll_request(automation: &IUIAutomation) -> Result<IUIAutomationCach
 /// Build the batch request that describes which properties and patterns
 /// to pre-fetch. Created once per provider, used on every query.
 fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+    create_cache_request(automation, BATCH_PROPERTIES)
+}
+
+/// The cache request event handlers fetch their targets with.
+fn create_event_cache_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+    create_cache_request(automation, &event_cache_properties())
+}
+
+/// The batch properties minus [`EVENT_EXCLUDED_PROPERTIES`]: what event
+/// handlers pre-fetch for an event's sender.
+fn event_cache_properties() -> Vec<UIA_PROPERTY_ID> {
+    BATCH_PROPERTIES
+        .iter()
+        .copied()
+        .filter(|p| !EVENT_EXCLUDED_PROPERTIES.contains(p))
+        .collect()
+}
+
+/// Batch properties that event handlers do not pre-fetch.
+///
+/// With these in the event request, the subscribing process's heap was
+/// corrupted (0xC0000374) while the WinForms test app delivered events: in
+/// three CI runs out of three. The one run so far with both left out of this
+/// request was clean. The root cause is not known; issue #589 tracks it.
+///
+/// Leaving them out costs one thing: an event target never advertises the
+/// MSAA default action as `press` (see `legacy_default_action_is_activation`,
+/// which needs a non-empty default action), and its raw map lacks
+/// `uia_framework_id`. Re-reading the element through a query restores both.
+///
+/// The two come back together or not at all. `is_msaa_framework(None)` is
+/// true, so caching the default action without the framework id would make
+/// a native UIA event target (Chromium, WPF, ...) advertise `press` for its
+/// MSAA default action.
+const EVENT_EXCLUDED_PROPERTIES: &[UIA_PROPERTY_ID] = &[
+    UIA_LegacyIAccessibleDefaultActionPropertyId,
+    UIA_FrameworkIdPropertyId,
+];
+
+fn create_cache_request(
+    automation: &IUIAutomation,
+    properties: &[UIA_PROPERTY_ID],
+) -> Result<IUIAutomationCacheRequest> {
     let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
 
     // The property list is a fixed constant array of valid UIA property IDs.
     // If AddProperty ever fails here, something is structurally wrong with the
     // UIA environment (e.g. COM state corrupted). Propagate rather than
     // silently producing a half-configured cache request (tenet 1).
-    for prop in BATCH_PROPERTIES {
+    for prop in properties {
         unsafe { request.AddProperty(*prop) }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("AddProperty({:?}) failed: {e}", prop),
@@ -2098,6 +2355,8 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_IsOffscreenPropertyId,
     UIA_HasKeyboardFocusPropertyId,
     UIA_IsKeyboardFocusablePropertyId,
+    // Read by `parse_states` for the `password` state (#522).
+    UIA_IsPasswordPropertyId,
     UIA_NativeWindowHandlePropertyId,
     // MSAA state bitmask — the only place pre-SelectionItem frameworks report
     // selection (see the `selected` derivation in `parse_states`).
@@ -2105,6 +2364,13 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     // MSAA role — the only role signal for providers that publish no UIA
     // control type (see `map_msaa_role`).
     UIA_LegacyIAccessibleRolePropertyId,
+    // MSAA default action — advertises `press` on elements whose only
+    // activation is LegacyIAccessible.DoDefaultAction (see `get_actions`).
+    UIA_LegacyIAccessibleDefaultActionPropertyId,
+    // Which provider framework serves the element. Gates the MSAA default
+    // action as `press` to MSAA-proxied elements (see
+    // `legacy_default_action_is_activation`).
+    UIA_FrameworkIdPropertyId,
     // Scroll overflow: an element whose content overflows clips its
     // descendants to its bounds (see `cached_viewport`, issue #502).
     UIA_ScrollHorizontallyScrollablePropertyId,
@@ -2353,6 +2619,23 @@ fn intersect_clip(a: Option<RECT>, b: Option<RECT>) -> Option<RECT> {
     }
 }
 
+/// Acquire a live pattern, mapping "the element has no such pattern" to
+/// `Ok(None)` and every other failure to `Error::Platform` (tenet 1).
+fn current_pattern<T: windows::core::Interface>(
+    element: &IUIAutomationElement,
+    id: UIA_PATTERN_ID,
+    what: &str,
+) -> Result<Option<T>> {
+    match unsafe { element.GetCurrentPatternAs::<T>(id) } {
+        Ok(pattern) => Ok(Some(pattern)),
+        Err(e) if is_pattern_absent(&e) => Ok(None),
+        Err(e) => Err(Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("acquiring {what} failed: {e}"),
+        }),
+    }
+}
+
 /// Whether `clip` leaves no part of `bounds` showing.
 ///
 /// An element with real size shows when it overlaps the viewport by some
@@ -2383,6 +2666,42 @@ fn clipped_out(bounds: RECT, clip: Option<RECT>) -> bool {
             && c.top <= bounds.bottom
     };
     !overlaps
+}
+
+/// Whether `LegacyIAccessible.DoDefaultAction` is this element's `press`.
+///
+/// Only when it is the *sole* activation of an element exposed through MSAA:
+/// the element has none of Invoke, Toggle, SelectionItem, or ExpandCollapse,
+/// MSAA reports a non-empty default action, and the element is served by the
+/// MSAA side of UIA (see [`is_msaa_framework`]). An element with a UIA
+/// activation pattern keeps that pattern as its `press`; the default action is
+/// never a second try after it (issue #505, tenet 1). A native UIA provider
+/// that withheld every activation pattern did so on purpose (Chromium's
+/// "click ancestor" default action is not this element's activation), so its
+/// default action is not promoted either.
+///
+/// Advertisement (`get_actions`) and dispatch (`press`) both call this, so
+/// they cannot disagree.
+fn legacy_default_action_is_activation(
+    has_activation_pattern: bool,
+    default_action: Option<&str>,
+    framework_id: Option<&str>,
+) -> bool {
+    !has_activation_pattern
+        && is_msaa_framework(framework_id)
+        && default_action.is_some_and(|a| !a.trim().is_empty())
+}
+
+/// Whether a UIA `FrameworkId` names an element exposed through MSAA rather
+/// than a native UIA provider: the Win32 MSAA proxy (`"Win32"`), WinForms
+/// accessible objects (`"WinForm"`), or a proxied element that reports none.
+/// Native providers name themselves (`"Chrome"`, `"XAML"`, `"WPF"`, `"Qt"`,
+/// `"DirectUI"`, …) and are excluded.
+fn is_msaa_framework(framework_id: Option<&str>) -> bool {
+    matches!(
+        framework_id.map(str::trim),
+        None | Some("" | "Win32" | "WinForm")
+    )
 }
 
 /// The stable identity of a UIA element, or `None` when it has none.
@@ -2761,6 +3080,17 @@ impl Provider for WindowsProvider {
                 // grouping now reports one Application node per process on
                 // every platform, and the windows are the node's children.
                 let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
+                // A desktop-wide UIA query that reaches a hung app stalls
+                // for the transaction timeout. Check first and fail the
+                // listing with every hung window named, as the Linux backend
+                // does, rather than stall or drop the app (issue #507).
+                let hung = hung_top_level_windows()?;
+                if !hung.is_empty() {
+                    return Err(hung_windows_error(
+                        "every top-level window on the desktop to respond".to_string(),
+                        &hung,
+                    ));
+                }
                 let condition = uia_call(|| unsafe {
                     self.automation.CreatePropertyCondition(
                         UIA_ControlTypePropertyId,
@@ -2769,6 +3099,9 @@ impl Provider for WindowsProvider {
                 })?;
                 let found = uia_call(|| unsafe {
                     root.FindAllBuildCache(TreeScope_Children, &condition, &self.batch_request)
+                })
+                .map_err(|e| {
+                    uia_timeout_as_timeout(e, || "the desktop's top-level windows".to_string())
                 })?;
 
                 let mut windows: Vec<(IUIAutomationElement, u32)> = Vec::new();
@@ -3143,6 +3476,18 @@ impl Provider for WindowsProvider {
     /// missing-entry shape: the process's windows, not its first window,
     /// are what the pid means).
     fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
+        // A hung window of this pid would stall the UIA search below for the
+        // transaction timeout; fail fast naming it instead (issue #507).
+        let hung: Vec<HungWindow> = hung_top_level_windows()?
+            .into_iter()
+            .filter(|w| w.pid == pid)
+            .collect();
+        if !hung.is_empty() {
+            return Err(hung_windows_error(
+                format!("the top-level windows of pid {pid} to respond"),
+                &hung,
+            ));
+        }
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         let value = pid_variant(pid)?;
         let pid_condition = uia_call(|| unsafe {
@@ -3188,10 +3533,13 @@ impl Provider for WindowsProvider {
                 );
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("FindFirstBuildCache(ProcessId={pid}) failed: {e}"),
-                });
+                return Err(uia_timeout_as_timeout(
+                    Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!("FindFirstBuildCache(ProcessId={pid}) failed: {e}"),
+                    },
+                    || format!("a top-level window of pid {pid}"),
+                ));
             }
         };
         // The representative window serves only the fallback name source of
@@ -3218,22 +3566,35 @@ impl Provider for WindowsProvider {
         if hwnd.0.is_null() {
             return Err(Error::selector_not_matched("focused application"));
         }
-        let el = uia_call(|| unsafe { self.automation.ElementFromHandle(hwnd) })?;
-        // A failing read propagates with its HRESULT; this branch is reserved
-        // for a *successfully returned* zero pid (an honest "no owning
-        // process", tenet 1 — not "no foreground app").
-        let pid = unsafe { el.CurrentProcessId() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!(
-                "IUIAutomationElement.CurrentProcessId failed for the foreground window: {e}"
-            ),
-        })? as u32;
+        // The pid comes from the window manager, which answers even when the
+        // app cannot.
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        // A window whose owner the window manager cannot name (an honest "no
+        // owning process", tenet 1 — not "no foreground app").
         if pid == 0 {
             return Err(Error::Platform {
                 code: -1,
                 message: "foreground window returns pid 0 (no owning process)".to_string(),
             });
         }
+        // `App::list` / `App::find` tag the foreground app through here, so a
+        // hung foreground app must fail fast rather than stall them in UIA.
+        if window_is_hung(hwnd) {
+            return Err(hung_windows_error(
+                "the foreground window to respond".to_string(),
+                &[HungWindow { hwnd, pid }],
+            ));
+        }
+        let el = uia_call(|| unsafe { self.automation.ElementFromHandle(hwnd) }).map_err(|e| {
+            uia_timeout_as_timeout(e, || {
+                format!(
+                    "the foreground window HWND {:#x} \"{}\" (pid {pid}) to answer UIA",
+                    hwnd.0 as usize,
+                    hwnd_title(hwnd)
+                )
+            })
+        })?;
         // The foreground window is the representative; only its title can
         // fall back as the name source of the synthesized node.
         self.build_synthetic_app_data(pid, &el)
@@ -3573,11 +3934,16 @@ impl Provider for WindowsProvider {
         // applies to the *semantic* verb (`press` = "activate this element"),
         // not the underlying API — each branch below is Windows' canonical
         // implementation of that semantic for the element's pattern.
+        //
+        // Each lookup distinguishes "pattern absent" (try the next) from a
+        // real COM failure (propagate): a wedged provider must not fall
+        // through to a different activation (tenet 1).
         let uia_element = self.get_cached(element.handle)?;
-        // Try InvokePattern (buttons, menu items)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationInvokePattern>(
+            &uia_element,
+            UIA_InvokePatternId,
+            "InvokePattern",
+        )? {
             unsafe { pattern.Invoke() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -3590,10 +3956,11 @@ impl Provider for WindowsProvider {
             })?;
             return Ok(());
         }
-        // Try TogglePattern (checkboxes, switches)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationTogglePattern>(
+            &uia_element,
+            UIA_TogglePatternId,
+            "TogglePattern",
+        )? {
             unsafe { pattern.Toggle() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -3606,12 +3973,11 @@ impl Provider for WindowsProvider {
             })?;
             return Ok(());
         }
-        // Try SelectionItemPattern (list items, radio buttons)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                UIA_SelectionItemPatternId,
-            )
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationSelectionItemPattern>(
+            &uia_element,
+            UIA_SelectionItemPatternId,
+            "SelectionItemPattern",
+        )? {
             unsafe { pattern.Select() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -3624,12 +3990,11 @@ impl Provider for WindowsProvider {
             })?;
             return Ok(());
         }
-        // Try ExpandCollapsePattern (combo boxes, tree items)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-                UIA_ExpandCollapsePatternId,
-            )
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationExpandCollapsePattern>(
+            &uia_element,
+            UIA_ExpandCollapsePatternId,
+            "ExpandCollapsePattern",
+        )? {
             let state =
                 unsafe { pattern.CurrentExpandCollapseState() }.map_err(|e| Error::Platform {
                     code: e.code().0 as i64,
@@ -3650,6 +4015,47 @@ impl Provider for WindowsProvider {
                 }
             }
             return Ok(());
+        }
+        // None of the four activation patterns exists. For an element
+        // exposed only through MSAA, the MSAA default action *is* its primary
+        // activation, so `press` dispatches to it (issue #505). Reached only
+        // when every lookup above reported the pattern absent — never after
+        // one of them failed (tenet 1).
+        if let Some(pattern) = current_pattern::<IUIAutomationLegacyIAccessiblePattern>(
+            &uia_element,
+            UIA_LegacyIAccessiblePatternId,
+            "LegacyIAccessiblePattern",
+        )? {
+            let default_action =
+                unsafe { pattern.CurrentDefaultAction() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("LegacyIAccessible.CurrentDefaultAction failed: {e}"),
+                })?;
+            let framework_id =
+                unsafe { uia_element.CurrentFrameworkId() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("CurrentFrameworkId failed: {e}"),
+                })?;
+            if legacy_default_action_is_activation(
+                false,
+                Some(&default_action.to_string()),
+                Some(&framework_id.to_string()),
+            ) {
+                unsafe { pattern.DoDefaultAction() }.or_else(|e| {
+                    if is_event_subscriber_failure(&e) {
+                        Ok(())
+                    } else {
+                        Err(Error::Platform {
+                            code: e.code().0 as i64,
+                            message: format!(
+                                "LegacyIAccessible.DoDefaultAction (\"{default_action}\") \
+                                 failed: {e}"
+                            ),
+                        })
+                    }
+                })?;
+                return Ok(());
+            }
         }
         Err(Error::ActionNotSupported {
             action: "press".to_string(),
@@ -4353,6 +4759,18 @@ fn get_actions(
         actions.push("select".to_string());
     }
 
+    let has_activation_pattern = patterns.invoke.is_some()
+        || patterns.toggle.is_some()
+        || patterns.selection_item.is_some()
+        || patterns.expand_collapse.is_some();
+    if legacy_default_action_is_activation(
+        has_activation_pattern,
+        uia_cached_bstr(element, UIA_LegacyIAccessibleDefaultActionPropertyId).as_deref(),
+        uia_cached_bstr(element, UIA_FrameworkIdPropertyId).as_deref(),
+    ) {
+        actions.push("press".to_string());
+    }
+
     // Advertise `focus` iff focusing would have an observable effect: the
     // element must be both keyboard-focusable and enabled. A disabled-but-
     // focusable element shouldn't claim to support focus because SetFocus is
@@ -4549,6 +4967,12 @@ fn parse_states(
 
     let focusable = unsafe { element.CachedIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE;
 
+    // `IsPassword` is UIA's own secure-text flag (`ES_PASSWORD` edits,
+    // WPF `PasswordBox`, AccessKit `PasswordInput`). The control type stays
+    // Edit, so the role stays `TextField`. An unread property degrades to
+    // `false` like the other cached boolean reads above.
+    let password = unsafe { element.CachedIsPassword() }.unwrap_or(FALSE) == TRUE;
+
     // Window visual state (minimized / maximized) from WindowPattern. `None`
     // means unknown: no WindowPattern (non-window element) or a state that
     // couldn't be read. Fullscreen is not reported by UIA at all
@@ -4595,6 +5019,7 @@ fn parse_states(
         editable,
         required: false,
         busy: false,
+        password,
     }
     .into()
 }
@@ -6010,10 +6435,11 @@ impl WindowsProvider {
         });
 
         // Dedicated cache request: ensures event handlers receive elements
-        // with our standard batch of properties pre-fetched. We clone the
-        // provider's shared request so we don't rely on a mutable handle
-        // held elsewhere.
-        let cache = create_batch_request(&self.automation)?;
+        // with our standard batch of properties pre-fetched, minus the ones
+        // that are unsafe to fetch on the event thread (see
+        // `EVENT_EXCLUDED_PROPERTIES`). A fresh request, so we don't rely on
+        // a mutable handle held elsewhere.
+        let cache = create_event_cache_request(&self.automation)?;
 
         let focus: IUIAutomationFocusChangedEventHandler = FocusHandler {
             ctx: ctx.clone(),
@@ -6385,6 +6811,68 @@ mod tests {
     }
 
     #[test]
+    fn uia_timeouts_are_set_explicitly() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let automation2: IUIAutomation2 = windows::core::Interface::cast(&provider.automation)
+            .expect("CUIAutomation8 implements IUIAutomation2");
+        assert_eq!(
+            unsafe { automation2.ConnectionTimeout() }.expect("ConnectionTimeout reads"),
+            UIA_CONNECTION_TIMEOUT_MS
+        );
+        assert_eq!(
+            unsafe { automation2.TransactionTimeout() }.expect("TransactionTimeout reads"),
+            UIA_TRANSACTION_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn hung_windows_error_is_a_timeout_naming_each_window() {
+        let windows: Vec<HungWindow> = (1..=12)
+            .map(|i| HungWindow {
+                hwnd: HWND(i as *mut core::ffi::c_void),
+                pid: 4000 + i,
+            })
+            .collect();
+        let err = hung_windows_error("the desktop to respond".into(), &windows);
+        let Error::Timeout { elapsed, diagnosis } = &err else {
+            panic!("expected Timeout, got {err:?}");
+        };
+        assert_eq!(*elapsed, OS_HUNG_THRESHOLD);
+        let d = diagnosis.as_deref().expect("diagnosis attached");
+        assert_eq!(d.condition.as_deref(), Some("the desktop to respond"));
+        let observed = d.last_observed.as_deref().expect("last_observed");
+        assert!(observed.contains("12 top-level window(s)"), "{observed}");
+        assert!(observed.contains("pid 4001"), "{observed}");
+        // Bounded: ten listed plus a remainder line.
+        assert_eq!(d.candidates.len(), DIAG_HUNG_WINDOW_LIMIT + 1);
+        assert!(d.candidates.last().is_some_and(|c| c.contains("+2 more")));
+    }
+
+    #[test]
+    fn uia_timeout_maps_to_timeout_and_others_pass_through() {
+        let timed_out = Error::Platform {
+            code: i64::from(UIA_E_TIMEOUT as i32),
+            message: "FindAll".into(),
+        };
+        let err = uia_timeout_as_timeout(timed_out, || "the desktop".into());
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        assert_eq!(
+            err.diagnosis().and_then(|d| d.condition.clone()).as_deref(),
+            Some("the desktop")
+        );
+        let other = Error::Platform {
+            code: -1,
+            message: "x".into(),
+        };
+        assert!(matches!(
+            uia_timeout_as_timeout(other, || unreachable!()),
+            Error::Platform { code: -1, .. }
+        ));
+    }
+
+    #[test]
     fn get_children_none_returns_synthetic_applications() {
         let Some(provider) = try_provider() else {
             return;
@@ -6548,6 +7036,101 @@ mod tests {
     }
 
     #[test]
+    fn legacy_default_action_is_press_only_as_the_sole_activation() {
+        // MSAA-only element with a default action: press is DoDefaultAction.
+        for framework in [Some("Win32"), Some("WinForm"), Some(""), None] {
+            assert!(
+                legacy_default_action_is_activation(false, Some("Activate"), framework),
+                "{framework:?} is MSAA-proxied"
+            );
+        }
+        // Any UIA activation pattern wins; the default action is never a
+        // second mechanism behind it.
+        assert!(!legacy_default_action_is_activation(
+            true,
+            Some("Activate"),
+            Some("Win32")
+        ));
+        // No default action, or a blank one, is nothing to press.
+        assert!(!legacy_default_action_is_activation(
+            false,
+            None,
+            Some("Win32")
+        ));
+        assert!(!legacy_default_action_is_activation(
+            false,
+            Some(""),
+            Some("Win32")
+        ));
+        assert!(!legacy_default_action_is_activation(
+            false,
+            Some("  "),
+            Some("Win32")
+        ));
+        // A native UIA provider that withheld activation keeps it withheld,
+        // whatever its MSAA default action says (Chromium's "click ancestor").
+        for framework in ["Chrome", "XAML", "WPF", "Qt", "DirectUI"] {
+            assert!(
+                !legacy_default_action_is_activation(
+                    false,
+                    Some("click ancestor"),
+                    Some(framework)
+                ),
+                "{framework} is a native UIA provider"
+            );
+        }
+    }
+
+    #[test]
+    fn default_action_is_batched_for_advertisement() {
+        assert!(
+            BATCH_PROPERTIES.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId),
+            "LegacyIAccessible.DefaultAction must be cached so get_actions can advertise press"
+        );
+    }
+
+    #[test]
+    fn event_cache_properties_are_the_batch_minus_the_two_exclusions() {
+        let props = event_cache_properties();
+        assert!(
+            !props.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId),
+            "DefaultAction must stay out of the event request (#589)"
+        );
+        assert!(
+            !props.contains(&UIA_FrameworkIdPropertyId),
+            "FrameworkId must stay out of the event request (#589)"
+        );
+        for prop in BATCH_PROPERTIES {
+            if !EVENT_EXCLUDED_PROPERTIES.contains(prop) {
+                assert!(props.contains(prop), "{prop:?} dropped from events");
+            }
+        }
+        // An exclusion that is not in the batch excludes nothing while still
+        // reading as a live workaround.
+        for prop in EVENT_EXCLUDED_PROPERTIES {
+            assert!(
+                BATCH_PROPERTIES.contains(prop),
+                "{prop:?} is excluded from the event request but not batched"
+            );
+        }
+    }
+
+    #[test]
+    fn default_action_and_framework_id_are_cached_together() {
+        // Without FrameworkId, `is_msaa_framework(None)` reads any element as
+        // MSAA-proxied, so a cached DefaultAction alone would advertise
+        // `press` on native UIA providers. Every request must carry both or
+        // neither.
+        for props in [BATCH_PROPERTIES.to_vec(), event_cache_properties()] {
+            assert_eq!(
+                props.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId),
+                props.contains(&UIA_FrameworkIdPropertyId),
+                "DefaultAction and FrameworkId must be cached together"
+            );
+        }
+    }
+
+    #[test]
     fn is_pattern_absent_classifies_the_known_absent_signals() {
         use windows::core::{Error as CoreError, HRESULT};
         // The canonical "no such pattern" HRESULTs.
@@ -6700,6 +7283,7 @@ mod tests {
         assert!(BATCH_PROPERTIES.contains(&UIA_BoundingRectanglePropertyId));
         assert!(BATCH_PROPERTIES.contains(&UIA_IsEnabledPropertyId));
         assert!(BATCH_PROPERTIES.contains(&UIA_ProcessIdPropertyId));
+        assert!(BATCH_PROPERTIES.contains(&UIA_IsPasswordPropertyId));
     }
 
     #[test]

@@ -62,6 +62,13 @@ Line 3</textarea>
     </table>
   </div>
 
+  <!-- Password entry (#522), mirroring the Tauri page: the `password`
+       state. Last so it is never the first text_field a test picks up. -->
+  <div>
+    <label for="password-field">Password</label>
+    <input id="password-field" type="password" aria-label="Password">
+  </div>
+
   <script>
     // Keep aria-valuenow in sync so AT-SPI value reads track user changes.
     const slider = document.getElementById('volume-slider');

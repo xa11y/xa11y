@@ -24,6 +24,7 @@ const APP_CONFIG = {
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    passwordFieldName: 'Password', // password entry (#522)
   },
   qt: {
     okButtonName: 'OK',
@@ -57,6 +58,7 @@ const APP_CONFIG = {
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    passwordFieldName: 'Password', // password entry (#522)
   },
   electron: {
     okButtonName: 'OK',           // Electron index.html has <button id="ok">OK</button>
@@ -64,6 +66,7 @@ const APP_CONFIG = {
     minButtons: 2,                 // "OK" + "Cancel"
     hasCheckbox: false,
     hasRadio: false,
+    passwordFieldName: 'Password', // password entry (#522)
   },
   egui: {
     okButtonName: 'OK',           // egui sets the AccessKit name from the visible label

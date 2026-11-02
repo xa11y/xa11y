@@ -97,6 +97,7 @@ pub struct FuzzStateSet {
     pub modal: bool,
     pub required: bool,
     pub busy: bool,
+    pub password: bool,
     pub minimized: Option<bool>,
     pub maximized: Option<bool>,
     pub fullscreen: Option<bool>,
@@ -246,6 +247,7 @@ pub fn make_state(s: &FuzzStateSet) -> StateSet {
         modal: s.modal,
         required: s.required,
         busy: s.busy,
+        password: s.password,
     }
     .into()
 }

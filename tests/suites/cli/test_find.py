@@ -8,6 +8,8 @@ One element per line, followed by a summary ``(N match[es])`` line.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 
@@ -140,3 +142,22 @@ def test_find_pretty_output_contains_state_info(run_cli, app_pid):
     assert "enabled" in stdout or "disabled" in stdout, (
         f"expected state info in pretty output:\n{stdout}"
     )
+
+
+# Apps whose test page shows a password entry named "Password" (#522).
+PASSWORD_APPS = {"tauri", "electron"}
+
+
+def test_find_lists_the_password_state(run_cli, app_pid, app_name):
+    """``xa11y find`` shows `password` among a password entry's states."""
+    if app_name not in PASSWORD_APPS:
+        pytest.skip(f"the {app_name} test app shows no password entry")
+    rc, stdout, stderr = run_cli(
+        "find", 'text_field[password="true"]', "--pid", str(app_pid)
+    )
+    assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
+    result_lines = stdout.strip().splitlines()[:-1]
+    assert len(result_lines) == 1, stdout
+    assert "Password" in result_lines[0], stdout
+    states = re.search(r"\[([^\]]*)\]", result_lines[0])
+    assert states and "password" in states.group(1).split(), result_lines[0]

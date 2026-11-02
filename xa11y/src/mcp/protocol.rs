@@ -10,8 +10,9 @@
 //!
 //! Deployed clients are still mostly legacy, so this server is **dual-era**.
 //! That costs little because both eras share `tools/list` and `tools/call`
-//! verbatim — the era changes only the opening exchange and whether results
-//! carry `resultType`. The era is a property of the session (the spec: "a
+//! verbatim, and the agent guide's `resources/*` and `prompts/*` likewise —
+//! the era changes only the opening exchange and whether results carry
+//! `resultType` and the caching hints. The era is a property of the session (the spec: "a
 //! dual-era server selects its behavior from how the client opens"), so it is
 //! latched on the first request that identifies one and reused thereafter.
 //!
@@ -110,7 +111,27 @@ The input and screenshot tools work in screen coordinates only. Get those from \
 `find`, which returns each match's `bounds` and `center`.
 
 Trees are depth-limited and match lists are capped; both say so in the result \
-when output was truncated.";
+when output was truncated.
+
+The full guide (selector syntax, auto-wait, result bounds, and what to do about \
+each failure `kind`) is the `guide` prompt and the `xa11y://guide` resource.";
+
+/// URI of the agent guide resource.
+pub(crate) const GUIDE_URI: &str = "xa11y://guide";
+/// Name of the agent guide prompt.
+pub(crate) const GUIDE_PROMPT: &str = "guide";
+/// One line on what the guide is, shared by its resource and prompt entries.
+const GUIDE_DESCRIPTION: &str = "How to drive xa11y: the workflow, selector syntax, \
+action auto-wait and what `ok: true` means, result bounds, every failure `kind` \
+with what to do about it, and platform notes. Describes this server's build.";
+
+/// The capabilities this server declares, identical in both eras.
+///
+/// `prompts` and `resources` carry no `listChanged` / `subscribe`: the guide
+/// is compiled in, so nothing can change under a connected client.
+fn capabilities() -> Value {
+    json!({ "tools": {}, "prompts": {}, "resources": {} })
+}
 
 /// Which protocol era this session is speaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +236,11 @@ impl<H: ToolHost> Session<H> {
             "ping" => Ok(json!({})),
             "tools/list" => Ok(self.tools_list_result()),
             "tools/call" => self.tools_call_result(params),
+            "resources/list" => Ok(self.cacheable(json!({ "resources": [guide_resource()] }))),
+            "resources/templates/list" => Ok(self.cacheable(json!({ "resourceTemplates": [] }))),
+            "resources/read" => self.resources_read_result(params),
+            "prompts/list" => Ok(self.cacheable(json!({ "prompts": [guide_prompt()] }))),
+            "prompts/get" => self.prompts_get_result(params),
             other => Err(RpcError::new(
                 METHOD_NOT_FOUND,
                 format!("unknown method: {other}"),
@@ -246,7 +272,7 @@ impl<H: ToolHost> Session<H> {
         let mut result = Map::new();
         result.insert("resultType".into(), json!("complete"));
         result.insert("supportedVersions".into(), json!(supported_versions()));
-        result.insert("capabilities".into(), json!({ "tools": {} }));
+        result.insert("capabilities".into(), capabilities());
         result.insert("instructions".into(), json!(INSTRUCTIONS));
         result.insert("_meta".into(), json!({ META_SERVER_INFO: server_info() }));
         with_cache_hints(&mut result);
@@ -271,10 +297,88 @@ impl<H: ToolHost> Session<H> {
         };
         Ok(json!({
             "protocolVersion": negotiated,
-            "capabilities": { "tools": {} },
+            "capabilities": capabilities(),
             "serverInfo": server_info(),
             "instructions": INSTRUCTIONS,
         }))
+    }
+
+    /// Finish a cacheable list or read result for this session's era: the
+    /// modern revisions require `resultType` and the caching hints on it, and
+    /// the legacy ones have no field for either.
+    fn cacheable(&self, body: Value) -> Value {
+        let mut result = match body {
+            Value::Object(map) => map,
+            other => return other,
+        };
+        if self.modern_results() {
+            result.insert("resultType".into(), json!("complete"));
+            with_cache_hints(&mut result);
+        }
+        Value::Object(result)
+    }
+
+    fn resources_read_result(&self, params: &Value) -> Result<Value, RpcError> {
+        let uri = params
+            .get("uri")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::new(INVALID_PARAMS, "resources/read requires a \"uri\""))?;
+        if uri != GUIDE_URI {
+            // Named with what does exist, so the client can correct itself
+            // from one reply (tenet 6). -32602 is deliberate in both eras:
+            // the older "resource not found" code -32002 is retired by the
+            // 2026-07-28 revision and reserved never to be reused.
+            return Err(
+                RpcError::new(INVALID_PARAMS, format!("unknown resource: {uri}"))
+                    .with_data(json!({ "uri": uri, "available": [GUIDE_URI] })),
+            );
+        }
+        Ok(self.cacheable(json!({
+            "contents": [{
+                "uri": GUIDE_URI,
+                "mimeType": "text/markdown",
+                "text": crate::cli::AGENT_GUIDE,
+            }],
+        })))
+    }
+
+    fn prompts_get_result(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::new(INVALID_PARAMS, "prompts/get requires a \"name\""))?;
+        if name != GUIDE_PROMPT {
+            return Err(
+                RpcError::new(INVALID_PARAMS, format!("unknown prompt: {name}"))
+                    .with_data(json!({ "name": name, "available": [GUIDE_PROMPT] })),
+            );
+        }
+        // The prompt declares no arguments, so one sent anyway is refused
+        // rather than ignored: a client that thinks it customised the prompt
+        // would otherwise never find out it did not (tenet 1).
+        match params.get("arguments") {
+            None | Some(Value::Null) => {}
+            Some(Value::Object(args)) if args.is_empty() => {}
+            Some(other) => {
+                return Err(RpcError::new(
+                    INVALID_PARAMS,
+                    format!("prompt {GUIDE_PROMPT} takes no arguments (got {other})"),
+                ))
+            }
+        }
+        let mut result = Map::new();
+        if self.modern_results() {
+            result.insert("resultType".into(), json!("complete"));
+        }
+        result.insert("description".into(), json!(GUIDE_DESCRIPTION));
+        result.insert(
+            "messages".into(),
+            json!([{
+                "role": "user",
+                "content": { "type": "text", "text": crate::cli::AGENT_GUIDE },
+            }]),
+        );
+        Ok(Value::Object(result))
     }
 
     fn tools_list_result(&self) -> Value {
@@ -353,6 +457,27 @@ fn request_protocol_version(params: &Value) -> Option<&str> {
         .get(META_PROTOCOL_VERSION)?
         .as_str()
         .filter(|s| !s.is_empty())
+}
+
+/// The guide's `resources/list` entry.
+fn guide_resource() -> Value {
+    json!({
+        "uri": GUIDE_URI,
+        "name": "guide",
+        "title": "xa11y agent guide",
+        "description": GUIDE_DESCRIPTION,
+        "mimeType": "text/markdown",
+        "size": crate::cli::AGENT_GUIDE.len(),
+    })
+}
+
+/// The guide's `prompts/list` entry.
+fn guide_prompt() -> Value {
+    json!({
+        "name": GUIDE_PROMPT,
+        "title": "xa11y agent guide",
+        "description": GUIDE_DESCRIPTION,
+    })
 }
 
 fn server_info() -> Value {
@@ -614,7 +739,9 @@ mod tests {
     #[test]
     fn unknown_method_is_method_not_found() {
         let mut s = session();
-        let resp = s.handle(req(1, "resources/list", Value::Null)).unwrap();
+        let resp = s
+            .handle(req(1, "sampling/createMessage", Value::Null))
+            .unwrap();
         assert_eq!(resp["error"]["code"], METHOD_NOT_FOUND);
     }
 
@@ -685,6 +812,156 @@ mod tests {
         let resp = s.handle(msg).unwrap();
         assert_eq!(resp["id"], "discover-1");
         assert_eq!(resp["jsonrpc"], "2.0");
+    }
+
+    fn legacy_session() -> Session<StubHost> {
+        let mut s = session();
+        s.handle(req(
+            1,
+            "initialize",
+            json!({ "protocolVersion": "2025-06-18" }),
+        ));
+        s
+    }
+
+    fn modern_session() -> Session<StubHost> {
+        let mut s = session();
+        s.handle(req(1, "server/discover", modern_meta()));
+        s
+    }
+
+    #[test]
+    fn both_eras_advertise_prompts_and_resources() {
+        let mut s = session();
+        let modern = s.handle(req(1, "server/discover", modern_meta())).unwrap();
+        let mut s = session();
+        let legacy = s
+            .handle(req(
+                1,
+                "initialize",
+                json!({ "protocolVersion": "2025-06-18" }),
+            ))
+            .unwrap();
+        for caps in [
+            &modern["result"]["capabilities"],
+            &legacy["result"]["capabilities"],
+        ] {
+            assert!(caps["tools"].is_object(), "{caps}");
+            assert!(caps["prompts"].is_object(), "{caps}");
+            assert!(caps["resources"].is_object(), "{caps}");
+        }
+    }
+
+    #[test]
+    fn the_instructions_point_at_the_guide() {
+        assert!(INSTRUCTIONS.contains(GUIDE_URI));
+        assert!(INSTRUCTIONS.contains("`guide` prompt"));
+    }
+
+    #[test]
+    fn the_guide_resource_is_listed_and_reads_back_the_embedded_text() {
+        for mut s in [modern_session(), legacy_session()] {
+            let listed = s.handle(req(2, "resources/list", Value::Null)).unwrap();
+            let entry = &listed["result"]["resources"][0];
+            assert_eq!(entry["uri"], GUIDE_URI);
+            assert_eq!(entry["mimeType"], "text/markdown");
+            assert_eq!(entry["size"], crate::cli::AGENT_GUIDE.len());
+
+            let read = s
+                .handle(req(3, "resources/read", json!({ "uri": GUIDE_URI })))
+                .unwrap();
+            let contents = &read["result"]["contents"][0];
+            assert_eq!(contents["uri"], GUIDE_URI);
+            assert_eq!(contents["text"], crate::cli::AGENT_GUIDE);
+
+            let templates = s
+                .handle(req(4, "resources/templates/list", Value::Null))
+                .unwrap();
+            assert_eq!(templates["result"]["resourceTemplates"], json!([]));
+        }
+    }
+
+    #[test]
+    fn the_guide_prompt_is_listed_and_carries_the_embedded_text() {
+        for mut s in [modern_session(), legacy_session()] {
+            let listed = s.handle(req(2, "prompts/list", Value::Null)).unwrap();
+            assert_eq!(listed["result"]["prompts"][0]["name"], GUIDE_PROMPT);
+            assert!(
+                listed["result"]["prompts"][0].get("arguments").is_none(),
+                "the prompt takes no arguments"
+            );
+            let got = s
+                .handle(req(3, "prompts/get", json!({ "name": GUIDE_PROMPT })))
+                .unwrap();
+            let message = &got["result"]["messages"][0];
+            assert_eq!(message["role"], "user");
+            assert_eq!(message["content"]["type"], "text");
+            assert_eq!(message["content"]["text"], crate::cli::AGENT_GUIDE);
+        }
+    }
+
+    #[test]
+    fn modern_guide_results_carry_the_era_fields_and_legacy_ones_do_not() {
+        let cacheable = [
+            ("resources/list", Value::Null),
+            ("resources/templates/list", Value::Null),
+            ("resources/read", json!({ "uri": GUIDE_URI })),
+            ("prompts/list", Value::Null),
+        ];
+        let mut modern = modern_session();
+        let mut legacy = legacy_session();
+        for (method, params) in &cacheable {
+            let m = modern.handle(req(2, method, params.clone())).unwrap();
+            assert_eq!(m["result"]["resultType"], "complete", "{method}");
+            assert_eq!(m["result"]["ttlMs"], CACHE_TTL_MS, "{method}");
+            assert_eq!(m["result"]["cacheScope"], CACHE_SCOPE, "{method}");
+            let l = legacy.handle(req(2, method, params.clone())).unwrap();
+            for key in ["resultType", "ttlMs", "cacheScope"] {
+                assert!(l["result"].get(key).is_none(), "{method}: {key}");
+            }
+        }
+        // `prompts/get` is not cacheable in either era; only the
+        // discriminator differs.
+        let params = json!({ "name": GUIDE_PROMPT });
+        let m = modern
+            .handle(req(3, "prompts/get", params.clone()))
+            .unwrap();
+        assert_eq!(m["result"]["resultType"], "complete");
+        assert!(m["result"].get("ttlMs").is_none());
+        let l = legacy.handle(req(3, "prompts/get", params)).unwrap();
+        assert!(l["result"].get("resultType").is_none());
+    }
+
+    #[test]
+    fn an_unknown_resource_or_prompt_names_what_exists() {
+        let mut s = modern_session();
+        let resp = s
+            .handle(req(2, "resources/read", json!({ "uri": "xa11y://nope" })))
+            .unwrap();
+        assert_eq!(resp["error"]["code"], INVALID_PARAMS);
+        assert_eq!(resp["error"]["data"]["available"], json!([GUIDE_URI]));
+
+        let resp = s
+            .handle(req(3, "prompts/get", json!({ "name": "nope" })))
+            .unwrap();
+        assert_eq!(resp["error"]["code"], INVALID_PARAMS);
+        assert_eq!(resp["error"]["data"]["available"], json!([GUIDE_PROMPT]));
+
+        let resp = s.handle(req(4, "resources/read", json!({}))).unwrap();
+        assert_eq!(resp["error"]["code"], INVALID_PARAMS);
+        let resp = s.handle(req(5, "prompts/get", json!({}))).unwrap();
+        assert_eq!(resp["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[test]
+    fn the_guide_prompt_refuses_arguments_it_does_not_take() {
+        let mut s = modern_session();
+        let params = json!({ "name": GUIDE_PROMPT, "arguments": { "app": "Safari" } });
+        let resp = s.handle(req(2, "prompts/get", params)).unwrap();
+        assert_eq!(resp["error"]["code"], INVALID_PARAMS);
+        let params = json!({ "name": GUIDE_PROMPT, "arguments": {} });
+        let resp = s.handle(req(3, "prompts/get", params)).unwrap();
+        assert!(resp.get("error").is_none(), "{resp}");
     }
 
     #[test]

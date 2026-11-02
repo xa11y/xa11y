@@ -126,6 +126,28 @@ const READONLY_FIELD: NodeId = NodeId(76);
 // 0x0 for it, which is "no bounds", not a clickable point (issue #489).
 const ZERO_SIZE_NODE: NodeId = NodeId(77);
 
+// A password entry (#522): AccessKit's `PasswordInput` reaches each platform
+// as its native secure-text field (AXSecureTextField subrole, AT-SPI
+// `password text`, UIA `IsPassword`), which is what the `password` state
+// reads. Late in document order so it is not the first `text_field` a test
+// picks up, and shifts no `:nth(n)` index another test relies on.
+const PASSWORD_FIELD: NodeId = NodeId(79);
+
+// A label whose text is far larger than any per-field cap a consumer applies
+// (the MCP server's `MAX_FIELD_BYTES`). Late in document order so it shifts
+// no `:nth(n)` index another test relies on.
+const LONG_TEXT: NodeId = NodeId(78);
+
+/// The long label's text: a fixed prefix to select it by, then ~4 KiB of
+/// ASCII filler.
+fn long_text() -> String {
+    let mut text = String::from("Long text: ");
+    while text.len() < 4096 {
+        text.push_str("The quick brown fox jumps over the lazy dog. ");
+    }
+    text
+}
+
 // Dynamic items start at NodeId(100) to leave room for future static nodes
 const DYNAMIC_ITEM_BASE: u64 = 100;
 
@@ -738,8 +760,23 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         ANNOUNCE_BTN,
         ANNOUNCE_LIVE_REGION,
         READONLY_FIELD,
+        PASSWORD_FIELD,
+        LONG_TEXT,
     ]);
     nodes.push((EXTRA_PANEL, extra_panel));
+
+    let mut password = Node::new(Role::PasswordInput);
+    password.set_label("Password");
+    password.add_action(Action::Focus);
+    nodes.push((PASSWORD_FIELD, password));
+
+    // Label and value both, as for the status text: AT-SPI reads a Label's
+    // name from its value, the other platforms from its label.
+    let mut long = Node::new(Role::Label);
+    let text = long_text();
+    long.set_label(text.as_str());
+    long.set_value(text);
+    nodes.push((LONG_TEXT, long));
 
     // Announce button + live region. Pressing the button updates the live
     // region's value, which on macOS translates to

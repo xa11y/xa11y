@@ -51,12 +51,19 @@ pub enum EventKind {
     /// Target: the parent element whose children changed, if known.
     StructureChanged,
 
-    /// A new window was created.
+    /// A top-level window entered the application's window listing
+    /// ([`App::windows`](crate::App::windows)): it was created, or a hidden
+    /// window was shown again.
     /// Target: the window element.
+    ///
+    /// - Linux: `Window:Create`, or derived for toolkits that never emit it
+    ///   (GTK 4, Qt) from the application's children and the window's
+    ///   `VISIBLE` / `ICONIFIED` states. Fires once per transition.
     WindowOpened,
 
-    /// A window was closed or destroyed.
-    /// Target: snapshot taken at destruction time; some attributes may be absent.
+    /// A top-level window left the application's window listing: it was
+    /// closed or destroyed, or (Linux) hidden while kept alive.
+    /// Target: the window's last snapshot; some attributes may be absent.
     WindowClosed,
 
     /// A window became the active/focused window.

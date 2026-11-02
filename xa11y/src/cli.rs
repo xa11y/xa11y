@@ -216,6 +216,7 @@ pub fn run(args: &[String]) -> CliResult<()> {
         Some("type") => cmd_type(&args[1..]),
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("mcp") => crate::mcp::serve(&args[1..]),
+        Some("guide") => cmd_guide(&args[1..]),
         _ => {
             print_usage();
             Ok(())
@@ -289,6 +290,12 @@ Screenshot (pixels; --annotate adds selectors and a11y):
 Model Context Protocol:
   xa11y mcp                                 Serve the above as MCP tools over
                                             stdio (for MCP clients, not humans)
+
+Agent guide:
+  xa11y guide                               Print the guide for agents driving
+                                            xa11y: selectors, auto-wait, result
+                                            bounds, failure kinds. `xa11y mcp`
+                                            serves the same text.
 
 Compose a11y + input/screenshot via `find -o bounds|center`:
   region=$(xa11y find 'button[name=\"OK\"]' --app Safari -o bounds)
@@ -1045,6 +1052,9 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     if el.states.busy {
         states.push("busy");
     }
+    if el.states.password {
+        states.push("password");
+    }
     if let Some(checked) = &el.states.checked {
         states.push(match checked {
             Toggled::Off => "checked=off",
@@ -1128,6 +1138,27 @@ fn print_tree_recursive(
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
+
+/// The agent guide, embedded so that what an agent reads always describes the
+/// binary it is talking to.
+///
+/// `xa11y guide` prints it and `xa11y mcp` serves it as a resource and a
+/// prompt. Its one source is `xa11y/AGENT_GUIDE.md`; the docs site page is
+/// rendered from that file by `cargo xtask sync-agent-guide`, and CI fails
+/// when the two differ.
+pub(crate) const AGENT_GUIDE: &str = include_str!("../AGENT_GUIDE.md");
+
+fn cmd_guide(args: &[String]) -> CliResult<()> {
+    // Takes no arguments; one passed anyway is a mistake worth reporting
+    // rather than ignoring (tenet 1).
+    if let Some(extra) = args.first() {
+        return Err(CliError::Usage(format!(
+            "xa11y guide takes no arguments (got {extra:?})"
+        )));
+    }
+    print!("{AGENT_GUIDE}");
+    Ok(())
+}
 
 fn cmd_apps() -> CliResult<()> {
     let apps = App::list()?;
@@ -3008,6 +3039,20 @@ mod tests {
     // ── Exit-code contract ──────────────────────────────────────────────────
 
     #[test]
+    fn guide_takes_no_arguments() {
+        let err = run(&["guide".into(), "--json".into()]).expect_err("must reject");
+        assert!(
+            matches!(&err, CliError::Usage(m) if m.contains("--json")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_usage_text_lists_the_guide_command() {
+        assert!(usage_text().contains("xa11y guide"));
+    }
+
+    #[test]
     fn exit_code_usage_is_2() {
         assert_eq!(CliError::Usage("bad flag".into()).exit_code(), 2);
     }
@@ -3116,6 +3161,16 @@ mod tests {
         el.states.expanded = Some(false);
         let out = format_element_oneline(&el);
         assert!(out.contains("collapsed"));
+    }
+
+    #[test]
+    fn format_element_password() {
+        let mut el = make_element(Role::TextField, Some("PIN"));
+        assert!(!format_element_oneline(&el).contains("password"));
+        el.states.password = true;
+        let out = format_element_oneline(&el);
+        assert!(out.starts_with("text_field"), "{out}");
+        assert!(out.contains(" password"), "{out}");
     }
 
     #[test]

@@ -1961,8 +1961,9 @@ const WINDOW_FULLSCREEN_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 /// restore promise — so a confirmation shorter than the transition can
 /// confirm the pre-commit value. Measured on macOS 26.4, the transition takes
 /// ~0.5 s and the window is absent from `AXWindows` for 450–650 ms once under
-/// way; the grace is that absence plus a margin. Any unreadable sample or
-/// state change restarts the run (see [`SettleRun`]).
+/// way. The hold counts only while the target is enumerated, so the absence
+/// itself never counts toward it, however long it runs. Any unreadable sample,
+/// absence or state change restarts the run (see [`SettleRun`]).
 const WINDOW_FULLSCREEN_SETTLE_GRACE: Duration = Duration::from_millis(700);
 
 /// How long `minimize` / `restore` wait for the `AXMinimized` state to commit,
@@ -2166,8 +2167,9 @@ fn probe_settable(result: Result<bool>) -> Result<AttrProbe> {
 /// holds it in the app's enumerated window set the sample is read from the
 /// fresh object (the transition can recreate the window); while it is missing
 /// from `AXWindows` the cached handle answers instead. The two shapes are
-/// kept apart because a cached sample cannot count toward the same hold as an
-/// enumerated one (see [`SettleRun`]).
+/// kept apart because only an enumerated sample can confirm the promise (see
+/// [`SettleRun`]); a cached one still decides whether to re-issue the set and
+/// feeds the timeout diagnosis.
 enum TargetSample {
     /// The target's own sample from the app's enumerated window set. An
     /// absent `AXFullScreen` reads as `false`: a window without the surface
@@ -2276,47 +2278,127 @@ fn poll_target(
 }
 
 /// The continuous-hold bookkeeping behind [`settle_window_fullscreen`]: the
-/// promise must hold without interruption for
+/// promise must hold on the *enumerated* target, without interruption, for
 /// [`WINDOW_FULLSCREEN_SETTLE_GRACE`].
+///
+/// A sample answered by the cached handle never confirms, and it breaks a
+/// running hold. The verb's promise is what the next read observes, and that
+/// read goes through `AXWindows` (`App::windows`, a re-resolved locator): a
+/// settle that returned while the target was still off the list handed the
+/// caller a window it could not find (#591: the cached handle used to
+/// confirm on its own grace run, sized to outlast the absence measured on an
+/// idle machine, 450–650 ms; on a loaded CI runner the absence ran longer and
+/// `enter_fullscreen` returned into it).
 #[derive(Default)]
 struct SettleRun {
     /// When the current run of promise-holding enumerated samples started.
     held_since: Option<Instant>,
-    /// When the current run of promise-holding cached samples started. Kept
-    /// apart from the enumerated run: time spent in the set before the target
-    /// left must not pad the absence, because the entry transient itself
-    /// reads the restore promise and only a hold longer than the transition
-    /// rules it out.
-    cached_held_since: Option<Instant>,
+    /// Whether any poll found the target in the enumerated window set.
+    ever_enumerated: bool,
+    /// The most recent poll that found the target off the enumerated set.
+    last_absence: Option<Instant>,
+    /// The most recent poll that broke (or prevented) a hold, and why.
+    last_break: Option<(HoldBreak, Instant)>,
+    /// How many running holds were broken before the grace: a target that
+    /// flickers in and out of the promise shows up here.
+    holds_broken: u32,
+}
+
+/// Why a poll did not extend the hold. Diagnosis only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoldBreak {
+    /// The target was off the enumerated window set.
+    Absent,
+    /// The target was enumerated but read a state away from the promise.
+    WrongState,
+    /// No readable sample of the target.
+    Unreadable,
+}
+
+impl HoldBreak {
+    fn describe(self) -> &'static str {
+        match self {
+            HoldBreak::Absent => "the target was off AXWindows",
+            HoldBreak::WrongState => "the enumerated target read a state away from the promise",
+            HoldBreak::Unreadable => "the target gave no readable sample",
+        }
+    }
 }
 
 impl SettleRun {
     /// Fold one poll in. `reached` is [`TargetSample::evaluate`]'s verdict.
     fn observe(&mut self, sample: Option<&TargetSample>, reached: bool, now: Instant) {
-        match sample {
-            Some(TargetSample::Enumerated { .. }) if reached => {
-                self.held_since.get_or_insert(now);
-                self.cached_held_since = None;
+        // A target off the enumerated set, an unreadable sample, or a state
+        // away from the promise is not evidence the caller's next read will
+        // see the promise: the hold starts over.
+        let cause = match sample {
+            Some(TargetSample::Enumerated { .. }) => {
+                self.ever_enumerated = true;
+                if reached {
+                    self.held_since.get_or_insert(now);
+                    return;
+                }
+                HoldBreak::WrongState
             }
-            Some(TargetSample::Cached { .. }) if reached => {
-                self.cached_held_since.get_or_insert(now);
-                self.held_since = None;
+            Some(TargetSample::Cached { .. }) => {
+                self.last_absence = Some(now);
+                HoldBreak::Absent
             }
-            // An unreadable sample or a state away from the promise is
-            // unknown, not evidence of the promise: the hold starts over.
-            _ => {
-                self.held_since = None;
-                self.cached_held_since = None;
-            }
+            None => HoldBreak::Unreadable,
+        };
+        if self.held_since.take().is_some() {
+            self.holds_broken += 1;
         }
+        self.last_break = Some((cause, now));
     }
 
-    /// Whether the promise has held for the grace, uninterrupted.
+    /// Whether the promise has held on the enumerated target for the grace,
+    /// uninterrupted.
     fn confirmed(&self, now: Instant) -> bool {
-        [self.held_since, self.cached_held_since]
-            .into_iter()
-            .flatten()
-            .any(|since| now.duration_since(since) >= WINDOW_FULLSCREEN_SETTLE_GRACE)
+        self.held_since
+            .is_some_and(|since| now.duration_since(since) >= WINDOW_FULLSCREEN_SETTLE_GRACE)
+    }
+
+    /// Which half of the confirmation was missing at the deadline, for the
+    /// timeout diagnosis: the target was not back in `AXWindows`, or it was
+    /// listed but the promised state did not hold there. Every arm carries
+    /// the run's history, so a churned last sample keeps the context.
+    fn describe_failure(&self, last: Option<&TargetSample>, now: Instant) -> String {
+        let state = describe_target(last);
+        let headline = match last {
+            Some(TargetSample::Cached { .. }) if self.ever_enumerated => format!(
+                "the target window left the app's window list (AXWindows) during the \
+                 transition and was not re-enumerated before the deadline; {state}"
+            ),
+            Some(TargetSample::Cached { .. }) => format!(
+                "the target window was never enumerated in the app's window list \
+                 (AXWindows) during the wait; {state}"
+            ),
+            Some(TargetSample::Enumerated { .. }) => format!(
+                "the target window is enumerated, but the promised state did not hold \
+                 there for {} ms; {state}",
+                WINDOW_FULLSCREEN_SETTLE_GRACE.as_millis()
+            ),
+            None => state,
+        };
+        let ago = |at: Instant| now.saturating_duration_since(at).as_millis();
+        let absence = match self.last_absence {
+            Some(at) => format!("last off AXWindows {} ms before the deadline", ago(at)),
+            None => "never off AXWindows".to_string(),
+        };
+        let interruption = match self.last_break {
+            Some((cause, at)) => format!(
+                "last interruption {} ms before the deadline: {}",
+                ago(at),
+                cause.describe()
+            ),
+            None => "no interruption".to_string(),
+        };
+        format!(
+            "{headline} [ever enumerated: {}; {absence}; {interruption}; holds broken \
+             before the grace: {}]",
+            self.ever_enumerated, self.holds_broken
+        )
     }
 }
 
@@ -2363,10 +2445,12 @@ fn describe_cached_target(fullscreen: &AttrProbe, settable: &AttrProbe) -> Strin
 /// `false` after `restore` (and after the fullscreen exit `minimize` performs
 /// before it iconifies). The wait succeeds once the *target* window's own state
 /// holds the promise for [`WINDOW_FULLSCREEN_SETTLE_GRACE`] without
-/// interruption. The target is followed across the transition's window
-/// recreation through the app's enumerated window set ([`safe_cf_equal`]),
-/// and while it is missing from `AXWindows` its cached handle is read
-/// directly.
+/// interruption *while enumerated in `AXWindows`*, so a caller's next
+/// `App::windows()` finds it. The target is followed across the transition's
+/// window recreation through the app's enumerated window set
+/// ([`safe_cf_equal`]). While it is missing from `AXWindows` its cached handle
+/// is read for the re-issue decision and the diagnosis, but cannot confirm
+/// (see [`SettleRun`]).
 ///
 /// Every unconfirmed iteration re-issues `AXFullScreen = want`: a set that
 /// lands mid-transition is discarded rather than queued (see the constants),
@@ -2445,7 +2529,7 @@ fn settle_window_fullscreen(
             }
         }
         if Instant::now() >= deadline {
-            let mut last = describe_target(sample.as_ref());
+            let mut last = run.describe_failure(sample.as_ref(), Instant::now());
             if let Some(err) = last_set_error {
                 last = format!("{last}; the last retry set failed: {err}");
             }
@@ -2852,6 +2936,16 @@ fn settle_window_size(
 }
 
 // ── Role Mapping ──────────────────────────────────────────────────────────────
+
+/// Whether an AX role/subrole pair is a secure (password) text field.
+///
+/// AppKit's `NSSecureTextField` reports `AXSecureTextField` as its role;
+/// WebKit and AccessKit report `AXTextField` with `AXSecureTextField` as the
+/// subrole. Both map to `Role::TextField` in [`map_ax_role`], so this is the
+/// only place the distinction survives.
+fn is_secure_text_field(role: &str, subrole: Option<&str>) -> bool {
+    role == "AXSecureTextField" || subrole == Some("AXSecureTextField")
+}
 
 fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
     match subrole {
@@ -3497,6 +3591,7 @@ fn build_snapshot_data(
         };
 
         let role = map_ax_role(&attrs.role_str, attrs.subrole_str.as_deref());
+        let password = is_secure_text_field(&attrs.role_str, attrs.subrole_str.as_deref());
 
         // Build raw platform data map before consuming attrs fields.
         let mut raw = std::collections::HashMap::new();
@@ -3672,6 +3767,7 @@ fn build_snapshot_data(
             editable: matches!(role, Role::TextField | Role::TextArea),
             required: false,
             busy: false,
+            password,
         }
         .into();
 
@@ -5095,8 +5191,10 @@ impl Provider for MacOSProvider {
             // handle would then answer kAXErrorInvalidUIElement to the
             // minimize set. Prefer the fresh object from the app's enumerated
             // window set — the same lookup the settle follows the target
-            // with — and fall back to the cached handle when it is not
-            // listed.
+            // with. The settle only returns once the target is enumerated
+            // (see `SettleRun`), so the cached handle is used only if the
+            // window drops off the list again in the moment between the
+            // settle's last poll and this lookup.
             if let Some(fresh) = fresh_target_in_app(app.as_ptr(), target.as_ptr())? {
                 target = fresh;
             }
@@ -5992,44 +6090,103 @@ mod tests {
     }
 
     #[test]
-    fn settle_run_confirms_a_cached_target_only_on_its_own_grace_run() {
+    fn settle_run_never_confirms_on_the_cached_handle() {
+        // The target off `AXWindows` with its cached handle reading the
+        // promise is not confirmation, however long it lasts: the caller's
+        // next read goes through `AXWindows` and would not find the window.
+        // This is the "no window advertises enter_fullscreen" flake: the old
+        // run confirmed the cached handle after the grace.
         let t0 = Instant::now();
-        let promise = settle_poll(true, true);
-        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(false));
+        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(true));
         let mut run = SettleRun::default();
 
-        // Time held while the target was enumerated must not pad the cached
-        // run: the window is absent from `AXWindows` during the transition,
-        // and only a hold that starts there outlasts the absence (the entry
-        // transient reads the restore promise).
-        run.observe(promise.as_ref(), true, t0);
-        run.observe(cached.as_ref(), true, t0 + Duration::from_millis(100));
-        assert!(!run.confirmed(t0 + WINDOW_FULLSCREEN_SETTLE_GRACE));
-        assert!(!run.confirmed(
-            t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE
-                - Duration::from_millis(1)
-        ));
-        assert!(run.confirmed(t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE));
+        let mut now = t0;
+        while now < t0 + WINDOW_FULLSCREEN_SETTLE_BUDGET {
+            run.observe(cached.as_ref(), true, now);
+            assert!(
+                !run.confirmed(now),
+                "confirmed off AXWindows at {:?}",
+                now - t0
+            );
+            now += WINDOW_FULLSCREEN_SETTLE_INTERVAL;
+        }
     }
 
     #[test]
-    fn settle_run_treats_an_unanswered_cached_read_as_unknown() {
+    fn settle_run_restarts_the_enumerated_hold_after_an_absence() {
         let t0 = Instant::now();
-        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(false));
-        let churn = cached_poll(
-            AttrProbe::Churn("invalidated".to_string()),
-            AttrProbe::Value(true),
-        );
+        let promise = settle_poll(true, true);
+        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(true));
         let mut run = SettleRun::default();
 
-        run.observe(cached.as_ref(), true, t0);
-        run.observe(churn.as_ref(), false, t0 + Duration::from_millis(50));
+        // Held while enumerated, then off the list, then back: neither the
+        // time before the absence nor the absence itself counts.
+        run.observe(promise.as_ref(), true, t0);
         run.observe(cached.as_ref(), true, t0 + Duration::from_millis(100));
-        assert!(!run.confirmed(
-            t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE
-                - Duration::from_millis(1)
-        ));
-        assert!(run.confirmed(t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE));
+        assert!(!run.confirmed(t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE));
+        let back = t0 + Duration::from_millis(1500);
+        run.observe(promise.as_ref(), true, back);
+        assert!(!run.confirmed(back + WINDOW_FULLSCREEN_SETTLE_GRACE - Duration::from_millis(1)));
+        assert!(run.confirmed(back + WINDOW_FULLSCREEN_SETTLE_GRACE));
+    }
+
+    #[test]
+    fn settle_run_diagnosis_names_the_missing_half() {
+        let t0 = Instant::now();
+        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(true));
+
+        // Never in the enumerated set.
+        let mut run = SettleRun::default();
+        run.observe(cached.as_ref(), true, t0);
+        let described = run.describe_failure(cached.as_ref(), t0);
+        assert!(described.contains("was never enumerated"), "{described}");
+        assert!(described.contains("reads AXFullScreen=true"), "{described}");
+        assert!(described.contains("ever enumerated: false"), "{described}");
+
+        // Listed and holding, then gone at the deadline.
+        let mut run = SettleRun::default();
+        run.observe(settle_poll(true, true).as_ref(), true, t0);
+        run.observe(cached.as_ref(), true, t0 + Duration::from_millis(50));
+        let deadline = t0 + Duration::from_millis(250);
+        let described = run.describe_failure(cached.as_ref(), deadline);
+        assert!(
+            described.contains("was not re-enumerated before the deadline"),
+            "{described}"
+        );
+        assert!(
+            described.contains("last off AXWindows 200 ms before the deadline"),
+            "{described}"
+        );
+        assert!(
+            described.contains("the target was off AXWindows"),
+            "{described}"
+        );
+        assert!(
+            described.contains("holds broken before the grace: 1"),
+            "{described}"
+        );
+
+        // Listed at the deadline, but the state is wrong there.
+        let wrong = settle_poll(false, true);
+        run.observe(wrong.as_ref(), false, deadline);
+        let described = run.describe_failure(wrong.as_ref(), deadline);
+        assert!(
+            described.contains("is enumerated, but the promised state did not hold"),
+            "{described}"
+        );
+        assert!(described.contains("AXFullScreen=false"), "{described}");
+        assert!(described.contains("away from the promise"), "{described}");
+
+        // A churned last sample keeps the run's history.
+        run.observe(None, false, deadline);
+        let described = run.describe_failure(None, deadline);
+        assert!(
+            described.contains("did not answer a readable sample"),
+            "{described}"
+        );
+        assert!(described.contains("ever enumerated: true"), "{described}");
+        assert!(described.contains("last off AXWindows"), "{described}");
+        assert!(described.contains("no readable sample"), "{described}");
     }
 
     #[test]
@@ -6573,6 +6730,20 @@ mod tests {
         assert_ne!(err, AX_ERROR_SUCCESS);
     }
 
+    /// Both spellings of a password field are flagged, and nothing else
+    /// is (#522). The role itself stays `TextField`; see `map_ax_role`.
+    #[test]
+    fn secure_text_field_is_flagged_as_role_or_subrole() {
+        assert!(is_secure_text_field("AXSecureTextField", None));
+        assert!(is_secure_text_field(
+            "AXTextField",
+            Some("AXSecureTextField")
+        ));
+        assert!(!is_secure_text_field("AXTextField", None));
+        assert!(!is_secure_text_field("AXTextField", Some("AXSearchField")));
+        assert!(!is_secure_text_field("AXTextArea", None));
+    }
+
     #[test]
     fn map_ax_role_covers_all_known_roles() {
         assert_eq!(map_ax_role("AXSortButton", None), Role::Button);
@@ -6607,6 +6778,10 @@ mod tests {
         assert_eq!(map_ax_role("AXCheckBox", None), Role::CheckBox);
         assert_eq!(map_ax_role("AXTextField", None), Role::TextField);
         assert_eq!(map_ax_role("AXSecureTextField", None), Role::TextField);
+        assert_eq!(
+            map_ax_role("AXTextField", Some("AXSecureTextField")),
+            Role::TextField
+        );
         assert_eq!(map_ax_role("AXTextArea", None), Role::TextArea);
         assert_eq!(map_ax_role("AXStaticText", None), Role::StaticText);
         assert_eq!(map_ax_role("AXComboBox", None), Role::ComboBox);

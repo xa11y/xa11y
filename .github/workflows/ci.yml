@@ -677,6 +677,11 @@ jobs:
       - name: Check READMEs are in sync
         run: cargo xtask sync-readmes --check
 
+      # The agent guide is embedded in the binary and rendered into the docs
+      # site; the page must not drift from what `xa11y guide` prints.
+      - name: Check the agent guide page is in sync
+        run: cargo xtask sync-agent-guide --check
+
       # These three are source greps, so they run anywhere. They guard
       # invariants whose violation is invisible at runtime: a stray print
       # macro corrupts an MCP stdio session with a parse error that points
