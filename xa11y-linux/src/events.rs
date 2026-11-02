@@ -701,7 +701,7 @@ fn seed_top_level_windows(
     buses: &[String],
     windows: &mut HashMap<String, TrackedWindow>,
 ) -> Result<()> {
-    let call = |path: &str, method: &str| -> Result<Option<zbus::Message>> {
+    let call = |bus: &str, path: &str, method: &str| -> Result<Option<zbus::Message>> {
         let proxy = zbus::blocking::Proxy::new(
             conn,
             bus.to_owned(),
@@ -721,7 +721,7 @@ fn seed_top_level_windows(
             }),
         }
     };
-    let Some(reply) = call(APP_ROOT_PATH, "GetChildren")? else {
+    let Some(reply) = call(bus, APP_ROOT_PATH, "GetChildren")? else {
         return Ok(());
     };
     let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
@@ -745,7 +745,7 @@ fn seed_top_level_windows(
             );
             continue;
         }
-        let Some(role) = call(&aref.path, "GetRole")? else {
+        let Some(role) = call(&aref.bus_name, &aref.path, "GetRole")? else {
             continue;
         };
         let role: u32 = role.body().deserialize().map_err(|e| Error::Platform {
@@ -755,7 +755,7 @@ fn seed_top_level_windows(
         if !is_window_role_number(role) {
             continue;
         }
-        let Some(state) = call(&aref.path, "GetState")? else {
+        let Some(state) = call(&aref.bus_name, &aref.path, "GetState")? else {
             continue;
         };
         let words: Vec<u32> = state.body().deserialize().map_err(|e| Error::Platform {
