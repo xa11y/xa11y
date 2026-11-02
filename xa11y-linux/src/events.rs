@@ -720,7 +720,7 @@ fn bits_from_u32s(state_bits: &[u32]) -> u64 {
 /// flags must stay tri-state-unknown (`None`) rather than read-as-absent —
 /// the same rule `LinuxProvider::parse_states_with_bits` applies through
 /// `state_bits`, kept in sync here.
-fn states_from_bits(bits: u64, role: Role, state_read_ok: bool) -> StateSet {
+pub(crate) fn states_from_bits(bits: u64, role: Role, state_read_ok: bool) -> StateSet {
     // Same bit positions as `LinuxProvider::parse_states` — kept in sync.
     // Each constant is `1 << ordinal` of the `AtspiStateType` enum in
     // at-spi2-core's `atspi/atspi-constants.h` (e.g. ICONIFIED=15,
@@ -739,13 +739,11 @@ fn states_from_bits(bits: u64, role: Role, state_read_ok: bool) -> StateSet {
     const MODAL: u64 = 1 << 16;
     const SELECTED: u64 = 1 << 23;
     const SENSITIVE: u64 = 1 << 24;
-    const SHOWING: u64 = 1 << 25;
-    const VISIBLE: u64 = 1 << 30;
     const INDETERMINATE: u64 = 1 << 32;
     const REQUIRED: u64 = 1 << 33;
 
     let enabled = (bits & ENABLED) != 0 || (bits & SENSITIVE) != 0;
-    let visible = (bits & VISIBLE) != 0 || (bits & SHOWING) != 0;
+    let visible = crate::atspi::atspi_visible(bits);
 
     let checked = match role {
         Role::CheckBox | Role::RadioButton | Role::MenuItem | Role::Switch => {

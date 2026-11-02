@@ -1105,6 +1105,21 @@ mod tests {
         assert!(submit.bounds.is_some(), "Submit button should have bounds");
     }
 
+    /// A 0x0 extents reply is a sentinel, not a point to click (issue #489):
+    /// the AccessKit node with a zero-size rectangle reports no bounds.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn element_bounds_none_for_zero_size_extents() {
+        let app = h::app_root();
+        let marker = h::named(&app, "Zero-size Marker");
+        assert!(
+            marker.bounds.is_none(),
+            "0x0 extents must read as no bounds, got {:?}",
+            marker.bounds
+        );
+    }
+
     #[test]
     #[ignore]
     fn element_actions_list_on_button() {

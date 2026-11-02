@@ -685,22 +685,11 @@ impl LinuxProvider {
         // coord_type 0 = screen coordinates
         let reply = proxy.call_method("GetExtents", &(0u32,)).ok()?;
         let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().ok()?;
-        if w <= 0 && h <= 0 {
-            return None;
-        }
         // AT-SPI screen extents are physical device pixels. Convert to logical
         // coordinates (the cross-platform contract, same space as the
         // screenshot/input layers) using the detected display scale. On the
         // common 1.0 case this is a no-op. See `crate::scale`.
-        Some(
-            Rect {
-                x,
-                y,
-                width: w.max(0) as u32,
-                height: h.max(0) as u32,
-            }
-            .to_logical(crate::scale::coordinate_scale()),
-        )
+        extents_to_rect(x, y, w, h).map(|r| r.to_logical(crate::scale::coordinate_scale()))
     }
 
     /// Get available actions via Action interface, returning both the action list
@@ -1405,13 +1394,11 @@ impl LinuxProvider {
         const MODAL: u64 = 1 << 16;
         const SELECTED: u64 = 1 << 23;
         const SENSITIVE: u64 = 1 << 24;
-        const SHOWING: u64 = 1 << 25;
-        const VISIBLE: u64 = 1 << 30;
         const INDETERMINATE: u64 = 1 << 32;
         const REQUIRED: u64 = 1 << 33;
 
         let enabled = (bits & ENABLED) != 0 || (bits & SENSITIVE) != 0;
-        let visible = (bits & VISIBLE) != 0 || (bits & SHOWING) != 0;
+        let visible = atspi_visible(bits);
 
         let checked = match role {
             Role::CheckBox | Role::RadioButton | Role::MenuItem | Role::Switch => {
@@ -3352,6 +3339,42 @@ fn is_dock_frame(role_number: u32, attributes: &HashMap<String, String>) -> bool
     role_number == ATSPI_ROLE_FRAME && attributes.get("window-type").is_some_and(|t| t == "dock")
 }
 
+/// Whether an AT-SPI state set means "on screen".
+///
+/// `VISIBLE` only says the object *would* be shown if its ancestors were —
+/// a widget in a hidden dialog, a collapsed panel or a minimised window keeps
+/// it. `SHOWING` is the state that means it is actually drawn, so `visible`
+/// requires it (issue #489). `VISIBLE` is still required alongside it: an
+/// object a toolkit has explicitly hidden is not visible even if a stale
+/// `SHOWING` lingers. Shared by the tree read and the event decoder so the
+/// two never disagree.
+pub(crate) fn atspi_visible(bits: u64) -> bool {
+    const SHOWING: u64 = 1 << 25;
+    const VISIBLE: u64 = 1 << 30;
+    bits & SHOWING != 0 && bits & VISIBLE != 0
+}
+
+/// Turn a `Component.GetExtents` reply into bounds, or `None` when the reply
+/// is a sentinel rather than a position.
+///
+/// Toolkits report an unrealised or off-screen widget as `INT32_MIN`
+/// coordinates (GTK 3), a negative size (`-1,-1,-1,-1`) or `0x0`. Accepting
+/// those as bounds put click targets and screenshot crops at -2147483648, so
+/// they are "no bounds" (issue #489). A zero width *or* height alone (a
+/// separator line) is a real, if thin, rectangle and is kept — the same rule
+/// the Windows backend applies.
+fn extents_to_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Rect> {
+    if x == i32::MIN || y == i32::MIN || w < 0 || h < 0 || (w == 0 && h == 0) {
+        return None;
+    }
+    Some(Rect {
+        x,
+        y,
+        width: w as u32,
+        height: h as u32,
+    })
+}
+
 /// Classify the structured reply before rendering it. `UnknownObject` means
 /// this exact accessible was destroyed, not that the peer timed out or that
 /// `GetChildren` is unimplemented. Direct reads retain the stale-element error;
@@ -3829,6 +3852,46 @@ mod tests {
         assert_eq!(insert_text_length_for(Some("GTK"), "a😀"), 5);
         // Unknown toolkit keeps libatspi's documented byte count.
         assert_eq!(insert_text_length_for(None, "a😀"), 5);
+    }
+
+    // ── #489: SHOWING and sentinel extents ───────────────────────────────
+
+    #[test]
+    fn visible_requires_showing() {
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        assert!(atspi_visible(VISIBLE | SHOWING));
+        // Would be shown if its parents were — e.g. inside a hidden dialog.
+        assert!(!atspi_visible(VISIBLE));
+        assert!(!atspi_visible(SHOWING));
+        assert!(!atspi_visible(0));
+        // The event decoder uses the same rule.
+        assert!(!crate::events::states_from_bits(VISIBLE, Role::Button, true).visible);
+        assert!(crate::events::states_from_bits(VISIBLE | SHOWING, Role::Button, true).visible);
+    }
+
+    #[test]
+    fn sentinel_extents_are_no_bounds() {
+        assert_eq!(
+            extents_to_rect(10, 20, 30, 40),
+            Some(Rect {
+                x: 10,
+                y: 20,
+                width: 30,
+                height: 40
+            })
+        );
+        // Off-screen to the left/top is a real position.
+        assert!(extents_to_rect(-50, -5, 30, 40).is_some());
+        assert_eq!(extents_to_rect(i32::MIN, i32::MIN, 0, 0), None);
+        assert_eq!(extents_to_rect(i32::MIN, 0, 30, 40), None);
+        assert_eq!(extents_to_rect(0, i32::MIN, 30, 40), None);
+        assert_eq!(extents_to_rect(-1, -1, -1, -1), None);
+        assert_eq!(extents_to_rect(5, 5, -3, 10), None);
+        assert_eq!(extents_to_rect(5, 5, 0, 0), None);
+        // N×0 and 0×N are thin but real (a separator), as on Windows.
+        assert!(extents_to_rect(5, 5, 30, 0).is_some());
+        assert!(extents_to_rect(5, 5, 0, 30).is_some());
     }
 
     #[test]
