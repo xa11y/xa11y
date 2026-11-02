@@ -33,17 +33,22 @@ def _rect(r) -> str:
 
 
 def _desktop_bounds() -> tuple[int, int, int, int] | str:
-    """The main display as Finder reports it: ``(left, top, right, bottom)``.
+    """The main display as ``(left, top, right, bottom)`` in points.
 
-    A string instead when it cannot be read, so the diagnosis says why.
+    Read from AppKit's ``NSScreen.mainScreen`` through JXA, which needs no
+    Automation consent: a Finder Apple Event could raise a TCC dialog that
+    takes the frontmost slot and swallows the right-click. On the
+    single-display CI runner the main display holds the global origin, so its
+    top-left is ``(0, 0)``. A string
+    instead when it cannot be read, so the diagnosis says why.
     """
+    script = (
+        'ObjC.import("AppKit"); var f = $.NSScreen.mainScreen.frame; '
+        'f.size.width + "," + f.size.height'
+    )
     try:
         out = subprocess.run(
-            [
-                "osascript",
-                "-e",
-                'tell application "Finder" to get bounds of window of desktop',
-            ],
+            ["osascript", "-l", "JavaScript", "-e", script],
             capture_output=True,
             check=False,
             text=True,
@@ -52,10 +57,10 @@ def _desktop_bounds() -> tuple[int, int, int, int] | str:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"<unavailable: {exc}>"
     try:
-        left, top, right, bottom = (int(v) for v in out.stdout.split(","))
+        width, height = (int(float(v)) for v in out.stdout.split(","))
     except ValueError:
         return f"<unavailable: stdout={out.stdout.strip()!r} stderr={out.stderr.strip()!r}>"
-    return (left, top, right, bottom)
+    return (0, 0, width, height)
 
 
 def _contains(outer, x: float, y: float) -> bool:
@@ -102,7 +107,11 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
                 target = app.locator('[name="Context Target"]').element()
                 window = app.windows()[0]
                 bounds, win_bounds = target.bounds, window.bounds
-                assert bounds is not None and win_bounds is not None
+                assert bounds is not None and win_bounds is not None, (
+                    f"no bounds to click after moving the window from "
+                    f"{original_origin!r}: target={_rect(bounds)} "
+                    f"window={_rect(win_bounds)} desktop={desktop!r}"
+                )
                 cx, cy = bounds.x + bounds.width / 2, bounds.y + bounds.height / 2
         geometry = (
             f"target={_rect(bounds)} actions={target.actions!r}; "
@@ -154,4 +163,7 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
             except xa11y.XA11yError:
                 pass  # Preserve the discovery failure if cleanup also fails.
         if original_origin is not None:
-            app.windows()[0].move_to(*original_origin)
+            try:
+                app.windows()[0].move_to(*original_origin)
+            except xa11y.XA11yError:
+                pass  # Preserve the test's own failure if the restore also fails.
