@@ -490,7 +490,8 @@ fn tool_definition(name: &str) -> Value {
             tool(
                 "windows",
                 "List top-level windows",
-                "List the top-level windows of one application (give `app` or \
+                &format!(
+                    "List the top-level windows of one application (give `app` or \
                  `pid`) or of every running application when neither is given. \
                  Each window reports its `name`, `bounds`, `states` (including \
                  `minimized` / `maximized` / `fullscreen` when the platform can \
@@ -514,7 +515,9 @@ fn tool_definition(name: &str) -> Value {
                  native fullscreen (macOS); a platform without one does not \
                  advertise it. `restore` is the inverse of all three entry \
                  verbs — it leaves minimized, maximized, or fullscreen; there \
-                 is no separate exit-fullscreen action.",
+                 is no separate exit-fullscreen action.\n\n{field_cap}",
+                    field_cap = field_cap_note(),
+                ),
                 object_schema(props, &[]),
             )
         }
@@ -1011,7 +1014,9 @@ fn events_poll_description() -> String {
          application that quits keeps returning `live: true` with no events. Use \
          `apps` to find out whether it is still running.\n\n\
          An event is a snapshot from when it fired. Read the tree again to see the \
-         UI as it is now."
+         UI as it is now.\n\n\
+         {field_cap}",
+        field_cap = field_cap_note(),
     )
 }
 
@@ -1433,10 +1438,13 @@ fn build_node(
         Ok(children) => children,
         Err(e) => {
             obj.insert("children_error".into(), json!(e.to_string()));
-            // The depth limit may have hidden a subtree here or not; the
-            // global flag must not claim nothing was cut when that is unknown.
+            // Whichever limit would have stopped here may have hidden a
+            // subtree or not; the global flag must not claim nothing was cut
+            // when that is unknown.
             if depth >= max_depth {
                 cut.by_depth = true;
+            } else if *budget == 0 {
+                cut.by_node_limit = true;
             }
             return node;
         }
@@ -2517,7 +2525,7 @@ mod tests {
 
     #[test]
     fn the_element_tools_state_the_field_cap_they_enforce() {
-        for name in ["tree", "find"] {
+        for name in ["tree", "find", "windows", "events_poll"] {
             let description = tool_definition(name)["description"]
                 .as_str()
                 .expect("description")
