@@ -475,7 +475,7 @@ impl InputProvider for MacOSInputProvider {
                 // As Unicode text, AppKit text views insert "\r" or "\n"
                 // inconsistently and controls that act on Return never see
                 // the key.
-                TypeStep::Return => {
+                TypeStep::LineBreak => {
                     self.key_down(&Key::Enter)?;
                     self.key_up(&Key::Enter)?;
                 }
@@ -526,12 +526,13 @@ const TYPE_CHUNK_CHARS: usize = 20;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TypeStep {
     Text(String),
-    Return,
+    LineBreak,
 }
 
 /// Split `text` into Unicode chunks of at most [`TYPE_CHUNK_CHARS`]
 /// characters, with each line break (`"\r\n"`, `"\r"` or `"\n"`) as one
-/// [`TypeStep::Return`].
+/// [`TypeStep::LineBreak`]. Pairing is per call: a `"\r"` ending one call and
+/// a `"\n"` starting the next are two line breaks.
 fn plan_type_text(text: &str) -> Vec<TypeStep> {
     let mut steps = Vec::new();
     let mut run: Vec<char> = Vec::new();
@@ -549,7 +550,7 @@ fn plan_type_text(text: &str) -> Vec<TypeStep> {
                     chars.next();
                 }
                 flush(&mut run, &mut steps);
-                steps.push(TypeStep::Return);
+                steps.push(TypeStep::LineBreak);
             }
             _ => run.push(c),
         }
@@ -583,11 +584,11 @@ mod tests {
             plan_type_text("a\r\nb\rc\nd"),
             vec![
                 text("a"),
-                TypeStep::Return,
+                TypeStep::LineBreak,
                 text("b"),
-                TypeStep::Return,
+                TypeStep::LineBreak,
                 text("c"),
-                TypeStep::Return,
+                TypeStep::LineBreak,
                 text("d"),
             ]
         );
@@ -598,16 +599,21 @@ mod tests {
         assert_eq!(
             plan_type_text("\n\r\r\n\n"),
             vec![
-                TypeStep::Return,
-                TypeStep::Return,
-                TypeStep::Return,
-                TypeStep::Return
+                TypeStep::LineBreak,
+                TypeStep::LineBreak,
+                TypeStep::LineBreak,
+                TypeStep::LineBreak
             ]
         );
         // "\n\r" is two breaks: only CR followed by LF pairs up.
         assert_eq!(
             plan_type_text("x\n\ry"),
-            vec![text("x"), TypeStep::Return, TypeStep::Return, text("y")]
+            vec![
+                text("x"),
+                TypeStep::LineBreak,
+                TypeStep::LineBreak,
+                text("y")
+            ]
         );
     }
 
@@ -619,8 +625,14 @@ mod tests {
             vec![
                 text(&"é".repeat(TYPE_CHUNK_CHARS)),
                 text("ééé"),
-                TypeStep::Return,
+                TypeStep::LineBreak,
             ]
+        );
+        // Chunks count characters, not UTF-16 units: a non-BMP emoji is one
+        // character and is never split across events.
+        assert_eq!(
+            plan_type_text(&"😀".repeat(TYPE_CHUNK_CHARS + 1)),
+            vec![text(&"😀".repeat(TYPE_CHUNK_CHARS)), text("😀")]
         );
         assert_eq!(plan_type_text(""), vec![]);
         assert_eq!(plan_type_text("plain"), vec![text("plain")]);
