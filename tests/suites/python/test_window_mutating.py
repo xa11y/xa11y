@@ -422,7 +422,7 @@ def test_minimize_and_restore(app: xa11y.App) -> None:
 
 
 @pytest.mark.skipif(
-    sys.platform != "win32" or APP not in ("winforms", "wpf"),
+    sys.platform != "win32" or APP not in ("winforms", "wpf", "uwp"),
     reason="minimized-window visibility is asserted on the Microsoft framework cells",
 )
 def test_controls_of_a_minimized_window_are_not_visible(
@@ -434,7 +434,8 @@ def test_controls_of_a_minimized_window_are_not_visible(
     window, so without the provider's own check an auto-waiting action
     would pass its ``visible`` wait and act on a control nobody can see
     (issue #501). WinForms controls carry their own HWND and WPF's do not,
-    so the two cells cover both of the provider's paths.
+    so the two cells cover both of the provider's paths. The uwp cell adds a
+    window whose content lives in another process's CoreWindow.
 
     A provider may also drop the controls from the tree while the window is
     minimized; the WinForms cell does (its child-HWND controls are gone

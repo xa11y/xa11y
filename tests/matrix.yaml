@@ -542,9 +542,11 @@ gaps:
       matches three elements. The MCP window-mutation tests address their
       target by that selector, and `action` refuses an ambiguous one. On the
       uwp cell they skip with a reason that starts with this gap's id, and
-      only when every extra match is a same-named window. The same ambiguity
-      on any other cell fails (_no_mcp_window_target in
-      tests/suites/cli/test_mcp.py).
+      only when `find` returns exactly that shape: three matches, one of them
+      the title bar reporting the title as its value. Any other ambiguity, on
+      any cell, fails (_no_mcp_window_target in tests/suites/cli/test_mcp.py).
+      A selector's first segment never matches the app root, so
+      `application > window[...]` cannot single out the frame either.
       The Python, JS and CLI window suites act on the window element itself
       and run in full there.
     severity: low
@@ -553,6 +555,25 @@ gaps:
       apps: [uwp]
       language: cli
       features: [windows]
+
+  - id: uwp_events_attributed_to_frame_host
+    description: >
+      Until #497 is fixed (#567), xa11y resolves the UWP test app to
+      ApplicationFrameHost, so the Python events suite subscribes on the
+      frame host's pid while the XAML events come from the UWP process.
+      FocusChanged, ValueChanged (slider), StateChanged (check box),
+      NameChanged, event app metadata, event target and wait_for all time
+      out there, though the same tests XPASS on the wpf cell. They are
+      strict xfails with `raises=` on the uwp cell
+      (uwp_frame_host_xfail in tests/suites/python/test_events.py), so the
+      #567 fix has to flip them. Subscription lifecycle, try_recv, and
+      StructureChanged (non-strict, XPASS) do run there.
+    severity: medium
+    workaround: "The wpf cell covers UIA event delivery from a XAML framework; #567 is the fix."
+    affects:
+      apps: [uwp]
+      language: python
+      features: [events]
 
   - id: uwp_textbox_nested_text_field
     description: >

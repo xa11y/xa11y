@@ -231,16 +231,20 @@ struct App : ApplicationT<App> {
 // apartment"), and an STA here failed activation the same way: both reach the
 // activator only as "The app didn't start".
 int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    init_apartment(apartment_type::multi_threaded);
+    // Installed first, so a failure in anything below still reaches the log.
     std::set_terminate([] {
         log_failure(L"std::terminate", L"uncaught exception or noexcept violation");
         std::abort();
     });
     try {
+        init_apartment(apartment_type::multi_threaded);
         Application::Start([](auto&&) { make<App>(); });
     } catch (hresult_error const& error) {
-        log_hresult(L"Application::Start", error);
-        throw;
+        // Logged, then reported through the exit code: an exception may not
+        // leave wWinMain (C4297), and the activator sees the process exit
+        // either way.
+        log_hresult(L"wWinMain", error);
+        return 1;
     }
     return 0;
 }

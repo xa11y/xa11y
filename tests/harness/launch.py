@@ -676,7 +676,7 @@ def _suite_command(suite: str, report_path: Path) -> list[str]:
     """
     if suite == "python":
         return [
-            sys.executable, "-m", "pytest", "tests/suites/python/", "-v",
+            sys.executable, "-m", "pytest", "tests/suites/python/", "-v", "-rxXs",
             "-m", "not window_mutating",
             f"--junitxml={report_path}",
         ]
@@ -688,13 +688,13 @@ def _suite_command(suite: str, report_path: Path) -> list[str]:
         # flaky (see tests/suites/python/test_window_mutating.py).
         return [
             sys.executable, "-m", "pytest",
-            "tests/suites/python/test_window_mutating.py", "-v",
+            "tests/suites/python/test_window_mutating.py", "-v", "-rxXs",
             "-m", "window_mutating",
             f"--junitxml={report_path}",
         ]
     if suite == "cli":
         return [
-            sys.executable, "-m", "pytest", "tests/suites/cli/", "-v",
+            sys.executable, "-m", "pytest", "tests/suites/cli/", "-v", "-rxXs",
             f"--junitxml={report_path}",
         ]
     if suite == "js":
