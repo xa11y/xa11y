@@ -35,7 +35,7 @@ The mechanisms are not bridged. A failed accessibility action never falls back t
 | Platform | Requirement |
 | --- | --- |
 | macOS | Accessibility + Input Monitoring for the terminal/IDE running your code |
-| Windows | None for normal user sessions |
+| Windows | None for normal user sessions. Input to an elevated window needs an elevated caller |
 | Linux (X11) | `XTest` extension enabled on the X server. Zero setup. |
 | Linux (Wayland / headless) | Membership in the `input` group (`sudo usermod -aG input $USER` then re-login). xa11y opens `/dev/uinput` and registers a virtual evdev keyboard+pointer, the same mechanism used by `xdotool --using-uinput`, `ydotool`, `wtype`, Steam Input, and Wine. **The privilege grants global input read/write access**, comparable to macOS Input Monitoring. |
 
@@ -302,7 +302,7 @@ Drag-and-drop has no accessibility equivalent on most platforms. Resolve both en
 
 Input simulation raises five of xa11y's error variants:
 
-- `PermissionDenied` when the OS denied the synthesis permission. On Linux this is the missing `input` group; macOS cannot report a missing Input Monitoring grant, so the events are dropped silently instead.
+- `PermissionDenied` when the OS denied the synthesis permission. On Linux this is the missing `input` group; macOS cannot report a missing Input Monitoring grant, so the events are dropped silently instead. On Windows it means the target window belongs to a process at a higher integrity level, such as an elevated app. UIPI drops such input and still reports it as delivered. xa11y refuses it up front instead, naming both integrity levels. When the target's level cannot be read, as with another user's process, the input is sent and UIPI may still drop it. Key and button releases are never refused, so a held key can always be released. A drag checks both of its ends before it presses the button.
 - `Unsupported` when the platform has no backend for the operation, when the Linux `uinput` kernel module is unavailable, when a `Char` key is on no key of the active Windows layout, or when that layout needs a modifier to produce it.
 - `NoElementBounds` when the target `Element` has no bounds. Re-fetch it, or anchor on a point.
 - `InvalidActionData` for an uppercase `Char` key, a malformed key name, or a bad target tuple.

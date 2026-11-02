@@ -819,12 +819,23 @@ impl<'a> From<&'a Element> for ClickTarget<'a> {
 /// Run `body` with each key in `keys` held down, releasing them all (in
 /// reverse order) before returning. Errors during release are returned only
 /// when `body` succeeded — a body failure takes precedence.
+///
+/// A `key_down` that fails partway (a backend can refuse one, as Windows
+/// does for input UIPI would drop) releases the keys already pressed before
+/// returning its error, so a refused chord never leaves a modifier held.
 fn with_keys_held<F>(backend: &dyn InputProvider, keys: &[Key], body: F) -> Result<()>
 where
     F: FnOnce() -> Result<()>,
 {
-    for k in keys {
-        backend.key_down(k)?;
+    for (pressed, k) in keys.iter().enumerate() {
+        if let Err(e) = backend.key_down(k) {
+            for held in keys[..pressed].iter().rev() {
+                // The press error is the one to report; a release that also
+                // fails cannot be retried from here and must not mask it.
+                let _ = backend.key_up(held);
+            }
+            return Err(e);
+        }
     }
     let result = body();
     let mut release_err: Option<Error> = None;
@@ -841,6 +852,69 @@ where
         (Err(e), _) => Err(e),
         (Ok(()), Some(e)) => Err(e),
         (Ok(()), None) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod keys_held_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records key events and refuses `key_down` for one key.
+    struct Refusing {
+        refuse: Key,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl InputProvider for Refusing {
+        fn pointer_move(&self, _: Point) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_down(&self, _: MouseButton) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_up(&self, _: MouseButton) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_click(&self, _: Point, _: MouseButton, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_scroll(&self, _: Point, _: ScrollDelta) -> Result<()> {
+            Ok(())
+        }
+        fn key_down(&self, key: &Key) -> Result<()> {
+            if *key == self.refuse {
+                return Err(Error::PermissionDenied {
+                    instructions: "refused".into(),
+                });
+            }
+            self.log.lock().unwrap().push(format!("down {key:?}"));
+            Ok(())
+        }
+        fn key_up(&self, key: &Key) -> Result<()> {
+            self.log.lock().unwrap().push(format!("up {key:?}"));
+            Ok(())
+        }
+        fn type_text(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_refused_key_down_releases_the_keys_already_held() {
+        let backend = Refusing {
+            refuse: Key::Alt,
+            log: Mutex::new(Vec::new()),
+        };
+        let err = with_keys_held(&backend, &[Key::Ctrl, Key::Shift, Key::Alt], || {
+            panic!("the body must not run when a key could not be pressed")
+        })
+        .expect_err("the refusal propagates");
+        assert!(matches!(err, Error::PermissionDenied { .. }), "{err:?}");
+        assert_eq!(
+            *backend.log.lock().unwrap(),
+            ["down Ctrl", "down Shift", "up Shift", "up Ctrl"]
+        );
     }
 }
 

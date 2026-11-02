@@ -23,7 +23,7 @@ variants onto a shared class, so the mapping columns are what you catch.
 
 | Rust variant | Raised when | Python | JavaScript |
 | --- | --- | --- | --- |
-| `PermissionDenied` | Accessibility or Screen Recording permission is not granted. Carries setup instructions. On macOS 26+ both permissions are required. | `PermissionDeniedError` | `PermissionDeniedError` |
+| `PermissionDenied` | Accessibility or Screen Recording permission is not granted. Carries setup instructions. On macOS 26+ both permissions are required. On Windows, also raised by input simulation when the target window belongs to a process at a higher integrity level, such as an elevated app, which UIPI would silently drop the input for. | `PermissionDeniedError` | `PermissionDeniedError` |
 | `AccessibilityNotEnabled` | The application advertises a tree, but its content is empty because its accessibility bridge is off. Chromium and Electron on Linux without `--force-renderer-accessibility` is the common case. | `AccessibilityNotEnabledError` | `AccessibilityNotEnabledError` |
 | `SelectorNotMatched` | No element (or no application) matched the selector on a fail-fast call. Carries a diagnosis. | `SelectorNotMatchedError` | `SelectorNotMatchedError` |
 | `ElementStale` | The element's platform handle is stale and re-traversal could not relocate it. | `SelectorNotMatchedError` | `SelectorNotMatchedError` |
@@ -50,7 +50,7 @@ surface:
 
 | Surface | Variants it raises |
 | --- | --- |
-| [Input simulation](/guides/input/) | `Unsupported`, `NoElementBounds`, `InvalidActionData`, `Platform`; on Linux, `PermissionDenied` when the `input` group is missing. macOS cannot report a missing Input Monitoring grant, so it drops the events silently |
+| [Input simulation](/guides/input/) | `Unsupported`, `NoElementBounds`, `InvalidActionData`, `Platform`; on Linux, `PermissionDenied` when the `input` group is missing; on Windows, `PermissionDenied` when the target window is known to run at a higher integrity level. macOS cannot report a missing Input Monitoring grant, so it drops the events silently |
 | [Screenshots](/guides/screenshots/) | `PermissionDenied` (macOS Screen Recording not granted, or the Wayland portal denied consent), `Unsupported` (no capture backend for the session), `NoElementBounds`, `Platform` (capture or PNG encode failure) |
 | [Selectors](/reference/selectors/) | `InvalidSelector` at parse time, `SelectorNotMatched` or `Timeout` at resolve time |
 | [Events](/reference/events/) | `Timeout` from `wait_for` |
