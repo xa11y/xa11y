@@ -10,22 +10,22 @@ use std::sync::Mutex;
 
 use windows::Win32::Foundation::GetLastError;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3,
-    VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_D, VK_DELETE,
-    VK_DOWN, VK_E, VK_END, VK_ESCAPE, VK_F, VK_F1, VK_F10, VK_F11, VK_F12, VK_F13, VK_F14, VK_F15,
-    VK_F16, VK_F17, VK_F18, VK_F19, VK_F2, VK_F20, VK_F21, VK_F22, VK_F23, VK_F24, VK_F3, VK_F4,
-    VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_G, VK_H, VK_HOME, VK_I, VK_INSERT, VK_J, VK_K, VK_L,
-    VK_LEFT, VK_LWIN, VK_M, VK_MENU, VK_N, VK_NEXT, VK_O, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4,
-    VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_P,
-    VK_PRIOR, VK_Q, VK_R, VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_SPACE, VK_T, VK_TAB, VK_U, VK_UP,
-    VK_V, VK_W, VK_X, VK_Y, VK_Z,
+    GetKeyboardLayout, SendInput, VkKeyScanExW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
+    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_0,
+    VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL,
+    VK_D, VK_DELETE, VK_DOWN, VK_E, VK_END, VK_ESCAPE, VK_F, VK_F1, VK_F10, VK_F11, VK_F12, VK_F13,
+    VK_F14, VK_F15, VK_F16, VK_F17, VK_F18, VK_F19, VK_F2, VK_F20, VK_F21, VK_F22, VK_F23, VK_F24,
+    VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_G, VK_H, VK_HOME, VK_I, VK_INSERT, VK_J,
+    VK_K, VK_L, VK_LEFT, VK_LWIN, VK_M, VK_MENU, VK_N, VK_NEXT, VK_O, VK_P, VK_PRIOR, VK_Q, VK_R,
+    VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_SPACE, VK_T, VK_TAB, VK_U, VK_UP, VK_V, VK_W, VK_X,
+    VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
@@ -202,9 +202,11 @@ fn vk_for(key: &Key) -> Result<(VIRTUAL_KEY, bool)> {
     Ok(v)
 }
 
-/// Map a `Key::Char` value to a virtual-key code assuming a US layout for
-/// symbols. The [`Key`] contract guarantees `c` is not ASCII uppercase, so we
-/// only need to handle lowercase letters, digits, and common OEM punctuation.
+/// Map a `Key::Char` value to a virtual-key code. The [`Key`] contract
+/// guarantees `c` is not ASCII uppercase. Letters and digits use their fixed
+/// `VK_A`..`VK_Z` / `VK_0`..`VK_9` codes, which Windows defines per layout
+/// already (shortcuts such as Ctrl+1 depend on that). Everything else is
+/// resolved on the active layout by [`vk_on_active_layout`].
 fn vk_for_char(c: char) -> Result<VIRTUAL_KEY> {
     let vk = match c {
         'a' => VK_A,
@@ -243,27 +245,82 @@ fn vk_for_char(c: char) -> Result<VIRTUAL_KEY> {
         '7' => VK_7,
         '8' => VK_8,
         '9' => VK_9,
-        ';' => VK_OEM_1,
-        '/' => VK_OEM_2,
-        '`' => VK_OEM_3,
-        '[' => VK_OEM_4,
-        '\\' => VK_OEM_5,
-        ']' => VK_OEM_6,
-        '\'' => VK_OEM_7,
-        ',' => VK_OEM_COMMA,
-        '.' => VK_OEM_PERIOD,
-        '-' => VK_OEM_MINUS,
-        '=' => VK_OEM_PLUS,
-        _ => {
-            return Err(Error::Unsupported {
-                feature: format!(
-                    "Key::Char('{c}') has no Win32 virtual-key mapping; \
-                     use Keyboard::type_text for arbitrary characters"
-                ),
-            });
-        }
+        // Everything else (punctuation, and letters outside a-z such as
+        // `ß` or `é`) lives on a different key per layout, so it is looked up
+        // on the layout that will receive the key, never assumed to be US
+        // (issue #508).
+        _ => return vk_on_active_layout(c),
     };
     Ok(vk)
+}
+
+/// Resolve `c` to a virtual key on the keyboard layout of the foreground
+/// window's thread, which is the layout that will interpret the key press.
+fn vk_on_active_layout(c: char) -> Result<VIRTUAL_KEY> {
+    let mut units = [0u16; 2];
+    let encoded = c.encode_utf16(&mut units);
+    if encoded.len() != 1 {
+        return Err(Error::Unsupported {
+            feature: format!(
+                "Key::Char('{c}') is outside the Basic Multilingual Plane, so no key on a \
+                 Windows layout produces it; use Keyboard::type_text"
+            ),
+        });
+    }
+    // SAFETY: plain Win32 calls; a null foreground window yields thread id 0,
+    // which GetKeyboardLayout reads as the calling thread. With no foreground
+    // window there is no other layout the key could be read under.
+    let layout = unsafe {
+        let thread = GetWindowThreadProcessId(GetForegroundWindow(), None);
+        GetKeyboardLayout(thread)
+    };
+    // SAFETY: plain Win32 call on a value code unit and layout handle.
+    let scan = unsafe { VkKeyScanExW(encoded[0], layout) };
+    decode_vk_scan(c, scan, layout.0 as usize)
+}
+
+/// Interpret a `VkKeyScanExW` result: the low byte is the virtual key, the
+/// high byte the modifiers the layout needs to produce `c`, and `-1` means no
+/// key produces it.
+///
+/// A character that needs modifiers is refused rather than chorded:
+/// `Key::Char` names a key, never a shifted symbol (that is why it rejects
+/// ASCII uppercase), so `"/"` on a German layout, where it is Shift+7, has no
+/// key of its own.
+fn decode_vk_scan(c: char, scan: i16, layout: usize) -> Result<VIRTUAL_KEY> {
+    if scan == -1 {
+        return Err(Error::Unsupported {
+            feature: format!(
+                "Key::Char('{c}') is on no key of the active keyboard layout \
+                 (HKL {layout:#x}); use Keyboard::type_text for arbitrary characters"
+            ),
+        });
+    }
+    let [vk, shift_state] = (scan as u16).to_le_bytes();
+    if shift_state != 0 {
+        let mut needs = Vec::new();
+        if shift_state & 1 != 0 {
+            needs.push("Shift");
+        }
+        if shift_state & 2 != 0 {
+            needs.push("Ctrl");
+        }
+        if shift_state & 4 != 0 {
+            needs.push("Alt");
+        }
+        if needs.is_empty() {
+            needs.push("a layout-specific modifier");
+        }
+        return Err(Error::Unsupported {
+            feature: format!(
+                "Key::Char('{c}') needs {} on the active keyboard layout (HKL {layout:#x}), \
+                 so it is not a key of its own there; chord the base key with those \
+                 modifiers, or use Keyboard::type_text",
+                needs.join("+")
+            ),
+        });
+    }
+    Ok(VIRTUAL_KEY(u16::from(vk)))
 }
 
 fn button_down_up(button: MouseButton) -> (u32, u32) {
@@ -357,5 +414,46 @@ impl InputProvider for WindowsInputProvider {
             return Ok(());
         }
         self.send(&inputs)
+    }
+}
+
+#[cfg(test)]
+mod keymap_tests {
+    use super::*;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_OEM_1, VK_OEM_2};
+
+    #[test]
+    fn unshifted_key_resolves_to_its_vk() {
+        // US ';' is VK_OEM_1 with no modifiers.
+        assert_eq!(
+            decode_vk_scan(';', VK_OEM_1.0 as i16, 0x409).unwrap(),
+            VK_OEM_1
+        );
+    }
+
+    #[test]
+    fn shifted_symbol_is_refused_naming_the_modifier() {
+        // German '/' is Shift+7: VK_7 (0x37) with shift state 1.
+        let err = decode_vk_scan('/', 0x0137, 0x407).expect_err("needs Shift");
+        let msg = err.to_string();
+        assert!(msg.contains("Shift"), "{msg}");
+        assert!(msg.contains("0x407"), "{msg}");
+        // AltGr (Ctrl+Alt) symbols, e.g. German '{'.
+        let err = decode_vk_scan('{', 0x0637, 0x407).expect_err("needs AltGr");
+        assert!(err.to_string().contains("Ctrl+Alt"), "{err}");
+    }
+
+    #[test]
+    fn character_off_the_layout_is_refused() {
+        let err = decode_vk_scan('\u{00e6}', -1, 0x409).expect_err("not on US");
+        assert!(err.to_string().contains("no key"), "{err}");
+    }
+
+    #[test]
+    fn us_slash_still_resolves() {
+        assert_eq!(
+            decode_vk_scan('/', VK_OEM_2.0 as i16, 0x409).unwrap(),
+            VK_OEM_2
+        );
     }
 }
