@@ -74,6 +74,11 @@ The `flag` carried by `StateChanged`:
 Python flattens the `state_changed` payload onto the event itself as
 `state_flag` and `state_value`, which are `None` for every other event type.
 
+On Windows, a `target` snapshot is thinner than a queried element. It has no
+`uia_framework_id` in `raw` and never offers `Press` through the MSAA default
+action. [Action mapping](/reference/platform-details/#action-mapping) has the
+details. Query the element again to get both.
+
 ## Subscribing
 
 <Tabs syncKey="lang">

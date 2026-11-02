@@ -1753,29 +1753,37 @@ fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCache
     create_cache_request(automation, BATCH_PROPERTIES)
 }
 
-/// The cache request event handlers fetch their targets with: the batch
-/// request minus [`EVENT_EXCLUDED_PROPERTIES`].
+/// The cache request event handlers fetch their targets with.
 fn create_event_cache_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
-    let properties: Vec<UIA_PROPERTY_ID> = BATCH_PROPERTIES
+    create_cache_request(automation, &event_cache_properties())
+}
+
+/// The batch properties minus [`EVENT_EXCLUDED_PROPERTIES`]: what event
+/// handlers pre-fetch for an event's sender.
+fn event_cache_properties() -> Vec<UIA_PROPERTY_ID> {
+    BATCH_PROPERTIES
         .iter()
         .copied()
         .filter(|p| !EVENT_EXCLUDED_PROPERTIES.contains(p))
-        .collect();
-    create_cache_request(automation, &properties)
+        .collect()
 }
 
 /// Batch properties that event handlers do not pre-fetch.
 ///
-/// Fetching these for the sender of a UIA event, on the event delivery
-/// thread, corrupted the subscribing process's heap (0xC0000374) on the
-/// WinForms test app: three CI runs of #545 out of three, and none with the
-/// two properties left out of this request (#584). The root cause is on the
-/// provider side and was not isolated further.
+/// With these in the event request, the subscribing process's heap was
+/// corrupted (0xC0000374) while the WinForms test app delivered events: in
+/// three CI runs out of three. The one run so far with both left out of this
+/// request was clean. The root cause is not known; issue #589 tracks it.
 ///
 /// Leaving them out costs one thing: an event target never advertises the
 /// MSAA default action as `press` (see `legacy_default_action_is_activation`,
 /// which needs a non-empty default action), and its raw map lacks
 /// `uia_framework_id`. Re-reading the element through a query restores both.
+///
+/// The two come back together or not at all. `is_msaa_framework(None)` is
+/// true, so caching the default action without the framework id would make
+/// a native UIA event target (Chromium, WPF, ...) advertise `press` for its
+/// MSAA default action.
 const EVENT_EXCLUDED_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_LegacyIAccessibleDefaultActionPropertyId,
     UIA_FrameworkIdPropertyId,
@@ -6182,13 +6190,42 @@ mod tests {
     }
 
     #[test]
-    fn event_exclusions_name_batch_properties() {
+    fn event_cache_properties_are_the_batch_minus_the_two_exclusions() {
+        let props = event_cache_properties();
+        assert!(
+            !props.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId),
+            "DefaultAction must stay out of the event request (#589)"
+        );
+        assert!(
+            !props.contains(&UIA_FrameworkIdPropertyId),
+            "FrameworkId must stay out of the event request (#589)"
+        );
+        for prop in BATCH_PROPERTIES {
+            if !EVENT_EXCLUDED_PROPERTIES.contains(prop) {
+                assert!(props.contains(prop), "{prop:?} dropped from events");
+            }
+        }
         // An exclusion that is not in the batch excludes nothing while still
         // reading as a live workaround.
         for prop in EVENT_EXCLUDED_PROPERTIES {
             assert!(
                 BATCH_PROPERTIES.contains(prop),
                 "{prop:?} is excluded from the event request but not batched"
+            );
+        }
+    }
+
+    #[test]
+    fn default_action_and_framework_id_are_cached_together() {
+        // Without FrameworkId, `is_msaa_framework(None)` reads any element as
+        // MSAA-proxied, so a cached DefaultAction alone would advertise
+        // `press` on native UIA providers. Every request must carry both or
+        // neither.
+        for props in [BATCH_PROPERTIES.to_vec(), event_cache_properties()] {
+            assert_eq!(
+                props.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId),
+                props.contains(&UIA_FrameworkIdPropertyId),
+                "DefaultAction and FrameworkId must be cached together"
             );
         }
     }
