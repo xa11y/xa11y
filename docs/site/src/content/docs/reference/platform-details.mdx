@@ -316,7 +316,7 @@ xa11y supports both X11 and Wayland Linux sessions. Backends are selected at run
 | Capability | X11 | Wayland |
 | --- | --- | --- |
 | Accessibility (AT-SPI2) | D-Bus, no display-server dependency | D-Bus, no display-server dependency |
-| Input simulation | `XTest` extension (no setup) | `/dev/uinput` virtual evdev device (requires `input` group) |
+| Input simulation | `XTest` extension (no setup) | `/dev/uinput` virtual evdev device (requires the `input` group or a udev rule) |
 | Screen capture | `GetImage` on the root window | PNG URI from `org.freedesktop.portal.Screenshot` |
 | Window management | EWMH/ICCCM | Sway native IPC, gated by `zwlr_foreign_toplevel_manager_v1` |
 
@@ -374,7 +374,7 @@ must be observed by reading a new snapshot.
 
 `org.freedesktop.portal.RemoteDesktop` (libei) is the architecturally "correct" Wayland input-sim path and the future of structured input injection on Linux, but today it covers a strict subset of the ecosystem: only `xdg-desktop-portal-gnome` and `xdg-desktop-portal-kde` support it, and neither has a usable headless mode without a session manager (GDM / SDDM). uinput goes through the kernel and is compositor-agnostic, so it works on every Wayland desktop (GNOME, KDE Plasma, sway, Hyprland, Cosmic, weston) and on headless Linux servers, with the same code path. It is the same mechanism `xdotool --using-uinput`, `ydotool`, `wtype`, Steam Input, and Wine all use.
 
-The trade-off is that uinput requires the user to be in the `input` group, which grants global input read/write, comparable to macOS Input Monitoring. The portal model is finer-grained (per-app consent) but isn't broadly available yet. xa11y may add a libei backend later as an opt-in upgrade once the portal landscape stabilises.
+The trade-off is that uinput requires the user to be in the `input` group or to have a udev rule granting `/dev/uinput` access, which grants global input read/write, comparable to macOS Input Monitoring. The portal model is finer-grained (per-app consent) but isn't broadly available yet. xa11y may add a libei backend later as an opt-in upgrade once the portal landscape stabilises.
 
 #### Wayland screenshot portal consent
 
@@ -426,6 +426,8 @@ cursor --force-renderer-accessibility
 # Google Chrome / Chromium
 google-chrome --force-renderer-accessibility
 ```
+
+In a session with no settings daemon (CI, Xvfb, a container), also set `ACCESSIBILITY_ENABLED=1` in the app's environment. There, Chromium needs both the variable and the flag before it exposes web content.
 
 Representative node counts on Ubuntu 24.04 + GNOME 46 (Wayland):
 

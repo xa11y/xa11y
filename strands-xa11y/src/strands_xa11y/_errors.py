@@ -24,8 +24,9 @@ _GUIDANCE = {
     ),
     "AccessibilityNotEnabledError": (
         "The app is reachable but publishes an empty tree. Chromium and Electron apps only expose "
-        "their accessibility tree when launched with --force-renderer-accessibility (or with "
-        "ACCESSIBILITY_ENABLED=1 in the environment). Relaunch the app that way, or fall back to "
+        "their accessibility tree when launched with --force-renderer-accessibility; in a bare "
+        "session with no settings daemon (CI, Xvfb, a container) they also need "
+        "ACCESSIBILITY_ENABLED=1 in the environment. Relaunch the app that way, or fall back to "
         "screenshot plus point-targeted input."
     ),
     # xa11y maps three distinct core errors onto this one class, and `describe`

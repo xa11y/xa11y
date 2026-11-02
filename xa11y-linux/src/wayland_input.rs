@@ -12,12 +12,13 @@
 //!
 //! ## Privilege model
 //!
-//! Opening `/dev/uinput` for writing requires either root or membership
-//! in the `input` group. Granting the user the `input` group also grants
-//! global keystroke read access via `/dev/input/event*` — the same threat
-//! surface as macOS "Input Monitoring" or any X11 client connecting to
-//! `$DISPLAY`. xa11y surfaces an actionable [`Error::PermissionDenied`]
-//! when the open fails with `EACCES`.
+//! Opening `/dev/uinput` for writing requires root, membership in the
+//! `input` group, or a udev rule that grants the user access. Granting the
+//! user the `input` group also grants global keystroke read access via
+//! `/dev/input/event*` — the same threat surface as macOS "Input
+//! Monitoring" or any X11 client connecting to `$DISPLAY`. xa11y surfaces
+//! an actionable [`Error::PermissionDenied`] when the open fails with
+//! `EACCES`.
 //!
 //! ## Keymap
 //!
@@ -352,8 +353,12 @@ fn map_open_err(e: std::io::Error) -> Error {
     use std::io::ErrorKind;
     match e.kind() {
         ErrorKind::PermissionDenied => Error::PermissionDenied {
-            instructions: "open /dev/uinput: permission denied — add the user to the `input` \
-                           group (sudo usermod -aG input $USER) and re-login, then re-run."
+            instructions: "open /dev/uinput: permission denied. Wayland input simulation \
+                           writes to /dev/uinput, which needs either membership in the `input` \
+                           group (sudo usermod -aG input $USER, then log in again) or a udev \
+                           rule granting the user access, e.g. \
+                           KERNEL==\"uinput\", GROUP=\"input\", MODE=\"0660\", \
+                           OPTIONS+=\"static_node=uinput\"."
                 .into(),
         },
         ErrorKind::NotFound => Error::Unsupported {

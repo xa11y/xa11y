@@ -50,6 +50,7 @@ tmpfs
 toolkits?
 tooltip
 uinput
+udev
 weston
 widget
 winit
