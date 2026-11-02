@@ -483,7 +483,7 @@ impl WindowsProvider {
         element: &IUIAutomationElement,
         pid: Option<u32>,
     ) -> Result<ElementData> {
-        self.build_element_data_in(element, pid, None)
+        self.build_element_data_in(element, pid, None, HostHint::Parent)
     }
 
     /// [`Self::build_element_data`] for an element whose nearest native
@@ -492,23 +492,36 @@ impl WindowsProvider {
     /// remembered for the element's handle, so its children inherit it, and
     /// decides whether it sits in a minimized window, which makes it not
     /// visible whatever UIA's `IsOffscreen` says (issue #501).
+    ///
+    /// `hint` says how far `host_hwnd` can be trusted. Only a parent's answer
+    /// ([`HostHint::Parent`]) is recorded for a windowless element; a search
+    /// root's ([`HostHint::Ancestor`]) is used for this snapshot's visibility
+    /// but not remembered, because a child HWND between the root and the
+    /// element would make it the wrong window for later navigation.
     fn build_element_data_in(
         &self,
         element: &IUIAutomationElement,
         pid: Option<u32>,
         host_hwnd: Option<HWND>,
+        hint: HostHint,
     ) -> Result<ElementData> {
         let own = unsafe { element.CachedNativeWindowHandle() }
             .ok()
             .filter(|h| !h.0.is_null());
         let nearest = own.or(host_hwnd);
         let handle = self.cache_element(element.clone());
-        // 0 records "no window above this element", so that answer is
-        // remembered too instead of re-walking.
-        self.host_hwnds
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(handle, nearest.map_or(0, |h| h.0 as usize));
+        let recorded = match hint {
+            HostHint::Parent => Some(nearest),
+            HostHint::Ancestor => own.map(Some),
+        };
+        if let Some(recorded) = recorded {
+            // 0 records "no window above this element", so that answer is
+            // remembered too instead of re-walking.
+            self.host_hwnds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(handle, recorded.map_or(0, |h| h.0 as usize));
+        }
         let in_minimized_window = nearest.is_some_and(hwnd_in_minimized_window);
         build_snapshot_data(
             element,
@@ -1695,6 +1708,18 @@ fn is_pattern_absent(err: &windows::core::Error) -> bool {
 /// Upper bound on the raw-view walk in [`WindowsProvider::walk_to_host_hwnd`].
 const HOST_WINDOW_WALK_LIMIT: usize = 256;
 
+/// Where the `host_hwnd` passed to `build_element_data_in` came from.
+#[derive(Clone, Copy)]
+enum HostHint {
+    /// The element's parent: its nearest native window is exactly this one
+    /// unless the element has its own, so it is recorded for its children.
+    Parent,
+    /// A search root further up. Good enough for this snapshot's
+    /// minimized-window check, but a child HWND may sit in between, so only
+    /// the element's own HWND is recorded.
+    Ancestor,
+}
+
 /// Whether `hwnd`, or any window it is a child of, is minimized.
 ///
 /// UIA keeps `IsOffscreen = false` on the descendants of a minimized window,
@@ -2207,9 +2232,12 @@ impl Provider for WindowsProvider {
                 let pid = element_data.pid;
                 let mut data = Vec::with_capacity(children.len());
                 for child in children {
-                    if let Some(child) =
-                        live_snapshot(self.build_element_data_in(&child, pid, host_hwnd))?
-                    {
+                    if let Some(child) = live_snapshot(self.build_element_data_in(
+                        &child,
+                        pid,
+                        host_hwnd,
+                        HostHint::Parent,
+                    ))? {
                         data.push(child);
                     }
                 }
@@ -2264,7 +2292,8 @@ impl Provider for WindowsProvider {
                 } else {
                     self.host_hwnd_of(element.handle, &uia)?
                 };
-                let data = self.build_element_data_in(&parent, element.pid, host_hwnd)?;
+                let data =
+                    self.build_element_data_in(&parent, element.pid, host_hwnd, HostHint::Parent)?;
                 return Ok(Some(data));
             }
         }
@@ -2761,9 +2790,13 @@ impl Provider for WindowsProvider {
             };
             // Build ElementData once; reuse for every clause check. The
             // handle assigned here is stable for the rest of this call.
-            // Windowless elements inherit the root's window; elements with an
-            // HWND of their own use it.
-            let Some(data) = live_snapshot(self.build_element_data_in(&el, pid, root_hwnd))? else {
+            // Windowless elements inherit the root's window for this snapshot
+            // only (`Ancestor`: a child HWND may sit between them and the
+            // root, so it is not recorded); elements with an HWND of their
+            // own use and record it.
+            let Some(data) =
+                live_snapshot(self.build_element_data_in(&el, pid, root_hwnd, HostHint::Ancestor))?
+            else {
                 continue;
             };
 
