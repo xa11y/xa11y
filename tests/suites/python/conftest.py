@@ -596,6 +596,19 @@ APP_CONFIGS: dict[str, dict] = {
         "legacy_press_name": "Legacy Tile",
         "legacy_press_status_prefix": "Legacy activations: ",
         "window_name_contains": "xa11y-winforms-test-app",
+        # A panel longer than its viewport (issue #502): its first button is in
+        # view and its last is scrolled out, while UIA still reports the last
+        # one on screen. Scrolled-out *list items* are no use here: WinForms
+        # and WPF both report those offscreen themselves.
+        "scrolled_pane_name": "Long Pane",
+        "scrolled_pane_first_item": "Long Entry 1",
+        "scrolled_pane_last_item": "Long Entry 10",
+        # A ComboBox in an overflowing panel: its open drop-down extends past
+        # the panel and must not be clipped to it.
+        "scrolled_panel_name": "Scroll Panel",
+        "scrolled_panel_filler_name": "Panel Filler",
+        "scrolled_panel_combo_name": "Panel Combo",
+        "scrolled_panel_combo_last_item": "Panel Choice 3",
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",
