@@ -761,6 +761,7 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         ANNOUNCE_LIVE_REGION,
         READONLY_FIELD,
         PASSWORD_FIELD,
+        LONG_TEXT,
     ]);
     nodes.push((EXTRA_PANEL, extra_panel));
 
@@ -768,9 +769,6 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     password.set_label("Password");
     password.add_action(Action::Focus);
     nodes.push((PASSWORD_FIELD, password));
-        LONG_TEXT,
-    ]);
-    nodes.push((EXTRA_PANEL, extra_panel));
 
     // Label and value both, as for the status text: AT-SPI reads a Label's
     // name from its value, the other platforms from its label.
