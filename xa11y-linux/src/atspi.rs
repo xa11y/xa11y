@@ -4857,6 +4857,15 @@ mod tests {
             }
         }
 
+        /// Visible and showing: `App::windows` lists a top-level window only
+        /// when it is `VISIBLE` or `ICONIFIED` (#492).
+        fn get_state(&self) -> Vec<u32> {
+            const SHOWING: u64 = 1 << 25;
+            const VISIBLE: u64 = 1 << 30;
+            let bits = SHOWING | VISIBLE;
+            vec![bits as u32, (bits >> 32) as u32]
+        }
+
         #[zbus(property)]
         fn name(&self) -> &str {
             self.name
