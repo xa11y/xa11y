@@ -1285,6 +1285,31 @@ mod tests {
         }
     }
 
+    /// AccessKit's `PasswordInput` reaches every platform as its native
+    /// secure-text field (AXSecureTextField subrole, AT-SPI `password text`,
+    /// UIA `IsPassword`). xa11y keeps the `text_field` role and sets
+    /// `password` (#522); the ordinary Name field next to it stays unflagged.
+    #[test]
+    #[ignore]
+    fn state_password_on_password_field() {
+        let app = h::app_root();
+        let password = h::one(&app, r#"text_field[name="Password"]"#);
+        assert_eq!(password.role, Role::TextField);
+        assert!(password.states.password, "{:?}", password.states);
+
+        let flagged: Vec<Option<String>> = app
+            .locator(r#"text_field[password="true"]"#)
+            .elements()
+            .expect("password selector")
+            .into_iter()
+            .map(|e| e.name.clone())
+            .collect();
+        assert_eq!(flagged, vec![Some("Password".to_string())]);
+
+        let name = h::one(&app, r#"text_field[name="Name"]"#);
+        assert!(!name.states.password, "{:?}", name.states);
+    }
+
     #[test]
     #[ignore]
     fn state_selected_on_list_item() {

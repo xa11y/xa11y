@@ -664,7 +664,8 @@ reader_writer_pair! {
     /// defaults:
     /// - `enabled`: `true` (elements are enabled unless explicitly disabled)
     /// - `visible`: `true` (elements are visible unless explicitly hidden/offscreen)
-    /// - `focused`, `active`, `focusable`, `modal`, `selected`, `editable`, `required`, `busy`: `false`
+    /// - `focused`, `active`, `focusable`, `modal`, `selected`, `editable`, `required`, `busy`,
+    ///   `password`: `false`
     ///
     /// States that are inherently inapplicable use `Option`: `checked` is
     /// `None` for non-checkable elements, `expanded` is `None` for
@@ -741,6 +742,15 @@ reader_writer_pair! {
         pub required: bool,
         /// Async operation in progress
         pub busy: bool,
+        /// Whether this is a password (secure text) field, whose contents the
+        /// platform treats as secret. The role stays `TextField`, so existing
+        /// `text_field` selectors keep matching; this flag is how a caller
+        /// tells the two apart. xa11y does not redact anything itself: a
+        /// caller that must keep a secret out of its logs checks this flag.
+        /// Platform mappings: `AXSecureTextField` as the role or subrole
+        /// (macOS), the `PasswordText` role (AT-SPI), and `IsPassword` (UIA).
+        #[serde(default)]
+        pub password: bool,
     }
 }
 
@@ -762,6 +772,7 @@ impl Default for StateSet {
             modal: false,
             required: false,
             busy: false,
+            password: false,
         }
     }
 }
@@ -1450,6 +1461,8 @@ mod tests {
         assert_eq!(states.minimized, None);
         assert_eq!(states.maximized, None);
         assert_eq!(states.fullscreen, None);
+        // `password` arrived later still, and carries `#[serde(default)]`.
+        assert!(!states.password);
 
         // And a payload that does carry a window state round-trips untouched.
         let mut data = ElementData::for_role(Role::Window);

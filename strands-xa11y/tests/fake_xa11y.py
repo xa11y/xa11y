@@ -93,6 +93,7 @@ _STATE_DEFAULTS = {
     "modal": False,
     "required": False,
     "busy": False,
+    "password": False,
 }
 
 ACTION_VERBS = (

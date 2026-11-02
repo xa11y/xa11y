@@ -177,7 +177,7 @@ match in document order, 1-based, and is the only pseudo-class — `:checked`, \
 ordinary attributes: `checked` takes `\"on\"` / `\"off\"` / `\"mixed\"`, and \
 `\"true\"` / `\"false\"` work for `enabled`, `visible`, `focused`, \
 `focusable`, `selected`, `editable`, `expanded`, `required`, `busy`, \
-`modal`, `active`, and the window states `minimized`, `maximized`, and \
+`modal`, `active`, `password`, and the window states `minimized`, `maximized`, and \
 `fullscreen`. A window state that the platform cannot report reads as absent \
 (no attribute) rather than `\"false\"`, so match `minimized=\"true\"` if you \
 need to be sure the state is known.";
@@ -2085,6 +2085,7 @@ fn states_json(states: &crate::StateSet) -> Value {
         ("modal", states.modal),
         ("required", states.required),
         ("busy", states.busy),
+        ("password", states.password),
     ] {
         if value {
             out.insert(key.into(), json!(true));
@@ -3648,6 +3649,16 @@ mod tests {
         assert!(states.contains_key("enabled"));
         assert!(states.contains_key("visible"));
         assert!(!states.contains_key("focused"), "false states are omitted");
+        assert!(!states.contains_key("password"), "false states are omitted");
+    }
+
+    #[test]
+    fn a_password_field_says_so_in_its_states() {
+        let mut data = crate::ElementData::for_role(crate::Role::TextField);
+        data.states.password = true;
+        let encoded = element_data_json(&data);
+        assert_eq!(encoded["role"], "text_field");
+        assert_eq!(encoded["states"]["password"], true);
     }
 
     #[test]

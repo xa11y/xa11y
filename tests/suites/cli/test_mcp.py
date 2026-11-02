@@ -1028,6 +1028,29 @@ def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     assert center["y"] == bounds["y"] + bounds["height"] // 2
 
 
+# Apps whose test page shows a password entry named "Password" (#522).
+PASSWORD_APPS = {"tauri", "electron"}
+
+
+def test_find_flags_a_password_entry(mcp, app_pid, app_name):
+    """A password entry keeps `text_field` and carries `states.password`."""
+    if app_name not in PASSWORD_APPS:
+        pytest.skip(f"the {app_name} test app shows no password entry")
+    result = mcp.call_tool(
+        "find", {"pid": app_pid, "selector": 'text_field[password="true"]'}
+    )["result"]
+    assert result["isError"] is False, result["content"]
+    matches = result["structuredContent"]["matches"]
+    assert [m.get("name") for m in matches] == ["Password"], matches
+    assert matches[0]["role"] == "text_field"
+    assert matches[0]["states"]["password"] is True
+    plain = mcp.call_tool(
+        "find", {"pid": app_pid, "selector": 'text_field[name="Search"]'}
+    )["result"]["structuredContent"]["matches"]
+    assert plain, "the Search field must be found"
+    assert "password" not in plain[0]["states"], plain[0]
+
+
 def test_bounds_and_center_are_reported_together_or_not_at_all(mcp, app_pid):
     """The handler inserts both from one `Option`, so neither can appear alone.
 

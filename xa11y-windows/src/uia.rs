@@ -1773,6 +1773,8 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_IsOffscreenPropertyId,
     UIA_HasKeyboardFocusPropertyId,
     UIA_IsKeyboardFocusablePropertyId,
+    // Read by `parse_states` for the `password` state (#522).
+    UIA_IsPasswordPropertyId,
     UIA_NativeWindowHandlePropertyId,
     // MSAA state bitmask — the only place pre-SelectionItem frameworks report
     // selection (see the `selected` derivation in `parse_states`).
@@ -4001,6 +4003,12 @@ fn parse_states(
 
     let focusable = unsafe { element.CachedIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE;
 
+    // `IsPassword` is UIA's own secure-text flag (`ES_PASSWORD` edits,
+    // WPF `PasswordBox`, AccessKit `PasswordInput`). The control type stays
+    // Edit, so the role stays `TextField`. An unread property degrades to
+    // `false` like the other cached boolean reads above.
+    let password = unsafe { element.CachedIsPassword() }.unwrap_or(FALSE) == TRUE;
+
     // Window visual state (minimized / maximized) from WindowPattern. `None`
     // means unknown: no WindowPattern (non-window element) or a state that
     // couldn't be read. Fullscreen is not reported by UIA at all
@@ -4047,6 +4055,7 @@ fn parse_states(
         editable,
         required: false,
         busy: false,
+        password,
     }
     .into()
 }
@@ -6104,6 +6113,7 @@ mod tests {
         assert!(BATCH_PROPERTIES.contains(&UIA_BoundingRectanglePropertyId));
         assert!(BATCH_PROPERTIES.contains(&UIA_IsEnabledPropertyId));
         assert!(BATCH_PROPERTIES.contains(&UIA_ProcessIdPropertyId));
+        assert!(BATCH_PROPERTIES.contains(&UIA_IsPasswordPropertyId));
     }
 
     #[test]

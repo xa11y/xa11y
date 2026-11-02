@@ -701,6 +701,7 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
         "modal" => Some(element.states.modal.to_string()),
         "required" => Some(element.states.required.to_string()),
         "busy" => Some(element.states.busy.to_string()),
+        "password" => Some(element.states.password.to_string()),
         "expanded" => element.states.expanded.map(|b| b.to_string()),
         // Window states are Option<bool>: a platform that cannot report the
         // state yields `None`, which matches nothing (the same semantics as
@@ -1855,6 +1856,7 @@ mod tests {
         assert_eq!(resolve_attr(&el, "modal").as_deref(), Some("false"));
         assert_eq!(resolve_attr(&el, "required").as_deref(), Some("false"));
         assert_eq!(resolve_attr(&el, "busy").as_deref(), Some("false"));
+        assert_eq!(resolve_attr(&el, "password").as_deref(), Some("false"));
     }
 
     #[test]

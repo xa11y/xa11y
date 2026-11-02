@@ -209,6 +209,14 @@ impl Element {
         self.data.states.busy
     }
 
+    /// `true` for a password (secure text) field. The role stays
+    /// `text_field`; xa11y redacts nothing, so a caller that must keep a
+    /// secret out of its logs checks this flag.
+    #[napi(getter)]
+    pub fn password(&self) -> bool {
+        self.data.states.password
+    }
+
     /// Whether the window is minimized, or `null` if unknown / not a window.
     /// A platform that cannot report the state says `null` rather than
     /// guessing `false`.
