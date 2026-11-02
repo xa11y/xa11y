@@ -20,6 +20,11 @@ $pkg = Get-AppxPackage -Name 'xa11y.UwpTestApp'
 if (-not $pkg) { throw 'xa11y.UwpTestApp is not installed; run build.ps1 and install.ps1 first' }
 $aumid = "$($pkg.PackageFamilyName)!App"
 
+# Reports UAC on stderr (stdout carries only the PID) and throws
+# UwpActivationUnavailable when UAC is off.
+. (Join-Path $PSScriptRoot 'uac.ps1')
+Assert-UwpActivatable
+
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;

@@ -442,8 +442,9 @@ def _launch_app(
     # Discovery is a single waited call: `App.find` polls the accessibility
     # API internally, so the harness no longer hand-rolls a retry loop. Match
     # on the PID we just launched *or* any of the platform's candidate names
-    # (the process name on Linux/macOS, the window title on Windows) — matching
-    # either absorbs the per-platform registration races in one place.
+    # (the process name on Linux/macOS, the executable's file stem on
+    # Windows) — matching either absorbs the per-platform registration races
+    # in one place.
     def _is_test_app(candidate: "xa11y.App") -> bool:
         return candidate.pid == proc.pid or candidate.name in app_names
 

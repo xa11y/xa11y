@@ -19,6 +19,17 @@ $Name = 'xa11y.UwpTestApp'
 
 if (-not (Test-Path $Msix)) { throw "$Msix not found; run build.ps1 first" }
 
+# Fail here, before installing, rather than at the first activation.
+. (Join-Path $PSScriptRoot 'uac.ps1')
+Assert-UwpActivatable
+
+# Every build signs with a fresh certificate under the same subject, so a
+# local machine collects one per build; drop the old ones before trusting the
+# new one.
+Get-ChildItem 'Cert:\LocalMachine\TrustedPeople' |
+    Where-Object { $_.Subject -eq 'CN=xa11y Test' } |
+    Remove-Item
+
 Import-Certificate -FilePath $Cer -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
 
 Get-AppxPackage -Name $Name | Remove-AppxPackage

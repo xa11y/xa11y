@@ -54,8 +54,12 @@ def test_frame_window_and_xaml_content_are_readable(app):
 
 # Both #497 tests are strict: the fix makes them pass, which fails the run
 # until the markers come off, so the fix cannot land without them.
+# `raises=` keeps the xfails from absorbing an unrelated failure (a crashed
+# app, a platform error): only the lookup miss or the wrong-pid assertion that
+# #497 causes counts as the expected failure.
 @pytest.mark.xfail(
     strict=True,
+    raises=xa11y.SelectorNotMatchedError,
     reason=(
         "#497: the frame is attributed to ApplicationFrameHost.exe, so the UWP "
         "process owns no top-level window xa11y reports"
@@ -71,6 +75,7 @@ def test_app_is_found_by_its_own_pid():
 
 @pytest.mark.xfail(
     strict=True,
+    raises=(AssertionError, xa11y.SelectorNotMatchedError),
     reason=(
         "#497: xa11y reports the UWP app as 'ApplicationFrameHost' rather than "
         "by its package display name"
@@ -79,9 +84,9 @@ def test_app_is_found_by_its_own_pid():
 def test_app_is_found_by_its_package_display_name():
     """App.by_name with the package DisplayName resolves to the UWP process.
 
-    The pid check is what keeps this honest before #497: on Windows an app
-    lookup can match a window title, and the frame's title is the same
-    string, so the name alone may resolve to ApplicationFrameHost.
+    Before #497 the frame is reported as "ApplicationFrameHost", so the
+    lookup misses; the pid check guards against it resolving to the frame
+    host by any other route.
     """
     pid = _app_pid()
     found = xa11y.App.by_name(TITLE, timeout=5.0)

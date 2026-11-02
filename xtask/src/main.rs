@@ -35,7 +35,7 @@ COMMANDS:
     test-winforms [SUITE..]  Run WinForms integration tests (Windows only)
     test-wpf [SUITE..]  Run WPF integration tests (Windows only)
     test-uwp [SUITE..]  Run UWP integration tests (Windows only; installs a sideloaded package, needs elevation)
-    test-apps           Run the Python suite for every app (qt, gtk, cocoa, tauri, electron, egui, winforms, wpf)
+    test-apps           Run the Python suite for every app (qt, gtk, cocoa, tauri, electron, egui, winforms, wpf; not uwp, which needs elevation)
     test-compat [APP]   Run shared harness (python + js + cli suites) against APP (default: tauri)
     test-matrix-check   Validate the tests/matrix.yaml coverage index
     test-harness        Unit-test the shared integ harness (tests/harness/)
@@ -616,6 +616,10 @@ fn do_test_apps() -> bool {
     if env::consts::OS == "windows" && !do_test_wpf(&py) {
         ok = false;
     }
+    // uwp is left out on purpose: its setup installs a sideloaded package and
+    // trusts a certificate machine-wide (LocalMachine\TrustedPeople), which
+    // needs an elevated shell and changes the developer's machine. Run
+    // `cargo xtask test-uwp` explicitly for that.
     ok
 }
 
