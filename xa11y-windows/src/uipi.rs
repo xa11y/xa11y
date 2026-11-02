@@ -95,9 +95,9 @@ pub fn check_target(hwnd: HWND, input: &str) -> Result<()> {
     if pid == 0 || pid == unsafe { GetCurrentProcessId() } {
         return Ok(());
     }
+    // TENET-BREAK(1): target integrity level unreadable (e.g. another user's process) → send as before; maintainer-approved (#503): refusing would break legitimate same-integrity targets (runas, service accounts); UIPI may still drop the input silently.
     let Ok(target) = ProcessToken::of_pid(pid).and_then(|t| t.integrity_level()) else {
-        // Unreadable: send as before (see the function docs for why, and for
-        // the gap this leaves).
+        // See the function docs for the gap this leaves.
         return Ok(());
     };
     if blocked_by_uipi(sender.level, sender.ui_access, target) {

@@ -447,6 +447,9 @@ impl InputProvider for WindowsInputProvider {
         button: MouseButton,
         duration: std::time::Duration,
     ) -> Result<()> {
+        // Mirrors core's default `InputProvider::pointer_drag` (same step
+        // interval and interpolation); keep the two in step. The only
+        // addition is the pre-flight below.
         // Pre-flight both ends before anything is pressed, so a refusal can
         // never strand a held button mid-drag. The moves in between run
         // unchecked once the button is down (see `pointer_move`).
