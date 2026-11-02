@@ -1112,6 +1112,14 @@ impl BatchAttrs {
         if err != AX_ERROR_SUCCESS || values.is_null() {
             return None;
         }
+        // The reply is indexed as a CFArray below; a misbehaving app can hand
+        // back some other CF type with `kAXErrorSuccess`, and indexing that is
+        // undefined behavior. Treat it as a failed batch, so the caller re-reads
+        // through the individual attribute path.
+        if unsafe { safe_cf_get_type_id(values) } != unsafe { safe_cf_array_get_type_id() } {
+            unsafe { safe_cf_release(values) };
+            return None;
+        }
 
         let count = unsafe { safe_cf_array_get_count(values) } as usize;
         let mut vals = [std::ptr::null(); attr_idx::COUNT];
@@ -1293,7 +1301,17 @@ struct ResolvedAttrs {
 
 impl ResolvedAttrs {
     /// Populate from a BatchAttrs (1 Mach IPC round-trip).
-    fn from_batch(batch: &BatchAttrs) -> Self {
+    ///
+    /// Returns `None` when the role slot does not hold a string. The batch
+    /// call never fails per attribute; it puts an `AXValue` error object in
+    /// the slot of each attribute it could not read. For most attributes
+    /// that is an absent value, but an unreadable role would build a
+    /// `Role::Unknown` element with no sign that the read failed. The caller
+    /// re-reads the element through [`from_individual`](Self::from_individual),
+    /// which tells a role-less element apart from an unreadable one and
+    /// propagates the latter.
+    fn from_batch(batch: &BatchAttrs) -> Option<Self> {
+        let role_str = batch.string(attr_idx::ROLE)?;
         let value_is_bool = {
             let v = batch.vals[attr_idx::VALUE];
             if v.is_null() {
@@ -1309,8 +1327,8 @@ impl ResolvedAttrs {
             }
         };
 
-        Self {
-            role_str: batch.string(attr_idx::ROLE).unwrap_or_default(),
+        Some(Self {
+            role_str,
             subrole_str: batch.string(attr_idx::SUBROLE),
             ax_title: batch.string(attr_idx::TITLE),
             ax_description: batch.string(attr_idx::DESCRIPTION),
@@ -1330,7 +1348,7 @@ impl ResolvedAttrs {
             position: batch.position(),
             size: batch.size(),
             identifier: batch.string(attr_idx::IDENTIFIER),
-        }
+        })
     }
 
     /// Populate from individual AX API calls (fallback path).
@@ -2949,15 +2967,17 @@ fn build_snapshot_data(
     }
 
     let body = move || -> Result<ElementData> {
-        let attrs = if let Some(batch) = BatchAttrs::fetch(element) {
-            ResolvedAttrs::from_batch(&batch)
-        } else {
-            // The batch call is an optimisation, not a requirement: fall back
-            // to individual reads. The fallback is error-preserving for
+        let batched =
+            BatchAttrs::fetch(element).and_then(|batch| ResolvedAttrs::from_batch(&batch));
+        let attrs = match batched {
+            Some(attrs) => attrs,
+            // The batch call is an optimisation, not a requirement. When it
+            // fails, or answers without a readable role, re-read the same
+            // attributes one at a time. That re-read is error-preserving for
             // `AXRole`, so an element invalidated between the batch fetch and
-            // the fallback reads carries its platform error out instead of
+            // the individual reads carries its platform error out instead of
             // being built as a role-less ghost (tenet 1).
-            ResolvedAttrs::from_individual(element)?
+            None => ResolvedAttrs::from_individual(element)?,
         };
 
         let role = map_ax_role(&attrs.role_str, attrs.subrole_str.as_deref());
@@ -6006,6 +6026,40 @@ mod tests {
         assert!(batch.position().is_none());
         assert!(batch.size().is_none());
         // Don't drop — _values_array is null so Drop is a no-op.
+    }
+
+    #[test]
+    fn from_batch_requires_a_readable_role() {
+        // A role slot holding anything but a string (the batch call's
+        // per-attribute error object, kCFNull, ...) must not become an
+        // empty role: `from_batch` declines, and the caller re-reads the
+        // element individually (issue #513).
+        let role = CFString::new("AXButton");
+        let not_a_string = core_foundation::boolean::CFBoolean::true_value();
+
+        let mut vals = [std::ptr::null(); attr_idx::COUNT];
+        let missing = BatchAttrs {
+            _values_array: std::ptr::null(),
+            vals,
+        };
+        assert!(ResolvedAttrs::from_batch(&missing).is_none());
+
+        vals[attr_idx::ROLE] = not_a_string.as_CFTypeRef();
+        let malformed = BatchAttrs {
+            _values_array: std::ptr::null(),
+            vals,
+        };
+        assert!(ResolvedAttrs::from_batch(&malformed).is_none());
+
+        vals[attr_idx::ROLE] = role.as_concrete_TypeRef() as CFTypeRef;
+        let readable = BatchAttrs {
+            _values_array: std::ptr::null(),
+            vals,
+        };
+        let attrs = ResolvedAttrs::from_batch(&readable).expect("string role is readable");
+        assert_eq!(attrs.role_str, "AXButton");
+        // The borrowed values outlive the batches: `role` and `not_a_string`
+        // drop after them, and each `_values_array` is null so Drop is a no-op.
     }
 
     #[test]
