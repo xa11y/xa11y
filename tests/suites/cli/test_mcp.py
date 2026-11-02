@@ -555,9 +555,8 @@ def test_windows_lists_the_test_apps_windows(mcp, app_pid, app_name):
     process twice only runs on the unfiltered path, and only the filtered path
     pins the listing to one app for the assertions below.
 
-    Not every app exposes a window-like element (the GTK app's AT-SPI tree
-    starts at a plain group), so a count of zero is the provider answering
-    honestly — skip, since the per-app matrix is the Rust integ suite's
+    Not every app exposes a window-like element, so a count of zero is the
+    provider answering honestly — skip, since the per-app matrix is the Rust integ suite's
     ground truth and this file's point is the wire shape.
     """
     by_pid = mcp.call_tool("windows", {"pid": app_pid})["result"]

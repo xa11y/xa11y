@@ -324,9 +324,8 @@ def test_python_window_suite_resolves_the_app(app: xa11y.App) -> None:
     """The suite's smoke anchor.
 
     The harness fails a matrix cell whose suite executes zero tests. On apps
-    that expose no window-like element at all (the GTK app's AT-SPI tree has
-    no frame node) every mutating test below would skip, so this one always
-    executes and keeps the cell honest.
+    that expose no window-like element at all every mutating test below
+    would skip, so this one always executes and keeps the cell honest.
     """
     assert isinstance(app.windows(), list)
 
@@ -336,15 +335,20 @@ def test_atspi_geometry_capability_is_measured_for_gtk_and_qt(app: xa11y.App) ->
     """Pin the GTK/Qt results that decide whether geometry is advertised.
 
     Qt exports Component.SetPosition and Component.SetSize on its top-level
-    accessible, but returns ``false`` from both. GTK's adapter exposes no
-    top-level window accessible in this fixture. Neither therefore provides
-    a capability xa11y can honestly advertise.
+    accessible, but returns ``false`` from both. GTK 4's top-level window is
+    listed since role numbers take precedence over its misleading
+    ``application`` role name (issue #485), and it does not advertise AT-SPI
+    geometry either. Neither therefore provides a capability xa11y can
+    honestly advertise.
     """
     if APP not in {"gtk", "qt"}:
         pytest.skip("this probe is specifically for the GTK and Qt adapters")
     windows = app.windows()
     if APP == "gtk":
-        assert windows == [], "GTK unexpectedly gained a targetable AT-SPI window"
+        assert windows, "GTK 4 must expose its top-level window (issue #485)"
+        for win in windows:
+            assert "move_to" not in win.actions, win.actions
+            assert "resize_to" not in win.actions, win.actions
         return
     assert windows, "Qt must expose its top-level window through AT-SPI"
     win = windows[0]

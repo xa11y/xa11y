@@ -37,8 +37,8 @@ use xa11y_core::{
 };
 
 use crate::atspi::{
-    is_listable_top_level, is_password_role, map_atspi_role, map_atspi_role_number,
-    read_interfaces, AccessibleRef, Interfaces, LinuxProvider,
+    is_listable_top_level, is_password_role, read_interfaces, role_from_atspi,
+    try_map_atspi_role_number, AccessibleRef, Interfaces, LinuxProvider,
 };
 
 /// AT-SPI2 event-interface names we subscribe to via match rules.
@@ -1009,26 +1009,19 @@ fn build_event_snapshot(
     aref: &AccessibleRef,
     pid: Option<u32>,
 ) -> Option<ElementData> {
-    let role_name = get_role_name(conn, aref).unwrap_or_default();
-    let role_num = if role_name.is_empty() {
-        get_role_number(conn, aref).unwrap_or(0)
+    // Number first, name only as a fallback: the same rule the tree read
+    // uses (`role_from_atspi`, issue #485), so an event's target role
+    // matches the element the tree returns.
+    let role_num = get_role_number(conn, aref).unwrap_or(0);
+    let role_name = if try_map_atspi_role_number(role_num).is_some() {
+        String::new()
     } else {
-        0
+        get_role_name(conn, aref).unwrap_or_default()
     };
-    let mut role = if !role_name.is_empty() {
-        let r = map_atspi_role(&role_name);
-        if r == Role::Unknown {
-            let n = get_role_number(conn, aref).unwrap_or(0);
-            map_atspi_role_number(n)
-        } else {
-            r
-        }
-    } else {
-        map_atspi_role_number(role_num)
-    };
-    // `role_num` is read only when the name is empty; a named role is
-    // decided by its name, which `is_password_role` also accepts.
+    // The role number is always read and the name only when the number
+    // is unmapped; `is_password_role` accepts either form.
     let password = is_password_role(&role_name, role_num);
+    let mut role = role_from_atspi(role_num, &role_name);
 
     // State bits (used both for role refinement and for StateSet).
     // A failed GetState is `None` — preserve that as `state_read_ok = false`
