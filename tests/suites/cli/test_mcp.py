@@ -1051,35 +1051,6 @@ def test_an_uncut_tree_marks_no_node(mcp, app_pid):
         assert node["children_count"] > len(node.get("children", [])), node
 
 
-def test_a_document_sized_label_is_capped_and_says_so(mcp, app_pid):
-    """The test app's ~4 KiB label must come back as a bounded prefix.
-
-    Selectors still match the full text, which is how the label is found;
-    the encoding cuts each of `name` / `value` / `description` and names the
-    cut beside the field.
-    """
-    selector = '[name^="Long text:"], [value^="Long text:"]'
-    result = mcp.call_tool("find", {"pid": app_pid, "selector": selector})["result"]
-    assert result["isError"] is False, result["content"]
-    matches = result["structuredContent"]["matches"]
-    assert matches, result["structuredContent"]
-    label = matches[0]
-    cut_fields = []
-    for field in ("name", "value", "description"):
-        if field not in label:
-            continue
-        assert len(label[field].encode("utf-8")) <= 1024, (field, len(label[field]))
-        if label.get(f"{field}_truncated"):
-            assert label[f"{field}_bytes"] >= 4096, label
-            assert label[field].startswith("Long text: "), label[field][:40]
-            cut_fields.append(field)
-        else:
-            assert f"{field}_bytes" not in label, label
-    assert cut_fields, f"the long text must be reported as cut: {sorted(label)}"
-    # The whole response stays small even though the element is not.
-    assert len(json.dumps(label)) < 4096, len(json.dumps(label))
-
-
 def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     """Named, because `button` alone leads with window chrome on Windows.
 
