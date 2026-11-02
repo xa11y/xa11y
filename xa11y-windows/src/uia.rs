@@ -714,45 +714,105 @@ impl WindowsProvider {
         Ok(children)
     }
 
-    /// Extract a UIA element's RuntimeId as a `Vec<i32>` for use as a stable
-    /// cross-call identity key. `GetRuntimeId` returns a SAFEARRAY of i32 that
-    /// uniquely identifies an element within the UIA tree session — the only
-    /// identifier safe to use for dedup across `narrow_multi_segment` walks
-    /// within a single `find_elements_group` call.
-    ///
-    /// Returns `None` if the COM call fails or the SAFEARRAY shape isn't what
-    /// UIA documents (1D, VT_I4). Callers treat `None` as "untracked" — the
-    /// element falls through dedup, which is harmless because untracked
-    /// duplicates would only over-report, never under-report.
-    fn runtime_id_key(element: &IUIAutomationElement) -> Option<Vec<i32>> {
+    /// A UIA element's RuntimeId as a `Vec<i32>`: the identity UIA itself
+    /// compares elements by (`CompareElements`), and the one key that
+    /// survives this provider minting a fresh handle on every fetch.
+    /// `GetRuntimeId` hands back a SAFEARRAY of i32 that this copies and
+    /// destroys. A failure propagates (tenet 1): `UIA_E_ELEMENTNOTAVAILABLE`
+    /// means the element is gone, which callers handle with `live_snapshot`.
+    fn runtime_id(element: &IUIAutomationElement) -> Result<Vec<i32>> {
         use windows::Win32::System::Com::SAFEARRAY;
-        use windows::Win32::System::Ole::{SafeArrayAccessData, SafeArrayUnaccessData};
-
-        let sa: *mut SAFEARRAY = match unsafe { element.GetRuntimeId() } {
-            Ok(p) if !p.is_null() => p,
-            _ => return None,
+        use windows::Win32::System::Ole::{
+            SafeArrayAccessData, SafeArrayDestroy, SafeArrayUnaccessData,
         };
 
-        // Safety: GetRuntimeId hands us ownership of a SAFEARRAY*. We must
-        // free it via SafeArrayDestroy when done, otherwise we leak. Lock
-        // the data via SafeArrayAccessData, copy out the i32s, unlock,
-        // destroy.
-        let result = unsafe {
+        let sa: *mut SAFEARRAY = uia_call(|| unsafe { element.GetRuntimeId() })?;
+        if sa.is_null() {
+            return Err(Error::Platform {
+                code: -1,
+                message: "IUIAutomationElement.GetRuntimeId returned no array".into(),
+            });
+        }
+        // SAFETY: GetRuntimeId handed us ownership of `sa`, a 1-D SAFEARRAY
+        // of VT_I4. It is locked while the i32s are copied out, then
+        // unlocked and destroyed on every path.
+        unsafe {
             let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
-            if SafeArrayAccessData(sa, &mut data_ptr as *mut _).is_err() {
-                let _ = windows::Win32::System::Ole::SafeArrayDestroy(sa);
-                return None;
+            if let Err(e) = SafeArrayAccessData(sa, &mut data_ptr as *mut _) {
+                // Already failing; a failed destroy only leaks the array.
+                let _ = SafeArrayDestroy(sa);
+                return Err(Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("SafeArrayAccessData on a RuntimeId failed: {e}"),
+                });
             }
-            // SAFEARRAY of i32 — rgsabound[0].cElements is the count.
             let bounds = (*sa).rgsabound.as_ptr();
             let count = (*bounds).cElements as usize;
-            let slice = std::slice::from_raw_parts(data_ptr as *const i32, count);
-            let v = slice.to_vec();
+            let v = std::slice::from_raw_parts(data_ptr as *const i32, count).to_vec();
+            // The values are already copied; a failed unlock or destroy
+            // leaks the array and changes nothing about them.
             let _ = SafeArrayUnaccessData(sa);
-            let _ = windows::Win32::System::Ole::SafeArrayDestroy(sa);
-            v
+            let _ = SafeArrayDestroy(sa);
+            Ok(v)
+        }
+    }
+}
+
+/// Identity-stable `get_children` for one query's tree walk (issue #571).
+///
+/// `WindowsProvider` mints a fresh handle each time it builds an element, so
+/// a walk that reaches one element through two anchors (`* button`: the
+/// button sits under several `*` matches) gets two handles, and the core
+/// walkers' handle dedup keeps both. This wrapper gives every element the
+/// first handle this query minted for its RuntimeId, which turns that dedup
+/// (and `:nth` counting after it) into a dedup by UIA identity. The handle
+/// cache entry is refreshed with the newest element so the canonical handle
+/// stays live. An element that vanishes before its RuntimeId is read is left
+/// out, as the walk does for any element that goes away mid-snapshot.
+struct CanonicalWalk<'a> {
+    provider: &'a WindowsProvider,
+    handles: std::cell::RefCell<HashMap<Vec<i32>, u64>>,
+}
+
+impl<'a> CanonicalWalk<'a> {
+    fn new(provider: &'a WindowsProvider) -> Self {
+        Self {
+            provider,
+            handles: std::cell::RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn children(&self, parent: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        let children = self.provider.get_children(parent)?;
+        let mut out = Vec::with_capacity(children.len());
+        for mut child in children {
+            if let Some(handle) = self.canonical_handle(child.handle)? {
+                child.handle = handle;
+                out.push(child);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The query's handle for the element behind `handle`; `None` when the
+    /// element is gone. Synthesized app nodes have stable handles already.
+    fn canonical_handle(&self, handle: u64) -> Result<Option<u64>> {
+        if is_synthetic_handle(handle) {
+            return Ok(Some(handle));
+        }
+        let element = self.provider.get_cached(handle)?;
+        let Some(id) = live_snapshot(WindowsProvider::runtime_id(&element))? else {
+            return Ok(None);
         };
-        Some(result)
+        let canonical = *self.handles.borrow_mut().entry(id).or_insert(handle);
+        if canonical != handle {
+            self.provider
+                .handle_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(canonical, element);
+        }
+        Ok(Some(canonical))
     }
 }
 
@@ -2396,12 +2456,15 @@ impl Provider for WindowsProvider {
         limit: Option<usize>,
     ) -> Result<Vec<ElementData>> {
         xa11y_core::selector::validate_tail_segments(segments)?;
+        // Dedup below is by handle; the canonical walk makes that a dedup by
+        // UIA identity (issue #571).
+        let walk = CanonicalWalk::new(self);
         for segment in segments {
             let mut next_candidates = Vec::new();
             for candidate in &candidates {
                 match segment.combinator {
                     Combinator::Child => {
-                        let children = self.get_children(Some(candidate))?;
+                        let children = walk.children(Some(candidate))?;
                         for child in children {
                             if matches_simple(&child, &segment.simple) {
                                 next_candidates.push(child);
@@ -2418,7 +2481,7 @@ impl Provider for WindowsProvider {
                             }],
                         };
                         let mut sub_results = xa11y_core::selector::find_elements_in_tree(
-                            |el| self.get_children(el),
+                            |el| walk.children(el),
                             Some(candidate),
                             &sub_selector,
                             None,
@@ -2472,8 +2535,9 @@ impl Provider for WindowsProvider {
         // fallback further down — the walk is the honest primitive for a
         // root that is not a UIA HWND fragment.
         if is_synthetic_handle(root.handle) {
+            let walk = CanonicalWalk::new(self);
             return xa11y_core::selector::find_elements_in_tree_group(
-                |el| self.get_children(el),
+                |el| walk.children(el),
                 Some(root),
                 group,
                 limit,
@@ -2521,8 +2585,9 @@ impl Provider for WindowsProvider {
             .map(|h| !h.0.is_null())
             .unwrap_or(false);
         if !is_hwnd_root {
+            let walk = CanonicalWalk::new(self);
             return xa11y_core::selector::find_elements_in_tree_group(
-                |el| self.get_children(el),
+                |el| walk.children(el),
                 Some(root),
                 group,
                 limit,
@@ -2625,37 +2690,22 @@ impl Provider for WindowsProvider {
 
         // Stable sort by walk position keeps doc-order; dedup by UIA
         // RuntimeId so descendants reached via multiple phase-1 anchors
-        // (or matched by multiple clauses) collapse to one result.
+        // (or matched by multiple clauses) collapse to the first one found
+        // (issue #571). Every narrowing above minted its own handles, so the
+        // handle cannot be the key.
         merged.sort_by_key(|(pos, _)| *pos);
-        let mut seen_rt: HashSet<Vec<i32>> = HashSet::new();
-        let mut seen_handle: HashSet<u64> = HashSet::new();
+        let mut seen: HashSet<Vec<i32>> = HashSet::new();
         let mut out: Vec<ElementData> = Vec::with_capacity(merged.len());
         for (_, data) in merged {
-            // Primary identity: RuntimeId. Cheap to fetch from the cached
-            // element and stable across narrowings within this call.
-            let key = self
-                .get_cached(data.handle)
-                .ok()
-                .and_then(|el| Self::runtime_id_key(&el));
-            match key {
-                Some(rt) => {
-                    if !seen_rt.insert(rt) {
-                        continue;
-                    }
-                }
-                None => {
-                    // Fall back to handle dedup if RuntimeId is unavailable.
-                    // Handle uniqueness across the call is weaker than
-                    // RuntimeId (the same physical element rebuilt in phase
-                    // 2 gets a fresh handle), but it's better than nothing
-                    // — over-counting beats under-counting on the rare path
-                    // where the COM call fails.
-                    if !seen_handle.insert(data.handle) {
-                        continue;
-                    }
-                }
+            let element = self.get_cached(data.handle)?;
+            // An element that vanished since the walk is left out, as the
+            // walk itself does.
+            let Some(id) = live_snapshot(Self::runtime_id(&element))? else {
+                continue;
+            };
+            if seen.insert(id) {
+                out.push(data);
             }
-            out.push(data);
         }
         if let Some(l) = limit {
             out.truncate(l);
