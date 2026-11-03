@@ -147,6 +147,14 @@ pub trait Provider: Send + Sync {
     /// the lookup polled. `Some(err)` is returned to the caller in place of
     /// the not-found error; `None` keeps it. The default is `None`.
     ///
+    /// The hook may return any [`Error`] variant. A `Some(Timeout)` changes
+    /// the error kind from [`Error::SelectorNotMatched`], so callers that
+    /// treat not-found as "app absent" see a different failure. A returned
+    /// `SelectorNotMatched` keeps the poll loop's diagnosis under its own
+    /// fields. The hook runs after the lookup's timeout expired, so the total
+    /// wait can exceed the requested timeout by the hook's own cost (on
+    /// Windows, up to the window-probe budget).
+    ///
     /// Windows uses it to name a window that stopped answering messages, which
     /// UIA reports as "no element" rather than as an error.
     fn app_by_pid_failure(&self, _pid: u32, _waited: std::time::Duration) -> Option<Error> {

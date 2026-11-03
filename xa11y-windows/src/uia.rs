@@ -1639,20 +1639,29 @@ fn hung_among(windows: &[HWND]) -> Vec<HungWindow> {
 /// listing reads. One that closes while it is being classified is skipped.
 /// `purpose` completes "EnumWindows failed while …".
 fn interactive_top_level_windows(purpose: &str) -> Result<Vec<HWND>> {
+    interactive_top_level_windows_owned_by(purpose, None)
+}
+
+/// [`interactive_top_level_windows`], limited to the windows `owner` owns when
+/// it is `Some`. Ownership is checked first, so only those windows pay for the
+/// interactivity read.
+fn interactive_top_level_windows_owned_by(purpose: &str, owner: Option<u32>) -> Result<Vec<HWND>> {
     unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
-        let all = unsafe { &mut *(param.0 as *mut Vec<HWND>) };
-        all.push(hwnd);
+        let (owner, all) = unsafe { &mut *(param.0 as *mut (Option<u32>, Vec<HWND>)) };
+        if owner.is_none_or(|pid| hwnd_pid(hwnd) == pid) {
+            all.push(hwnd);
+        }
         true.into()
     }
-    let mut all: Vec<HWND> = Vec::new();
-    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut all) as isize)) }.map_err(|e| {
+    let mut state: (Option<u32>, Vec<HWND>) = (owner, Vec::new());
+    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut state) as isize)) }.map_err(|e| {
         Error::Platform {
             code: e.code().0 as i64,
             message: format!("EnumWindows failed while {purpose}: {e}"),
         }
     })?;
     let mut interactive = Vec::new();
-    for hwnd in all {
+    for hwnd in state.1 {
         match is_interactive_top_level(hwnd) {
             Ok(true) => interactive.push(hwnd),
             Ok(false) => {}
@@ -2290,33 +2299,18 @@ fn dropped_windows_error(
     )
 }
 
-/// The interactive top-level windows owned by `pid`. Ownership is checked
-/// first, so only the process's own windows pay for the interactivity read.
-fn interactive_top_level_windows_of_pid(pid: u32) -> Result<Vec<HWND>> {
-    unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
-        let (pid, owned) = unsafe { &mut *(param.0 as *mut (u32, Vec<HWND>)) };
-        if hwnd_pid(hwnd) == *pid {
-            owned.push(hwnd);
-        }
-        true.into()
-    }
-    let mut state = (pid, Vec::new());
-    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut state) as isize)) }.map_err(|e| {
-        Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("EnumWindows failed while probing the windows of pid {pid}: {e}"),
-        }
-    })?;
-    let mut interactive = Vec::new();
-    for hwnd in state.1 {
-        match is_interactive_top_level(hwnd) {
-            Ok(true) => interactive.push(hwnd),
-            Ok(false) => {}
-            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(interactive)
+/// The not-found error a pid lookup keeps when the probe's window scan
+/// failed. The scan is best-effort enrichment and the not-found is real, so
+/// the scan's failure is recorded in the diagnosis instead of replacing it
+/// (tenet 1: nothing dropped, and callers matching `SelectorNotMatched` for
+/// "app absent" still work).
+fn not_found_after_failed_scan(pid: u32, scan: &Error) -> Error {
+    Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
+        xa11y_core::Diagnosis::new().last_observed(format!(
+            "no top-level UIA element owned by the process; the check for an unresponsive \
+             window of the process could not run: {scan}"
+        )),
+    )
 }
 
 /// The [`Error::Timeout`] for a pid lookup that found no element while some
@@ -4354,10 +4348,12 @@ impl Provider for WindowsProvider {
     /// loop gave up. No windows, or windows that all answer, keep the not-found
     /// error.
     fn app_by_pid_failure(&self, pid: u32, waited: std::time::Duration) -> Option<Error> {
-        let windows = match interactive_top_level_windows_of_pid(pid) {
-            Ok(windows) => windows,
-            Err(e) => return Some(e),
-        };
+        let windows =
+            match interactive_top_level_windows_owned_by("probing the windows of a pid", Some(pid))
+            {
+                Ok(windows) => windows,
+                Err(scan) => return Some(not_found_after_failed_scan(pid, &scan)),
+            };
         if windows.is_empty() {
             return None;
         }
@@ -8243,6 +8239,22 @@ mod tests {
         assert!(observed.contains("owns 2 interactive"), "{observed}");
         assert_eq!(diagnosis.candidates.len(), 1, "{:?}", diagnosis.candidates);
         assert!(diagnosis.candidates[0].contains("(pid 7000"));
+    }
+
+    #[test]
+    fn a_failed_window_scan_keeps_the_pid_lookup_not_found_and_records_why() {
+        let scan = Error::Platform {
+            code: -2147024891,
+            message: "EnumWindows failed while probing the windows of a pid: denied".into(),
+        };
+        let err = not_found_after_failed_scan(7000, &scan);
+        assert!(matches!(err, Error::SelectorNotMatched { .. }), "{err}");
+        let observed = err
+            .diagnosis()
+            .and_then(|d| d.last_observed.clone())
+            .unwrap_or_default();
+        assert!(observed.contains("could not run"), "{observed}");
+        assert!(observed.contains("EnumWindows failed"), "{observed}");
     }
 
     #[test]

@@ -363,9 +363,17 @@ impl App {
         .map_err(|err| match err {
             // The loop gave up. Ask the backend whether it knows why the
             // process stayed unreachable, once, for the error the caller sees.
-            Error::SelectorNotMatched { .. } => provider
-                .app_by_pid_failure(pid, start.elapsed())
-                .unwrap_or(err),
+            Error::SelectorNotMatched { .. } => {
+                match provider.app_by_pid_failure(pid, start.elapsed()) {
+                    // Still "app absent": keep the loop's diagnosis (the
+                    // running-apps candidates) under the hook's own fields.
+                    Some(better @ Error::SelectorNotMatched { .. }) => {
+                        merge_diagnosis(better, err.diagnosis().cloned().unwrap_or_default())
+                    }
+                    Some(better) => better,
+                    None => err,
+                }
+            }
             other => other,
         })
     }
