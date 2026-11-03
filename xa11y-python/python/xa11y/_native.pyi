@@ -18,7 +18,24 @@ OmissionReasonName = Literal["no_bounds", "zero_area", "outside_capture"]
 
 # Why an element reads ``visible=False`` (``Element.hidden_reason``, and the
 # ``hidden_reason`` of a timeout). Identically spelled in the JS binding.
+#   scrolled_out      outside the viewport of a scrolling ancestor, so
+#                     scroll_into_view can fix it
+#   window_minimized  its window is minimized; restore the window
+#   not_showing       the platform reports it not drawn without saying why
+#                     (a collapsed container, an inactive tab)
+#   unknown           the provider did not establish why
+# The values are spelled only in the Literal (comments do not count), so the
+# parity check's variant coverage notices one going missing from it.
 HiddenReasonName = Literal["window_minimized", "scrolled_out", "not_showing", "unknown"]
+
+# What an auto-waiting action's scroll attempt came to (the ``auto_scroll`` of
+# a timeout). Identically spelled in the JS binding.
+#   refused    the element has no semantic scroll call; asked once per wait
+#   no_effect  the platform accepted the call, and the next check still read
+#              the element not visible (scrolled out, or hidden otherwise)
+#   revealed   the next check read it visible; something else, such as
+#              enabled=False, kept the action from running
+AutoScrollOutcomeName = Literal["refused", "no_effect", "revealed"]
 
 # Shell-surface kinds. Like roles and key names, these strings are identical in
 # the JS binding — a kind is a value the user writes as a literal.
@@ -71,6 +88,10 @@ class SelectorNotMatchedError(XA11yError):
     """Why the last observed element was not visible. Set by timeouts; always
     ``None`` for this class (present for attribute parity with
     :class:`TimeoutError`)."""
+    auto_scroll: AutoScrollOutcomeName | None
+    """What an auto-waiting action's scroll attempt came to. Set by timeouts;
+    always ``None`` for this class (present for attribute parity with
+    :class:`TimeoutError`)."""
     candidates: list[str]
     """Bounded near-miss candidates, e.g. same-role elements with different
     names, or the running applications for app lookups."""
@@ -114,9 +135,15 @@ class TimeoutError(XA11yError):
     matched'``."""
     hidden_reason: HiddenReasonName | None
     """Why the last observed element was not visible, when it matched but
-    read ``visible=False``: ``'scrolled_out'`` (scroll it into view first),
-    ``'window_minimized'`` (restore its window), ``'not_showing'`` or
-    ``'unknown'``. ``None`` when nothing hidden was observed."""
+    read ``visible=False``; the values are listed at :data:`HiddenReasonName`.
+    ``None`` when nothing hidden was observed."""
+    auto_scroll: AutoScrollOutcomeName | None
+    """What the action's auto-scroll came to, when its target was enabled
+    and scrolled out; the values are listed at :data:`AutoScrollOutcomeName`.
+    It describes the first check after the latest accepted scroll, so
+    ``revealed`` alongside ``hidden_reason`` scrolled out means the element
+    came into view and later scrolled back out. ``None`` when the wait never
+    tried to scroll."""
     candidates: list[str]
     """Bounded near-miss candidates (same role, different attributes).
     Collected only when the selector never matched during the wait."""
@@ -521,12 +548,9 @@ class Element:
     def hidden_reason(self) -> HiddenReasonName | None:
         """Why the element is not visible, or ``None`` when it is.
 
-        ``'scrolled_out'``: outside the viewport of a scrolling ancestor, so
-        :meth:`scroll_into_view` can fix it. ``'window_minimized'``: its
-        window is minimized. ``'not_showing'``: the platform reports it not
-        drawn without saying why (a collapsed container, an inactive tab).
-        ``'unknown'``: the provider did not establish why. Which reasons a
-        platform can tell apart is in the platform details reference.
+        The values and what each calls for are listed at
+        :data:`HiddenReasonName`. Which reasons a platform can tell apart is
+        in the platform details reference.
         """
     @property
     def focused(self) -> bool: ...

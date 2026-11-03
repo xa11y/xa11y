@@ -327,7 +327,9 @@ On Windows, `visible` starts from the UIA `IsOffscreen` property, which some pro
 
 The scroll check has limits. UIA has no viewport rectangle, so the ancestor's bounds stand in for it, and an item hidden only behind a scroll bar or header still counts as visible. A popup or top-level window, such as an open drop-down list, isn't clipped by anything above it, because it's drawn over its owner's content. Event targets skip the scroll check, so a scrolled-out item can report visible on an event. Each element's `raw` map carries `uia_is_offscreen`, the UIA value before these corrections.
 
-Auto-waiting actions wait for `visible`, so an action on a control scrolled out of view times out instead of acting. `scroll_into_view()` waits only for attached and enabled, but it needs the UIA ScrollItem pattern, which list items, tree items and similar controls have. A plain control such as a button has none, and the call returns `Unsupported`. For those, call `focus()` on an `Element` snapshot: frameworks such as WinForms scroll a focused control into view. `Locator.focus()` doesn't help there, because it also waits for `visible`. See the [locator reference](/reference/locator/).
+Auto-waiting actions wait for `visible`, and scroll a control that is only scrolled out into view first (see the [locator reference](/reference/locator/#locator)). That scroll, like `scroll_into_view()` itself, needs the UIA ScrollItem pattern, which list items, tree items and similar controls have. A plain control such as a button has none: the call returns `ActionNotSupported`, and an action on a scrolled-out button times out with a diagnosis that says the scroll was refused. For those, call `focus()` on an `Element` snapshot, because frameworks such as WinForms scroll a focused control into view. `Locator.focus()` doesn't help there, because it also waits for `visible`.
+
+An item under a collapsed parent that also lies outside a scrolling ancestor's bounds reads `scrolled_out`, because the scroll check runs before `IsOffscreen` is consulted. Scrolling doesn't reveal it: ScrollItem accepts the call and the item stays hidden until its parent expands. The auto-wait stops calling it after three accepted calls, and its timeout says the item stayed scrolled out. Expand the parent first.
 
 ### Hidden reason
 
@@ -349,6 +351,7 @@ What each platform can tell apart:
   - An element without `Visible` reports `not_showing`, with one exception. An item cell (`list item`, `table cell`, `table row` or `tree item`) that lies outside a showing scrolling container that is its parent reports `scrolled_out`, because Qt clears `Visible` on a row scrolled out of its view.
   - A read that fails during these checks gives `unknown`, and so does a failed read of the element's own bounds or state set. Event targets skip the ancestor walk and report `unknown` for the `Visible`-without-`Showing` case.
   - GTK 4 keeps `Visible` and `Showing` on widgets scrolled out of a `GtkScrolledWindow`, so they read as visible.
+  - The auto-wait's scroll is `Component.ScrollTo`. Qt has no `ScrollTo`, so `scroll_into_view()` on a Qt row returns `ActionNotSupported`, and an action on a scrolled-out Qt row times out with a diagnosis that says the scroll was refused. A `false` reply from `ScrollTo` counts as a refusal too.
 - **macOS** has only `AXHidden`, which carries no reason, so every hidden element reports `not_showing`.
 
 A timeout on an element that matched but stayed hidden carries the reason in its diagnosis. See [errors](/reference/errors/).

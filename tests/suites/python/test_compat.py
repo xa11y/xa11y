@@ -881,6 +881,123 @@ def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
         bring_into_view(first)
 
 
+def _wait_for(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.2)
+    return True
+
+
+def test_an_action_scrolls_its_scrolled_out_target_into_view(app, app_config):
+    """An auto-waiting action on a row scrolled out of its list scrolls it
+    into view through the platform's own scroll call, then acts (#590).
+
+    ``select`` waits for ``visible``, which the last row starts without. The
+    test asserts that premise first, so it cannot pass on a list whose rows
+    were all in view anyway. It then selects the first row again, which has
+    to scroll back the other way: the list is scrolled back to its top, and
+    the first row (not whichever row was selected before) is left selected.
+    """
+    list_name = app_config.get("auto_scroll_list_name")
+    if not list_name:
+        pytest.skip("this app has no list whose rows scroll into view")
+    first = app_config["auto_scroll_first_item"]
+    last = app_config["auto_scroll_last_item"]
+
+    def row(name: str) -> xa11y.Element:
+        return app.locator(f'list_item[name="{name}"]').element()
+
+    hidden = row(last)
+    assert hidden.visible is False and hidden.hidden_reason == "scrolled_out", (
+        f"{last!r} must start scrolled out of {list_name!r}, or this test "
+        f"exercises nothing; got visible={hidden.visible!r}, "
+        f"hidden_reason={hidden.hidden_reason!r}"
+    )
+    try:
+        app.locator(f'list_item[name="{last}"]').select()
+        assert _wait_for(lambda: row(last).visible and row(last).selected), (
+            f"select() returned, so {last!r} was scrolled into view and "
+            f"selected; it now reads visible={row(last).visible!r}, "
+            f"selected={row(last).selected!r}"
+        )
+        assert row(first).hidden_reason == "scrolled_out", (
+            f"scrolling to {last!r} must scroll {first!r} out; got "
+            f"{row(first).hidden_reason!r}"
+        )
+    except BaseException:
+        # Restore on a best-effort basis, without letting a failure here
+        # replace the assertion that actually failed.
+        try:
+            app.locator(f'list_item[name="{first}"]').select()
+        except xa11y.XA11yError as cleanup:
+            print(f"cleanup: selecting {first!r} failed too: {cleanup}")
+        raise
+    # The scroll back is half the test (the other direction), so it runs
+    # outside the cleanup path and fails loudly.
+    app.locator(f'list_item[name="{first}"]').select()
+    assert _wait_for(lambda: row(first).visible), (
+        f"selecting {first!r} must scroll it back into view"
+    )
+
+
+def test_an_action_on_a_target_nothing_can_scroll_waits_it_out(app, app_config):
+    """When the platform refuses to scroll a scrolled-out target into view,
+    the action waits as before and its timeout says the scroll was refused
+    (#590): "nothing can scroll this" reads differently from "the scroll did
+    not help"."""
+    if not app_config.get("scrolled_pane_name"):
+        pytest.skip("this app reports no control as scrolled out")
+    if not app_config.get("scrolled_pane_refuses_scroll_into_view"):
+        pytest.skip("this app has no scrolled-out control that refuses scrolling")
+    last = app_config["scrolled_pane_last_item"]
+
+    # Act with a verb the target really advertises: an action the element
+    # does not offer is refused before the auto-wait runs, and that would
+    # prove nothing about it. Which verbs a scrolled-out row offers differs by
+    # toolkit (a Qt list row offers none), so read them off the element.
+    target = app.locator(f'[name="{last}"]')
+
+    # The shared app is put back by the test above with a scroll that settles
+    # asynchronously, so the row can still read visible for a moment. Acting
+    # then succeeds at once and nothing times out. Wait for the premise rather
+    # than assuming it, and fail (not skip) if it never holds.
+    assert _wait_for(lambda: target.element().hidden_reason == "scrolled_out"), (
+        f"{last!r} must read scrolled_out before the action, or the auto-wait "
+        f"is never exercised; got visible={target.element().visible!r}, "
+        f"hidden_reason={target.element().hidden_reason!r}"
+    )
+    advertised = target.element().actions
+    verbs = ("press", "select", "toggle", "expand", "collapse", "focus")
+    verb = next((v for v in verbs if v in advertised), None)
+    if verb is None:
+        pytest.skip(
+            f"{last!r} advertises none of {verbs} (actions: {advertised}), so "
+            f"there is no action whose auto-wait could be observed"
+        )
+
+    previous = xa11y.get_default_timeout()
+    xa11y.set_default_timeout(1.0)
+    try:
+        with pytest.raises(xa11y.TimeoutError) as excinfo:
+            getattr(target, verb)()
+    finally:
+        xa11y.set_default_timeout(previous)
+    err = excinfo.value
+    assert err.hidden_reason == "scrolled_out", (
+        f"{last!r} is scrolled out of its pane; got {err.hidden_reason!r}"
+    )
+    assert err.auto_scroll == "refused", (
+        f"the diagnosis must say the auto-scroll was refused; got "
+        f"auto_scroll={err.auto_scroll!r}, last_observed={err.last_observed!r}"
+    )
+    # The prose stays for a reader of the message.
+    assert "scroll_into_view was refused" in (err.last_observed or ""), (
+        err.last_observed
+    )
+
+
 def test_open_dropdown_in_a_scrolled_panel_is_visible(app, app_config):
     """An open drop-down's entries report visible although they lie outside
     the overflowing panel that holds the combo box.

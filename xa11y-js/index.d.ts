@@ -41,6 +41,7 @@ export type {
   DragOptions,
   EventTypeName,
   HiddenReasonName,
+  AutoScrollOutcomeName,
   LegendEntry,
   MouseButtonName,
   Omission,
@@ -49,6 +50,7 @@ export type {
   ShellSurfaceKindName,
 } from './native.js';
 import type {
+  AutoScrollOutcomeName,
   Element,
   Event,
   EventTypeName,
@@ -552,6 +554,8 @@ export class SelectorNotMatchedError extends XA11yError {
   lastObserved: string | null;
   /** Always `null` for this class (parity with {@link TimeoutError}). */
   hiddenReason: HiddenReasonName | null;
+  /** Always `null` for this class (parity with {@link TimeoutError}). */
+  autoScroll: AutoScrollOutcomeName | null;
   /** Bounded near-miss candidates (e.g. same-role elements). */
   candidates: string[];
   /** Bounded rendering of the search scope (tree dump or app list). */
@@ -588,6 +592,19 @@ export class TimeoutError extends XA11yError {
    * `'unknown'`. `null` when nothing hidden was observed.
    */
   hiddenReason: HiddenReasonName | null;
+  /**
+   * What the action's auto-scroll came to, when its target was enabled and
+   * `hiddenReason` was `'scrolled_out'`: `'refused'` (the element has no
+   * semantic scroll; it was asked once), `'no_effect'` (the platform
+   * accepted the call, and the next check still read the element not
+   * visible, scrolled out or hidden otherwise) or `'revealed'` (the next
+   * check read it visible, and something else, such as `enabled: false`,
+   * kept the wait going). It describes the first check after the latest
+   * accepted scroll, so `'revealed'` with `hiddenReason: 'scrolled_out'`
+   * means the element came into view and later scrolled back out. `null`
+   * when the wait never tried to scroll.
+   */
+  autoScroll: AutoScrollOutcomeName | null;
   /** Bounded near-miss candidates; collected only when the selector never matched. */
   candidates: string[];
   /** Bounded rendering of the search scope; collected only when the selector never matched. */
