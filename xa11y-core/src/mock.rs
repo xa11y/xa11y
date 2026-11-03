@@ -43,7 +43,7 @@
 //! actions into an internal log; use [`MockProviderHandle::actions`] to inspect
 //! them from tests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::element::{ElementData, HiddenReason, Rect, StateSet, Toggled};
@@ -96,7 +96,12 @@ pub struct MockProvider {
     /// Interior-mutable so window verbs can mutate state/bounds in place.
     nodes: Mutex<Vec<MockNode>>,
     actions: Mutex<Vec<ActionLogEntry>>,
+    /// Scripted geometry per node index, consumed by [`MockProvider::animate`].
+    frames: Mutex<HashMap<usize, VecDeque<MockFrame>>>,
 }
+
+/// One scripted observation of a node: its bounds and whether it is visible.
+pub type MockFrame = (Option<Rect>, bool);
 
 impl MockProvider {
     /// Return a clone of the action log recorded so far.
@@ -105,6 +110,43 @@ impl MockProvider {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Script how the node named `name` looks to successive tree reads.
+    ///
+    /// Each time `get_children` reports the node, the next frame's bounds and
+    /// visibility are applied first; once the frames run out the last one
+    /// persists. Deterministic stand-in for an animating widget, so
+    /// `Locator::wait_stable` can be tested without a clock.
+    pub fn animate(&self, name: &str, frames: Vec<MockFrame>) {
+        let idx = self
+            .nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .position(|n| n.data.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("mock fixture has no node named {name:?}"));
+        self.frames
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(idx, frames.into());
+    }
+
+    /// Apply the next scripted frame (if any) to node `idx`.
+    fn advance_frame(&self, nodes: &mut [MockNode], idx: usize) {
+        let mut frames = self.frames.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(queue) = frames.get_mut(&idx) {
+            // Keep the last frame: it is where the animation settles.
+            let frame = if queue.len() > 1 {
+                queue.pop_front()
+            } else {
+                queue.front().copied()
+            };
+            if let Some((bounds, visible)) = frame {
+                nodes[idx].data.bounds = bounds;
+                nodes[idx].data.states.visible = visible;
+            }
+        }
     }
 
     /// Clear the action log.
@@ -183,7 +225,7 @@ struct MockNode {
 
 impl Provider for MockProvider {
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         match element {
             None => {
                 if nodes.is_empty() {
@@ -198,6 +240,9 @@ impl Provider for MockProvider {
                 // providers have dropped.
                 if idx >= nodes.len() || nodes[idx].closed {
                     return Ok(vec![]);
+                }
+                for child in nodes[idx].children.clone() {
+                    self.advance_frame(&mut nodes, child);
                 }
                 Ok(nodes[idx]
                     .children
@@ -942,6 +987,7 @@ pub fn build_provider() -> Arc<MockProvider> {
     Arc::new(MockProvider {
         nodes: Mutex::new(nodes),
         actions: Mutex::new(Vec::new()),
+        frames: Mutex::new(HashMap::new()),
     })
 }
 

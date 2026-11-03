@@ -695,3 +695,36 @@ def test_many_calls_stay_in_order_on_one_connection(run_client):
         return seen
 
     assert run_client(body) == [len(EXPECTED_TOOLS)] * 10
+
+
+# ── find with stable: true (#530) ────────────────────────────────────────────
+
+
+def test_the_find_tool_states_what_stable_waits_for_and_requires(run_client):
+    """The wait and the uniqueness rule are what a model plans a click with."""
+    find = _tool(run_client, "find")
+    description = find.description
+    assert "XA11Y_DEFAULT_TIMEOUT" in description, "a stable find blocks; name the knob"
+    assert "exactly one" in description, "stable refuses several matches"
+    assert "ambiguous_selector" in description, "and says what the refusal is called"
+    stable = find.input_schema["properties"]["stable"]
+    assert stable["type"] == "boolean"
+    assert "two consecutive polls" in stable["description"]
+
+
+def test_a_validating_client_can_send_stable(run_client):
+    schema = _tool(run_client, "find").input_schema
+    jsonschema.validate({"selector": "button", "pid": 1, "stable": True}, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"selector": "button", "pid": 1, "stable": "yes"}, schema)
+
+
+def test_a_non_boolean_stable_is_something_to_fix(run_client):
+    """Checked before the target resolves, so no display is needed."""
+    result = run_client(
+        lambda c: c.call_tool("find", {"selector": "button", "stable": "yes"})
+    )
+    assert result.is_error is True
+    structured = result.structured_content
+    assert structured["kind"] == "invalid_arguments"
+    assert '"stable"' in structured["message"]

@@ -3,7 +3,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::element::{Element, ElementData, HiddenReason};
+use crate::element::{Element, ElementData, HiddenReason, Rect};
 use crate::error::{AutoScrollOutcome, Diagnosis, Error, Result};
 use crate::event::ElementState;
 use crate::provider::Provider;
@@ -45,6 +45,29 @@ fn describe_observed(data: &ElementData) -> String {
         data.states.enabled,
         data.states.focused
     )
+}
+
+/// Interval between polls of the `wait_*` methods.
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The condition named in a [`Locator::wait_stable`] timeout diagnosis.
+const STABLE_CONDITION: &str =
+    "stable (bounds unchanged across two consecutive polls, and visible)";
+
+/// The bounds a poll contributes to [`Locator::wait_stable`]: present only
+/// when the element is visible and reports bounds. Anything else resets the
+/// comparison.
+fn stable_candidate(data: &ElementData) -> Option<Rect> {
+    if data.states.visible {
+        data.bounds
+    } else {
+        None
+    }
+}
+
+/// `{x=10, y=20, w=100, h=30}`, for bounds in a diagnosis.
+fn describe_rect(r: &Rect) -> String {
+    format!("{{x={}, y={}, w={}, h={}}}", r.x, r.y, r.width, r.height)
 }
 
 /// Cap a multi-line string at `max_lines`, appending a truncation marker
@@ -1261,6 +1284,131 @@ impl Locator {
         self.poll_until(&predicate, timeout, "custom predicate")
     }
 
+    /// Wait until the element's bounds are unchanged across two consecutive
+    /// polls and it is visible, then return it.
+    ///
+    /// "Stable" is geometric: it has nothing to do with
+    /// [`ElementData::stable_id`]. Use it before a pointer action
+    /// ([`crate::InputSim`]) whose target is still animating — sliding in,
+    /// resizing, or settling after a layout change — so the click lands
+    /// where the element ends up rather than where it was mid-motion:
+    ///
+    /// ```ignore
+    /// sim.mouse().click(&locator.wait_stable(timeout)?)?;
+    /// ```
+    ///
+    /// Each poll re-resolves the selector (~100 ms apart, like the other
+    /// `wait_*` methods), so the success path costs at least two resolves
+    /// and one poll interval. An element that reports no bounds never counts
+    /// as stable. Semantic actions (`press`, `toggle`, …) do not need this:
+    /// they do not depend on position.
+    ///
+    /// Only bounds are compared, not identity: if the selector resolves to a
+    /// different element on the second poll whose bounds equal the first
+    /// one's, that element is returned. For pointer targeting this is
+    /// harmless — the point clicked is the same either way.
+    ///
+    /// On timeout the error's [`Diagnosis`] says what blocked stability: the
+    /// last two differing rectangles, a match that is not visible, a match
+    /// that reports no bounds, or a selector that never matched.
+    pub fn wait_stable(&self, timeout: Duration) -> Result<Element> {
+        let start = std::time::Instant::now();
+        let mut ever_matched = false;
+        // Bounds from the previous poll, when that poll saw the element
+        // visible with bounds. Two equal in a row is stability.
+        let mut prev: Option<Rect> = None;
+        let mut polls: u32 = 0;
+
+        loop {
+            polls = polls.saturating_add(1);
+            let matched = match self.resolve_data() {
+                Ok(data) => Some(data),
+                Err(Error::SelectorNotMatched { .. }) => None,
+                Err(e) => return Err(e),
+            };
+            if matched.is_some() {
+                ever_matched = true;
+            }
+
+            // This poll's change against the previous one, for the diagnosis.
+            let last_change = match matched.as_ref().and_then(stable_candidate) {
+                Some(bounds) if prev == Some(bounds) => {
+                    let data = matched.expect("a stable candidate comes from a match");
+                    return Ok(Element::new(data, Arc::clone(&self.provider)));
+                }
+                Some(bounds) => prev.replace(bounds).map(|before| (before, bounds)),
+                None => {
+                    prev = None;
+                    None
+                }
+            };
+
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(self.diagnose_unstable(
+                    elapsed,
+                    matched.as_ref(),
+                    ever_matched,
+                    last_change,
+                    polls == 1,
+                ));
+            }
+            std::thread::sleep(WAIT_POLL_INTERVAL);
+        }
+    }
+
+    /// Timeout error for [`Locator::wait_stable`]. Reuses
+    /// [`Locator::diagnose_timeout`] for the "never matched" / "not visible"
+    /// cases and names the moving bounds otherwise.
+    fn diagnose_unstable(
+        &self,
+        elapsed: Duration,
+        last: Option<&ElementData>,
+        ever_matched: bool,
+        last_change: Option<(Rect, Rect)>,
+        first_poll: bool,
+    ) -> Error {
+        let condition = STABLE_CONDITION.to_string();
+        let Some(data) = last else {
+            return self.diagnose_timeout(elapsed, condition, None, ever_matched, None);
+        };
+        let observed = if !data.states.visible {
+            format!("{}; matched but not visible", describe_observed(data))
+        } else {
+            match (data.bounds, last_change) {
+                (None, _) => format!("{} reports no bounds", describe_observed(data)),
+                (Some(_), Some((before, after))) => format!(
+                    "bounds still changing: {} \u{2192} {} on {}",
+                    describe_rect(&before),
+                    describe_rect(&after),
+                    short_describe(data)
+                ),
+                // The timeout expired after a single poll, so there was never
+                // a second one to compare against.
+                (Some(b), None) if first_poll => format!(
+                    "bounds {} seen on only one poll of {}; stability needs two \
+                     (timeout shorter than the poll interval?)",
+                    describe_rect(&b),
+                    short_describe(data)
+                ),
+                // Earlier polls ran, but the one just before this saw the
+                // element missing, hidden, or without bounds.
+                (Some(b), None) => format!(
+                    "bounds {} on {}, but the poll before saw it missing, hidden, \
+                     or without bounds; stability needs two such polls in a row",
+                    describe_rect(&b),
+                    short_describe(data)
+                ),
+            }
+        };
+        Error::timeout(elapsed).diagnose(Diagnosis {
+            condition: Some(condition),
+            selector: Some(self.selector.clone()),
+            last_observed: Some(observed),
+            ..Diagnosis::default()
+        })
+    }
+
     /// Core polling loop shared by `wait_for_state` and `wait_until`.
     ///
     /// `condition` names what is being waited for; on timeout it is embedded
@@ -1275,7 +1423,6 @@ impl Locator {
         condition: &str,
     ) -> Result<Option<Element>> {
         let start = std::time::Instant::now();
-        let poll_interval = Duration::from_millis(100);
         let mut ever_matched = false;
 
         loop {
@@ -1303,7 +1450,7 @@ impl Locator {
                     None,
                 ));
             }
-            std::thread::sleep(poll_interval);
+            std::thread::sleep(WAIT_POLL_INTERVAL);
         }
     }
 }
@@ -2670,5 +2817,148 @@ mod tests {
         assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
         assert_eq!(provider.calls(), 0);
         assert_eq!(err.diagnosis().and_then(|d| d.auto_scroll), None);
+    }
+}
+
+#[cfg(test)]
+mod wait_stable_tests {
+    //! [`Locator::wait_stable`] against the mock provider, whose
+    //! [`crate::mock::MockProvider::animate`] scripts what each poll sees.
+
+    use super::*;
+    use crate::mock::{build_provider, MockFrame, MockProvider};
+    use std::time::Instant;
+
+    const BACK: &str = r#"button[name="Back"]"#;
+
+    fn rect(x: i32) -> Rect {
+        Rect {
+            x,
+            y: 60,
+            width: 50,
+            height: 30,
+        }
+    }
+
+    fn animated(frames: Vec<MockFrame>) -> (Arc<MockProvider>, Locator) {
+        let provider = build_provider();
+        if !frames.is_empty() {
+            provider.animate("Back", frames);
+        }
+        let dyn_provider: Arc<dyn Provider> = provider.clone();
+        (provider, Locator::new(dyn_provider, None, BACK))
+    }
+
+    fn observed(err: &Error) -> String {
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        let d = err
+            .diagnosis()
+            .expect("a stability timeout carries a diagnosis");
+        assert_eq!(d.condition.as_deref(), Some(STABLE_CONDITION));
+        d.last_observed.clone().expect("last observation recorded")
+    }
+
+    #[test]
+    fn a_still_element_is_stable_after_two_polls() {
+        let (_p, loc) = animated(vec![]);
+        let start = Instant::now();
+        let el = loc
+            .wait_stable(Duration::from_secs(2))
+            .expect("unmoving element");
+        assert_eq!(el.bounds, Some(rect(110)));
+        assert!(
+            start.elapsed() >= WAIT_POLL_INTERVAL,
+            "stability needs a second poll"
+        );
+    }
+
+    #[test]
+    fn returns_the_settled_bounds_once_the_motion_stops() {
+        let (_p, loc) = animated(vec![
+            (Some(rect(0)), true),
+            (Some(rect(40)), true),
+            (Some(rect(80)), true),
+        ]);
+        let el = loc.wait_stable(Duration::from_secs(2)).expect("settles");
+        assert_eq!(el.bounds, Some(rect(80)));
+    }
+
+    #[test]
+    fn a_hidden_poll_resets_the_comparison() {
+        // Equal bounds either side of a hidden poll are not two consecutive
+        // stable observations: it takes four polls (three intervals).
+        let (_p, loc) = animated(vec![
+            (Some(rect(5)), true),
+            (Some(rect(5)), false),
+            (Some(rect(5)), true),
+        ]);
+        let start = Instant::now();
+        loc.wait_stable(Duration::from_secs(2)).expect("settles");
+        assert!(start.elapsed() >= WAIT_POLL_INTERVAL * 3);
+    }
+
+    #[test]
+    fn timeout_names_the_last_two_rectangles_while_still_moving() {
+        let frames = (0..200).map(|i| (Some(rect(i * 10)), true)).collect();
+        let (_p, loc) = animated(frames);
+        let err = loc
+            .wait_stable(Duration::from_millis(350))
+            .expect_err("never settles");
+        let obs = observed(&err);
+        assert!(obs.starts_with("bounds still changing: {x="), "{obs}");
+        assert!(obs.contains('\u{2192}'), "{obs}");
+        assert!(obs.ends_with(r#"on button "Back""#), "{obs}");
+    }
+
+    #[test]
+    fn timeout_says_not_visible() {
+        let (_p, loc) = animated(vec![(Some(rect(5)), false)]);
+        let err = loc
+            .wait_stable(Duration::from_millis(250))
+            .expect_err("hidden element is never stable");
+        let obs = observed(&err);
+        assert!(obs.contains("matched but not visible"), "{obs}");
+    }
+
+    #[test]
+    fn timeout_says_no_bounds() {
+        let (_p, loc) = animated(vec![(None, true)]);
+        let err = loc
+            .wait_stable(Duration::from_millis(250))
+            .expect_err("an element without bounds is never stable");
+        assert!(observed(&err).contains("reports no bounds"));
+    }
+
+    #[test]
+    fn timeout_says_never_matched() {
+        let loc = Locator::new(build_provider(), None, r#"button[name="Nope"]"#);
+        let err = loc
+            .wait_stable(Duration::from_millis(150))
+            .expect_err("no such element");
+        assert_eq!(observed(&err), "selector never matched");
+    }
+
+    #[test]
+    fn a_zero_timeout_explains_that_one_poll_cannot_prove_stability() {
+        let (_p, loc) = animated(vec![]);
+        let err = loc.wait_stable(Duration::ZERO).expect_err("one poll only");
+        assert!(observed(&err).contains("seen on only one poll"));
+    }
+
+    #[test]
+    fn a_timeout_after_a_hidden_poll_does_not_blame_the_timeout_length() {
+        // Poll 1 sees it hidden; poll 2 (after the 50 ms timeout) sees it
+        // visible with nothing to compare against. That is not the
+        // "timeout shorter than the poll interval" case.
+        let (_p, loc) = animated(vec![(Some(rect(110)), false), (Some(rect(110)), true)]);
+        let err = loc
+            .wait_stable(Duration::from_millis(50))
+            .expect_err("a hidden poll resets the comparison");
+        let observed = observed(&err);
+        assert!(
+            observed.contains("the poll before saw it missing, hidden"),
+            "{observed}"
+        );
+        assert!(!observed.contains("timeout shorter"), "{observed}");
     }
 }

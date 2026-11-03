@@ -184,6 +184,26 @@ def test_wait_detached_timeout(test_app):
         test_app.descendant('button[name="Back"]').wait_detached(timeout=0.3)
 
 
+def test_wait_stable_returns_the_still_element(test_app):
+    el = test_app.descendant('button[name="Back"]').wait_stable(timeout=1.0)
+    assert el.name == "Back"
+    assert el.bounds is not None
+
+
+def test_wait_stable_timeout_diagnoses_hidden_match(test_app):
+    with pytest.raises(xa11y.TimeoutError) as exc_info:
+        test_app.descendant("static_text").wait_stable(timeout=0.3)
+    err = exc_info.value
+    assert err.condition.startswith("stable (bounds unchanged across two")
+    assert "matched but not visible" in err.last_observed
+
+
+def test_wait_stable_timeout_diagnoses_a_miss(test_app):
+    with pytest.raises(xa11y.TimeoutError) as exc_info:
+        test_app.descendant('button[name="Nope"]').wait_stable(timeout=0.3)
+    assert exc_info.value.last_observed == "selector never matched"
+
+
 # ── wait_until predicate error propagation ───────────────────────────────────
 
 

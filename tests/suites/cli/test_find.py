@@ -8,7 +8,9 @@ One element per line, followed by a summary ``(N match[es])`` line.
 
 from __future__ import annotations
 
+import os
 import re
+import time
 
 import pytest
 
@@ -177,3 +179,78 @@ def test_find_says_why_a_scrolled_out_element_is_hidden(run_cli, app_pid, app_na
     rc, stdout, stderr = run_cli("find", '[name="Long Entry 1"]', "--pid", str(app_pid))
     assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
     assert "hidden" not in stdout.splitlines()[0], stdout
+
+
+# ── find --stable (#530) ──────────────────────────────────────────────────────
+#
+# "Start slide" restarts a three-second slide of "Slide target" that ends
+# where the target already rests. On the apps in SLIDE_APPS the widget is
+# required, so its absence fails rather than skips (#383).
+
+_START_SLIDE = 'button[name="Start slide"]'
+_SLIDE_TARGET = 'button[name="Slide target"]'
+SLIDE_APPS = {"tauri", "accesskit"}
+# Comfortably longer than the slide, so a slow resolve cannot eat the budget.
+_STABLE_ENV = {**os.environ, "XA11Y_DEFAULT_TIMEOUT": "15"}
+
+
+def _stable_bounds(run_cli, app_pid) -> str:
+    rc, stdout, stderr = run_cli(
+        "find",
+        _SLIDE_TARGET,
+        "--pid",
+        str(app_pid),
+        "-o",
+        "bounds",
+        "--stable",
+        env=_STABLE_ENV,
+    )
+    assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
+    lines = stdout.strip().splitlines()
+    assert len(lines) == 1, f"--stable prints exactly the one match: {stdout!r}"
+    return lines[0]
+
+
+def test_find_stable_prints_the_bounds_a_slide_ends_at(
+    run_cli, app, app_pid, app_name
+):
+    """``find --stable`` waits out the slide and prints where it ended.
+
+    The 1.5 s floor leaves the rest of the 3 s slide for press latency.
+    """
+    if app_name not in SLIDE_APPS:
+        pytest.skip("this app has no sliding widget")
+    assert app.locator(_START_SLIDE).count() == 1, (
+        "the app's Start slide button is missing"
+    )
+    rest = _stable_bounds(run_cli, app_pid)
+
+    app.locator(_START_SLIDE).press()
+    started = time.monotonic()
+    settled = _stable_bounds(run_cli, app_pid)
+    waited = time.monotonic() - started
+    assert settled == rest, f"--stable printed mid-slide bounds after {waited:.2f}s"
+    assert waited >= 1.5, f"a 3 s slide cannot be proven stable in {waited:.2f}s"
+
+
+def test_find_stable_refuses_an_ambiguous_selector(run_cli, app_pid):
+    """With ``--stable`` the selector must match exactly one element."""
+    rc, _stdout, stderr = run_cli(
+        "find", "button", "--pid", str(app_pid), "-o", "center", "--stable"
+    )
+    assert rc == 1, f"expected exit 1, got {rc}\nstderr: {stderr}"
+    assert "Ambiguous selector" in stderr, stderr
+    assert "button" in stderr, f"the candidates should be listed: {stderr}"
+
+
+def test_find_stable_reports_a_miss_after_the_wait(run_cli, app_pid):
+    """A selector that never matches fails as not-found, not as a timeout."""
+    env = {**os.environ, "XA11Y_DEFAULT_TIMEOUT": "0.5"}
+    rc, stdout, stderr = run_cli(
+        "find", 'button[name="NoSuchButton"]', "--pid", str(app_pid), "--stable",
+        env=env,
+    )
+    assert rc == 1, f"expected exit 1, got {rc}\nstderr: {stderr}"
+    assert not stdout.strip(), stdout
+    assert "No element matched selector" in stderr, f"a miss is not a timeout: {stderr}"
+    assert "NoSuchButton" in stderr, stderr

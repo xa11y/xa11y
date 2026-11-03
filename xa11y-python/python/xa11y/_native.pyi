@@ -839,6 +839,17 @@ class Locator:
         """Wait until the element has keyboard focus."""
     def wait_unfocused(self, timeout: float | None = None) -> Element:
         """Wait until the element does not have keyboard focus."""
+    def wait_stable(self, timeout: float | None = None) -> Element:
+        """Wait until the element's bounds are unchanged across two consecutive
+        polls and it is visible, then return it.
+
+        Use before an ``InputSim`` pointer action on an element that may still
+        be animating, so the click lands where it settles:
+        ``sim.click(locator.wait_stable())``. Unrelated to ``stable_id``.
+
+        Raises ``TimeoutError`` whose diagnosis names the last two differing
+        bounds, a match that is not visible, or a selector that never matched.
+        """
     def wait_until(
         self,
         predicate: Callable[[Element | None], bool],
