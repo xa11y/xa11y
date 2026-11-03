@@ -7925,6 +7925,88 @@ mod tests {
         );
     }
 
+    /// TEMPORARY (#603 overhead measurement with an owned window, not for merge).
+    #[test]
+    fn zz_measure_603_listing_overhead_with_owned_window() {
+        use std::io::BufRead;
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.Text = 'xa11y-owner-fixture'
+$owned = New-Object System.Windows.Forms.Form
+$owned.Text = 'xa11y-owned-fixture'
+$owner.Add_Shown({ $owned.Show($owner); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush() })
+[System.Windows.Forms.Application]::Run($owner)
+"#;
+        let mut child = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-STA", "-Command", script])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("fixture");
+        let out = child.stdout.take().expect("stdout");
+        let mut line = String::new();
+        std::io::BufReader::new(out)
+            .read_line(&mut line)
+            .expect("ready");
+        std::thread::sleep(Duration::from_secs(2));
+
+        let provider = WindowsProvider::new().expect("provider");
+        let dpi = &crate::dpi::DpiScope::enter().expect("dpi");
+        let root = unsafe { provider.automation.GetRootElement() }.expect("root");
+        let window_cond = unsafe {
+            provider.automation.CreatePropertyCondition(
+                UIA_ControlTypePropertyId,
+                &VARIANT::from(UIA_WindowControlTypeId.0),
+            )
+        }
+        .expect("cond");
+        let true_cond = unsafe { provider.automation.CreateTrueCondition() }.expect("true");
+        let interactive = interactive_top_level_windows("measuring").expect("enum");
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        let (mut naive, mut with_owner, mut listed) = (Vec::new(), Vec::new(), 0);
+        for _ in 0..25 {
+            let t = std::time::Instant::now();
+            let found = unsafe {
+                root.FindAllBuildCache(
+                    TreeScope_Children,
+                    &window_cond,
+                    provider.batch_request.get(dpi),
+                )
+            }
+            .expect("old");
+            let _ = desktop_app_windows(&DesktopArray(&found)).expect("old filter");
+            old.push(t.elapsed());
+
+            let t = std::time::Instant::now();
+            let found = unsafe {
+                root.FindAllBuildCache(
+                    TreeScope_Children,
+                    &true_cond,
+                    provider.batch_request.get(dpi),
+                )
+            }
+            .expect("new");
+            let l = desktop_app_windows(&DesktopArray(&found)).expect("new filter");
+            with_owner = omitted_windows(&interactive, &l.returned, root_owner);
+            new.push(t.elapsed());
+            naive = omitted_windows(&interactive, &l.returned, |h| h);
+            listed = l.windows.len();
+        }
+        let _ = child.kill();
+        old.sort();
+        new.sort();
+        let names = |v: &[HWND]| {
+            v.iter()
+                .map(|h| format!("{:#x} {:?}", h.0 as usize, hwnd_title(*h)))
+                .collect::<Vec<_>>()
+        };
+        panic!(
+            "MEASURE603 old median {:?} p90 {:?}; new median {:?} p90 {:?}; listed {listed}; interactive {}: {:?}; missing without owner check {:?}; missing with owner check {:?}",
+            old[12], old[22], new[12], new[22], interactive.len(), names(&interactive), names(&naive), names(&with_owner)
+        );
+    }
+
     #[test]
     fn probe_of_the_live_desktop_stays_inside_its_budget() {
         let start = std::time::Instant::now();
