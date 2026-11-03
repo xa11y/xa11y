@@ -39,6 +39,7 @@ export type {
   CheckedState,
   ClickOptions,
   DragOptions,
+  DeliveryName,
   EventTypeName,
   HiddenReasonName,
   LegendEntry,
@@ -51,6 +52,7 @@ export type {
 import type {
   Element,
   Event,
+  DeliveryName,
   EventTypeName,
   HiddenReasonName,
   Locator,
@@ -519,7 +521,20 @@ export declare function getDefaultTimeout(): number;
 // ── JS-only: typed error hierarchy ─────────────────────────────────────────
 
 /** Base class for all xa11y errors. */
-export class XA11yError extends Error {}
+export class XA11yError extends Error {
+  /**
+   * Whether the failed action may already have taken effect. Always set on
+   * errors xa11y throws.
+   *
+   * `'not_delivered'`: the failure happened before the action was
+   * dispatched (selector not matched, action not supported, element stale, an
+   * auto-wait that timed out), so a retry is safe. `'unknown'`: the action
+   * was dispatched or may have been (a D-Bus `NoReply`, an AX
+   * `CannotComplete`, a UIA timeout, any platform error), so a retry can
+   * apply it twice.
+   */
+  delivery: DeliveryName;
+}
 
 /** Accessibility permissions have not been granted. */
 export class PermissionDeniedError extends XA11yError {}

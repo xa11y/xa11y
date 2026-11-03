@@ -713,6 +713,13 @@ def test_locator_dump_shorthand(app, app_config):
     assert "button" in text
 
 
+def test_a_selector_miss_reports_it_was_not_delivered(app):
+    """A fail-fast miss never reached the application, so a retry is safe (#523)."""
+    with pytest.raises(xa11y.SelectorNotMatchedError) as caught:
+        app.locator('button[name="NoSuchButtonAnywhere523"]').element()
+    assert caught.value.delivery == "not_delivered"
+
+
 def test_hidden_reason_is_set_exactly_when_not_visible(app):
     """Every element carries a ``hidden_reason`` exactly when it is not
     visible (#590), and the reason is one of the documented names."""

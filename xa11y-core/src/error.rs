@@ -34,6 +34,70 @@
 use crate::element::HiddenReason;
 use crate::role::Role;
 
+/// Whether an action that failed may already have taken effect.
+///
+/// A caller deciding whether to retry a failed action needs exactly this, and
+/// no platform return code can be trusted for it: a timeout or a D-Bus
+/// `NoReply` often arrives after the application applied the action, and a
+/// retry then double-submits (a second "Send"). Read it with
+/// [`Error::delivery`].
+///
+/// There are two answers, and the absence of a third is deliberate. A
+/// confirmed delivery is not an error, so `Ok` already says it. What an
+/// error can honestly claim is "nothing reached the application"
+/// ([`NotDelivered`](Self::NotDelivered), safe to retry) or "I cannot tell"
+/// ([`Unknown`](Self::Unknown), not safe to retry blindly). A failure that
+/// does not clearly happen before dispatch is `Unknown`.
+///
+/// The disposition describes errors that come from an action. For an error
+/// from a read or a wait it says only whether an action could have reached
+/// the application.
+///
+/// Each backend documents which of its platform failures map to which value
+/// in the crate-level docs of `xa11y-linux`, `xa11y-macos`, and
+/// `xa11y-windows`.
+///
+/// `#[non_exhaustive]`: only core resolves a disposition and the bindings
+/// pass it on as a string, so a further value needs no work in a backend.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    /// The failure happened before the action was dispatched to the
+    /// application, so nothing was applied and a retry is safe. Examples:
+    /// the selector matched nothing, the element does not support the
+    /// action, the element went stale before dispatch, an argument was
+    /// rejected, an auto-wait timed out before acting.
+    NotDelivered,
+    /// The action was dispatched, or may have been, and the outcome is
+    /// unconfirmed. A retry may apply the action twice. Examples: a D-Bus
+    /// `NoReply`, an AX `kAXErrorCannotComplete`, a UIA timeout, any
+    /// platform error from the dispatch call itself.
+    Unknown,
+}
+
+impl Delivery {
+    /// The `snake_case` name this disposition crosses the bindings, the CLI
+    /// and MCP as (`"not_delivered"`, `"unknown"`).
+    pub fn to_snake_case(self) -> &'static str {
+        match self {
+            Self::NotDelivered => "not_delivered",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// True when retrying the failed action cannot apply it twice.
+    pub fn is_safe_to_retry(self) -> bool {
+        matches!(self, Self::NotDelivered)
+    }
+}
+
+impl std::fmt::Display for Delivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_snake_case())
+    }
+}
+
 /// Result type alias for xa11y operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -85,6 +149,11 @@ pub struct Diagnosis {
     /// tree dump or an application list), so the consumer does not need to
     /// re-run the failure under `print(app.dump())`.
     pub scope: Option<String>,
+    /// Overrides the disposition [`Error::delivery`] would derive from the
+    /// error's variant. Set where the variant alone is wrong: core's own
+    /// wait timeouts happen before any dispatch (`NotDelivered`), while a
+    /// bare [`Error::Timeout`] from a backend is `Unknown`.
+    pub delivery: Option<Delivery>,
 }
 
 impl Diagnosis {
@@ -135,6 +204,13 @@ impl Diagnosis {
         self
     }
 
+    /// Override the delivery disposition of the error this is attached to.
+    #[must_use]
+    pub fn delivery(mut self, delivery: Delivery) -> Self {
+        self.delivery = Some(delivery);
+        self
+    }
+
     /// True when no field carries any information.
     pub fn is_empty(&self) -> bool {
         self.condition.is_none()
@@ -143,6 +219,7 @@ impl Diagnosis {
             && self.hidden_reason.is_none()
             && self.candidates.is_empty()
             && self.scope.is_none()
+            && self.delivery.is_none()
     }
 }
 
@@ -336,6 +413,42 @@ impl Error {
         self
     }
 
+    /// Whether the failed action may already have taken effect.
+    ///
+    /// Safe to call on any error. The value is the attached
+    /// [`Diagnosis::delivery`] when one is set, otherwise derived from the
+    /// variant:
+    ///
+    /// - [`NotDelivered`](Delivery::NotDelivered): the failure is decided
+    ///   before dispatch. These are `SelectorNotMatched`, `ElementStale`,
+    ///   `ActionNotSupported`, `TextValueNotSupported`, `InvalidSelector`,
+    ///   `InvalidActionData`, `InvalidConfig`, `NoElementBounds`,
+    ///   `Unsupported`, `PermissionDenied` and `AccessibilityNotEnabled`.
+    /// - [`Unknown`](Delivery::Unknown): `Timeout` and `Platform`, where the
+    ///   platform call may have reached the application.
+    ///
+    /// The match has no wildcard arm, so a new variant does not compile until
+    /// someone classifies it here.
+    pub fn delivery(&self) -> Delivery {
+        if let Some(delivery) = self.diagnosis().and_then(|d| d.delivery) {
+            return delivery;
+        }
+        match self {
+            Self::PermissionDenied { .. }
+            | Self::AccessibilityNotEnabled { .. }
+            | Self::SelectorNotMatched { .. }
+            | Self::ElementStale { .. }
+            | Self::ActionNotSupported { .. }
+            | Self::TextValueNotSupported
+            | Self::InvalidSelector { .. }
+            | Self::InvalidActionData { .. }
+            | Self::InvalidConfig { .. }
+            | Self::NoElementBounds
+            | Self::Unsupported { .. } => Delivery::NotDelivered,
+            Self::Timeout { .. } | Self::Platform { .. } => Delivery::Unknown,
+        }
+    }
+
     /// The attached [`Diagnosis`], if this error carries one. Bindings use
     /// this to expose structured fields on their exception types.
     pub fn diagnosis(&self) -> Option<&Diagnosis> {
@@ -420,5 +533,69 @@ mod tests {
             d.last_observed.as_deref(),
             Some("selector matched 1 element(s); nth(3) requested")
         );
+    }
+
+    #[test]
+    fn delivery_is_not_delivered_for_errors_decided_before_dispatch() {
+        let cases = [
+            Error::selector_not_matched("button"),
+            Error::ElementStale {
+                selector: "button".into(),
+            },
+            Error::ActionNotSupported {
+                action: "press".into(),
+                role: Role::Button,
+            },
+            Error::TextValueNotSupported,
+            Error::InvalidSelector {
+                selector: "[".into(),
+                message: "bad".into(),
+            },
+            Error::InvalidActionData {
+                message: "bad".into(),
+            },
+            Error::NoElementBounds,
+            Error::Unsupported {
+                feature: "x".into(),
+            },
+            Error::PermissionDenied {
+                instructions: "grant".into(),
+            },
+        ];
+        for err in cases {
+            assert_eq!(err.delivery(), Delivery::NotDelivered, "{err}");
+            assert!(err.delivery().is_safe_to_retry(), "{err}");
+        }
+    }
+
+    #[test]
+    fn delivery_is_unknown_for_platform_failures_and_bare_timeouts() {
+        let platform = Error::Platform {
+            code: -25204,
+            message: "cannot complete".into(),
+        };
+        assert_eq!(platform.delivery(), Delivery::Unknown);
+        assert!(!platform.delivery().is_safe_to_retry());
+        assert_eq!(
+            Error::timeout(Duration::from_secs(1)).delivery(),
+            Delivery::Unknown
+        );
+    }
+
+    #[test]
+    fn diagnosis_delivery_overrides_the_variant_default() {
+        let err = Error::timeout(Duration::from_secs(1))
+            .diagnose(Diagnosis::new().delivery(Delivery::NotDelivered));
+        assert_eq!(err.delivery(), Delivery::NotDelivered);
+        // A diagnosis carrying only a disposition is not empty, and adds
+        // nothing to the rendered message.
+        assert!(err.diagnosis().is_some());
+        assert_eq!(format!("{err}"), "Timeout after 1.0s");
+    }
+
+    #[test]
+    fn delivery_names_are_stable_snake_case() {
+        assert_eq!(Delivery::NotDelivered.to_snake_case(), "not_delivered");
+        assert_eq!(Delivery::Unknown.to_string(), "unknown");
     }
 }

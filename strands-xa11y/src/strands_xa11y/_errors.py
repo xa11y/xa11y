@@ -69,7 +69,9 @@ _GUIDANCE = {
 # `hidden_reason` says why a matched element read visible=False ("scrolled_out",
 # "window_minimized", ...), which is what tells the model whether to scroll or to
 # restore a window.
-_DIAGNOSIS_FIELDS = ("condition", "selector", "last_observed", "hidden_reason", "elapsed")
+# `delivery` says whether the failed action may already have taken effect, so
+# the model knows whether retrying is safe or could double-submit.
+_DIAGNOSIS_FIELDS = ("condition", "selector", "last_observed", "hidden_reason", "elapsed", "delivery")
 
 
 class ToolError(Exception):

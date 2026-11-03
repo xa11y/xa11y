@@ -72,6 +72,12 @@ export type HiddenReasonName =
   | 'not_showing'
   | 'unknown';
 
+/**
+ * Whether a failed action may already have taken effect (\`XA11yError.delivery\`).
+ * \`not_delivered\` is safe to retry. Spelled as in Python.
+ */
+export type DeliveryName = 'not_delivered' | 'unknown';
+
 /** Why an annotated element is not in the image. Spelled as in Python. */
 export type OmissionReasonName = 'no_bounds' | 'zero_area' | 'outside_capture';
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::element::{Element, ElementData, Rect};
-use crate::error::{Diagnosis, Error, Result};
+use crate::error::{Delivery, Diagnosis, Error, Result};
 use crate::event::ElementState;
 use crate::provider::Provider;
 use crate::selector::{
@@ -612,6 +612,8 @@ impl Locator {
         let mut d = Diagnosis {
             condition: Some(condition),
             selector: Some(self.selector.clone()),
+            // A wait gives up before it acts, so nothing was dispatched.
+            delivery: Some(Delivery::NotDelivered),
             ..Diagnosis::default()
         };
         match last {
@@ -1229,6 +1231,7 @@ impl Locator {
             condition: Some(condition),
             selector: Some(self.selector.clone()),
             last_observed: Some(observed),
+            delivery: Some(Delivery::NotDelivered),
             ..Diagnosis::default()
         })
     }
@@ -2076,6 +2079,20 @@ mod tests {
             last.contains("enabled=false"),
             "last observed should expose the blocking state, got: {last}"
         );
+    }
+
+    #[test]
+    fn action_timeout_and_miss_report_not_delivered() {
+        // The auto-wait gives up before dispatching anything, so a retry is
+        // safe. Without the override a Timeout would read as Unknown.
+        let blocked = root_locator(r#"button[name="Forward"]"#).with_timeout(SHORT_WAIT);
+        let err = blocked.press().expect_err("disabled button must time out");
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        assert_eq!(err.delivery(), crate::Delivery::NotDelivered);
+
+        let missing = root_locator(r#"button[name="Nope"]"#).with_timeout(SHORT_WAIT);
+        let err = missing.press().expect_err("missing button must fail");
+        assert_eq!(err.delivery(), crate::Delivery::NotDelivered, "{err:?}");
     }
 
     #[test]

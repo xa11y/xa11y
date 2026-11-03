@@ -89,7 +89,22 @@ fn attach_diagnosis_attrs(
     err
 }
 
+/// Convert a core error into the matching Python exception, with the
+/// structured `delivery` attribute set on every one of them: whether the
+/// failed action may already have taken effect (`"not_delivered"` is safe to
+/// retry, `"unknown"` is not).
 fn to_py_err(e: xa11y::Error) -> PyErr {
+    let delivery = e.delivery();
+    let err = map_to_py_err(e);
+    Python::attach(|py| {
+        // Best-effort by design, like the diagnosis attributes: the rendered
+        // message is intact and an attribute failure must not mask it.
+        let _ = err.value(py).setattr("delivery", delivery.to_snake_case());
+    });
+    err
+}
+
+fn map_to_py_err(e: xa11y::Error) -> PyErr {
     match e {
         xa11y::Error::PermissionDenied { instructions } => {
             PermissionDeniedError::new_err(instructions)
@@ -1255,7 +1270,8 @@ impl Subscription {
                     xa11y::Error::timeout(start.elapsed()).diagnose(
                         xa11y::Diagnosis::new()
                             .condition("event matching predicate")
-                            .last_observed(format!("{seen} event(s) received, none matched")),
+                            .last_observed(format!("{seen} event(s) received, none matched"))
+                            .delivery(xa11y::Delivery::NotDelivered),
                     ),
                 ));
             }

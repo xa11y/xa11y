@@ -710,6 +710,13 @@ fn tool_definition(name: &str) -> Value {
                      view first (`scroll-into-view`, where the element supports it), \
                      `window_minimized` that its window has to be restored. Do not wrap \
                      this tool in a retry loop; the wait is the retry loop.\n\n\
+                     A failure carries `delivery`, which says whether a retry is safe. \
+                     `not_delivered` means the action never reached the application (no \
+                     match, not supported, element gone, the wait expired), so retrying \
+                     cannot apply it twice. `unknown` means it was dispatched and the \
+                     outcome is unconfirmed (the application did not reply, the platform \
+                     call errored): re-read with `tree` or `find` before acting again, \
+                     or a second \"Send\" can be submitted twice.\n\n\
                      `ok: true` means the application accepted the call, not that \
                      anything changed: a control is free to accept an action and do \
                      nothing. Confirm the effect by re-reading with `tree` or `find`.\n\n\
@@ -2268,6 +2275,11 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
     structured.insert("tool".into(), json!(tool));
     structured.insert("message".into(), json!(text));
     structured.insert("kind".into(), json!(failure_kind(err)));
+    // Whether a retry is safe. Absent only for a usage error, where no
+    // operation was attempted.
+    if let Some(delivery) = err.delivery() {
+        structured.insert("delivery".into(), json!(delivery.to_snake_case()));
+    }
 
     match err {
         CliError::Xa11y(inner) => {
@@ -2353,6 +2365,8 @@ fn diagnosis_json(d: &crate::Diagnosis) -> Value {
         }
     }
     insert_some(&mut out, "scope", d.scope.as_deref().map(Value::from));
+    // `delivery` is reported once, at the top level of the failure, where it
+    // is resolved from the variant and this diagnosis together.
     Value::Object(out)
 }
 
@@ -3446,6 +3460,46 @@ mod tests {
         let (text, structured) = describe_failure("action", &err);
         assert!(text.contains("hidden because: scrolled_out"), "{text}");
         assert_eq!(structured["diagnosis"]["hidden_reason"], "scrolled_out");
+    }
+
+    #[test]
+    fn every_failure_but_a_usage_error_reports_its_delivery() {
+        let cases = [
+            (
+                CliError::Xa11y(crate::Error::selector_not_matched("button")),
+                Some("not_delivered"),
+            ),
+            (
+                CliError::Xa11y(crate::Error::Platform {
+                    code: -25204,
+                    message: "cannot complete".into(),
+                }),
+                Some("unknown"),
+            ),
+            (
+                // A wait that expired before acting overrides the variant.
+                CliError::Xa11y(
+                    crate::Error::timeout(std::time::Duration::from_secs(1))
+                        .diagnose(crate::Diagnosis::new().delivery(crate::Delivery::NotDelivered)),
+                ),
+                Some("not_delivered"),
+            ),
+            (
+                // A bare timeout may have been dispatched.
+                CliError::Xa11y(crate::Error::timeout(std::time::Duration::from_secs(1))),
+                Some("unknown"),
+            ),
+            (CliError::NotFound("no match".into()), Some("not_delivered")),
+            (CliError::Usage("bad flag".into()), None),
+        ];
+        for (err, expected) in cases {
+            let (_, structured) = describe_failure("action", &err);
+            assert_eq!(
+                structured.get("delivery").and_then(Value::as_str),
+                expected,
+                "{err}"
+            );
+        }
     }
 
     #[test]

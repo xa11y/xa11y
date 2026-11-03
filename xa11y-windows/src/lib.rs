@@ -2,6 +2,37 @@
 //!
 //! This backend implements the `Provider` trait using the Windows UI Automation API.
 //! No special permissions are required for local UIA queries.
+//!
+//! # Delivery disposition of action failures
+//!
+//! Every error answers [`xa11y_core::Error::delivery`]: whether the failed
+//! action may already have taken effect. A caller retries only on
+//! `NotDelivered`. This is how UIA failures map.
+//!
+//! `NotDelivered`:
+//!
+//! - `ActionNotSupported`: the element exposes no pattern that implements the
+//!   verb (`Invoke`, `Toggle`, `SelectionItem`, `ExpandCollapse`, `Value`,
+//!   `RangeValue`, `Window`, ...), or a pattern reports that the operation
+//!   is unavailable (`UIA_E_NOTSUPPORTED`, `UIA_E_INVALIDOPERATION` before the
+//!   call runs).
+//! - `ElementStale`: the xa11y handle is not in the provider's cache, or the
+//!   element no longer matches its recorded identity, so there is nothing to
+//!   call.
+//! - `InvalidActionData`, `InvalidSelector`, `NoElementBounds`,
+//!   `Unsupported`: rejected from the arguments before any UIA call.
+//!
+//! `Unknown`:
+//!
+//! - `UIA_E_TIMEOUT` from an element-level call, as a `Platform` error. The
+//!   provider may have run the pattern method before the transaction timed
+//!   out.
+//! - Every other `Platform` HRESULT from the pattern call that performs the
+//!   action, including `UIA_E_ELEMENTNOTAVAILABLE`, which can also arrive
+//!   after the provider acted on an element that then went away.
+//! - `Timeout` from a discovery call or from a window verb that was sent and
+//!   did not settle. The backend does not split a discovery timeout apart
+//!   from a dispatch timeout, so both stay `Unknown`.
 
 mod splice;
 

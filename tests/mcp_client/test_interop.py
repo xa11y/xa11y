@@ -200,6 +200,9 @@ def test_a_failing_call_carries_structured_context(run_client):
     assert structured["tool"] == "find"
     assert structured["kind"], "every failure carries a machine-readable kind"
     assert structured["message"]
+    assert structured["delivery"] in {"not_delivered", "unknown"}, (
+        "every failure says whether a retry could double-apply"
+    )
 
 
 def test_an_argument_mistake_is_reported_as_something_to_fix(run_client):

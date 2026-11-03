@@ -34,6 +34,7 @@ _DIAGNOSIS_FIELDS = (
     "elapsed",
     "last_observed",
     "hidden_reason",
+    "delivery",
     "candidates",
     "scope",
 )

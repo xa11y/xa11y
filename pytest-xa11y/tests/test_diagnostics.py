@@ -131,6 +131,13 @@ def test_render_diagnosis_says_why_a_matched_element_was_hidden():
     assert "hidden_reason" not in render_diagnosis(FakeTimeout("Timeout after 5.0s"))
 
 
+def test_render_diagnosis_reports_the_delivery_disposition():
+    class Undelivered(FakeTimeout):
+        delivery = "not_delivered"
+
+    assert "delivery: not_delivered" in render_diagnosis(Undelivered("Timeout after 5.0s"))
+
+
 def test_render_diagnosis_ignores_foreign_exceptions():
     assert render_diagnosis(ValueError("not an xa11y error")) is None
 

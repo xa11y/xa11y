@@ -77,3 +77,36 @@ does not apply, so no `hasattr` guard is needed. On `SelectorNotMatchedError`,
 
 See [Errors and diagnosis](/explanation/errors-and-diagnosis/) for what each
 field contains and how to read one.
+
+## Delivery disposition
+
+Every error says whether a failed action may already have taken effect. The
+value is one of two strings:
+
+| Value | Meaning |
+| --- | --- |
+| `not_delivered` | The action never reached the application, so a retry cannot apply it twice. |
+| `unknown` | The action was dispatched and the outcome is unconfirmed. The application may have acted on it. |
+
+A successful action still returns `Result<()>`. The disposition describes
+failures only.
+
+| Rust variant | Disposition |
+| --- | --- |
+| `PermissionDenied`, `AccessibilityNotEnabled`, `SelectorNotMatched`, `ElementStale`, `ActionNotSupported`, `TextValueNotSupported`, `InvalidSelector`, `InvalidActionData`, `InvalidConfig`, `NoElementBounds`, `Unsupported` | `not_delivered` |
+| `Timeout`, `Platform` | `unknown` |
+
+A `Diagnosis` can override the variant default. The wait and not-found
+diagnoses built by `Locator` set `not_delivered`, because the wait expired
+before the action was attempted.
+
+| Surface | Where it appears |
+| --- | --- |
+| Rust | `Error::delivery()` returns a `Delivery`. `Delivery::is_safe_to_retry()` is true for `NotDelivered`. |
+| Python | The `delivery` attribute on every exception, always present. |
+| JavaScript | The `delivery` property on every error, always present. |
+| MCP | A top-level `delivery` field in a failed tool result, absent only for a usage error. |
+| CLI | A `delivery:` line on stderr after the error of an action command. |
+
+The platform mapping behind `unknown` is in
+[Platform details](/reference/platform-details/).

@@ -158,6 +158,26 @@ event source disconnected after 3 non-matching event(s) — no further
 events will arrive
 ```
 
+## Retrying after a failure
+
+A failed action leaves one question open: did it happen anyway? A click that
+times out waiting for the application's reply may have been applied, and a
+second click submits the form twice. Every error therefore carries a
+`delivery` value that answers it.
+
+`not_delivered` means the action never reached the application. A selector
+that matched nothing, an action the element does not support, and a wait that
+expired before the action was attempted all fall here, and retrying them is
+safe. `unknown` means the call was dispatched and the outcome is unconfirmed.
+Re-read the element's state before acting again.
+
+xa11y reports `unknown` whenever it cannot prove the action stayed local. A
+platform error from the dispatching call is `unknown` even when the code
+usually means the element was gone, because the application may have acted
+before it failed. Each platform's rules are in
+[Platform details](/reference/platform-details/#delivery-disposition), and the
+attribute names are in [Errors](/reference/errors/#delivery-disposition).
+
 ## For contributors
 
 This behavior is governed by design tenet 6 (*errors carry their own
