@@ -72,7 +72,10 @@ def _type_perkey(sim, text):
 
 @pytest.mark.parametrize("mode", ["batched", "nobreak", "perkey"])
 def test_experiment(app, mode):
-    reps = 150
+    # 150 reps x 3 variants overran the harness's 900 s suite timeout on WPF
+    # (about 2.8 s per repetition there), which killed the run before pytest
+    # printed any failure detail.
+    reps = 60 if APP == "wpf" else 150
     bad = []
     dumps = []
     text = NOBREAK if mode == "nobreak" else BREAK
