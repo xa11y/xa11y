@@ -235,7 +235,17 @@ internal sealed class TestForm : Form
             Width = 260,
         };
 
-        return MakeGroup("Input", new Size(300, 70), FlowDirection.TopDown, search);
+        // Password entry (#522, #597): an `ES_PASSWORD` edit, which reports
+        // UIA `IsPassword` and withholds its text from ValuePattern.Value.
+        var password = new TextBox
+        {
+            AccessibleName = "Password",
+            Text = "hunter2",
+            UseSystemPasswordChar = true,
+            Width = 260,
+        };
+
+        return MakeGroup("Input", new Size(300, 100), FlowDirection.TopDown, search, password);
     }
 
     private static GroupBox BuildText()

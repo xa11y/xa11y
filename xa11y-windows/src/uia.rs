@@ -2160,13 +2160,24 @@ fn build_snapshot_data(
         .filter(|s| !s.is_empty());
 
     let patterns = WindowsProvider::query_patterns(role, element)?;
-    let (value, observed_range_value) = get_value(role, &patterns)?;
+    // `IsPassword` is UIA's own secure-text flag (`ES_PASSWORD` edits,
+    // WPF `PasswordBox`, AccessKit `PasswordInput`). The control type stays
+    // Edit, so the role stays `TextField`. An unread property degrades to
+    // `false` like the other cached boolean reads. Read before the value,
+    // which a password control may decline to disclose (see
+    // `value_pattern_text`).
+    let password = unsafe { element.CachedIsPassword() }.unwrap_or(FALSE) == TRUE;
+    let site = ReadSite {
+        role,
+        name: name.as_deref(),
+    };
+    let (value, observed_range_value) = get_value(site, &patterns, password)?;
 
     // Try FullDescription first (AccessKit's description), then HelpText
     let description = uia_cached_bstr(element, UIA_FullDescriptionPropertyId)
         .or_else(|| uia_cached_bstr(element, UIA_HelpTextPropertyId));
 
-    let states = parse_states(element, role, &patterns, hidden_by_ancestor)?;
+    let states = parse_states(element, site, &patterns, password, hidden_by_ancestor)?;
 
     let bounds = crate::coords::cached_bounding_rect(dpi, element)
         .ok()
@@ -2269,15 +2280,21 @@ fn build_snapshot_data(
         Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton
     ) {
         if let Some(ref pattern) = patterns.range_value {
+            let site = ReadSite {
+                role,
+                name: name.as_deref(),
+            };
             (
                 // Reuse the value already read for `value` so the string and
                 // numeric fields describe the same observation.
                 observed_range_value,
                 Some(pattern_read(
+                    site,
                     "RangeValuePattern.CurrentMinimum",
                     || unsafe { pattern.CurrentMinimum() },
                 )?),
                 Some(pattern_read(
+                    site,
                     "RangeValuePattern.CurrentMaximum",
                     || unsafe { pattern.CurrentMaximum() },
                 )?),
@@ -2533,15 +2550,38 @@ fn value_set_error(e: windows::core::Error, what: &str) -> Error {
 ///
 /// A read with a documented "no value" signal matches it at the call site
 /// instead (see [`value_pattern_text`]).
-fn pattern_read<T>(what: &str, f: impl Fn() -> windows::core::Result<T>) -> Result<T> {
-    retry_transient(f).map_err(|e| pattern_read_error(what, &e))
+fn pattern_read<T>(
+    site: ReadSite<'_>,
+    what: &str,
+    f: impl Fn() -> windows::core::Result<T>,
+) -> Result<T> {
+    retry_transient(f).map_err(|e| pattern_read_error(site, what, &e))
+}
+
+/// The element a snapshot read is for, named in a failed read's error so it
+/// says which element failed without a re-run (tenet 6). Borrowed, and only
+/// formatted on the failure path.
+#[derive(Clone, Copy)]
+struct ReadSite<'a> {
+    role: Role,
+    name: Option<&'a str>,
+}
+
+impl std::fmt::Display for ReadSite<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.role.to_snake_case())?;
+        match self.name {
+            Some(name) => write!(f, " {name:?}"),
+            None => Ok(()),
+        }
+    }
 }
 
 /// The error [`pattern_read`] reports for a failed read of `what`.
-fn pattern_read_error(what: &str, e: &windows::core::Error) -> Error {
+fn pattern_read_error(site: ReadSite<'_>, what: &str, e: &windows::core::Error) -> Error {
     Error::Platform {
         code: e.code().0 as i64,
-        message: format!("reading {what} while building element data failed: {e}"),
+        message: format!("reading {what} on {site} failed: {e}"),
     }
 }
 
@@ -4916,15 +4956,19 @@ impl Provider for WindowsProvider {
 /// RangeValuePattern, when present, is the element's value: a failed read
 /// propagates rather than falling through to ValuePattern, which would
 /// report a different property as the value (tenet 1, issue #597).
-fn get_value(role: Role, patterns: &ElementPatterns) -> Result<(Option<String>, Option<f64>)> {
+fn get_value(
+    site: ReadSite<'_>,
+    patterns: &ElementPatterns,
+    password: bool,
+) -> Result<(Option<String>, Option<f64>)> {
     // For checkboxes/radios, value is handled by state — skip
-    if matches!(role, Role::CheckBox | Role::RadioButton) {
+    if matches!(site.role, Role::CheckBox | Role::RadioButton) {
         return Ok((None, None));
     }
 
     // RangeValuePattern first (sliders, progress bars, spinners)
     if let Some(ref pattern) = patterns.range_value {
-        let v = pattern_read("RangeValuePattern.CurrentValue", || unsafe {
+        let v = pattern_read(site, "RangeValuePattern.CurrentValue", || unsafe {
             pattern.CurrentValue()
         })?;
         return Ok((Some(v.to_string()), Some(v)));
@@ -4932,7 +4976,11 @@ fn get_value(role: Role, patterns: &ElementPatterns) -> Result<(Option<String>, 
 
     // ValuePattern (text fields, combo boxes)
     if let Some(ref pattern) = patterns.value {
-        let text = value_pattern_text(retry_transient(|| unsafe { pattern.CurrentValue() }))?;
+        let text = value_pattern_text(
+            site,
+            password,
+            retry_transient(|| unsafe { pattern.CurrentValue() }),
+        )?;
         return Ok((text, None));
     }
 
@@ -4941,17 +4989,29 @@ fn get_value(role: Role, patterns: &ElementPatterns) -> Result<(Option<String>, 
 
 /// Classify a `ValuePattern.CurrentValue` read.
 ///
-/// `UIA_E_INVALIDOPERATION` is UIA's documented answer from a control that
-/// will not disclose its value, which is what a password edit is required
-/// to do (WPF's `PasswordBoxAutomationPeer` raises `InvalidOperationException`
-/// for it): there is no value to report, so `None`. An empty string is also
-/// `None`. Any other failure propagates (tenet 1).
-fn value_pattern_text(read: windows::core::Result<windows::core::BSTR>) -> Result<Option<String>> {
+/// A password control (`password`, from UIA's `IsPassword`) may decline to
+/// disclose its value, and UIA documents `UIA_E_INVALIDOPERATION` as how it
+/// does so (WPF's `PasswordBoxAutomationPeer` raises
+/// `InvalidOperationException`). There is no value to report then, so
+/// `None`. The same HRESULT from a control that is not a password control
+/// is a failed read, and propagates like any other failure (tenet 1). An
+/// empty string is also `None`.
+fn value_pattern_text(
+    site: ReadSite<'_>,
+    password: bool,
+    read: windows::core::Result<windows::core::BSTR>,
+) -> Result<Option<String>> {
     match read {
         Ok(v) => Ok(Some(v.to_string()).filter(|s| !s.is_empty())),
-        Err(e) if e.code().0 == UIA_E_INVALIDOPERATION as i32 => Ok(None),
-        Err(e) => Err(pattern_read_error("ValuePattern.CurrentValue", &e)),
+        Err(e) if password && is_password_value_withheld(&e) => Ok(None),
+        Err(e) => Err(pattern_read_error(site, "ValuePattern.CurrentValue", &e)),
     }
+}
+
+/// Whether a failed `ValuePattern.CurrentValue` read on a password control
+/// is the control withholding its value (see [`value_pattern_text`]).
+fn is_password_value_withheld(e: &windows::core::Error) -> bool {
+    e.code().0 == UIA_E_INVALIDOPERATION as i32
 }
 
 /// Determine available actions from pre-queried UIA patterns.
@@ -5106,10 +5166,12 @@ fn get_actions(
 #[allow(non_upper_case_globals)]
 fn parse_states(
     element: &IUIAutomationElement,
-    role: Role,
+    site: ReadSite<'_>,
     patterns: &ElementPatterns,
+    password: bool,
     hidden_by_ancestor: bool,
 ) -> Result<StateSet> {
+    let role = site.role;
     let enabled = unsafe { element.CachedIsEnabled() }
         .unwrap_or(BOOL(1))
         .as_bool();
@@ -5144,12 +5206,13 @@ fn parse_states(
         Role::CheckBox | Role::RadioButton => {
             if let Some(ref pattern) = patterns.toggle {
                 toggled_from_state(pattern_read(
+                    site,
                     "TogglePattern.CurrentToggleState",
                     || unsafe { pattern.CurrentToggleState() },
                 )?)
             } else if let Some(ref pattern) = patterns.selection_item {
                 // For radio buttons, check SelectionItemPattern
-                if pattern_read("SelectionItemPattern.CurrentIsSelected", || unsafe {
+                if pattern_read(site, "SelectionItemPattern.CurrentIsSelected", || unsafe {
                     pattern.CurrentIsSelected()
                 })?
                 .as_bool()
@@ -5169,6 +5232,7 @@ fn parse_states(
     let expanded = if let Some(ref pattern) = patterns.expand_collapse {
         // PartiallyExpanded and LeafNode have no boolean answer: unknown.
         match pattern_read(
+            site,
             "ExpandCollapsePattern.CurrentExpandCollapseState",
             || unsafe { pattern.CurrentExpandCollapseState() },
         )? {
@@ -5197,10 +5261,12 @@ fn parse_states(
     // hides an error from the other (mirrors the container-selection
     // derivation xa11y-macos does for Qt's AX bridge).
     let selected = match patterns.selection_item {
-        Some(ref pattern) => pattern_read("SelectionItemPattern.CurrentIsSelected", || unsafe {
-            pattern.CurrentIsSelected()
-        })?
-        .as_bool(),
+        Some(ref pattern) => {
+            pattern_read(site, "SelectionItemPattern.CurrentIsSelected", || unsafe {
+                pattern.CurrentIsSelected()
+            })?
+            .as_bool()
+        }
         None => legacy_state_selected(uia_cached_i32(
             element,
             UIA_LegacyIAccessibleStatePropertyId,
@@ -5210,7 +5276,7 @@ fn parse_states(
     let editable = match role {
         Role::TextField | Role::TextArea => {
             if let Some(ref pattern) = patterns.value {
-                !pattern_read("ValuePattern.CurrentIsReadOnly", || unsafe {
+                !pattern_read(site, "ValuePattern.CurrentIsReadOnly", || unsafe {
                     pattern.CurrentIsReadOnly()
                 })?
                 .as_bool()
@@ -5223,12 +5289,6 @@ fn parse_states(
 
     let focusable = unsafe { element.CachedIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE;
 
-    // `IsPassword` is UIA's own secure-text flag (`ES_PASSWORD` edits,
-    // WPF `PasswordBox`, AccessKit `PasswordInput`). The control type stays
-    // Edit, so the role stays `TextField`. An unread property degrades to
-    // `false` like the other cached boolean reads above.
-    let password = unsafe { element.CachedIsPassword() }.unwrap_or(FALSE) == TRUE;
-
     // Window visual state (minimized / maximized) from WindowPattern. `None`
     // means unknown: no WindowPattern (non-window element) or a state that
     // couldn't be read. Fullscreen is not reported by UIA at all
@@ -5239,7 +5299,7 @@ fn parse_states(
     // fullscreen notification.
     let (minimized, maximized) = match patterns.window {
         Some(ref pattern) => {
-            match pattern_read("WindowPattern.CurrentWindowVisualState", || unsafe {
+            match pattern_read(site, "WindowPattern.CurrentWindowVisualState", || unsafe {
                 pattern.CurrentWindowVisualState()
             })? {
                 WindowVisualState_Minimized => (Some(true), Some(false)),
@@ -5258,7 +5318,7 @@ fn parse_states(
     // signal. Previously hard-coded `false`, which reported every modal
     // dialog (e.g. a WinForms modal form) as non-modal.
     let modal = match patterns.window {
-        Some(ref pattern) => pattern_read("WindowPattern.CurrentIsModal", || unsafe {
+        Some(ref pattern) => pattern_read(site, "WindowPattern.CurrentIsModal", || unsafe {
             pattern.CurrentIsModal()
         })?
         .as_bool(),
@@ -7458,19 +7518,26 @@ mod tests {
 
     // ── Pattern-value reads (issue #597) ────────────────────────────────────
 
+    const BOLD: ReadSite<'static> = ReadSite {
+        role: Role::CheckBox,
+        name: Some("Bold"),
+    };
+
     #[test]
     fn pattern_read_propagates_a_failed_read_with_its_hresult() {
         use windows::core::{Error as CoreError, HRESULT};
         for hr in [E_FAIL, RPC_E_DISCONNECTED, E_ACCESSDENIED] {
-            let result: Result<bool> = pattern_read("TogglePattern.CurrentToggleState", || {
-                Err(CoreError::from_hresult(HRESULT(hr.0)))
-            });
+            let result: Result<bool> =
+                pattern_read(BOLD, "TogglePattern.CurrentToggleState", || {
+                    Err(CoreError::from_hresult(HRESULT(hr.0)))
+                });
             match result {
                 Err(Error::Platform { code, message }) => {
                     assert_eq!(code, i64::from(hr.0));
+                    // The error names the read and the element (tenet 6).
                     assert!(
-                        message.contains("TogglePattern.CurrentToggleState"),
-                        "the error names the read: {message}"
+                        message.contains("TogglePattern.CurrentToggleState on check_box \"Bold\""),
+                        "the error names the read and the element: {message}"
                     );
                 }
                 other => panic!("expected Platform for {hr:?}, got {other:?}"),
@@ -7479,11 +7546,21 @@ mod tests {
     }
 
     #[test]
+    fn read_site_names_an_unnamed_element_by_role() {
+        let site = ReadSite {
+            role: Role::Slider,
+            name: None,
+        };
+        assert_eq!(site.to_string(), "slider");
+        assert_eq!(BOLD.to_string(), "check_box \"Bold\"");
+    }
+
+    #[test]
     fn pattern_read_keeps_element_not_available_prunable() {
         use windows::core::{Error as CoreError, HRESULT};
         // A tree walk prunes an element that vanished mid-snapshot; that
         // only works while the read's error keeps UIA's exact HRESULT.
-        let result: Result<()> = pattern_read("ValuePattern.CurrentIsReadOnly", || {
+        let result: Result<()> = pattern_read(BOLD, "ValuePattern.CurrentIsReadOnly", || {
             Err(CoreError::from_hresult(HRESULT(
                 UIA_E_ELEMENTNOTAVAILABLE as i32,
             )))
@@ -7494,7 +7571,7 @@ mod tests {
     #[test]
     fn pattern_read_retries_a_transient_failure() {
         let calls = std::cell::Cell::new(0);
-        let result = pattern_read("WindowPattern.CurrentIsModal", || {
+        let result = pattern_read(BOLD, "WindowPattern.CurrentIsModal", || {
             calls.set(calls.get() + 1);
             if calls.get() == 1 {
                 Err(RPC_E_SERVERCALL_RETRYLATER.ok().expect_err("busy HRESULT"))
@@ -7507,20 +7584,37 @@ mod tests {
     }
 
     #[test]
-    fn value_pattern_text_reports_only_a_withheld_value_as_none() {
+    fn value_pattern_text_reports_only_a_withheld_password_as_none() {
         use windows::core::{Error as CoreError, BSTR, HRESULT};
-        assert_eq!(
-            value_pattern_text(Ok(BSTR::from("hello"))).expect("read"),
-            Some("hello".to_string())
-        );
-        assert_eq!(value_pattern_text(Ok(BSTR::new())).expect("read"), None);
+        let field = ReadSite {
+            role: Role::TextField,
+            name: Some("Password"),
+        };
+        for password in [false, true] {
+            assert_eq!(
+                value_pattern_text(field, password, Ok(BSTR::from("hello"))).expect("read"),
+                Some("hello".to_string())
+            );
+            assert_eq!(
+                value_pattern_text(field, password, Ok(BSTR::new())).expect("read"),
+                None
+            );
+        }
+        let withheld = || CoreError::from_hresult(HRESULT(UIA_E_INVALIDOPERATION as i32));
         // A password control declines to disclose its value.
-        let withheld = CoreError::from_hresult(HRESULT(UIA_E_INVALIDOPERATION as i32));
-        assert_eq!(value_pattern_text(Err(withheld)).expect("withheld"), None);
-        // Anything else is a failed read, not an empty field (tenet 1).
+        assert_eq!(
+            value_pattern_text(field, true, Err(withheld())).expect("withheld"),
+            None
+        );
+        // The same HRESULT from an ordinary field is a failed read.
+        assert!(matches!(
+            value_pattern_text(field, false, Err(withheld())),
+            Err(Error::Platform { code, .. }) if code == i64::from(UIA_E_INVALIDOPERATION as i32)
+        ));
+        // Anything else is a failed read even on a password field (tenet 1).
         let failed = CoreError::from_hresult(HRESULT(E_FAIL.0));
         assert!(matches!(
-            value_pattern_text(Err(failed)),
+            value_pattern_text(field, true, Err(failed)),
             Err(Error::Platform { code, .. }) if code == i64::from(E_FAIL.0)
         ));
     }

@@ -249,7 +249,12 @@ internal sealed class TestWindow : Window
         var search = new TextBox { Text = "hello world", Width = 260 };
         AutomationProperties.SetName(search, "Search");
 
-        return MakeGroup("Input", Orientation.Vertical, search);
+        // Password entry (#522, #597): PasswordBoxAutomationPeer reports UIA
+        // `IsPassword` and withholds its text from ValuePattern.Value.
+        var password = new PasswordBox { Password = "hunter2", Width = 260 };
+        AutomationProperties.SetName(password, "Password");
+
+        return MakeGroup("Input", Orientation.Vertical, search, password);
     }
 
     private static GroupBox BuildText()
