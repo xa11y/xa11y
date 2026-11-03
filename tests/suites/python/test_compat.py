@@ -958,6 +958,16 @@ def test_an_action_on_a_target_nothing_can_scroll_waits_it_out(app, app_config):
     # prove nothing about it. Which verbs a scrolled-out row offers differs by
     # toolkit (a Qt list row offers none), so read them off the element.
     target = app.locator(f'[name="{last}"]')
+
+    # The shared app is put back by the test above with a scroll that settles
+    # asynchronously, so the row can still read visible for a moment. Acting
+    # then succeeds at once and nothing times out. Wait for the premise rather
+    # than assuming it, and fail (not skip) if it never holds.
+    assert _wait_for(lambda: target.element().hidden_reason == "scrolled_out"), (
+        f"{last!r} must read scrolled_out before the action, or the auto-wait "
+        f"is never exercised; got visible={target.element().visible!r}, "
+        f"hidden_reason={target.element().hidden_reason!r}"
+    )
     advertised = target.element().actions
     verbs = ("press", "select", "toggle", "expand", "collapse", "focus")
     verb = next((v for v in verbs if v in advertised), None)
