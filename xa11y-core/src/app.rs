@@ -2339,6 +2339,11 @@ mod tests {
         accept: Result<()>,
         fills: bool,
         requests: std::sync::Mutex<usize>,
+        /// How many reads of the web area's children fail as stale before
+        /// they answer, the way a page does while it rebuilds.
+        stale_reads: std::sync::Mutex<usize>,
+        /// A non-stale error to return from reading the web area's children.
+        children_error: Option<Error>,
     }
 
     impl WebProvider {
@@ -2347,7 +2352,19 @@ mod tests {
                 accept,
                 fills,
                 requests: std::sync::Mutex::new(0),
+                stale_reads: std::sync::Mutex::new(0),
+                children_error: None,
             }
+        }
+
+        fn stale_for(self, reads: usize) -> Self {
+            *self.stale_reads.lock().unwrap_or_else(|e| e.into_inner()) = reads;
+            self
+        }
+
+        fn failing_children(mut self, error: Error) -> Self {
+            self.children_error = Some(error);
+            self
         }
 
         fn node(role: Role, handle: u64, name: &str) -> ElementData {
@@ -2371,6 +2388,18 @@ mod tests {
 
     impl Provider for WebProvider {
         fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
+            if e.map(|e| e.handle) == Some(3) {
+                if let Some(error) = &self.children_error {
+                    return Err(error.clone());
+                }
+                let mut stale = self.stale_reads.lock().unwrap_or_else(|e| e.into_inner());
+                if *stale > 0 {
+                    *stale -= 1;
+                    return Err(Error::ElementStale {
+                        selector: "web_area".to_string(),
+                    });
+                }
+            }
             Ok(match e.map(|e| e.handle) {
                 None => vec![Self::node(Role::Application, 1, "Web")],
                 Some(1) => vec![Self::node(Role::Window, 2, "Main")],
@@ -2513,6 +2542,33 @@ mod tests {
             d.last_observed.as_deref(),
             Some("1 web_area(s), none with children")
         );
+    }
+
+    #[test]
+    fn enable_web_accessibility_treats_a_stale_web_area_as_not_yet() {
+        // The first two reads of the web area's children fail as stale, the
+        // way a page does while it rebuilds. That is "not yet", so the poll
+        // goes on and finds the content on the third.
+        let provider = Arc::new(WebProvider::new(Ok(()), true).stale_for(2));
+        web_app(&provider)
+            .enable_web_accessibility(Duration::from_secs(2))
+            .expect("a stale read is retried, not reported");
+    }
+
+    #[test]
+    fn enable_web_accessibility_propagates_a_non_stale_scan_error() {
+        let provider = Arc::new(
+            WebProvider::new(Ok(()), true).failing_children(Error::Platform {
+                code: 42,
+                message: "scan broke".to_string(),
+            }),
+        );
+        let start = Instant::now();
+        let err = web_app(&provider)
+            .enable_web_accessibility(Duration::from_secs(30))
+            .expect_err("a real scan error must not read as 'not yet'");
+        assert!(matches!(err, Error::Platform { code: 42, .. }), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(1), "must fail fast");
     }
 
     #[test]
