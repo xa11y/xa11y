@@ -5890,6 +5890,7 @@ mod tests {
             ),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         };
         let scroll = |path: &str| {
             let mut data = ElementData::for_role(Role::ListItem);

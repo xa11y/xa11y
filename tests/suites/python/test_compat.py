@@ -934,11 +934,25 @@ def test_an_action_on_a_target_nothing_can_scroll_waits_it_out(app, app_config):
         pytest.skip("this app has no scrolled-out control that refuses scrolling")
     last = app_config["scrolled_pane_last_item"]
 
+    # Act with a verb the target really advertises: an action the element
+    # does not offer is refused before the auto-wait runs, and that would
+    # prove nothing about it. Which verbs a scrolled-out row offers differs by
+    # toolkit (a Qt list row offers none), so read them off the element.
+    target = app.locator(f'[name="{last}"]')
+    advertised = target.element().actions
+    verbs = ("press", "select", "toggle", "expand", "collapse", "focus")
+    verb = next((v for v in verbs if v in advertised), None)
+    if verb is None:
+        pytest.skip(
+            f"{last!r} advertises none of {verbs} (actions: {advertised}), so "
+            f"there is no action whose auto-wait could be observed"
+        )
+
     previous = xa11y.get_default_timeout()
     xa11y.set_default_timeout(1.0)
     try:
         with pytest.raises(xa11y.TimeoutError) as excinfo:
-            app.locator(f'[name="{last}"]').press()
+            getattr(target, verb)()
     finally:
         xa11y.set_default_timeout(previous)
     err = excinfo.value
