@@ -34,6 +34,7 @@ class FakeTimeout(xa11y.TimeoutError):
     condition = "visible"
     selector = 'dialog[name^="Submit"]'
     last_observed = "selector never matched"
+    hidden_reason = None
     candidates: ClassVar[list] = ['window "Untitled"', 'button "Export"']
     scope = "window\n  button"
 
@@ -118,6 +119,16 @@ def test_render_diagnosis_labels_every_field():
     assert "elapsed: 5.00s" in rendered
     assert '- button "Export"' in rendered
     assert "search scope (bounded):" in rendered
+
+
+def test_render_diagnosis_says_why_a_matched_element_was_hidden():
+    class HiddenTimeout(FakeTimeout):
+        last_observed = 'matched button "Save" (visible=false, enabled=true, focused=false)'
+        hidden_reason = "scrolled_out"
+
+    assert "hidden_reason: scrolled_out" in render_diagnosis(HiddenTimeout("Timeout after 5.0s"))
+    # Absent on a timeout that observed nothing hidden.
+    assert "hidden_reason" not in render_diagnosis(FakeTimeout("Timeout after 5.0s"))
 
 
 def test_render_diagnosis_ignores_foreign_exceptions():

@@ -41,6 +41,20 @@ def test_diagnosis_is_passed_through_verbatim():
     assert "search scope:" in message
 
 
+def test_hidden_reason_says_why_a_matched_element_was_not_visible():
+    """`scrolled_out` and `window_minimized` call for different fixes."""
+    message = describe(
+        fake_xa11y.TimeoutError(
+            "timed out",
+            condition="press target actionable (visible && enabled)",
+            last_observed='matched button "Save" (visible=false, enabled=true, focused=false)',
+            hidden_reason="scrolled_out",
+        )
+    )
+    assert "hidden reason: scrolled_out" in message
+    assert "hidden reason" not in describe(fake_xa11y.TimeoutError("timed out"))
+
+
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
