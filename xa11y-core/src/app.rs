@@ -351,6 +351,7 @@ impl App {
     /// as the accessibility API can reach it.
     pub fn by_pid_with(provider: Arc<dyn Provider>, pid: u32, timeout: Duration) -> Result<Self> {
         let diag_provider = Arc::clone(&provider);
+        let start = Instant::now();
         poll_lookup(
             timeout,
             || {
@@ -359,6 +360,22 @@ impl App {
             },
             || running_apps_diagnosis(&diag_provider),
         )
+        .map_err(|err| match err {
+            // The loop gave up. Ask the backend whether it knows why the
+            // process stayed unreachable, once, for the error the caller sees.
+            Error::SelectorNotMatched { .. } => {
+                match provider.app_by_pid_failure(pid, start.elapsed()) {
+                    // Still "app absent": keep the loop's diagnosis (the
+                    // running-apps candidates) under the hook's own fields.
+                    Some(better @ Error::SelectorNotMatched { .. }) => {
+                        merge_diagnosis(better, err.diagnosis().cloned().unwrap_or_default())
+                    }
+                    Some(better) => better,
+                    None => err,
+                }
+            }
+            other => other,
+        })
     }
 
     /// Resolve the application that currently holds the system foreground,

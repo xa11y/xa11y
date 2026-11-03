@@ -1639,20 +1639,29 @@ fn hung_among(windows: &[HWND]) -> Vec<HungWindow> {
 /// listing reads. One that closes while it is being classified is skipped.
 /// `purpose` completes "EnumWindows failed while …".
 fn interactive_top_level_windows(purpose: &str) -> Result<Vec<HWND>> {
+    interactive_top_level_windows_owned_by(purpose, None)
+}
+
+/// [`interactive_top_level_windows`], limited to the windows `owner` owns when
+/// it is `Some`. Ownership is checked first, so only those windows pay for the
+/// interactivity read.
+fn interactive_top_level_windows_owned_by(purpose: &str, owner: Option<u32>) -> Result<Vec<HWND>> {
     unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
-        let all = unsafe { &mut *(param.0 as *mut Vec<HWND>) };
-        all.push(hwnd);
+        let (owner, all) = unsafe { &mut *(param.0 as *mut (Option<u32>, Vec<HWND>)) };
+        if owner.is_none_or(|pid| hwnd_pid(hwnd) == pid) {
+            all.push(hwnd);
+        }
         true.into()
     }
-    let mut all: Vec<HWND> = Vec::new();
-    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut all) as isize)) }.map_err(|e| {
+    let mut state: (Option<u32>, Vec<HWND>) = (owner, Vec::new());
+    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut state) as isize)) }.map_err(|e| {
         Error::Platform {
             code: e.code().0 as i64,
             message: format!("EnumWindows failed while {purpose}: {e}"),
         }
     })?;
     let mut interactive = Vec::new();
-    for hwnd in all {
+    for hwnd in state.1 {
         match is_interactive_top_level(hwnd) {
             Ok(true) => interactive.push(hwnd),
             Ok(false) => {}
@@ -2283,6 +2292,50 @@ fn dropped_windows_error(
                     "UIA's desktop listing returned after {elapsed:.1?} without {missing} \
                      interactive top-level window(s) that EnumWindows reports, which UIA does \
                      when it cannot reach a window within its timeouts; {}",
+                    report.summary()
+                ))
+                .candidates(report.candidates()),
+        ),
+    )
+}
+
+/// The not-found error a pid lookup keeps when the probe's window scan
+/// failed. The scan is best-effort enrichment and the not-found is real, so
+/// the scan's failure is recorded in the diagnosis instead of replacing it
+/// (tenet 1: nothing dropped, and callers matching `SelectorNotMatched` for
+/// "app absent" still work).
+fn not_found_after_failed_scan(pid: u32, scan: &Error) -> Error {
+    Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
+        xa11y_core::Diagnosis::new().last_observed(format!(
+            "no top-level UIA element owned by the process; the check for an unresponsive \
+             window of the process could not run: {scan}"
+        )),
+    )
+}
+
+/// The [`Error::Timeout`] for a pid lookup that found no element while some
+/// of the pid's windows do not answer `WM_NULL`, `None` when `report` has no
+/// unresponsive window (none owned, or all of them answer).
+///
+/// `owned` is how many interactive top-level windows the pid has. `waited` is
+/// how long the lookup polled.
+fn unanswered_pid_lookup_error(
+    pid: u32,
+    owned: usize,
+    report: &ProbeReport,
+    waited: std::time::Duration,
+) -> Option<Error> {
+    if report.unresponsive.is_empty() {
+        return None;
+    }
+    Some(
+        Error::timeout(waited).diagnose(
+            xa11y_core::Diagnosis::new()
+                .condition(format!("a top-level window of pid {pid}"))
+                .last_observed(format!(
+                    "UIA's search for the windows of pid {pid} found no element in {waited:.1?} \
+                     although the process owns {owned} interactive top-level window(s), which \
+                     UIA does when it cannot reach a window within its timeouts; {}",
                     report.summary()
                 ))
                 .candidates(report.candidates()),
@@ -4255,6 +4308,10 @@ impl Provider for WindowsProvider {
         let el = match found {
             Ok(el) => el,
             Err(e) if e.code().is_ok() => {
+                // Stays the retry signal, cheap to build. A window that
+                // stopped pumping under `OS_HUNG_THRESHOLD` ago also lands
+                // here (issue #615); `app_by_pid_failure` tells that apart
+                // once the poll loop gives up.
                 return Err(
                     Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
                         xa11y_core::Diagnosis::new()
@@ -4278,6 +4335,30 @@ impl Provider for WindowsProvider {
         // and the node deliberately keeps no live element (tenet 2 — no
         // window-shaped stand-in).
         self.build_synthetic_app_data(pid, &el)
+    }
+
+    /// Name a window that stopped answering when the pid lookup gave up
+    /// (issue #615).
+    ///
+    /// A window that stopped pumping less than [`OS_HUNG_THRESHOLD`] ago passes
+    /// the `IsHungAppWindow` check in `app_by_pid`, and UIA answers a search
+    /// that reaches it with S_OK and no element. That is also what an app still
+    /// starting up looks like, so `app_by_pid` keeps reporting it as not found
+    /// while the caller polls and the probe runs only here, once, after the
+    /// loop gave up. No windows, or windows that all answer, keep the not-found
+    /// error.
+    fn app_by_pid_failure(&self, pid: u32, waited: std::time::Duration) -> Option<Error> {
+        let windows =
+            match interactive_top_level_windows_owned_by("probing the windows of a pid", Some(pid))
+            {
+                Ok(windows) => windows,
+                Err(scan) => return Some(not_found_after_failed_scan(pid, &scan)),
+            };
+        if windows.is_empty() {
+            return None;
+        }
+        let report = probe_windows(&windows, "top-level", std::time::Instant::now());
+        unanswered_pid_lookup_error(pid, windows.len(), &report, waited)
     }
 
     /// Identify the foreground application via `GetForegroundWindow` +
@@ -8104,6 +8185,76 @@ mod tests {
         assert!(observed.contains("1 did not answer"), "{observed}");
         assert_eq!(diagnosis.candidates.len(), 1, "{:?}", diagnosis.candidates);
         assert!(diagnosis.candidates[0].contains("(pid 6004"));
+    }
+
+    #[test]
+    fn only_an_unresponsive_window_turns_a_pid_lookup_into_a_timeout() {
+        let window = |i: u32| HungWindow {
+            hwnd: HWND(i as usize as *mut core::ffi::c_void),
+            pid: 7000,
+        };
+        let waited = Duration::from_secs(2);
+        // No window owned (the process has not shown one yet), and windows
+        // that all answer, keep the caller's not-found error.
+        let none = ProbeReport {
+            scope: "top-level",
+            ..ProbeReport::default()
+        };
+        assert!(unanswered_pid_lookup_error(7000, 0, &none, waited).is_none());
+        let answering = ProbeReport {
+            scope: "top-level",
+            total: 1,
+            probed: 1,
+            answered: vec![window(1)],
+            ..ProbeReport::default()
+        };
+        assert!(unanswered_pid_lookup_error(7000, 1, &answering, waited).is_none());
+
+        let frozen = ProbeReport {
+            scope: "top-level",
+            total: 2,
+            probed: 2,
+            unresponsive: vec![window(2)],
+            answered: vec![window(1)],
+            ..ProbeReport::default()
+        };
+        let err = unanswered_pid_lookup_error(7000, 2, &frozen, waited).expect("an error");
+        let Error::Timeout {
+            elapsed: reported, ..
+        } = &err
+        else {
+            panic!("expected Error::Timeout, got: {err}");
+        };
+        assert_eq!(*reported, waited);
+        let diagnosis = err.diagnosis().expect("a diagnosis");
+        assert_eq!(
+            diagnosis.condition.as_deref(),
+            Some("a top-level window of pid 7000")
+        );
+        let observed = diagnosis.last_observed.clone().unwrap_or_default();
+        assert!(
+            observed.contains("UIA's search for the windows of pid 7000"),
+            "{observed}"
+        );
+        assert!(observed.contains("owns 2 interactive"), "{observed}");
+        assert_eq!(diagnosis.candidates.len(), 1, "{:?}", diagnosis.candidates);
+        assert!(diagnosis.candidates[0].contains("(pid 7000"));
+    }
+
+    #[test]
+    fn a_failed_window_scan_keeps_the_pid_lookup_not_found_and_records_why() {
+        let scan = Error::Platform {
+            code: -2147024891,
+            message: "EnumWindows failed while probing the windows of a pid: denied".into(),
+        };
+        let err = not_found_after_failed_scan(7000, &scan);
+        assert!(matches!(err, Error::SelectorNotMatched { .. }), "{err}");
+        let observed = err
+            .diagnosis()
+            .and_then(|d| d.last_observed.clone())
+            .unwrap_or_default();
+        assert!(observed.contains("could not run"), "{observed}");
+        assert!(observed.contains("EnumWindows failed"), "{observed}");
     }
 
     #[test]

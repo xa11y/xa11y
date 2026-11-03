@@ -221,6 +221,45 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
         );
     }
 
+    /// The `by_pid` counterpart of the test above (#615). A window that
+    /// stopped pumping under 5 s ago passes the `IsHungAppWindow` check, and
+    /// UIA's search by pid then returns no element. That must surface as a
+    /// `Timeout` naming the window, not as an endless "not found" retry.
+    #[test]
+    #[ignore]
+    fn by_pid_fails_naming_a_window_that_stopped_answering_before_the_os_calls_it_hung() {
+        let fixture = HungFixture::start_then_wait(Duration::ZERO);
+        let pid = fixture.pid();
+
+        let found = App::by_pid(pid, Duration::from_secs(2));
+        let err = match found {
+            Err(e @ Error::Timeout { .. }) => e,
+            other => panic!(
+                "App::by_pid should fail with a Timeout naming the unresponsive window (#615), \
+                 got: {other:?}"
+            ),
+        };
+        let diagnosis = err.diagnosis().expect("the timeout carries a diagnosis");
+        let observed = diagnosis.last_observed.clone().unwrap_or_default();
+        // The OS-hung form means the fixture had already gone 5 s without
+        // pumping before the lookup began: the runner stalled between the
+        // fixture's ready line and the lookup, so this run did not exercise
+        // the #615 path.
+        assert!(
+            observed.contains("UIA's search for the windows of pid"),
+            "the lookup did not fail through the post-poll probe; if this is the \
+             IsHungAppWindow form, the runner stalled for more than 5 s after the fixture \
+             stopped pumping: {err}"
+        );
+        assert!(
+            diagnosis
+                .candidates
+                .iter()
+                .any(|c| c.contains(&format!("pid {pid}")) && c.contains(FIXTURE_TITLE)),
+            "the candidates should name the fixture window (pid {pid}, {FIXTURE_TITLE:?}): {err}"
+        );
+    }
+
     #[test]
     #[ignore]
     fn hung_window_fails_list_and_by_pid_fast_and_is_named() {
