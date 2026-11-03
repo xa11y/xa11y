@@ -359,9 +359,10 @@ jobs:
           cache-dependency-path: xa11y-js/package-lock.json
 
       # ── Accessibility environment (Linux only) ─────────────────────
-      # Install the package set AND bring up Xvfb + D-Bus + AT-SPI (and a
-      # window manager for egui, whose AccessKit bridge only publishes its
-      # tree once the window is focused). The daemons persist into the later
+      # Install the package set AND bring up Xvfb + D-Bus + AT-SPI, plus a
+      # window manager for egui (its AccessKit bridge only publishes its
+      # tree once the window is focused) and for gtk (GTK 4's X11 bounds
+      # and the EWMH window verbs are only exercised under one, issue #487). The daemons persist into the later
       # harness step, and the action exports XA11Y_A11Y_READY so launch.py
       # skips starting a second copy. Package list:
       # xa11y/setup-a11y repo (apt-packages.txt).
@@ -371,7 +372,7 @@ jobs:
         with:
           package-groups: base gtk electron
           apt-cache-version: "3"
-          setup-window-manager: ${{ matrix.app == 'egui' }}
+          setup-window-manager: ${{ matrix.app == 'egui' || matrix.app == 'gtk' }}
 
       # ── Build Rust workspace (all workspace test-app binaries) ─────
       - name: Build Rust workspace
@@ -567,7 +568,7 @@ jobs:
           fi
 
       # ── Run harness ───────────────────────────────────────────────
-      # On Linux, DISPLAY / D-Bus / AT-SPI (+ the egui window manager) were
+      # On Linux, DISPLAY / D-Bus / AT-SPI (+ the egui/gtk window manager) were
       # already brought up by the setup-a11y step above, and XA11Y_A11Y_READY
       # tells launch.py not to start a second AT-SPI stack.
       #

@@ -308,6 +308,10 @@ On Linux, `visible` requires the AT-SPI `Showing` state as well as `Visible`. `V
 
 `bounds` is `None` when `Component.GetExtents` reports a sentinel instead of a position: an `INT32_MIN` coordinate (unrealized GTK widgets), a negative size, or `0x0`. A zero width or a zero height alone, such as a separator line, is still reported, matching Windows.
 
+GTK 4 apps need different handling. GTK 4 doesn't know where its window is, and its screen extents are `(0, 0)` or window-relative wherever the window sits. For a GTK 4 app on X11, xa11y computes `bounds` as the widget's window-relative extents plus the X11 origin of its top-level window. It finds that window by process id and exact title, never by geometry. The origin is cached until the window moves, is renamed, or another top-level appears or goes away. When the title matches no window or several, `bounds` is `None` rather than a wrong position. `bounds` is also `None` when xa11y cannot read the app's toolkit name and version, since raw screen extents might be GTK 4's.
+
+Whenever the Wayland window backend is selected, GTK 4 `bounds` are always `None`, because a Wayland client has no global position. That includes a GTK 4 app forced onto XWayland with `GDK_BACKEND=x11`. The window-relative extents are assumed to be in the same pixels as the X11 window origin. This is correct at scale 1. xa11y has not verified it under `GDK_SCALE=2`.
+
 ### Visible state (Windows)
 
 On Windows, `visible` starts from the UIA `IsOffscreen` property, which some providers leave false on content that can't be seen. xa11y corrects two cases:

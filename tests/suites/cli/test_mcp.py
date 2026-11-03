@@ -892,26 +892,28 @@ def test_mcp_screen_fill_restore_mutates_and_reports_window_state(
 
     macOS exposes ``enter-fullscreen`` (``AXFullScreen``); Windows exposes
     ``maximize`` (UIA ``WindowVisualState``). Each is asserted against its own
-    state, and the other state must stay unknown — the two operations are
+    state, and the other state must not become true — the two operations are
     deliberately not the same bit.
     """
     candidate = None
     ambiguous = []
-    for action, state, other in (
-        ("enter-fullscreen", "fullscreen", "maximized"),
-        ("maximize", "maximized", "fullscreen"),
+    # The `action` tool takes the CLI's hyphenated verb; the `windows` tool
+    # lists the element's actions, which are snake_case.
+    for action, listed, state, other in (
+        ("enter-fullscreen", "enter_fullscreen", "fullscreen", "maximized"),
+        ("maximize", "maximize", "maximized", "fullscreen"),
     ):
-        target, why = _find_mcp_window_target(mcp, app_pid, action, "restore")
+        target, why = _find_mcp_window_target(mcp, app_pid, listed, "restore")
         ambiguous.extend(why)
         if target is not None:
-            candidate = (action, state, other, target)
+            candidate = (action, listed, state, other, target)
             break
     if candidate is None:
         _no_mcp_window_target(
             app_name, ambiguous, "a screen-filling verb with restore"
         )
-    action, state, other, (window, selector) = candidate
-    assert action in window["actions"] and "restore" in window["actions"]
+    action, listed, state, other, (window, selector) = candidate
+    assert listed in window["actions"] and "restore" in window["actions"]
     needs_restore = False
     try:
         filled = mcp.call_tool(
@@ -928,8 +930,10 @@ def test_mcp_screen_fill_restore_mutates_and_reports_window_state(
             lambda w: w["states"].get(state) is True,
             f"MCP {action} to report {state}=true",
         )
-        assert observed["states"].get(other) is None, (
-            f"{other} must stay unknown after {action}"
+        # X11 EWMH observes both states, so the other one reads False there;
+        # macOS and Windows leave it unknown (None). Either way it is not True.
+        assert observed["states"].get(other) is not True, (
+            f"{other} must not become true after {action}"
         )
 
         restored = mcp.call_tool(
