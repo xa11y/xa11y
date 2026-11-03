@@ -373,8 +373,11 @@ mod tests {
     }
 
     /// An element that does not advertise a scroll action is refused rather
-    /// than reported as scrolled. AT-SPI's `Component.ScrollTo` exists on
-    /// every component, so Linux has no "unsupported" answer to check.
+    /// than reported as scrolled. AccessKit's AT-SPI adapter forwards every
+    /// `Component.ScrollTo` to the app and answers `true`, so the AccessKit
+    /// app gives Linux no refusal to check; the Linux refusal shapes (a
+    /// `false` reply, `NotSupported`, Qt's missing member) are unit-tested in
+    /// `xa11y-linux` (`scroll_into_view_says_whether_it_scrolled`).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     #[ignore]

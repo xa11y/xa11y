@@ -675,16 +675,21 @@ fn tool_definition(name: &str) -> Value {
                      visible and must still be reachable by the very verbs that restore or \
                      activate it. `restore` is the inverse of `minimize`/`maximize`/ \
                      `enter-fullscreen`: it leaves minimized, maximized, or fullscreen. \
-                     The wait runs \
+                     When the element is enabled and hidden only because it is scrolled out \
+                     of view, the wait asks the application to scroll it into view (its own \
+                     scroll call, not a mouse gesture) and checks again. If the application \
+                     refuses, the wait keeps polling and its timeout says the scroll was \
+                     refused; a scroll it accepts that changes nothing is tried at most three \
+                     times. The wait runs \
                      up to the default timeout, currently {timeout}. Set {timeout_env} \
                      (in seconds) in the environment the server is launched with to \
                      change it; no tool argument does. A call that is going to fail \
                      therefore takes that long and returns a `timeout` failure \
                      naming what it was waiting for and what it last saw. When it \
                      matched an element that was not visible, the diagnosis also has \
-                     `hidden_reason`: `scrolled_out` means it has to be scrolled into \
-                     view first (`scroll-into-view`, where the element supports it), \
-                     `window_minimized` that its window has to be restored. Do not wrap \
+                     `hidden_reason`: `scrolled_out` means the scroll above was refused or \
+                     did not reveal it (`last_observed` says which), `window_minimized` \
+                     that its window has to be restored. Do not wrap \
                      this tool in a retry loop; the wait is the retry loop.\n\n\
                      `ok: true` means the application accepted the call, not that \
                      anything changed: a control is free to accept an action and do \

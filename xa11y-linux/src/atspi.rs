@@ -3268,13 +3268,56 @@ impl Provider for LinuxProvider {
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
-        proxy
-            .call_method("ScrollTo", &(0u32,))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("ScrollTo failed: {}", e),
-            })?;
-        Ok(())
+        let not_supported = || Error::ActionNotSupported {
+            action: "scroll_into_view".to_string(),
+            role: element.role,
+        };
+        let reply = match proxy.call_method("ScrollTo", &(0u32,)) {
+            Ok(reply) => reply,
+            // An absent member is ambiguous here. Qt implements no
+            // Component.ScrollTo and answers UnknownObject ("No such object
+            // path") for an object it is serving, while GDBus answers a
+            // destroyed object with UnknownMethod. One GetState read on the
+            // same path says which: an object that still answers it is alive
+            // and simply cannot be scrolled; one that does not is gone.
+            Err(e) if is_absent_member(&e) => {
+                return match self.scan_state_bits(&target)? {
+                    Some(_) => Err(not_supported()),
+                    None => Err(Error::ElementStale {
+                        selector: format!("{}{}", target.bus_name, target.path),
+                    }),
+                };
+            }
+            Err(e) if is_peer_gone(&e) => {
+                return Err(Error::ElementStale {
+                    selector: format!("{}{}", target.bus_name, target.path),
+                })
+            }
+            Err(zbus::Error::MethodError(name, _, _))
+                if name.as_str() == "org.freedesktop.DBus.Error.NotSupported" =>
+            {
+                return Err(not_supported())
+            }
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: format!("Component.ScrollTo failed: {e}"),
+                })
+            }
+        };
+        let scrolled: bool = reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Component.ScrollTo reply failed: {e}"),
+        })?;
+        // ScrollTo answers false when the adapter declines (ATK's default
+        // `scroll_to` does, for a component that does not implement it).
+        // Reporting that as success would tell an auto-wait the element was
+        // scrolled when nothing moved.
+        if scrolled {
+            Ok(())
+        } else {
+            Err(not_supported())
+        }
     }
 
     // ── Window management ──────────────────────────────────────────
@@ -5722,6 +5765,127 @@ mod tests {
             .do_atspi_action_by_index(&at("/cell"), 0)
             .expect("a live managed cell acts");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Accessible half of the `scroll_into_view` fixture: answers `GetState`,
+    /// which is how the provider tells a live object from a destroyed one.
+    struct ScrollAccessible;
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl ScrollAccessible {
+        fn get_state(&self) -> Vec<u32> {
+            vec![0, 0]
+        }
+    }
+
+    /// Component half: `ScrollTo` answers as `reply` says.
+    struct ScrollComponent {
+        reply: &'static str,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Component")]
+    impl ScrollComponent {
+        fn scroll_to(&self, _kind: u32) -> zbus::fdo::Result<bool> {
+            match self.reply {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                "NotSupported" => Err(zbus::fdo::Error::NotSupported("no scroller".into())),
+                "Failed" => Err(zbus::fdo::Error::Failed("layout busy".into())),
+                _ => panic!("unsupported test reply"),
+            }
+        }
+    }
+
+    /// Issue #590: an auto-wait scrolls a scrolled-out target only if
+    /// `scroll_into_view` tells "scrolled" apart from "cannot scroll this"
+    /// and from "this is gone". Qt implements no `ScrollTo` and answers it
+    /// with UnknownObject for an object it is still serving.
+    #[test]
+    fn scroll_into_view_says_whether_it_scrolled() {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            let mut builder =
+                zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                    .server(zbus::Guid::generate())
+                    .expect("server GUID")
+                    .p2p();
+            for (path, reply) in [
+                ("/scrolls", Some("true")),
+                ("/declines", Some("false")),
+                ("/refuses", Some("NotSupported")),
+                ("/broken", Some("Failed")),
+                // Qt: the object answers GetState but has no Component.ScrollTo.
+                ("/qt", None),
+            ] {
+                builder = builder
+                    .serve_at(path, ScrollAccessible)
+                    .expect("accessible");
+                if let Some(reply) = reply {
+                    builder = builder
+                        .serve_at(path, ScrollComponent { reply })
+                        .expect("component");
+                }
+            }
+            builder.build().expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let paths = [
+            "/scrolls",
+            "/declines",
+            "/refuses",
+            "/broken",
+            "/qt",
+            "/gone",
+        ];
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(
+                paths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, path)| {
+                        (
+                            i as u64,
+                            AccessibleRef {
+                                bus_name: "org.test.Scroll".into(),
+                                path: (*path).into(),
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        };
+        let scroll = |path: &str| {
+            let mut data = ElementData::for_role(Role::ListItem);
+            data.handle = paths.iter().position(|p| *p == path).expect("known path") as u64;
+            provider.scroll_into_view(&data)
+        };
+
+        scroll("/scrolls").expect("a true reply scrolled");
+        for path in ["/declines", "/refuses", "/qt"] {
+            let result = scroll(path);
+            assert!(
+                matches!(&result, Err(Error::ActionNotSupported { action, .. }) if action == "scroll_into_view"),
+                "{path}: {result:?}"
+            );
+        }
+        let result = scroll("/gone");
+        assert!(
+            matches!(&result, Err(Error::ElementStale { selector }) if selector == "org.test.Scroll/gone"),
+            "{result:?}"
+        );
+        let result = scroll("/broken");
+        assert!(
+            matches!(&result, Err(Error::Platform { message, .. }) if message.contains("layout busy")),
+            "{result:?}"
+        );
     }
 
     /// Minimal AT-SPI peer: the first child disappears when its children are

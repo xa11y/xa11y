@@ -3,7 +3,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::element::{Element, ElementData};
+use crate::element::{Element, ElementData, HiddenReason};
 use crate::error::{Diagnosis, Error, Result};
 use crate::event::ElementState;
 use crate::provider::Provider;
@@ -137,6 +137,92 @@ impl Actionability {
                 })
             }
         })
+    }
+}
+
+/// How many times one auto-wait calls `scroll_into_view` on a target that
+/// stays scrolled out after each call.
+///
+/// More than one because a call can succeed and leave the target still out of
+/// view: a virtualizing list that realizes rows as it scrolls can need a second
+/// pass once the layout settles. Bounded because some calls succeed and change
+/// nothing at all. A collapsed tree item on Windows that is also clipped by its
+/// scroller reads `scrolled_out`, and `ScrollItem.ScrollIntoView` on it is
+/// accepted without expanding the parent. Retrying that every 100 ms for the
+/// whole timeout would only repeat a call already known to have no effect.
+const AUTO_SCROLL_ATTEMPTS: u32 = 3;
+
+/// What an auto-wait has done about a target that is hidden only because it
+/// is scrolled out of view (issue #590).
+///
+/// Actionability includes scrolling: when the one thing standing between a
+/// visible-gated action and its target is [`HiddenReason::ScrolledOut`], the
+/// wait calls the element's own `scroll_into_view` (the platform's semantic
+/// scroll, never simulated input) and re-checks on the next poll. Where the
+/// platform has no such call for the target, the wait keeps polling as before
+/// and the timeout diagnosis says the scroll was refused, so a caller can tell
+/// "nothing can scroll this" from "the scroll did not help".
+#[derive(Default)]
+struct AutoScroll {
+    /// `scroll_into_view` calls the platform accepted.
+    accepted: u32,
+    /// Why the platform refused `scroll_into_view`, once it has. No further
+    /// attempt is made in this wait: a refusal is an answer about the element
+    /// and its toolkit, not about this instant.
+    refused: Option<String>,
+}
+
+impl AutoScroll {
+    /// Scroll `data` into view if the gate is blocked only by its being
+    /// scrolled out, and there are attempts left.
+    ///
+    /// A stale handle is left for the next poll, which re-resolves the
+    /// selector and tries again with the fresh one. Any other failure is
+    /// returned: it is not "this cannot be scrolled", and polling on past it
+    /// would hide a real error behind a timeout (tenet 1).
+    fn attempt(
+        &mut self,
+        gate: Actionability,
+        data: &ElementData,
+        provider: &dyn Provider,
+    ) -> Result<()> {
+        let blocked_only_by_scroll = gate.require_visible
+            && data.states.enabled
+            && !data.states.visible
+            && data.states.hidden_reason == Some(HiddenReason::ScrolledOut);
+        if !blocked_only_by_scroll
+            || self.refused.is_some()
+            || self.accepted >= AUTO_SCROLL_ATTEMPTS
+        {
+            return Ok(());
+        }
+        match provider.scroll_into_view(data) {
+            Ok(()) => self.accepted += 1,
+            Err(e @ (Error::ActionNotSupported { .. } | Error::Unsupported { .. })) => {
+                self.refused = Some(e.to_string());
+            }
+            Err(Error::ElementStale { .. }) => {}
+            Err(e) => return Err(e),
+        }
+        Ok(())
+    }
+
+    /// The clause the timeout diagnosis appends to `last_observed`, when the
+    /// last poll still saw the target scrolled out.
+    fn note(&self) -> Option<String> {
+        if let Some(why) = &self.refused {
+            return Some(format!(
+                "auto-scroll: scroll_into_view was refused ({why}), so nothing could \
+                 bring it into view"
+            ));
+        }
+        match self.accepted {
+            0 => None,
+            n => Some(format!(
+                "auto-scroll: scroll_into_view was accepted {n} time(s) but the \
+                 element stayed scrolled out"
+            )),
+        }
     }
 }
 
@@ -579,12 +665,16 @@ impl Locator {
     /// `poll_until`. `last` is the most recent poll's observation; the
     /// expensive miss context is collected only when the selector never
     /// matched during the entire wait.
+    ///
+    /// `auto_scroll` is what an action's auto-wait did about a scrolled-out
+    /// target; `poll_until` passes `None`, since a plain wait never scrolls.
     fn diagnose_timeout(
         &self,
         elapsed: Duration,
         condition: String,
         last: Option<&ElementData>,
         ever_matched: bool,
+        auto_scroll: Option<&AutoScroll>,
     ) -> Error {
         let mut d = Diagnosis {
             condition: Some(condition),
@@ -593,7 +683,13 @@ impl Locator {
         };
         match last {
             Some(data) => {
-                d.last_observed = Some(describe_observed(data));
+                let mut observed = describe_observed(data);
+                if data.states.hidden_reason == Some(HiddenReason::ScrolledOut) {
+                    if let Some(note) = auto_scroll.and_then(AutoScroll::note) {
+                        observed = format!("{observed}; {note}");
+                    }
+                }
+                d.last_observed = Some(observed);
                 // `visible=false` alone does not say what would fix it (issue
                 // #590): a scrolled-out element needs `scroll_into_view`, a
                 // minimized window needs restoring.
@@ -698,6 +794,10 @@ impl Locator {
     /// visible, so requiring visibility means it can never act on exactly the
     /// elements that need it (issue #350).
     ///
+    /// A target that fails a visible-requiring gate only because it is
+    /// scrolled out is scrolled into view with the platform's semantic
+    /// `scroll_into_view` while the wait runs; see [`AutoScroll`].
+    ///
     /// Always performs at least one attempt before checking the deadline, so
     /// `Duration::ZERO` means "single attempt, no polling" — the same
     /// contract as `poll_lookup` in `app.rs`.
@@ -779,6 +879,7 @@ impl Locator {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
         let mut ever_matched = false;
+        let mut auto_scroll = AutoScroll::default();
 
         loop {
             let resolved = match resolve()? {
@@ -795,8 +896,11 @@ impl Locator {
                     )));
                 }
                 Some(data) => {
-                    // Matched but not yet actionable — poll again.
+                    // Matched but not yet actionable. If only scrolling stands
+                    // in the way, ask the platform to scroll; either way the
+                    // next poll re-reads the element and re-checks the gate.
                     ever_matched = true;
+                    auto_scroll.attempt(gate, &data, self.provider.as_ref())?;
                     Some(data)
                 }
                 None => None,
@@ -809,6 +913,7 @@ impl Locator {
                     format!("{action} target actionable ({})", gate.label()),
                     observed.as_ref(),
                     ever_matched,
+                    Some(&auto_scroll),
                 ));
             }
             std::thread::sleep(poll_interval);
@@ -819,7 +924,8 @@ impl Locator {
     //
     // Locator actions auto-wait for the element to be visible and enabled
     // (re-resolving the selector on each poll), then delegate to the
-    // [`Element`] action of the same name. For snapshot-bound actions that
+    // [`Element`] action of the same name. A target hidden only by being
+    // scrolled out is scrolled into view during the wait ([`AutoScroll`]). For snapshot-bound actions that
     // do not re-resolve, capture an [`Element`] via [`Locator::element`]
     // and call its action methods directly.
 
@@ -1124,6 +1230,7 @@ impl Locator {
                     condition.to_string(),
                     matched.as_ref(),
                     ever_matched,
+                    None,
                 ));
             }
             std::thread::sleep(poll_interval);
@@ -2149,5 +2256,239 @@ mod tests {
             .expect("the first button is actionable")
             .expect("nth picks one");
         assert_eq!(el.name.as_deref(), Some("Back"));
+    }
+
+    // ── Auto-scroll (issue #590) ────────────────────────────────────
+
+    /// What [`ScrollingProvider`]'s `scroll_into_view` does.
+    #[derive(Clone, Copy)]
+    enum ScrollMode {
+        /// Accepts, and the target is in view from the next read on.
+        Reveals,
+        /// Refuses with `ActionNotSupported`, as a toolkit without a
+        /// scroll-into-view call does.
+        Refuses,
+        /// Accepts and changes nothing.
+        NoEffect,
+        /// Reports a stale handle once, then behaves as `Reveals`.
+        StaleOnce,
+        /// Fails with a platform error.
+        Fails,
+    }
+
+    /// The mock tree with `list_item "Item 2"` scrolled out of its list
+    /// (or, with `reason`, hidden for some other reason) until a
+    /// `scroll_into_view` call reveals it.
+    struct ScrollingProvider {
+        inner: Arc<crate::mock::MockProvider>,
+        mode: ScrollMode,
+        reason: HiddenReason,
+        calls: std::sync::atomic::AtomicU32,
+        revealed: std::sync::atomic::AtomicBool,
+    }
+
+    impl ScrollingProvider {
+        fn locator(mode: ScrollMode, reason: HiddenReason) -> (Arc<Self>, Locator) {
+            let provider = Arc::new(Self {
+                inner: build_provider(),
+                mode,
+                reason,
+                calls: std::sync::atomic::AtomicU32::new(0),
+                revealed: std::sync::atomic::AtomicBool::new(false),
+            });
+            let dyn_provider: Arc<dyn Provider> = provider.clone();
+            let loc = Locator::new(dyn_provider, None, r#"list_item[name="Item 2"]"#)
+                .with_timeout(SHORT_WAIT);
+            (provider, loc)
+        }
+
+        fn calls(&self) -> u32 {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Provider for ScrollingProvider {
+        fn list_apps(&self) -> Result<Vec<ElementData>> {
+            self.inner.list_apps()
+        }
+        fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+            let mut children = self.inner.get_children(element)?;
+            if !self.revealed.load(std::sync::atomic::Ordering::SeqCst) {
+                for child in &mut children {
+                    if child.name.as_deref() == Some("Item 2") {
+                        child.states.visible = false;
+                        child.states.hidden_reason = Some(self.reason);
+                    }
+                }
+            }
+            Ok(children)
+        }
+        fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+            self.inner.get_parent(element)
+        }
+        fn focused_app(&self) -> Result<ElementData> {
+            self.inner.focused_app()
+        }
+        fn list_shell_surfaces(
+            &self,
+        ) -> Result<Vec<(crate::shell::ShellSurfaceKind, ElementData)>> {
+            self.inner.list_shell_surfaces()
+        }
+        fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let reveal = || {
+                self.revealed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            };
+            match self.mode {
+                ScrollMode::Reveals => reveal(),
+                ScrollMode::Refuses => Err(Error::ActionNotSupported {
+                    action: "scroll_into_view".into(),
+                    role: element.role,
+                }),
+                ScrollMode::NoEffect => Ok(()),
+                ScrollMode::StaleOnce if call == 0 => Err(Error::ElementStale {
+                    selector: "list_item".into(),
+                }),
+                ScrollMode::StaleOnce => reveal(),
+                ScrollMode::Fails => Err(Error::Platform {
+                    code: -1,
+                    message: "ScrollTo failed: org.freedesktop.DBus.Error.Failed".into(),
+                }),
+            }
+        }
+        forward! {
+            press() -> (); focus() -> (); blur() -> (); toggle() -> (); select() -> ();
+            expand() -> (); collapse() -> (); show_menu() -> (); increment() -> ();
+            decrement() -> (); set_value(v: &str) -> ();
+            set_numeric_value(v: f64) -> (); type_text(t: &str) -> ();
+            set_text_selection(s: u32, f: u32) -> (); perform_action(a: &str) -> ();
+            activate() -> (); minimize() -> (); maximize() -> (); enter_fullscreen() -> ();
+            restore() -> (); close() -> (); move_to(x: i32, y: i32) -> ();
+            resize_to(w: u32, h: u32) -> ();
+            subscribe() -> crate::event_provider::Subscription;
+        }
+    }
+
+    fn acted(provider: &ScrollingProvider, action: &str) -> bool {
+        provider
+            .inner
+            .actions()
+            .iter()
+            .any(|(_, name, _)| name == action)
+    }
+
+    #[test]
+    fn an_action_on_a_scrolled_out_target_scrolls_it_into_view_first() {
+        let (provider, loc) =
+            ScrollingProvider::locator(ScrollMode::Reveals, HiddenReason::ScrolledOut);
+        loc.select()
+            .expect("the wait scrolls the target into view, then selects it");
+        assert_eq!(provider.calls(), 1);
+        assert!(acted(&provider, "select"));
+    }
+
+    #[test]
+    fn a_stale_handle_during_auto_scroll_is_retried_on_the_next_poll() {
+        let (provider, loc) =
+            ScrollingProvider::locator(ScrollMode::StaleOnce, HiddenReason::ScrolledOut);
+        loc.press().expect("the second poll's fresh handle scrolls");
+        assert_eq!(provider.calls(), 2);
+        assert!(acted(&provider, "press"));
+    }
+
+    #[test]
+    fn a_refused_auto_scroll_keeps_waiting_and_says_why_in_the_diagnosis() {
+        let (provider, loc) =
+            ScrollingProvider::locator(ScrollMode::Refuses, HiddenReason::ScrolledOut);
+        let err = loc.press().expect_err("nothing can bring it into view");
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        // A refusal is an answer: it is asked once per wait, not every poll.
+        assert_eq!(provider.calls(), 1);
+        assert!(!acted(&provider, "press"));
+        let d = err.diagnosis().expect("timeout must carry a diagnosis");
+        assert_eq!(d.hidden_reason, Some(HiddenReason::ScrolledOut));
+        let last = d.last_observed.as_deref().unwrap_or_default();
+        assert!(
+            last.contains("scroll_into_view was refused")
+                && last.contains("Action scroll_into_view not supported"),
+            "{last}"
+        );
+        assert!(
+            format!("{err}").contains("scroll_into_view was refused"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_auto_scroll_that_changes_nothing_is_bounded_and_reported() {
+        let (provider, loc) =
+            ScrollingProvider::locator(ScrollMode::NoEffect, HiddenReason::ScrolledOut);
+        let err = loc
+            .with_timeout(Duration::from_millis(600))
+            .press()
+            .expect_err("it never comes into view");
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        assert_eq!(provider.calls(), AUTO_SCROLL_ATTEMPTS);
+        let last = err
+            .diagnosis()
+            .and_then(|d| d.last_observed.clone())
+            .unwrap_or_default();
+        assert!(
+            last.contains("accepted 3 time(s) but the element stayed scrolled out"),
+            "{last}"
+        );
+    }
+
+    #[test]
+    fn an_auto_scroll_platform_failure_is_returned_not_waited_out() {
+        let (provider, loc) =
+            ScrollingProvider::locator(ScrollMode::Fails, HiddenReason::ScrolledOut);
+        let err = loc.press().expect_err("the failure propagates");
+        assert!(matches!(err, Error::Platform { .. }), "{err:?}");
+        assert_eq!(provider.calls(), 1);
+    }
+
+    #[test]
+    fn only_a_scrolled_out_target_is_auto_scrolled() {
+        for reason in [
+            HiddenReason::NotShowing,
+            HiddenReason::WindowMinimized,
+            HiddenReason::Unknown,
+        ] {
+            let (provider, loc) = ScrollingProvider::locator(ScrollMode::Reveals, reason);
+            let err = loc
+                .press()
+                .expect_err("only a scroll could have revealed it");
+            assert!(matches!(err, Error::Timeout { .. }), "{reason}: {err:?}");
+            assert_eq!(provider.calls(), 0, "{reason}");
+            let last = err
+                .diagnosis()
+                .and_then(|d| d.last_observed.clone())
+                .unwrap_or_default();
+            assert!(!last.contains("auto-scroll"), "{reason}: {last}");
+        }
+    }
+
+    #[test]
+    fn verbs_that_do_not_need_visibility_never_auto_scroll() {
+        // `scroll_into_view` itself passes its enabled-only gate at once, so
+        // the one call it makes is its own, not the wait's.
+        let (provider, loc) =
+            ScrollingProvider::locator(ScrollMode::Reveals, HiddenReason::ScrolledOut);
+        loc.scroll_into_view().expect("enabled is enough");
+        assert_eq!(provider.calls(), 1);
+    }
+
+    #[test]
+    fn a_plain_wait_never_scrolls() {
+        let (provider, loc) =
+            ScrollingProvider::locator(ScrollMode::Reveals, HiddenReason::ScrolledOut);
+        let err = loc
+            .wait_visible(SHORT_WAIT)
+            .expect_err("a wait only watches");
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        assert_eq!(provider.calls(), 0);
     }
 }
