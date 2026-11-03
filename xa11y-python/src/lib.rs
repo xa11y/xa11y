@@ -97,11 +97,17 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
     let delivery = e.delivery();
     let err = map_to_py_err(e);
     Python::attach(|py| {
-        // Best-effort by design, like the diagnosis attributes: the rendered
-        // message is intact and an attribute failure must not mask it.
-        let _ = err.value(py).setattr("delivery", delivery.to_snake_case());
-    });
-    err
+        // A failed setattr is surfaced, not dropped: a missing `delivery` would
+        // read as "unknown" to a caller that checks `hasattr`, and the
+        // original error stays reachable as the cause.
+        match err.value(py).setattr("delivery", delivery.to_snake_case()) {
+            Ok(()) => err,
+            Err(set_failed) => {
+                set_failed.set_cause(py, Some(err));
+                set_failed
+            }
+        }
+    })
 }
 
 fn map_to_py_err(e: xa11y::Error) -> PyErr {
@@ -1237,7 +1243,12 @@ impl Subscription {
         let guard = self.inner.lock().unwrap();
         let sub = guard
             .as_ref()
-            .ok_or_else(|| PlatformError::new_err("Subscription is closed"))?;
+            .ok_or_else(|| {
+                to_py_err(xa11y::Error::Platform {
+                    code: -1,
+                    message: "Subscription is closed".to_string(),
+                })
+            })?;
         Ok(f(sub))
     }
 }
@@ -1290,9 +1301,11 @@ impl Subscription {
                     // Event source is gone — no further events can match the
                     // predicate. Surface this as a platform error rather than
                     // hanging until the overall timeout elapses.
-                    return Err(PlatformError::new_err(
-                        "Subscription event source disconnected before predicate matched",
-                    ));
+                    return Err(to_py_err(xa11y::Error::Platform {
+                        code: -1,
+                        message: "Subscription event source disconnected before predicate matched"
+                            .to_string(),
+                    }));
                 }
             };
             let matched = {

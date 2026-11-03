@@ -2,31 +2,14 @@
 //!
 //! # Delivery disposition of action failures
 //!
-//! Every error answers [`xa11y_core::Error::delivery`]: whether the failed
-//! action may already have taken effect. A caller retries only on
-//! `NotDelivered`. This is how AX return codes map.
-//!
-//! `NotDelivered`:
-//!
-//! - `kAXErrorActionUnsupported` (-25206) becomes `ActionNotSupported`: the
-//!   element does not implement the action, so nothing was performed.
-//! - `ActionNotSupported` from the backend's own role and attribute checks
-//!   (a settable-attribute probe, a window verb on a non-window).
-//! - `ElementStale`, `InvalidActionData`, `InvalidSelector`,
-//!   `NoElementBounds`, `PermissionDenied`: decided before the AX call.
-//!
-//! `Unknown`:
-//!
-//! - `kAXErrorCannotComplete` (-25204), as a `Platform` error. It is also
-//!   what an expired messaging timeout surfaces as, and the application may
-//!   have applied the action before failing to answer.
-//! - Every other AX code from the dispatching call, as a `Platform` error,
-//!   including `kAXErrorInvalidUIElement` (-25202). That code usually means
-//!   the element is gone, but AX also returns it for an element the
-//!   application destroyed mid-call, so it is not promoted to
-//!   `ElementStale`.
-//! - `Timeout` from a window verb that was sent and did not settle within its
-//!   budget (fullscreen, minimize, move and resize).
+//! Every error answers [`xa11y_core::Error::delivery`]. `ActionNotSupported`
+//! (including `kAXErrorActionUnsupported`) and the checks made before any AX
+//! call are `NotDelivered`. Every other AX code from the dispatching call,
+//! including `kAXErrorCannotComplete`, is `Platform` and so `Unknown`. A step
+//! that fails after an earlier step of the same verb changed the window
+//! (`minimize`, `enter_fullscreen`, `restore`, `activate`, `resize_to`) is
+//! `Unknown`. The full table is in the "Delivery disposition" section of the
+//! platform details reference.
 
 #[cfg(target_os = "macos")]
 mod ax;

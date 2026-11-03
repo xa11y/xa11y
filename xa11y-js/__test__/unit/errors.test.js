@@ -263,6 +263,14 @@ test('a platform failure is unknown', async () => {
   );
 });
 
+test('a hand-built error defaults to the disposition core gives its variant', () => {
+  // Raised by the JS layer itself (argument validation), with no native payload.
+  assert.equal(new InvalidActionDataError('x').delivery, 'not_delivered');
+  assert.equal(new InvalidSelectorError('x').delivery, 'not_delivered');
+  assert.equal(new SelectorNotMatchedError('x').delivery, 'not_delivered');
+  assert.equal(new PlatformError('x').delivery, 'unknown');
+});
+
 test('delivery defaults to unknown on an error built without a payload', () => {
   assert.equal(new XA11yError('x').delivery, 'unknown');
   assert.equal(new TimeoutError('x').delivery, 'unknown');

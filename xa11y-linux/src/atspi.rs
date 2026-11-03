@@ -3484,11 +3484,16 @@ impl Provider for LinuxProvider {
         atspi_bool_reply(reply, "EditableText.DeleteText", &target, element)?;
         // Not atomic: if InsertText fails after DeleteText succeeded, the
         // field is left empty, and the error says which call failed.
-        let length = self.insert_text_length(&target, value)?;
-        let reply = proxy
-            .call_method("InsertText", &(0i32, value, length))
-            .map_err(|e| editable_text_call_error("InsertText", e, &target))?;
-        atspi_bool_reply(reply, "EditableText.InsertText", &target, element)
+        // DeleteText has already changed the field, so no failure from here on
+        // may read as "never delivered" (see `unknown_after_mutation`).
+        let insert = || -> Result<()> {
+            let length = self.insert_text_length(&target, value)?;
+            let reply = proxy
+                .call_method("InsertText", &(0i32, value, length))
+                .map_err(|e| editable_text_call_error("InsertText", e, &target))?;
+            atspi_bool_reply(reply, "EditableText.InsertText", &target, element)
+        };
+        insert().map_err(|e| unknown_after_mutation(e, "DeleteText"))
     }
 
     fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
@@ -4231,6 +4236,25 @@ fn atspi_bool_reply(
     }
 }
 
+/// Re-classify an error raised by a step that ran after `done` had already
+/// mutated the application.
+///
+/// A pre-dispatch-class error (`TextValueNotSupported`, `ActionNotSupported`,
+/// ...) describes the later step, but the earlier one went through, so
+/// reporting `NotDelivered` would invite a retry on top of a changed field.
+/// Such an error becomes a `Platform` error, which reads as `Unknown`, and the
+/// message keeps the original reason. Errors that are already `Unknown` pass
+/// through untouched.
+pub(crate) fn unknown_after_mutation(e: Error, done: &str) -> Error {
+    if e.delivery() == xa11y_core::Delivery::Unknown {
+        return e;
+    }
+    Error::Platform {
+        code: -1,
+        message: format!("{e}, after {done} had already changed the element"),
+    }
+}
+
 /// Map a failed `EditableText` call. A missing member or interface is
 /// [`Error::TextValueNotSupported`] (common on Chromium, whose URL bar only
 /// exposes read-only `Text`; issue #101); anything else, including no reply,
@@ -4593,6 +4617,31 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_after_a_completed_step_is_never_not_delivered() {
+        // set_value: DeleteText emptied the field, then InsertText answered
+        // UnknownInterface. TextValueNotSupported alone would say "retry safe".
+        assert_eq!(
+            Error::TextValueNotSupported.delivery(),
+            xa11y_core::Delivery::NotDelivered
+        );
+        let e = unknown_after_mutation(Error::TextValueNotSupported, "DeleteText");
+        assert_eq!(e.delivery(), xa11y_core::Delivery::Unknown);
+        assert!(
+            matches!(&e, Error::Platform { message, .. } if message.contains("DeleteText")),
+            "{e:?}"
+        );
+        // Already-unknown errors are untouched.
+        let platform = Error::Platform {
+            code: 7,
+            message: "x".into(),
+        };
+        assert!(matches!(
+            unknown_after_mutation(platform, "DeleteText"),
+            Error::Platform { code: 7, .. }
+        ));
+    }
+
+    #[test]
     fn false_set_selection_reply_is_an_error() {
         let (target, element) = text_target();
         let err = atspi_bool_reply(
@@ -4904,6 +4953,10 @@ mod tests {
             "focus",
             Role::Button,
         );
+        // The adapter declined to take focus: documented as not delivered
+        // (focusing twice is harmless), and the Unknown side is the broken
+        // call below.
+        assert_eq!(declined.delivery(), xa11y_core::Delivery::NotDelivered);
         match declined {
             Error::ActionNotSupported { action, role } => {
                 assert_eq!(action, "focus");
@@ -4918,6 +4971,7 @@ mod tests {
             "activate",
             Role::Window,
         );
+        assert_eq!(broken.delivery(), xa11y_core::Delivery::Unknown);
         match broken {
             Error::Platform { code, .. } => assert_eq!(code, -1),
             other => panic!("expected Platform error, got {other:?}"),

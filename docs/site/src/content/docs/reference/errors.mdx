@@ -105,8 +105,8 @@ before the action was attempted.
 | Rust | `Error::delivery()` returns a `Delivery`. `Delivery::is_safe_to_retry()` is true for `NotDelivered`. |
 | Python | The `delivery` attribute on every exception, always present. |
 | JavaScript | The `delivery` property on every error, always present. |
-| MCP | A top-level `delivery` field in a failed tool result, absent only for a usage error. |
-| CLI | A `delivery:` line on stderr after the error of an action command. |
+| MCP | A top-level `delivery` field in the failed result of every tool. An `invalid_arguments` failure reads `not_delivered`, because nothing was attempted. |
+| CLI | A `delivery:` line on stderr after the error of an action command (`action`, `click`, `move`, `drag`, `scroll`, `key`, `type`), except for a usage error. |
 
 The platform mapping behind `unknown` is in
 [Platform details](/reference/platform-details/).

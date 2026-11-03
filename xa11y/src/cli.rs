@@ -2631,6 +2631,57 @@ mod tests {
     // ── Delivery disposition ────────────────────────────────────────────────
 
     #[test]
+    fn every_dispatched_command_is_classified_as_action_or_read_only() {
+        // `ACTION_COMMANDS` is hand-kept. Read the dispatcher's own arms, so
+        // a new command that nobody classified fails here instead of
+        // silently lacking the `delivery:` line.
+        const NOT_ACTIONS: [&str; 8] = [
+            "apps",
+            "shell",
+            "windows",
+            "tree",
+            "find",
+            "events",
+            "screenshot",
+            "guide",
+        ];
+        let source = include_str!("cli.rs");
+        let body = source
+            .split("pub fn run(args: &[String]) -> CliResult<()> {")
+            .nth(1)
+            .expect("run() is in this file")
+            .split("/// The `xa11y --help` text.")
+            .next()
+            .expect("run() ends before usage_text");
+        let dispatched: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("Some(\""))
+            .filter_map(|l| l.split('"').next())
+            .collect();
+        assert!(
+            dispatched.len() >= 10,
+            "dispatcher not found: {dispatched:?}"
+        );
+        for name in dispatched {
+            if name == "mcp" {
+                continue; // a server, not a one-shot operation
+            }
+            let action = ACTION_COMMANDS.contains(&name);
+            let read_only = NOT_ACTIONS.contains(&name);
+            assert!(
+                action != read_only,
+                "`{name}` must be in exactly one of ACTION_COMMANDS and NOT_ACTIONS"
+            );
+        }
+        for name in ACTION_COMMANDS {
+            assert!(
+                body.contains(&format!("Some(\"{name}\")")),
+                "ACTION_COMMANDS lists `{name}`, which the dispatcher does not route"
+            );
+        }
+    }
+
+    #[test]
     fn a_failed_action_command_names_its_delivery() {
         let miss = CliError::Xa11y(Error::selector_not_matched("button"));
         let line = delivery_line("action", &miss).expect("an action failure reports delivery");

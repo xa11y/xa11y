@@ -44,6 +44,8 @@ class PermissionDeniedError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'PermissionDeniedError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -51,6 +53,8 @@ class AccessibilityNotEnabledError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'AccessibilityNotEnabledError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -58,6 +62,8 @@ class SelectorNotMatchedError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'SelectorNotMatchedError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
     // Structured diagnosis (tenet 6) — populated from the native payload in
     // `toTypedError`. Defaults keep every field present so consumers never
     // need existence checks.
@@ -75,6 +81,8 @@ class ActionNotSupportedError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'ActionNotSupportedError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -99,6 +107,8 @@ class InvalidSelectorError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'InvalidSelectorError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -106,6 +116,8 @@ class InvalidActionDataError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'InvalidActionDataError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
