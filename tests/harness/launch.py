@@ -142,7 +142,9 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
         return (
             [electron_bin, main_js, "--no-sandbox", "--force-renderer-accessibility"],
             {},
-            ["xa11y-electron-test-app", "electron"],
+            # macOS registers the bundle's CFBundleName ("Electron"), not the
+            # name main.js sets (observed in the #511 macos-latest cell).
+            ["xa11y-electron-test-app", "electron", "Electron"],
             'button[name="OK"]',
         )
 

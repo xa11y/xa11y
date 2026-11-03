@@ -68,10 +68,12 @@ apps:
       suite).
 
   electron:
-    platforms: [linux]
+    platforms: [linux, macos]
     notes: >
       Chromium-based. JS integ tests also exercise AccessibilityNotEnabledError detection
-      (app launched without --force-renderer-accessibility).
+      (app launched without --force-renderer-accessibility). The macOS cell
+      is where App.enable_web_accessibility runs against a real Chromium
+      (#511); Windows has no Electron cell.
 
   egui:
     platforms: [linux, macos, windows]
