@@ -1241,14 +1241,12 @@ struct Subscription {
 impl Subscription {
     fn with_sub<T>(&self, f: impl FnOnce(&xa11y::Subscription) -> T) -> PyResult<T> {
         let guard = self.inner.lock().unwrap();
-        let sub = guard
-            .as_ref()
-            .ok_or_else(|| {
-                to_py_err(xa11y::Error::Platform {
-                    code: -1,
-                    message: "Subscription is closed".to_string(),
-                })
-            })?;
+        let sub = guard.as_ref().ok_or_else(|| {
+            to_py_err(xa11y::Error::Platform {
+                code: -1,
+                message: "Subscription is closed".to_string(),
+            })
+        })?;
         Ok(f(sub))
     }
 }

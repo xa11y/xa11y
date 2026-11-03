@@ -5184,7 +5184,11 @@ impl Provider for MacOSProvider {
         // `xa11y action activate` "does nothing". Activate the app first through
         // the accessibility API (the application element's AXFrontmost), then
         // activate the window.
-        activate_owning_app(ax.as_ptr(), "activate", element.role)?;
+        // Conservative: the clear above is a no-op on a window that was not
+        // minimized, but it cannot be told apart here, so a failure from this
+        // step is `unknown`.
+        activate_owning_app(ax.as_ptr(), "activate", element.role)
+            .map_err(|e| unknown_after_step(e, "clearing AXMinimized"))?;
         // The window or its app has changed by now, so an AXRaise refusal
         // must not read as "not delivered".
         perform_ax_action(ax.as_ptr(), "AXRaise", "activate", element.role)
@@ -5309,7 +5313,10 @@ impl Provider for MacOSProvider {
         // `true` read would let an enter-fullscreen that races an exit
         // transition return success on a window that ends up restored. The
         // settle loop issues the set and re-issues it until the state
-        // commits.
+        // commits. Conservative: the AXMinimized clear above is a no-op on a
+        // window that was not minimized and that cannot be told apart here,
+        // and the settle loop itself sets AXFullScreen, so any error from it
+        // is `unknown`.
         settle_window_fullscreen(ax.as_ptr(), true, "enter_fullscreen", element.role)
             .map_err(|e| unknown_after_step(e, "clearing AXMinimized or setting AXFullScreen"))
     }
