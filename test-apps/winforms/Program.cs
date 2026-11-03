@@ -236,7 +236,8 @@ internal sealed class TestForm : Form
         };
 
         // Password entry (#522, #597): an `ES_PASSWORD` edit, which reports
-        // UIA `IsPassword` and withholds its text from ValuePattern.Value.
+        // UIA `IsPassword`. The Win32 edit proxy answers ValuePattern.Value
+        // with a placeholder ("Access denied") rather than the text.
         var password = new TextBox
         {
             AccessibleName = "Password",

@@ -552,9 +552,10 @@ APP_CONFIGS: dict[str, dict] = {
         # Password entry (#522): a `UseSystemPasswordChar` TextBox, an
         # `ES_PASSWORD` edit.
         "password_field_name": "Password",
-        # The provider withholds a password's text from ValuePattern.Value,
-        # so `value` is None rather than a failed tree read (#597).
-        "password_value_withheld": True,
+        # The Win32 edit proxy does not withhold the value: ValuePattern.Value
+        # succeeds with a placeholder ("Access denied") instead of the text,
+        # and that placeholder is what xa11y reports (#597).
+        "password_value_withheld": False,
         "textfield_initial_value": "hello world",
         # UIA has no multiline-edit control type: a WinForms multiline TextBox
         # is ControlType.Edit like any other, which xa11y maps to `text_field`.

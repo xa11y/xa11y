@@ -61,6 +61,8 @@ instead: `AXSecureTextField` as the role or subrole on macOS, the
 redact a password field's value or the text typed into it: the value is
 whatever the platform reports. On Windows, a password control may decline to
 report its value (a WPF `PasswordBox` does), and its `value` is then `None`.
+The Win32 edit control's provider reports a placeholder, `Access denied`, in
+place of the text, and xa11y passes that placeholder through.
 
 ## Action mapping
 
