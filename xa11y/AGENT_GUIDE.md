@@ -162,6 +162,9 @@ the tree again to see the current state.
 - macOS: the process running xa11y needs the Accessibility permission, and
   screenshots also need Screen Recording. Without them every call fails with
   `permission_denied`.
+- macOS: a Chromium or Electron application builds its web content's tree
+  only on request. A `web_area` with no children is the sign. Call
+  `enable_web_accessibility` on the application, then search again.
 - Linux: AT-SPI2 must be running on the session bus. Chromium and Electron
   applications need `--force-renderer-accessibility`, or they report
   `accessibility_not_enabled`.

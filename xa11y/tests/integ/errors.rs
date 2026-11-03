@@ -192,4 +192,55 @@ mod tests {
             start.elapsed()
         );
     }
+
+    /// `enable_web_accessibility` on an app with no web content. On Linux and
+    /// Windows the switch is not a client request at all, so the answer is
+    /// `Unsupported` naming what to do instead, without touching the app. On
+    /// macOS the request is made: AccessKit takes neither switch, or takes
+    /// one and has no web area to fill, and either way the error says which.
+    #[test]
+    #[ignore]
+    fn error_enable_web_accessibility_on_a_native_app() {
+        let app = h::app_root();
+        let start = std::time::Instant::now();
+        let err = app
+            .enable_web_accessibility(Duration::from_millis(500))
+            .expect_err("a native app has no web content to enable");
+        assert!(start.elapsed() < SHORT_TIMEOUT_CEILING, "{err}");
+        match err {
+            #[cfg(target_os = "linux")]
+            Error::Unsupported { feature } => {
+                assert!(
+                    feature.contains("--force-renderer-accessibility"),
+                    "{feature}"
+                );
+                assert!(feature.contains("ACCESSIBILITY_ENABLED=1"), "{feature}");
+            }
+            #[cfg(target_os = "windows")]
+            Error::Unsupported { feature } => {
+                assert!(feature.contains("UI Automation"), "{feature}");
+            }
+            #[cfg(target_os = "macos")]
+            Error::AccessibilityNotEnabled { instructions, .. } => {
+                assert!(
+                    instructions.contains("AXManualAccessibility"),
+                    "{instructions}"
+                );
+                assert!(
+                    instructions.contains("AXEnhancedUserInterface"),
+                    "{instructions}"
+                );
+            }
+            #[cfg(target_os = "macos")]
+            e @ Error::Timeout { .. } => {
+                let observed = e.diagnosis().and_then(|d| d.last_observed.clone());
+                assert_eq!(
+                    observed.as_deref(),
+                    Some("no web_area in the app's tree"),
+                    "{e}"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
 }

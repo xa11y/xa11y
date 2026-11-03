@@ -31,6 +31,7 @@ EXPECTED_TOOLS = [
     "apps",
     "shell",
     "windows",
+    "enable_web_accessibility",
     "tree",
     "find",
     "action",

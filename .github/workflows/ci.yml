@@ -329,6 +329,11 @@ jobs:
           # jobs retain the live macOS 26 gate. Restore Cocoa after capacity
           # recovers: https://github.com/xa11y/xa11y/issues/639
           - { os: macos-15,       app: cocoa }
+          # Electron on macOS is the only cell where Chromium's web
+          # accessibility tree is gated on AXManualAccessibility /
+          # AXEnhancedUserInterface (issue #511), so it is the end-to-end
+          # cover for App.enable_web_accessibility on its real platform.
+          - { os: macos-latest,   app: electron }
           - { os: macos-latest,   app: tauri }
           - { os: macos-latest,   app: qt }
           # Tauri on Windows is the only cell that reaches WebView2, and the

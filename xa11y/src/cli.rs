@@ -251,6 +251,7 @@ pub fn run(args: &[String]) -> CliResult<()> {
         Some("apps") => cmd_apps(),
         Some("shell") => cmd_shell(&args[1..]),
         Some("windows") => cmd_windows(&args[1..]),
+        Some("enable-web-accessibility") => cmd_enable_web_accessibility(&args[1..]),
         Some("tree") => cmd_tree(&args[1..]),
         Some("find") => cmd_find(&args[1..]),
         Some("action") => cmd_action(&args[1..]),
@@ -300,6 +301,10 @@ Accessibility tree:
                                             [--at X,Y] [--size W,H]
                                             Perform an action on an element
   xa11y events [--app NAME | --pid PID]     Stream accessibility events
+  xa11y enable-web-accessibility (--app NAME | --pid PID)
+                                            Turn on a Chromium/Electron app's
+                                            web content tree (macOS) and wait
+                                            for it to appear
 
 TARGET — what tree/find/action search (--shell and --app are exclusive):
   --app NAME | --pid PID                    A running application
@@ -1407,6 +1412,41 @@ fn cmd_windows(args: &[String]) -> CliResult<()> {
             apps.len()
         ),
     }))
+}
+
+/// Resolve the `--app` / `--pid` target and turn on its web content's
+/// accessibility tree, waiting up to the default timeout for the content.
+///
+/// The value-producing half shared with the MCP `enable_web_accessibility`
+/// tool; [`cmd_enable_web_accessibility`] is the printing half.
+pub(crate) fn enable_web_accessibility(opts: &Opts) -> CliResult<App> {
+    // Read before the app lookup: an invalid XA11Y_DEFAULT_TIMEOUT is a
+    // configuration error, and it must not be masked by a lookup failure.
+    let timeout = crate::default_timeout()?;
+    let app = resolve_app(opts)?;
+    app.enable_web_accessibility(timeout)?;
+    Ok(app)
+}
+
+fn cmd_enable_web_accessibility(args: &[String]) -> CliResult<()> {
+    const USAGE: &str = "usage: xa11y enable-web-accessibility (--app NAME | --pid PID)";
+    let (opts, positional) = parse_opts(args)?;
+    if let Some(arg) = positional.first() {
+        return Err(CliError::Usage(format!(
+            "{USAGE}; unexpected argument: {arg}"
+        )));
+    }
+    // A shell surface has no web content switch; refuse the flag rather than
+    // ignore it (tenet 1).
+    if opts.shell.is_some() {
+        return Err(CliError::Usage(format!(
+            "{USAGE}; --shell is not supported here"
+        )));
+    }
+    let app = enable_web_accessibility(&opts)?;
+    let pid = app.pid.map(|p| format!(" (pid={p})")).unwrap_or_default();
+    println!("web accessibility enabled for \"{}\"{pid}", app.name);
+    Ok(())
 }
 
 fn cmd_tree(args: &[String]) -> CliResult<()> {
@@ -2867,6 +2907,17 @@ mod tests {
             msg.contains("stray"),
             "message must name the offending argument: {msg}"
         );
+    }
+
+    #[test]
+    fn cmd_enable_web_accessibility_refuses_bad_arguments_before_any_platform_call() {
+        for args in [&["--shell", "taskbar"][..], &["Electron"][..]] {
+            let err = cmd_enable_web_accessibility(&strs(args))
+                .expect_err("the argument must be refused");
+            assert!(matches!(err, CliError::Usage(_)), "{args:?}: {err}");
+        }
+        let err = cmd_enable_web_accessibility(&[]).expect_err("no target");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
     }
 
     #[test]

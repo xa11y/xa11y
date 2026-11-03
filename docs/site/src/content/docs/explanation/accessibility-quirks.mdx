@@ -137,10 +137,18 @@ rebuild produces a new hash and a new, ungranted binary.
 
 ### macOS: web content needs accessibility turned on per-process
 
-Like Chromium on Linux, Chrome/Electron on macOS gate their renderer
-accessibility tree. Chrome honors `--force-renderer-accessibility`; WebKit/Safari
-content is exposed lazily and may require the `AXManualAccessibility` attribute to
-be set on the web area before the DOM is reflected into the AX tree.
+Like Chromium on Linux, Chrome and Electron on macOS gate their renderer
+accessibility tree. Until something asks for it, the window holds an
+`AXWebArea` with no children. Chrome honors `--force-renderer-accessibility` at
+launch. A running app builds the tree when an assistive client sets
+`AXManualAccessibility` (Electron) or `AXEnhancedUserInterface` (Chrome, and
+what VoiceOver sets) to true on the **application** element. Setting either on
+the web area does nothing.
+
+`App.enable_web_accessibility()` sets both, reads each back, and then waits for
+a web area to gain children. A lookup that misses beside an empty web area says
+so in its diagnosis and names the method. Linux and Windows have no such
+switch, so the method refuses there with the platform's own guidance.
 
 ## Roles and the role enum disagree across platforms
 

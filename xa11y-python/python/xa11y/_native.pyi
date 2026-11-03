@@ -417,6 +417,25 @@ class App:
         Calling ``windows`` on a non-application element fails with
         ``ActionNotSupportedError``.
         """
+    def enable_web_accessibility(self, *, timeout: float | None = None) -> None:
+        """Turn on the accessibility tree for the app's web content, then wait
+        for that content to appear.
+
+        Chromium and Electron build the accessibility tree for their web
+        content only when a client asks for it. Until then a selector for an
+        element on the page finds nothing. This makes that request; xa11y
+        never makes it implicitly.
+
+        On macOS it sets ``AXManualAccessibility`` (Electron) or
+        ``AXEnhancedUserInterface`` (Chrome) on the application element and
+        reads it back, raising ``AccessibilityNotEnabledError`` when neither
+        takes. It then waits up to ``timeout`` seconds (default: the
+        process-wide default timeout) until some ``web_area`` has a child,
+        raising ``TimeoutError`` with a diagnosis otherwise. On Linux and
+        Windows it raises ``ActionNotSupportedError`` saying what to do
+        instead: on Linux, launch the app with
+        ``--force-renderer-accessibility``.
+        """
     def as_element(self) -> Element:
         """Get an :class:`Element` handle for the application root.
 

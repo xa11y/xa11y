@@ -30,7 +30,7 @@ COMMANDS:
     test-gtk [SUITE..]  Run GTK4 integration tests
     test-cocoa [SUITE..]  Run Cocoa/AppKit integration tests (macOS only)
     test-tauri [SUITE..]  Run Tauri integration tests
-    test-electron [SUITE..]  Run Electron integration tests (Linux only)
+    test-electron [SUITE..]  Run Electron integration tests (Linux and macOS)
     test-egui [SUITE..]  Run egui (eframe) integration tests
     test-winforms [SUITE..]  Run WinForms integration tests (Windows only)
     test-wpf [SUITE..]  Run WPF integration tests (Windows only)
@@ -608,7 +608,7 @@ fn do_test_apps() -> bool {
     if !do_test_tauri(&py) {
         ok = false;
     }
-    if env::consts::OS == "linux" && !do_test_electron(&py) {
+    if matches!(env::consts::OS, "linux" | "macos") && !do_test_electron(&py) {
         ok = false;
     }
     if !do_test_egui(&py) {

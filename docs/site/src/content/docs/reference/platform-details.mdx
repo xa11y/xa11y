@@ -499,6 +499,22 @@ Two WebKitGTK behaviors affect `<table>` content (verified against WebKitGTK 2.5
 - **`<th>` cells can destabilize the whole page's tree.** With a window manager present, a table containing `<th>` header cells can send WebKit's accessibility tree into continuous invalidation churn. Every content accessible goes defunct moments after being exposed, and the page effectively vanishes from AT-SPI. If a WebKitGTK-based app's tree keeps coming back empty or `unknown`, check for this (xa11y marks dead objects with `raw["atspi_defunct"]`).
 - **Layout-table heuristic.** A `<table>` without headers or a `<caption>` is judged decorative and dropped from the accessibility tree entirely. Cell text is exposed through the AT-SPI Text interface (surfaced as the cell's `value`) rather than as the accessible name, so use `table_cell[value*="..."]` selectors for WebKitGTK content.
 
+### macOS Electron and Chromium apps
+
+On macOS, Electron and Chromium-based apps build their web content's accessibility tree only when an assistive client asks for it. Before that, the window contains a `web_area` with no children, and a selector for anything on the page misses. The miss's diagnosis points at the empty web area.
+
+Ask for the tree from xa11y, without relaunching the app:
+
+```python
+app = xa11y.App.by_name("Visual Studio Code")
+app.enable_web_accessibility(timeout=10)
+app.locator('button[name="Run"]').press()
+```
+
+The call sets `AXManualAccessibility` and `AXEnhancedUserInterface` on the application, then waits until a `web_area` has children. It raises `AccessibilityNotEnabledError` when the app accepts neither attribute, and `TimeoutError` when the content does not appear in time. The same operation is `app.enableWebAccessibility({ timeout })` in JS, `xa11y enable-web-accessibility` on the command line, and the `enable_web_accessibility` MCP tool.
+
+On Linux and Windows the call raises `ActionNotSupportedError` with guidance. Linux needs a launch flag, described in the next section. On Windows, Chromium builds the tree on its own when a UI Automation client connects.
+
 ### Linux Electron and Chromium apps
 
 On Linux, Electron and Chromium-based apps have their AT-SPI2 bridge disabled by default for performance. xa11y will connect to the app but its tree will contain only the top-level window, so `App.by_name("…").locator("button").count()` returns 0 even though buttons are visible on screen.

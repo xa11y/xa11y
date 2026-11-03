@@ -58,7 +58,7 @@ has_suite() {
 echo "=== xa11y integration harness: app=$APP suites=${SUITES[*]} ==="
 
 # ── Linux: display + window manager + AT-SPI ──────────────────────────
-# cocoa is macOS-only; electron is Linux-only; winforms, wpf and uwp are
+# cocoa is macOS-only; electron runs on Linux and macOS; winforms, wpf and uwp are
 # Windows-only. Everything else is cross-OS.
 if [ "$APP" = "cocoa" ] && [ "$(uname)" != "Darwin" ]; then
     echo "Cocoa tests are macOS-only — skipping on $(uname)."
@@ -74,8 +74,8 @@ if { [ "$APP" = "winforms" ] || [ "$APP" = "wpf" ] || [ "$APP" = "uwp" ]; } && [
     echo "$APP tests are Windows-only — skipping on $(uname)."
     exit 0
 fi
-if [ "$APP" = "electron" ] && [ "$(uname)" != "Linux" ]; then
-    echo "Electron a11y tests only run on Linux — skipping on $(uname)."
+if [ "$APP" = "electron" ] && [ "$(uname)" != "Linux" ] && [ "$(uname)" != "Darwin" ]; then
+    echo "Electron a11y tests only run on Linux and macOS — skipping on $(uname)."
     exit 0
 fi
 

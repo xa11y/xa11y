@@ -84,6 +84,16 @@ export interface AppLookupOptions {
   timeout?: number;
 }
 
+export interface WebAccessibilityOptions {
+  /**
+   * How many milliseconds to wait for the web content to appear once the
+   * app has taken the request. Defaults to the process-wide default timeout
+   * (see {@link setDefaultTimeout}; 5000ms unless overridden). Pass `0` to
+   * check once.
+   */
+  timeout?: number;
+}
+
 export interface ShellSurfaceLookupOptions {
   /**
    * Poll the accessibility API until exactly one surface of the kind
@@ -293,6 +303,26 @@ export declare class App {
    * `ActionNotSupportedError`.
    */
   windows(): Promise<Element[]>;
+
+  /**
+   * Turn on the accessibility tree for the app's web content, then wait for
+   * that content to appear.
+   *
+   * Chromium and Electron build the accessibility tree for their web content
+   * only when a client asks for it. Until then a selector for an element on
+   * the page finds nothing. This makes that request; xa11y never makes it
+   * implicitly.
+   *
+   * On macOS it sets `AXManualAccessibility` (Electron) or
+   * `AXEnhancedUserInterface` (Chrome) on the application element and reads
+   * it back, rejecting with `AccessibilityNotEnabledError` when neither
+   * takes. It then waits up to `options.timeout` ms until some `web_area` has
+   * a child, rejecting with `TimeoutError` and a diagnosis otherwise. On
+   * Linux and Windows it rejects with `ActionNotSupportedError` saying what
+   * to do instead: on Linux, launch the app with
+   * `--force-renderer-accessibility`.
+   */
+  enableWebAccessibility(options?: WebAccessibilityOptions): Promise<void>;
 
   /**
    * Get an `Element` handle for the application root.
