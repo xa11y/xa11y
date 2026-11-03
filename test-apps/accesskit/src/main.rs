@@ -16,10 +16,11 @@ use softbuffer::{Context, Surface};
 #[cfg(target_os = "linux")]
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::{Window, WindowId},
 };
 
@@ -138,6 +139,27 @@ const PASSWORD_FIELD: NodeId = NodeId(79);
 // no `:nth(n)` index another test relies on.
 const LONG_TEXT: NodeId = NodeId(78);
 
+// A button that slides across the window when "Start slide" is pressed
+// (issue #530): `Locator::wait_stable` has to wait for its bounds to stop
+// changing. At rest it sits at its end position, so it is stable until
+// pressed. Late in document order so it shifts no `:nth(n)` index.
+const START_SLIDE_BTN: NodeId = NodeId(80);
+const SLIDE_TARGET: NodeId = NodeId(81);
+/// How long one slide takes. Long enough that a short `wait_stable` started
+/// right after the press is guaranteed to see it moving.
+const SLIDE_DURATION: Duration = Duration::from_millis(2000);
+/// Tree updates while sliding. Well under the 100 ms `wait_*` poll interval,
+/// so two polls never see the same mid-slide position.
+const SLIDE_TICK: Duration = Duration::from_millis(30);
+const SLIDE_FROM_X: f64 = 16.0;
+const SLIDE_TO_X: f64 = 216.0;
+
+/// The slide target's left edge `elapsed` into a slide.
+fn slide_x(elapsed: Duration) -> f64 {
+    let t = (elapsed.as_secs_f64() / SLIDE_DURATION.as_secs_f64()).min(1.0);
+    SLIDE_FROM_X + (SLIDE_TO_X - SLIDE_FROM_X) * t
+}
+
 /// The long label's text: a fixed prefix to select it by, then ~4 KiB of
 /// ASCII filler.
 fn long_text() -> String {
@@ -179,6 +201,8 @@ struct AppState {
     announcement_counter: u32,
     /// ScrollIntoView requests received by the Cherry list item.
     cherry_scroll_requests: u32,
+    /// When the current slide started; `None` once it has finished.
+    slide_started: Option<Instant>,
 }
 
 impl AppState {
@@ -198,6 +222,7 @@ impl AppState {
             announcement_text: String::new(),
             announcement_counter: 0,
             cherry_scroll_requests: 0,
+            slide_started: None,
         }
     }
 }
@@ -762,8 +787,35 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         READONLY_FIELD,
         PASSWORD_FIELD,
         LONG_TEXT,
+        START_SLIDE_BTN,
+        SLIDE_TARGET,
     ]);
     nodes.push((EXTRA_PANEL, extra_panel));
+
+    let mut start_slide = Node::new(Role::Button);
+    start_slide.set_label("Start slide");
+    start_slide.add_action(Action::Click);
+    start_slide.set_bounds(Rect {
+        x0: 16.0,
+        y0: 540.0,
+        x1: 116.0,
+        y1: 565.0,
+    });
+    nodes.push((START_SLIDE_BTN, start_slide));
+
+    let x = state
+        .slide_started
+        .map_or(SLIDE_TO_X, |t| slide_x(t.elapsed()));
+    let mut slide_target = Node::new(Role::Button);
+    slide_target.set_label("Slide target");
+    slide_target.add_action(Action::Click);
+    slide_target.set_bounds(Rect {
+        x0: x,
+        y0: 500.0,
+        x1: x + 80.0,
+        y1: 530.0,
+    });
+    nodes.push((SLIDE_TARGET, slide_target));
 
     let mut password = Node::new(Role::PasswordInput);
     password.set_label("Password");
@@ -896,6 +948,13 @@ fn handle_action(request: &ActionRequest, state: &mut AppState) -> bool {
     let action = request.action;
 
     match (target, action) {
+        // Restart the slide from its start position; `about_to_wait` drives
+        // the frames.
+        (id, Action::Click) if id == START_SLIDE_BTN => {
+            state.slide_started = Some(Instant::now());
+            true
+        }
+
         // Submit button
         (id, Action::Click) if id == SUBMIT_BTN => {
             if state.checkbox_checked {
@@ -1288,8 +1347,25 @@ impl ApplicationHandler<AccessKitEvent> for Application {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.main.is_none() {
+        let Some(main) = self.main.as_mut() else {
             event_loop.exit();
+            return;
+        };
+        // Advance a running slide: push one frame, then sleep until the next
+        // tick. The last frame lands exactly on the end position and stops
+        // the ticking, so an idle app goes back to waiting for events.
+        match main.state.slide_started {
+            Some(started) => {
+                if started.elapsed() >= SLIDE_DURATION {
+                    main.state.slide_started = None;
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                } else {
+                    event_loop
+                        .set_control_flow(ControlFlow::WaitUntil(Instant::now() + SLIDE_TICK));
+                }
+                main.adapter.update_if_active(|| build_tree(&main.state));
+            }
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }

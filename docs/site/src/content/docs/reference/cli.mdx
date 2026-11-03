@@ -160,6 +160,14 @@ xa11y find "list > list_item" --app Finder
 `-o` selects the output format: `pretty` (the default, shown above), `bounds`,
 or `center`.
 
+`--stable` waits until the match is visible and its bounds are unchanged
+across two consecutive polls, then prints it. It waits up to the default
+timeout (5 s, or `XA11Y_DEFAULT_TIMEOUT` seconds). With `--stable` the selector
+must match exactly one element: several matches is an operation failure that
+lists the candidates, and a selector still matching nothing once the wait is
+over fails the same way as without the flag. A match that never holds still
+fails with a timeout naming the last two bounds it saw.
+
 ### `xa11y action`
 
 Perform an action on the first element matching a selector.
@@ -526,7 +534,8 @@ kind from the `subscription_not_found` an id that was never issued gets.
 Every tool returns `structuredContent`, mirrored as JSON in a text block for
 clients on revisions that predate `structuredContent`. `find` reports each
 match's `bounds` and a precomputed `center`, so a result feeds straight into
-`click` or `screenshot` without arithmetic.
+`click` or `screenshot` without arithmetic. With `stable: true`, `find` first
+waits for its one match to stop moving, the same as `find --stable`.
 
 Results are bounded, because each one lands in a model's context window.
 `tree` walks 12 levels by default and never returns more than 2000 nodes;
@@ -570,6 +579,13 @@ region=$(xa11y find 'button[name="OK"]' --app Safari -o bounds)
 xa11y screenshot --region "$region" --out button.png
 
 xa11y click --at "$(xa11y find 'button[name="OK"]' --app Safari -o center)"
+```
+
+Add `--stable` to the `find` when the target may still be animating into
+place, so the click lands where it comes to rest:
+
+```bash
+xa11y click --at "$(xa11y find 'button[name="OK"]' --app Safari -o center --stable)"
 ```
 
 ## Flags

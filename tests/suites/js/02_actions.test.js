@@ -10,7 +10,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const xa11y = require('../../../xa11y-js/index.js');
-const { ActionNotSupportedError, PlatformError, SelectorNotMatchedError } = xa11y;
+const { ActionNotSupportedError, PlatformError, SelectorNotMatchedError, TimeoutError } = xa11y;
 const { getApp, act, sleep, appConfig } = require('./helpers.js');
 
 test('press on primary button succeeds', async () => {
@@ -337,4 +337,48 @@ test('snapshot-bound Element can be pressed twice', async () => {
     countAfter >= countBefore + 1,
     `expected >= ${countBefore + 1} items after two presses, got ${countAfter}`,
   );
+});
+
+// ── waitStable (#530): a widget that moves ──────────────────────────────────
+//
+// "Start slide" restarts a two-second slide of "Slide target" that ends where
+// the target already rests (AccessKit and Tauri test apps). Apps without the
+// widget skip.
+
+const START_SLIDE = 'button[name="Start slide"]';
+const SLIDE_TARGET = 'button[name="Slide target"]';
+
+test('waitStable resolves with the bounds a slide ends at', async () => {
+  const app = await getApp();
+  if ((await app.locator(START_SLIDE).count()) === 0) return; // no sliding widget
+  const target = app.locator(SLIDE_TARGET);
+  const rest = (await target.waitStable(10)).bounds;
+  assert.ok(rest, 'the slide target reports no bounds');
+
+  await app.locator(START_SLIDE).press();
+  const started = Date.now();
+  const settled = await target.waitStable(10);
+  const waitedMs = Date.now() - started;
+  assert.deepEqual(settled.bounds, rest, `waitStable returned mid-slide after ${waitedMs} ms`);
+  assert.ok(waitedMs >= 1500, `a 2 s slide cannot be proven stable in ${waitedMs} ms`);
+});
+
+test('waitStable times out naming the moving bounds', async () => {
+  const app = await getApp();
+  if ((await app.locator(START_SLIDE).count()) === 0) return; // no sliding widget
+  const target = app.locator(SLIDE_TARGET);
+  await target.waitStable(10);
+
+  await app.locator(START_SLIDE).press();
+  try {
+    await assert.rejects(target.waitStable(0.6), (err) => {
+      assert.ok(err instanceof TimeoutError, String(err));
+      assert.ok(err.condition.includes('two consecutive polls'), err.condition);
+      assert.ok(err.lastObserved.startsWith('bounds still changing:'), err.lastObserved);
+      return true;
+    });
+  } finally {
+    // Leave the target at rest for whatever test runs next.
+    await target.waitStable(10);
+  }
 });

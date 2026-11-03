@@ -242,8 +242,13 @@ Accessibility tree:
   xa11y shell                               List OS shell surfaces: KIND PID NAME
   xa11y windows [--app NAME | --pid PID]    List top-level windows
   xa11y tree   [TARGET]                     Print the accessibility tree
-  xa11y find   SELECTOR [TARGET] [-o pretty|bounds|center]
-                                            Find elements matching a selector
+  xa11y find   SELECTOR [TARGET] [-o pretty|bounds|center] [--stable]
+                                            Find elements matching a selector.
+                                            --stable waits (up to the default
+                                            timeout) until the one match is
+                                            visible and its bounds hold still
+                                            across two polls; the selector must
+                                            then match exactly one element
   xa11y action ACTION SELECTOR [TARGET] [--value V]
                                             [--at X,Y] [--size W,H]
                                             Perform an action on an element
@@ -301,6 +306,7 @@ Compose a11y + input/screenshot via `find -o bounds|center`:
   region=$(xa11y find 'button[name=\"OK\"]' --app Safari -o bounds)
   xa11y screenshot --region \"$region\" --out button.png
   xa11y click --at \"$(xa11y find 'button[name=\"OK\"]' --app Safari -o center)\"
+  Add --stable to that find when the target may still be animating into place.
 
 Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
   scroll-into-view, increment, decrement,
@@ -424,6 +430,8 @@ pub(crate) struct Opts {
     pub legend: Option<String>,
     // Output format for `find`
     pub output_format: Option<String>,
+    /// `find --stable`: wait for the single match's bounds to settle.
+    pub stable: bool,
 }
 
 /// Fetch the value for a flag at `args[i]`, erroring if the flag is trailing
@@ -553,6 +561,8 @@ pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
                 i += 1;
                 opts.output_format = Some(flag_value(args, i, "-o")?.to_string());
             }
+            // A switch: takes no value.
+            "--stable" => opts.stable = true,
             other => positional.push(other.to_string()),
         }
         i += 1;
@@ -1364,19 +1374,33 @@ fn cmd_find(args: &[String]) -> CliResult<()> {
     let selector = positional.first().ok_or_else(|| {
         CliError::Usage(
             "usage: xa11y find SELECTOR [--app NAME | --pid PID | --shell KIND] \
-             [-o pretty|bounds|center]"
+             [-o pretty|bounds|center] [--stable]"
                 .into(),
         )
     })?;
+    // Validated before the target is resolved, so a typo'd format is a usage
+    // error rather than something reported after a full stability wait.
+    let fmt = opts.output_format.as_deref().unwrap_or("pretty");
+    if !matches!(fmt, "pretty" | "bounds" | "center") {
+        return Err(CliError::Usage(format!(
+            "unknown -o format: {fmt} (expected pretty|bounds|center)"
+        )));
+    }
 
     let target = resolve_target(&opts)?;
-    let elements = target.locator(selector).elements()?;
+    let elements = if opts.stable {
+        match find_stable(&target, selector)? {
+            Ok(element) => vec![element],
+            Err(matches) => return Err(ambiguous_selector(selector, &matches)),
+        }
+    } else {
+        target.locator(selector).elements()?
+    };
     if elements.is_empty() {
         return Err(CliError::NotFound(format!(
             "no elements matched selector: {selector}"
         )));
     }
-    let fmt = opts.output_format.as_deref().unwrap_or("pretty");
     match fmt {
         "pretty" => {
             for el in &elements {
@@ -1411,6 +1435,75 @@ fn cmd_find(args: &[String]) -> CliResult<()> {
         }
     }
     Ok(())
+}
+
+/// Resolve `selector` under `target` to its single match once that match is
+/// visible and its bounds are unchanged across two consecutive polls
+/// ([`Locator::wait_stable`]), waiting up to the default timeout.
+///
+/// The value-producing half of `find --stable`, shared by the CLI and the
+/// MCP `find` tool. `Ok(Err(matches))` means the selector matched more than
+/// one element: the caller renders that as its own ambiguity error. It is
+/// checked before the wait, so a selector that is ambiguous from the start is
+/// refused at once, and again after it, because the wait follows the first
+/// match only.
+///
+/// A wait that times out on a selector that matches nothing reports the
+/// diagnosed not-found error ([`Locator::element`]'s), the same failure a
+/// plain `find` miss gives; any other timeout keeps its stability diagnosis.
+pub(crate) fn find_stable(
+    target: &Target,
+    selector: &str,
+) -> CliResult<std::result::Result<Element, Vec<Element>>> {
+    let locator = target.locator(selector);
+    let before = locator.elements()?;
+    if before.len() > 1 {
+        return Ok(Err(before));
+    }
+    let element = match locator.wait_stable(crate::default_timeout()?) {
+        Ok(element) => element,
+        Err(timeout @ Error::Timeout { .. }) => {
+            return match locator.element() {
+                // Nothing matches now: the diagnosed miss is the failure to
+                // report (any other error from the re-query propagates).
+                Err(miss) => Err(miss.into()),
+                // Something matches; it just never held still.
+                Ok(_) => Err(timeout.into()),
+            };
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let after = locator.elements()?;
+    if after.len() > 1 {
+        return Ok(Err(after));
+    }
+    Ok(Ok(element))
+}
+
+/// The CLI's "matched more than one" failure for an operation that acts on
+/// exactly one element, with a bounded candidate list (tenet 6).
+pub(crate) fn ambiguous_selector(selector: &str, matches: &[Element]) -> CliError {
+    const MAX_CANDIDATES: usize = 8;
+    let mut candidates: Vec<String> = matches
+        .iter()
+        .take(MAX_CANDIDATES)
+        .map(|el| format_element_oneline(el))
+        .collect();
+    if matches.len() > MAX_CANDIDATES {
+        candidates.push(format!(
+            "… (+{} more matches)",
+            matches.len() - MAX_CANDIDATES
+        ));
+    }
+    CliError::Ambiguous {
+        count: matches.len(),
+        diagnosis: Box::new(
+            Diagnosis::new()
+                .selector(selector)
+                .last_observed(format!("selector matched {} elements", matches.len()))
+                .candidates(candidates),
+        ),
+    }
 }
 
 /// Tell the user (on stderr) that a matched element was omitted from
@@ -2465,6 +2558,17 @@ mod tests {
         assert_eq!(opts.app.as_deref(), Some("Safari"));
         assert!(opts.pid.is_none());
         assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn parse_opts_stable_is_a_switch_that_consumes_no_value() {
+        let args = strs(&["button", "--stable", "-o", "center"]);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
+        assert!(opts.stable);
+        assert_eq!(opts.output_format.as_deref(), Some("center"));
+        assert_eq!(pos, vec!["button".to_string()]);
+        let (plain, _) = parse_opts(&strs(&["button"])).expect("flags must parse");
+        assert!(!plain.stable);
     }
 
     #[test]

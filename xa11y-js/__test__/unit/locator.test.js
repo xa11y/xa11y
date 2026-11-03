@@ -12,6 +12,23 @@ function root() {
   return _makeTestLocator();
 }
 
+// ── waitStable (issue #530) ─────────────────────────────────────────────────
+
+test('waitStable resolves with the element once its bounds hold still', async () => {
+  const el = await root().descendant('button[name="Back"]').waitStable(1);
+  assert.equal(el.name, 'Back');
+  assert.ok(el.bounds, 'a stable element has bounds');
+});
+
+test('waitStable rejects with a diagnosis when the match is not visible', async () => {
+  await assert.rejects(root().descendant('static_text').waitStable(0.3), (err) => {
+    assert.ok(err instanceof TimeoutError);
+    assert.ok(err.condition.startsWith('stable (bounds unchanged across two'), err.condition);
+    assert.ok(err.lastObserved.includes('matched but not visible'), err.lastObserved);
+    return true;
+  });
+});
+
 test('count matches the mock tree', async () => {
   assert.equal(await root().count(), 1);
   const buttons = root().descendant('button');

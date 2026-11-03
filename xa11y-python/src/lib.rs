@@ -983,6 +983,22 @@ impl Locator {
         make_py_element(py, el.data(), el.provider().clone())
     }
 
+    /// Wait until the element's bounds are unchanged across two consecutive
+    /// polls and it is visible, then return it.
+    ///
+    /// Use before an `InputSim` pointer action on an element that may still
+    /// be animating, so the click lands where it settles:
+    /// `sim.click(locator.wait_stable())`. Unrelated to `stable_id`.
+    #[pyo3(signature = (timeout=None))]
+    fn wait_stable(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<Element>> {
+        let timeout = effective_timeout(timeout)?;
+        let inner = self.inner.clone();
+        let el = py
+            .detach(move || inner.wait_stable(timeout))
+            .map_err(to_py_err)?;
+        make_py_element(py, el.data(), el.provider().clone())
+    }
+
     /// Wait until an arbitrary Python predicate is satisfied.
     ///
     /// A predicate that *raises* aborts the wait immediately and propagates
