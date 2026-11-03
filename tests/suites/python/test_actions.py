@@ -683,7 +683,9 @@ def test_wait_stable_timeout_names_the_moving_bounds(app, app_config):
     app.locator(_START_SLIDE).press()
     try:
         with pytest.raises(xa11y.TimeoutError) as info:
-            target.wait_stable(timeout=0.6)
+            # 1.5 s leaves room for several polls where a resolve is slow
+            # (UIA), and still ends inside the 3 s slide.
+            target.wait_stable(timeout=1.5)
         err = info.value
         assert "two consecutive polls" in err.condition, err.condition
         assert err.last_observed.startswith("bounds still changing:"), (

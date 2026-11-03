@@ -383,7 +383,9 @@ test('waitStable times out naming the moving bounds', async (t) => {
 
   await app.locator(START_SLIDE).press();
   try {
-    await assert.rejects(target.waitStable(0.6), (err) => {
+    // 1.5 s leaves room for several polls where a resolve is slow (UIA on
+    // Windows fit only one poll into 0.6 s), and still ends inside the slide.
+    await assert.rejects(target.waitStable(1.5), (err) => {
       assert.ok(err instanceof TimeoutError, String(err));
       assert.ok(err.condition.includes('two consecutive polls'), err.condition);
       assert.ok(err.lastObserved.startsWith('bounds still changing:'), err.lastObserved);

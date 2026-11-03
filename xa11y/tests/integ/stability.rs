@@ -59,8 +59,10 @@ mod tests {
         app.locator(START).press().expect("start the slide");
         let err = app
             .locator(TARGET)
-            .wait_stable(Duration::from_millis(600))
-            .expect_err("a 3 s slide cannot settle within 600 ms");
+            // 1.5 s leaves room for several polls where a resolve is slow
+            // (UIA), and still ends well inside the 3 s slide.
+            .wait_stable(Duration::from_millis(1500))
+            .expect_err("a 3 s slide cannot settle within 1.5 s");
         let Error::Timeout { .. } = err else {
             panic!("expected a timeout, got {err:?}");
         };

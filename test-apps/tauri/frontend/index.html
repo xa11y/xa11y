@@ -219,17 +219,6 @@ Line 3</textarea>
       <button id="add-item-button" aria-label="Add Item">Add Item</button>
       <button id="remove-item-button" aria-label="Remove Item">Remove Item</button>
     </div>
-    <!-- Motion for Locator.wait_stable (#530). "Start slide" restarts a
-         three-second slide of "Slide target" along the track; it rests at the
-         far end. The slide moves the layout box (`left`), not a transform,
-         so the accessibility bounds move with it on every engine. -->
-    <div class="row">
-      <button id="start-slide-button" aria-label="Start slide">Start slide</button>
-      <div id="slide-track" style="position: relative; width: 180px; height: 28px;">
-        <button id="slide-target" aria-label="Slide target"
-                style="position: absolute; top: 0; left: 120px; width: 60px;">Target</button>
-      </div>
-    </div>
   </fieldset>
 
   <!-- Password entry (#522): the `password` state. Last on the page so it is
@@ -239,6 +228,20 @@ Line 3</textarea>
     <div class="row">
       <label for="password-field">Password</label>
       <input type="password" id="password-field" aria-label="Password" />
+    </div>
+    <!-- Motion for Locator.wait_stable (#530). "Start slide" restarts a
+         three-second slide of "Slide target" along the track; it rests at the
+         far end. The slide moves the layout box (`left`), not a transform,
+         so the accessibility bounds move with it on every engine. It sits in
+         this fieldset because the Dynamic one sets its grid row's height:
+         a row there made the page taller than the window (see the note at
+         the top of the stylesheet), and here it fits in that row as is. -->
+    <div class="row">
+      <button id="start-slide-button" aria-label="Start slide">Start slide</button>
+      <div id="slide-track" style="position: relative; width: 180px; height: 28px;">
+        <button id="slide-target" aria-label="Slide target"
+                style="position: absolute; top: 0; left: 120px; width: 60px;">Target</button>
+      </div>
     </div>
   </fieldset>
 
