@@ -173,15 +173,12 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
     #[test]
     #[ignore]
     fn listing_fails_naming_a_window_that_stopped_answering_before_the_os_calls_it_hung() {
-        // TEMPORARY (#603 investigation, not for merge): log the listing.
-        std::env::set_var("XA11Y_DIAG_603", "1");
         let fixture = HungFixture::start_then_wait(Duration::ZERO);
         let pid = fixture.pid();
 
         let start = Instant::now();
         let listed = App::list();
         let elapsed = start.elapsed();
-        std::env::remove_var("XA11Y_DIAG_603");
         eprintln!("App::list with a freshly unresponsive window took {elapsed:?}: {listed:?}");
         let err = match listed {
             Err(e) => e,
@@ -202,6 +199,17 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
             "reported {reported:?}, measured {elapsed:?}: {err}"
         );
         let diagnosis = err.diagnosis().expect("the timeout carries a diagnosis");
+        let observed = diagnosis.last_observed.clone().unwrap_or_default();
+        // The OS-hung form means the fixture had already gone 5 s without
+        // pumping before the listing began: the runner stalled between the
+        // fixture's ready line and the listing, so this run did not exercise
+        // the #603 path.
+        assert!(
+            observed.contains("UIA's desktop listing returned after"),
+            "the listing did not fail through the omission check (listing took {elapsed:?}); \
+             if this is the IsHungAppWindow form, the runner stalled for more than 5 s after \
+             the fixture stopped pumping: {err}"
+        );
         assert!(
             diagnosis
                 .candidates
