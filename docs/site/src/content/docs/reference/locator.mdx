@@ -56,10 +56,14 @@ practice it never happens on macOS, where every hidden element reads
   reason (`not_showing`, `window_minimized`, `unknown`).
 
 When such a wait times out, its diagnosis says how the scroll ended in the
-`auto_scroll` field: `refused`, `no_effect` (accepted, and a later poll still
-saw `scrolled_out`), or `revealed` (it came into view, and something else,
-such as `enabled=false`, kept the wait going). `last_observed` says the same
-in prose. No `auto_scroll` means the wait never tried to scroll. See
+`auto_scroll` field: `refused`, `no_effect` (accepted, and the next poll still
+read the element not visible, whether scrolled out or hidden for another
+reason), or `revealed` (the next poll read it visible, and something else,
+such as `enabled=false`, kept the wait going). The field describes the first
+poll after the latest accepted scroll, so `revealed` alongside a
+`hidden_reason` of `scrolled_out` means the element came into view and later
+scrolled back out. `last_observed` says the same in prose. No `auto_scroll`
+means the wait never tried to scroll. See
 [errors](/reference/errors/#structured-fields).
 
 `Element` actions and the `wait_*` family don't scroll. Platform limits, such

@@ -64,7 +64,12 @@ element is touched. Narrow it with an attribute filter or pick one with
 `action` auto-waits. It polls until the selector matches one element that is
 visible and enabled, then acts on that element. The window verbs and
 `scroll-into-view` wait only for enabled, because a minimized window or a
-scrolled-away element is invisible by design. The wait lasts up to the default
+scrolled-away element is invisible by design. When the element is enabled and
+the platform reports it as scrolled out, the wait asks the application to
+scroll it into view and checks again. A disabled element is never scrolled,
+and macOS never reports scrolled out. If the wait tried to scroll, the
+`timeout` failure's `auto_scroll` field says how that ended: `refused`,
+`no_effect` or `revealed`. The wait lasts up to the default
 timeout: 5 seconds unless `XA11Y_DEFAULT_TIMEOUT` sets another number of
 seconds in the server's environment. A call that fails takes that
 long, and its `timeout` failure names what it waited for and what it last saw.

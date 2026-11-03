@@ -596,10 +596,13 @@ export class TimeoutError extends XA11yError {
    * What the action's auto-scroll came to, when its target was enabled and
    * `hiddenReason` was `'scrolled_out'`: `'refused'` (the element has no
    * semantic scroll; it was asked once), `'no_effect'` (the platform
-   * accepted the call, and a later poll still read `scrolled_out`) or
-   * `'revealed'` (the scroll worked and something else, such as
-   * `enabled: false`, kept the wait going). `null` when the wait never
-   * tried to scroll.
+   * accepted the call, and the next check still read the element not
+   * visible, scrolled out or hidden otherwise) or `'revealed'` (the next
+   * check read it visible, and something else, such as `enabled: false`,
+   * kept the wait going). It describes the first check after the latest
+   * accepted scroll, so `'revealed'` with `hiddenReason: 'scrolled_out'`
+   * means the element came into view and later scrolled back out. `null`
+   * when the wait never tried to scroll.
    */
   autoScroll: AutoScrollOutcomeName | null;
   /** Bounded near-miss candidates; collected only when the selector never matched. */

@@ -224,19 +224,27 @@ fn diagnosis_suffix(diagnosis: &Option<Box<Diagnosis>>) -> String {
 /// and hidden only because it is scrolled out, the wait calls the platform's
 /// `scroll_into_view` on it, and a timeout reports the outcome here.
 ///
-/// `#[non_exhaustive]`: only the bindings map it, as snake_case strings, and
-/// `[[types.variant_coverage]]` guards their hand-written type declarations.
+/// `#[non_exhaustive]`: nothing outside core matches on it. The bindings, the
+/// CLI and MCP all render it through [`AutoScrollOutcome::to_snake_case`],
+/// whose exhaustive match is the compiler's guard, and
+/// `[[types.variant_coverage]]` guards the hand-written type declarations
+/// (the Python `Literal` and the TypeScript union).
+///
+/// The outcome describes the first check after the latest accepted scroll.
+/// `Revealed` alongside `hidden_reason: scrolled_out` therefore means the
+/// element came into view and later scrolled back out.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AutoScrollOutcome {
     /// The platform refused to scroll this element (it has no semantic
     /// scroll call for it). The wait asked once and kept polling.
     Refused,
-    /// The platform accepted the call, but the element still read
-    /// `scrolled_out` when it was next observed.
+    /// The platform accepted the call, but the element was still not
+    /// visible when it was next observed: still `scrolled_out`, or hidden
+    /// for another reason. `last_observed` says which.
     NoEffect,
-    /// The scroll brought the element into view; something else kept the
-    /// action from running (it was disabled, or hidden for another reason).
+    /// The next check after the scroll read the element visible; something
+    /// else (such as `enabled=false`) kept the action from running.
     Revealed,
 }
 

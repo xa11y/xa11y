@@ -176,24 +176,32 @@ struct AutoScroll {
     /// and its toolkit, not about this instant.
     refused: Option<String>,
     /// A call was accepted and no poll has observed the element since. The
-    /// wait does not time out while this is set, so an outcome is only ever
-    /// claimed from a real observation.
+    /// wait does not time out while this is set: the next poll's observation
+    /// decides `seen`, and no outcome is claimed without one.
     unobserved: bool,
-    /// What the first poll after the latest accepted call saw.
+    /// What the first poll after the latest accepted call saw: `Revealed`
+    /// when it read the element visible, `NoEffect` otherwise.
     seen: Option<AutoScrollOutcome>,
+    /// The element's `hidden_reason` on that poll, when it was not visible.
+    still_hidden: Option<HiddenReason>,
 }
 
 impl AutoScroll {
     /// Record what a poll observed, if a scroll is waiting to be checked.
+    ///
+    /// Only a poll that reads the element visible counts as `Revealed`. One
+    /// that is no longer `scrolled_out` but still hidden for another reason
+    /// is `NoEffect`: the scroll did not make it visible, and the note names
+    /// the reason it was hidden instead.
     fn observe(&mut self, data: &ElementData) {
         if std::mem::take(&mut self.unobserved) {
-            self.seen = Some(
-                if data.states.hidden_reason == Some(HiddenReason::ScrolledOut) {
-                    AutoScrollOutcome::NoEffect
-                } else {
-                    AutoScrollOutcome::Revealed
-                },
-            );
+            if data.states.visible {
+                self.seen = Some(AutoScrollOutcome::Revealed);
+                self.still_hidden = None;
+            } else {
+                self.seen = Some(AutoScrollOutcome::NoEffect);
+                self.still_hidden = data.states.hidden_reason;
+            }
         }
     }
 
@@ -258,13 +266,24 @@ impl AutoScroll {
                  it into view",
                 self.refused.as_deref().unwrap_or_default()
             ),
-            AutoScrollOutcome::NoEffect => format!(
-                "auto-scroll: scroll_into_view was accepted {n} time(s) but the element \
-                 stayed scrolled out"
-            ),
+            AutoScrollOutcome::NoEffect => match self.still_hidden {
+                Some(HiddenReason::ScrolledOut) => format!(
+                    "auto-scroll: scroll_into_view was accepted {n} time(s) but the element \
+                     stayed scrolled out"
+                ),
+                Some(reason) => format!(
+                    "auto-scroll: scroll_into_view was accepted {n} time(s); the element was \
+                     no longer scrolled out but still not visible ({})",
+                    reason.to_snake_case()
+                ),
+                None => format!(
+                    "auto-scroll: scroll_into_view was accepted {n} time(s) but the element \
+                     was still not visible"
+                ),
+            },
             AutoScrollOutcome::Revealed => format!(
-                "auto-scroll: scroll_into_view was accepted {n} time(s) and brought it \
-                 into view"
+                "auto-scroll: scroll_into_view was accepted {n} time(s) and the next check \
+                 read the element visible"
             ),
         })
     }
@@ -2312,7 +2331,7 @@ mod tests {
     // ── Auto-scroll (issue #590) ────────────────────────────────────
 
     /// What [`ScrollingProvider`]'s `scroll_into_view` does.
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq)]
     enum ScrollMode {
         /// Accepts, and the target is in view from the next read on.
         Reveals,
@@ -2326,6 +2345,8 @@ mod tests {
         /// Accepts, and the target is no longer scrolled out but still
         /// hidden for another reason (`not_showing`).
         Uncovers,
+        /// Accepts and brings the target into view, where it reads disabled.
+        RevealsDisabled,
         /// Fails with a platform error.
         Fails,
     }
@@ -2393,7 +2414,7 @@ mod tests {
                     child.states.visible = false;
                     child.states.hidden_reason = Some(reason);
                 }
-                if self.disabled {
+                if self.disabled || (revealed && self.mode == ScrollMode::RevealsDisabled) {
                     child.states.enabled = false;
                 }
             }
@@ -2418,7 +2439,9 @@ mod tests {
                 Ok(())
             };
             match self.mode {
-                ScrollMode::Reveals | ScrollMode::Uncovers => reveal(),
+                ScrollMode::Reveals | ScrollMode::Uncovers | ScrollMode::RevealsDisabled => {
+                    reveal()
+                }
                 ScrollMode::Refuses => Err(Error::ActionNotSupported {
                     action: "scroll_into_view".into(),
                     role: element.role,
@@ -2610,13 +2633,31 @@ mod tests {
     #[test]
     fn a_scroll_that_worked_is_reported_when_something_else_blocks_the_action() {
         let (provider, loc) =
+            ScrollingProvider::locator(ScrollMode::RevealsDisabled, HiddenReason::ScrolledOut);
+        let err = loc.press().expect_err("in view, but disabled");
+        assert_eq!(provider.calls(), 1);
+        let d = err.diagnosis().expect("timeout must carry a diagnosis");
+        assert_eq!(d.auto_scroll, Some(AutoScrollOutcome::Revealed));
+        assert_eq!(d.hidden_reason, None);
+        assert!(format!("{err}").contains("auto-scroll: revealed"), "{err}");
+    }
+
+    #[test]
+    fn a_scroll_that_left_the_target_hidden_otherwise_is_not_called_revealed() {
+        // No longer scrolled out, but not visible either: the scroll did not
+        // bring it into view, whatever the reason now is.
+        let (provider, loc) =
             ScrollingProvider::locator(ScrollMode::Uncovers, HiddenReason::ScrolledOut);
         let err = loc.press().expect_err("still hidden after the scroll");
         assert_eq!(provider.calls(), 1);
         let d = err.diagnosis().expect("timeout must carry a diagnosis");
-        assert_eq!(d.auto_scroll, Some(AutoScrollOutcome::Revealed));
+        assert_eq!(d.auto_scroll, Some(AutoScrollOutcome::NoEffect));
         assert_eq!(d.hidden_reason, Some(HiddenReason::NotShowing));
-        assert!(format!("{err}").contains("auto-scroll: revealed"), "{err}");
+        let last = d.last_observed.as_deref().unwrap_or_default();
+        assert!(
+            last.contains("no longer scrolled out but still not visible (not_showing)"),
+            "{last}"
+        );
     }
 
     #[test]

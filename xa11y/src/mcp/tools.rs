@@ -689,9 +689,10 @@ fn tool_definition(name: &str) -> Value {
                      `hidden_reason` (`scrolled_out`, or `window_minimized` when its window \
                      has to be restored), and `auto_scroll` when the wait tried to scroll: \
                      `refused` (asked once; the element has no scroll call), `no_effect` \
-                     (accepted, yet a later check still found it scrolled out) or `revealed` \
-                     (it came into view and something else, such as being disabled, kept the \
-                     wait going). No `auto_scroll` means no scroll was tried. Do not wrap \
+                     (accepted, yet the next check still found it not visible) or `revealed` \
+                     (the next check found it visible and something else, such as being \
+                     disabled, kept the wait going). No `auto_scroll` means no scroll was \
+                     tried. Do not wrap \
                      this tool in a retry loop; the wait is the retry loop.\n\n\
                      `ok: true` means the application accepted the call, not that \
                      anything changed: a control is free to accept an action and do \
