@@ -32,6 +32,7 @@ class SelectorNotMatchedError(XA11yError):
         self.selector = diagnosis.get("selector")
         self.condition = diagnosis.get("condition")
         self.last_observed = diagnosis.get("last_observed")
+        self.hidden_reason = diagnosis.get("hidden_reason")
         self.candidates = diagnosis.get("candidates", [])
         self.scope = diagnosis.get("scope")
         self.elapsed = None
@@ -48,6 +49,7 @@ class TimeoutError(XA11yError):  # noqa: A001 - mirrors the real module's shadow
         self.condition = diagnosis.get("condition")
         self.selector = diagnosis.get("selector")
         self.last_observed = diagnosis.get("last_observed")
+        self.hidden_reason = diagnosis.get("hidden_reason")
         self.candidates = diagnosis.get("candidates", [])
         self.scope = diagnosis.get("scope")
 
