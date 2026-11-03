@@ -1537,7 +1537,16 @@ def test_a_second_selector_is_a_second_group_lettered_b(mcp, app_pid):
         assert entry["group"] in by_group, entry
         by_group[entry["group"]].append(entry)
     assert by_group[1] and by_group[2], "the same selector twice is two groups"
-    assert len(by_group[1]) == len(by_group[2])
+    first = [e["index"] for e in by_group[1]]
+    second = [e["index"] for e in by_group[2]]
+    if structured["truncated"] == 0:
+        assert first == second, "each element is boxed once per group"
+    else:
+        # The cap counts matches across groups, so it cuts the second group
+        # short: on Windows, Tauri's button count includes WebView2's own
+        # chrome, and twice that passes the cap. What survives is still the
+        # same elements as the first group's, in the same order.
+        assert second == first[: len(second)], (first, second)
     assert all(e["tag"].startswith("A") for e in by_group[1])
     assert all(e["tag"].startswith("B") for e in by_group[2])
 
