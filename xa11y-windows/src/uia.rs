@@ -2290,6 +2290,43 @@ fn dropped_windows_error(
     )
 }
 
+/// The [`Error::Timeout`] for a `FindFirst` by pid that returned no element
+/// while the pid owns windows that do not answer `WM_NULL`, `None` when it
+/// owns no windows or all of them answer.
+///
+/// `windows` are the pid's interactive top-level windows. With none, the
+/// process really has no window yet. Windows that answer keep the caller's
+/// `SelectorNotMatched`, so the poll loop still retries an app that is
+/// starting up. `elapsed` is the `FindFirst` call alone, the wait UIA spent.
+fn unanswered_find_first_error(
+    pid: u32,
+    windows: &[HWND],
+    elapsed: std::time::Duration,
+) -> Option<Error> {
+    if windows.is_empty() {
+        return None;
+    }
+    let report = probe_windows(windows, "top-level", std::time::Instant::now());
+    if report.unresponsive.is_empty() {
+        return None;
+    }
+    Some(
+        Error::timeout(elapsed).diagnose(
+            xa11y_core::Diagnosis::new()
+                .condition(format!("a top-level window of pid {pid}"))
+                .last_observed(format!(
+                    "UIA's search for the windows of pid {pid} returned after {elapsed:.1?} \
+                     without an element although the process owns {} interactive top-level \
+                     window(s), which UIA does when it cannot reach a window within its \
+                     timeouts; {}",
+                    windows.len(),
+                    report.summary()
+                ))
+                .candidates(report.candidates()),
+        ),
+    )
+}
+
 /// A window's title without sending it a message (`GetWindowTextW` reads
 /// another process's caption from the window manager), so it is safe on a
 /// hung window. Empty when untitled or unreadable; the HWND identifies it.
@@ -4255,6 +4292,21 @@ impl Provider for WindowsProvider {
         let el = match found {
             Ok(el) => el,
             Err(e) if e.code().is_ok() => {
+                // A window that stopped pumping less than `OS_HUNG_THRESHOLD`
+                // ago passes the `IsHungAppWindow` check above, and UIA
+                // answers a search that reaches it with S_OK and no element
+                // once its timeouts pass (issue #615). Left as
+                // SelectorNotMatched the poll loop would retry until its own
+                // deadline and report "not found" for an app whose windows
+                // are on screen, so probe the pid's windows before deciding.
+                let windows: Vec<HWND> =
+                    interactive_top_level_windows("probing the windows of a pid")?
+                        .into_iter()
+                        .filter(|hwnd| hwnd_pid(*hwnd) == pid)
+                        .collect();
+                if let Some(err) = unanswered_find_first_error(pid, &windows, elapsed) {
+                    return Err(err);
+                }
                 return Err(
                     Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
                         xa11y_core::Diagnosis::new()
