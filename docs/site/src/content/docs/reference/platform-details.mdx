@@ -58,7 +58,11 @@ Roles not recognized by a platform map to `Unknown`.
 A password field keeps the `TextField` role and sets the `password` state
 instead: `AXSecureTextField` as the role or subrole on macOS, the
 `password text` role on Linux, and `IsPassword` on Windows. xa11y does not
-redact a password field's value or the text typed into it.
+redact a password field's value or the text typed into it: the value is
+whatever the platform reports. On Windows, a password control may decline to
+report its value (a WPF `PasswordBox` does), and its `value` is then `None`.
+The Win32 edit control's provider reports a placeholder, `Access denied`, in
+place of the text, and xa11y passes that placeholder through.
 
 ## Action mapping
 
@@ -300,7 +304,7 @@ The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
 
 - **macOS** parses the `AXValue` attribute, where `"0"` = Off, `"1"` = On, `"2"` = Mixed.
 - **Linux** uses the AT-SPI state bits `Checked` (0x10) and `Mixed` (0x2000).
-- **Windows** reads `TogglePattern.CurrentToggleState`, where 0 = Off, 1 = On, 2 = Indeterminate.
+- **Windows** reads `TogglePattern.CurrentToggleState`, where 0 = Off, 1 = On, 2 = Indeterminate. Any other value reads as `None`, because the state is unknown. A failed read returns a `Platform` error and is never reported as `Off`.
 
 ### Visible state and bounds (Linux)
 

@@ -315,6 +315,25 @@ def test_password_field_is_flagged(app, app_config):
     assert plain.password is False
 
 
+def test_password_field_value_is_withheld(app, app_config):
+    """A password entry whose provider withholds its text reads as no value.
+
+    On Windows, a password control declines `ValuePattern.Value` with
+    `UIA_E_INVALIDOPERATION`. That must surface as `value is None` on a
+    flagged element, not as a platform error that fails every tree read of
+    the window holding it (#597). Walking the whole tree first proves the
+    snapshot of every element, the password field among them, succeeds.
+    """
+    name = app_config.get("password_field_name")
+    if not name or not app_config.get("password_value_withheld"):
+        pytest.skip("app has no password entry whose value is withheld")
+    nodes = collect_tree_nodes(app)
+    assert nodes, "tree read returned no elements"
+    el = app.locator(f'text_field[name="{name}"]').element()
+    assert el.password is True
+    assert el.value is None, f"password value leaked: {el.value!r}"
+
+
 # ---------------------------------------------------------------------------
 # Text area
 # ---------------------------------------------------------------------------
