@@ -10,9 +10,9 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetAncestor, GetDesktopWindow, GetForegroundWindow, GetWindowLongPtrW,
+    EnumWindows, GetAncestor, GetDesktopWindow, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
     GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
-    SendMessageTimeoutW, SetForegroundWindow, GA_PARENT, GA_ROOTOWNER, GWL_EXSTYLE, GWL_STYLE,
+    SendMessageTimeoutW, SetForegroundWindow, GA_PARENT, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
     SMTO_ABORTIFHUNG, STATE_SYSTEM_SELECTED, WM_NULL, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -2151,8 +2151,8 @@ fn desktop_app_windows<C: DesktopChildren>(children: &C) -> Result<DesktopListin
 /// An owned window (a dialog, a progress or message box, a tool palette, a
 /// drop-down) is top-level to `EnumWindows`, but UIA places it under its
 /// owner rather than at the desktop root, so it counts as returned when its
-/// root owner was. `root_owner` is `GetAncestor(GA_ROOTOWNER)`, injected so
-/// the comparison is testable without windows.
+/// root owner was. `root_owner` is [`root_owner`], injected so the
+/// comparison is testable without windows.
 fn omitted_windows(
     interactive: &[HWND],
     returned: &HashSet<usize>,
@@ -2168,10 +2168,29 @@ fn omitted_windows(
         .collect()
 }
 
-/// A window's root owner: itself when it has no owner. A window that
-/// closed meanwhile yields a null HWND, which no listing returns.
+/// Longest owner chain [`root_owner`] follows; real chains are a few deep,
+/// and the bound keeps a cycle from looping.
+const OWNER_CHAIN_LIMIT: usize = 32;
+
+/// A window's root owner, following `GetWindow(GW_OWNER)`: itself when it
+/// has no owner.
+///
+/// Not `GetAncestor(GA_ROOTOWNER)`: that walks `GetParent`, which reports
+/// the owner of a `WS_POPUP` window only. A WinForms or WPF dialog shown
+/// with an owner is an overlapped window, so `GA_ROOTOWNER` returns the
+/// dialog itself (measured on the Windows runner for #603).
 fn root_owner(hwnd: HWND) -> HWND {
-    unsafe { GetAncestor(hwnd, GA_ROOTOWNER) }
+    let mut current = hwnd;
+    for _ in 0..OWNER_CHAIN_LIMIT {
+        // `GetWindow` fails with a null HWND when there is no owner, and
+        // otherwise only for a window that closed meanwhile. Either way the
+        // chain ends here: a closed window is classified by the probe.
+        match unsafe { GetWindow(current, GW_OWNER) } {
+            Ok(owner) if !owner.0.is_null() => current = owner,
+            _ => break,
+        }
+    }
+    current
 }
 
 /// Fail the listing when UIA silently left out a window that does not
