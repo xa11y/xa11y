@@ -578,9 +578,13 @@ APP_CONFIGS: dict[str, dict] = {
         # ProgressBar.ProgressBarAccessibleObject), so this one is asserted.
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
-        # Not instrumented yet: the toolkit has a password entry, the test
-        # app does not show one (#522).
-        "password_field_name": None,
+        # Password entry (#522): a `UseSystemPasswordChar` TextBox, an
+        # `ES_PASSWORD` edit.
+        "password_field_name": "Password",
+        # The Win32 edit proxy does not withhold the value: ValuePattern.Value
+        # succeeds with a placeholder ("Access denied") instead of the text,
+        # and that placeholder is what xa11y reports (#597).
+        "password_value_withheld": False,
         "textfield_initial_value": "hello world",
         # UIA has no multiline-edit control type: a WinForms multiline TextBox
         # is ControlType.Edit like any other, which xa11y maps to `text_field`.
@@ -698,9 +702,12 @@ APP_CONFIGS: dict[str, dict] = {
         # ProgressBarAutomationPeer also implements IRangeValueProvider.
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
-        # Not instrumented yet: the toolkit has a password entry, the test
-        # app does not show one (#522).
-        "password_field_name": None,
+        # Password entry (#522): a PasswordBox.
+        "password_field_name": "Password",
+        # PasswordBoxAutomationPeer withholds the text from
+        # ValuePattern.Value, so `value` is None rather than a failed tree
+        # read (#597).
+        "password_value_withheld": True,
         "textfield_initial_value": "hello world",
         # Same UIA limitation the WinForms and egui configs note: there is no
         # multiline-edit control type, so a WPF TextBox with AcceptsReturn is

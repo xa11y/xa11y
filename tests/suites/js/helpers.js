@@ -81,6 +81,7 @@ const APP_CONFIG = {
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    passwordFieldName: 'Password', // password entry (#522)
   },
   wpf: {
     okButtonName: 'OK',
@@ -88,6 +89,7 @@ const APP_CONFIG = {
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    passwordFieldName: 'Password', // password entry (#522)
     dialogButtonName: 'Open Dialog',
     dialogName: 'Sample Dialog',
     siblingButtonName: 'Open Sibling',

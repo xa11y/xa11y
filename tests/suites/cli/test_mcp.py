@@ -1243,7 +1243,7 @@ def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
 
 
 # Apps whose test page shows a password entry named "Password" (#522).
-PASSWORD_APPS = {"tauri", "electron"}
+PASSWORD_APPS = {"tauri", "electron", "winforms", "wpf"}
 
 
 def test_find_flags_a_password_entry(mcp, app_pid, app_name):

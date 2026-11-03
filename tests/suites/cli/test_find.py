@@ -145,7 +145,7 @@ def test_find_pretty_output_contains_state_info(run_cli, app_pid):
 
 
 # Apps whose test page shows a password entry named "Password" (#522).
-PASSWORD_APPS = {"tauri", "electron"}
+PASSWORD_APPS = {"tauri", "electron", "winforms", "wpf"}
 
 
 def test_find_lists_the_password_state(run_cli, app_pid, app_name):
