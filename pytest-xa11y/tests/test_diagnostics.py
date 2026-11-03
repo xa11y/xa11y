@@ -35,6 +35,7 @@ class FakeTimeout(xa11y.TimeoutError):
     selector = 'dialog[name^="Submit"]'
     last_observed = "selector never matched"
     hidden_reason = None
+    auto_scroll = None
     candidates: ClassVar[list] = ['window "Untitled"', 'button "Export"']
     scope = "window\n  button"
 
@@ -136,6 +137,15 @@ def test_render_diagnosis_reports_the_delivery_disposition():
         delivery = "not_delivered"
 
     assert "delivery: not_delivered" in render_diagnosis(Undelivered("Timeout after 5.0s"))
+
+
+def test_render_diagnosis_says_how_an_auto_scroll_ended():
+    class RefusedTimeout(FakeTimeout):
+        hidden_reason = "scrolled_out"
+        auto_scroll = "refused"
+
+    assert "auto_scroll: refused" in render_diagnosis(RefusedTimeout("Timeout after 5.0s"))
+    assert "auto_scroll" not in render_diagnosis(FakeTimeout("Timeout after 5.0s"))
 
 
 def test_render_diagnosis_ignores_foreign_exceptions():

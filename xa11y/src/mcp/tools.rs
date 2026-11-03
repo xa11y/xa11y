@@ -699,16 +699,24 @@ fn tool_definition(name: &str) -> Value {
                      visible and must still be reachable by the very verbs that restore or \
                      activate it. `restore` is the inverse of `minimize`/`maximize`/ \
                      `enter-fullscreen`: it leaves minimized, maximized, or fullscreen. \
-                     The wait runs \
+                     When the element it finds is enabled and reported as scrolled out of \
+                     view, the wait may ask the application to scroll it into view (its own \
+                     scroll call, not a mouse gesture) and check again. It asks only then: \
+                     not for a disabled element, nor on a platform that never reports \
+                     `scrolled_out`. The wait runs \
                      up to the default timeout, currently {timeout}. Set {timeout_env} \
                      (in seconds) in the environment the server is launched with to \
                      change it; no tool argument does. A call that is going to fail \
                      therefore takes that long and returns a `timeout` failure \
                      naming what it was waiting for and what it last saw. When it \
                      matched an element that was not visible, the diagnosis also has \
-                     `hidden_reason`: `scrolled_out` means it has to be scrolled into \
-                     view first (`scroll-into-view`, where the element supports it), \
-                     `window_minimized` that its window has to be restored. Do not wrap \
+                     `hidden_reason` (`scrolled_out`, or `window_minimized` when its window \
+                     has to be restored), and `auto_scroll` when the wait tried to scroll: \
+                     `refused` (asked once; the element has no scroll call), `no_effect` \
+                     (accepted, yet the next check still found it not visible) or `revealed` \
+                     (the next check found it visible and something else, such as being \
+                     disabled, kept the wait going). No `auto_scroll` means no scroll was \
+                     tried. Do not wrap \
                      this tool in a retry loop; the wait is the retry loop.\n\n\
                      Every failure of every tool carries `delivery`, which says whether a \
                      retry is safe. `not_delivered` means the action never reached the application (no \
@@ -2348,6 +2356,11 @@ fn diagnosis_json(d: &crate::Diagnosis) -> Value {
         "hidden_reason",
         d.hidden_reason.map(|r| Value::from(r.to_snake_case())),
     );
+    insert_some(
+        &mut out,
+        "auto_scroll",
+        d.auto_scroll.map(|o| Value::from(o.to_snake_case())),
+    );
     if !d.candidates.is_empty() {
         out.insert(
             "candidates".into(),
@@ -3443,6 +3456,7 @@ mod tests {
         assert_eq!(structured["diagnosis"]["condition"], "visible");
         assert_eq!(structured["diagnosis"]["candidates"][0], "button \"OK\"");
         assert!(structured["diagnosis"].get("hidden_reason").is_none());
+        assert!(structured["diagnosis"].get("auto_scroll").is_none());
     }
 
     #[test]
@@ -3454,12 +3468,15 @@ mod tests {
                     .last_observed(
                         "matched button \"Save\" (visible=false, enabled=true, focused=false)",
                     )
-                    .hidden_reason(crate::HiddenReason::ScrolledOut),
+                    .hidden_reason(crate::HiddenReason::ScrolledOut)
+                    .auto_scroll(crate::AutoScrollOutcome::Refused),
             ),
         );
         let (text, structured) = describe_failure("action", &err);
         assert!(text.contains("hidden because: scrolled_out"), "{text}");
+        assert!(text.contains("auto-scroll: refused"), "{text}");
         assert_eq!(structured["diagnosis"]["hidden_reason"], "scrolled_out");
+        assert_eq!(structured["diagnosis"]["auto_scroll"], "refused");
     }
 
     #[test]

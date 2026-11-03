@@ -278,7 +278,20 @@ internal sealed class TestWindow : Window
         var list = new ListBox { ItemsSource = _items, Width = 260, Height = 100 };
         AutomationProperties.SetName(list, "Items");
 
-        return MakeGroup("List", Orientation.Vertical, list);
+        // A list longer than its viewport, so its last rows start scrolled out
+        // (issue #590). An auto-waiting action on one of them scrolls it into
+        // view through ScrollItem.ScrollIntoView before acting. Virtualization
+        // is off so every row exists in the UIA tree from the start: a
+        // virtualized row past the viewport has no element to find at all.
+        var longList = new ListBox { Width = 260, Height = 50 };
+        VirtualizingPanel.SetIsVirtualizing(longList, false);
+        for (int i = 1; i <= 12; i++)
+        {
+            longList.Items.Add($"Long Item {i}");
+        }
+        AutomationProperties.SetName(longList, "Long List");
+
+        return MakeGroup("List", Orientation.Vertical, list, longList);
     }
 
     private GroupBox BuildTable() => MakeGroup("Table", Orientation.Vertical, _usersTable);

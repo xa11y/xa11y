@@ -127,6 +127,11 @@ APP_CONFIGS: dict[str, dict] = {
         # AT-SPI bridge cannot scroll a row into view itself.
         "scrolled_pane_end_button": "Scroll Long Pane To End",
         "scrolled_pane_start_button": "Scroll Long Pane To Start",
+        # Qt implements no AT-SPI Component.ScrollTo, so an action on a
+        # scrolled-out row cannot scroll it into view and waits it out (#590).
+        # Linux only, like the pane itself: elsewhere the row is not reported
+        # scrolled out, so no scroll is attempted to be refused.
+        "scrolled_pane_refuses_scroll_into_view": sys.platform.startswith("linux"),
         # A button on an inactive tab page: hidden by a container that does
         # not scroll, so not_showing (#590). Qt reports it without bounds,
         # so the scroll-role check is guarded by the Linux unit tests rather
@@ -646,6 +651,9 @@ APP_CONFIGS: dict[str, dict] = {
         "scrolled_pane_name": "Long Pane",
         "scrolled_pane_first_item": "Long Entry 1",
         "scrolled_pane_last_item": "Long Entry 10",
+        # Plain buttons have no UIA ScrollItem pattern, so an action on a
+        # scrolled-out one cannot scroll it into view and waits it out (#590).
+        "scrolled_pane_refuses_scroll_into_view": True,
         # A ComboBox in an overflowing panel: its open drop-down extends past
         # the panel and must not be clipped to it.
         "scrolled_panel_name": "Scroll Panel",
@@ -657,6 +665,13 @@ APP_CONFIGS: dict[str, dict] = {
         "remove_item_button_name": "Remove Item",
     },
     "wpf": {
+        # A list longer than its viewport whose rows have the UIA ScrollItem
+        # pattern: an auto-waiting action on a scrolled-out row scrolls it into
+        # view first (#590). Virtualization is off in the app, so the last row
+        # exists before it is scrolled to.
+        "auto_scroll_list_name": "Long List",
+        "auto_scroll_first_item": "Long Item 1",
+        "auto_scroll_last_item": "Long Item 12",
         # The second Microsoft UI framework in the matrix (step 2 of issue
         # #324), and the one that produces ControlType.Custom + TableItem
         # cells — the branch of map_uia_role added in #323, which no other app

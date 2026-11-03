@@ -35,6 +35,41 @@ The exception is `scroll_into_view()`, which waits for attached and enabled
 alone: an off-screen element is what it exists to bring on-screen, so gating it
 on visibility would never resolve.
 
+Waiting includes scrolling. When the target is enabled and
+the only thing hiding it is a scrolling ancestor (`hidden_reason` is
+`scrolled_out`), the wait calls the platform's own `scroll_into_view` on it and
+checks again on the next poll. Nothing is clicked or dragged to get there.
+Auto-scroll happens only where the platform reports `scrolled_out`, so in
+practice it never happens on macOS, where every hidden element reads
+`not_showing`. The call is made under these rules:
+
+- If the platform refuses it for that element, the wait doesn't ask again:
+  one refusal per wait. It keeps polling until its timeout, so an element that
+  scrolls into view some other way is still acted on.
+- If the platform accepts it, the wait always checks the element once more,
+  even when the timeout has run out meanwhile, so a scroll that worked is
+  never reported as one that didn't.
+- If the platform accepts it and the element stays scrolled out, the wait
+  calls it at most three times in all.
+- Any other failure of the call ends the wait with that error.
+- A disabled target is never scrolled, and neither is one hidden for any other
+  reason (`not_showing`, `window_minimized`, `unknown`).
+
+When such a wait times out, its diagnosis says how the scroll ended in the
+`auto_scroll` field: `refused`, `no_effect` (accepted, and the next poll still
+read the element not visible, whether scrolled out or hidden for another
+reason), or `revealed` (the next poll read it visible, and something else,
+such as `enabled=false`, kept the wait going). The field describes the first
+poll after the latest accepted scroll, so `revealed` alongside a
+`hidden_reason` of `scrolled_out` means the element came into view and later
+scrolled back out. `last_observed` says the same in prose. No `auto_scroll`
+means the wait never tried to scroll. See
+[errors](/reference/errors/#structured-fields).
+
+`Element` actions and the `wait_*` family don't scroll. Platform limits, such
+as which controls have a scroll call at all, are in
+[Platform Details](/reference/platform-details/).
+
 Which platform API each verb reaches is in
 [Platform Details](/reference/platform-details/#action-mapping).
 
@@ -130,7 +165,7 @@ difference is what they act on:
 | | `Locator` | `Element` |
 | --- | --- | --- |
 | Selector | Re-resolved on every call | Not applicable; the handle is fixed |
-| Auto-wait | Waits for visible and enabled | None |
+| Auto-wait | Waits for visible and enabled, scrolling a scrolled-out target into view | None |
 | Handle went away | Re-resolves against the current tree | Raises `ElementStale` |
 
 ## Default timeout

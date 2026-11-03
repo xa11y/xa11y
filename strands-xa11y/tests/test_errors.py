@@ -63,6 +63,20 @@ def test_delivery_tells_the_model_whether_a_retry_is_safe():
     assert "delivery: unknown" in describe(fake_xa11y.TimeoutError("timed out"))
 
 
+def test_auto_scroll_says_whether_scrolling_was_already_tried():
+    """A model told the scroll was refused should not ask for one."""
+    message = describe(
+        fake_xa11y.TimeoutError(
+            "timed out",
+            last_observed='matched button "Save" (visible=false, enabled=true, focused=false)',
+            hidden_reason="scrolled_out",
+            auto_scroll="refused",
+        )
+    )
+    assert "auto scroll: refused" in message
+    assert "auto scroll" not in describe(fake_xa11y.TimeoutError("timed out"))
+
+
 @pytest.mark.parametrize(
     ("error", "expected"),
     [

@@ -35,6 +35,7 @@ _DIAGNOSIS_FIELDS = (
     "last_observed",
     "hidden_reason",
     "delivery",
+    "auto_scroll",
     "candidates",
     "scope",
 )

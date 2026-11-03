@@ -71,6 +71,7 @@ class SelectorNotMatchedError extends XA11yError {
     /** @type {string | null} */ this.condition = null;
     /** @type {string | null} */ this.lastObserved = null;
     /** @type {string | null} */ this.hiddenReason = null;
+    /** @type {string | null} */ this.autoScroll = null;
     /** @type {string[]} */ this.candidates = [];
     /** @type {string | null} */ this.scope = null;
     /** @type {number | null} */ this.elapsedMs = null;
@@ -97,6 +98,7 @@ class TimeoutError extends XA11yError {
     /** @type {string | null} */ this.condition = null;
     /** @type {string | null} */ this.lastObserved = null;
     /** @type {string | null} */ this.hiddenReason = null;
+    /** @type {string | null} */ this.autoScroll = null;
     /** @type {string[]} */ this.candidates = [];
     /** @type {string | null} */ this.scope = null;
     /** @type {number | null} */ this.elapsedMs = null;
@@ -194,6 +196,7 @@ function toTypedError(err) {
     typed.condition = diagnosis.condition ?? null;
     typed.lastObserved = diagnosis.lastObserved ?? null;
     typed.hiddenReason = diagnosis.hiddenReason ?? null;
+    typed.autoScroll = diagnosis.autoScroll ?? null;
     typed.candidates = Array.isArray(diagnosis.candidates) ? diagnosis.candidates : [];
     typed.scope = diagnosis.scope ?? null;
     typed.elapsedMs = diagnosis.elapsedMs ?? null;
@@ -213,6 +216,7 @@ function diagnosedError(ErrorClass, summary, diagnosis) {
     condition = null,
     lastObserved = null,
     hiddenReason = null,
+    autoScroll = null,
     candidates = [],
     scope = null,
     elapsedMs = null,
@@ -222,6 +226,7 @@ function diagnosedError(ErrorClass, summary, diagnosis) {
   if (selector) message += `; selector: ${selector}`;
   if (lastObserved) message += `; last observed: ${lastObserved}`;
   if (hiddenReason) message += `; hidden because: ${hiddenReason}`;
+  if (autoScroll) message += `; auto-scroll: ${autoScroll}`;
   if (candidates.length > 0) message += `; candidates: ${candidates.join(', ')}`;
   if (scope) message += `\nsearch scope (bounded):\n${scope}`;
 
@@ -230,6 +235,7 @@ function diagnosedError(ErrorClass, summary, diagnosis) {
   err.condition = condition;
   err.lastObserved = lastObserved;
   err.hiddenReason = hiddenReason;
+  err.autoScroll = autoScroll;
   err.candidates = candidates;
   err.scope = scope;
   err.elapsedMs = elapsedMs;

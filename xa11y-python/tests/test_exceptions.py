@@ -271,6 +271,7 @@ def test_diagnosis_attributes_always_present(test_app):
         "selector",
         "last_observed",
         "hidden_reason",
+        "auto_scroll",
         "candidates",
         "scope",
         "elapsed",

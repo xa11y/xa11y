@@ -58,6 +58,10 @@ Reading it back:
     scrolled_out` (or `window_minimized`, `not_showing`, `unknown`), and the
     reason is also the `hidden_reason` field. See
     [hidden reason](/reference/platform-details/#hidden-reason).
+    When an action's wait tried to scroll the element into view, the
+    message also ends with `auto-scroll: refused`, `no_effect` or
+    `revealed`, which is the `auto_scroll` field. See
+    [auto-scroll](/reference/locator/#locator).
   - `selector matched 2 element(s); nth(5) requested` means an `nth()`
     index out of range.
 - **`candidates`** lists near-misses: elements with the selector's target

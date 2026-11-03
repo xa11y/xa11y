@@ -68,10 +68,20 @@ _GUIDANCE = {
 # Fields carrying xa11y's structured diagnosis, in the order they read best.
 # `hidden_reason` says why a matched element read visible=False ("scrolled_out",
 # "window_minimized", ...), which is what tells the model whether to scroll or to
-# restore a window.
+# restore a window. `auto_scroll` says whether the action already tried scrolling
+# it into view ("refused", "no_effect", "revealed"), so the model does not try a
+# scroll that was just refused.
 # `delivery` says whether the failed action may already have taken effect, so
 # the model knows whether retrying is safe or could double-submit.
-_DIAGNOSIS_FIELDS = ("condition", "selector", "last_observed", "hidden_reason", "elapsed", "delivery")
+_DIAGNOSIS_FIELDS = (
+    "condition",
+    "selector",
+    "last_observed",
+    "hidden_reason",
+    "auto_scroll",
+    "elapsed",
+    "delivery",
+)
 
 
 class ToolError(Exception):
