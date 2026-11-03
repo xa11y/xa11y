@@ -1439,6 +1439,9 @@ pub(crate) fn states_from_bits(
     StateParts {
         enabled,
         visible,
+        // From the bits alone: an event target is not walked to its
+        // ancestors, so `VISIBLE` without `SHOWING` stays `Unknown` here.
+        hidden_reason: crate::atspi::hidden_reason_from_bits(bits),
         focused: (bits & FOCUSED) != 0,
         // AT-SPI `ACTIVE` = foreground window/frame; kept in sync with
         // `LinuxProvider::parse_states`.

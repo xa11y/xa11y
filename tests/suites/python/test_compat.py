@@ -694,6 +694,24 @@ def test_locator_dump_shorthand(app, app_config):
     assert "button" in text
 
 
+def test_hidden_reason_is_set_exactly_when_not_visible(app):
+    """Every element carries a ``hidden_reason`` exactly when it is not
+    visible (#590), and the reason is one of the documented names."""
+    known = {"window_minimized", "scrolled_out", "not_showing", "unknown"}
+    elements = app.locator("*").elements()
+    assert elements, "the app's tree must not be empty"
+    broken = [
+        (e.role, e.name, e.visible, e.hidden_reason)
+        for e in elements
+        if (e.hidden_reason is None) != e.visible
+        or (e.hidden_reason is not None and e.hidden_reason not in known)
+    ]
+    assert not broken, (
+        f"hidden_reason must be a known name exactly when visible is False; "
+        f"these elements break it: {broken[:20]}"
+    )
+
+
 def _scrolled_pane_visibility(app, pane_name: str, first: str, last: str):
     """The first and last entries' ``visible``, read both ways the provider
     computes it: a selector search, which takes the one-pass subtree fetch,
@@ -708,13 +726,16 @@ def _scrolled_pane_visibility(app, pane_name: str, first: str, last: str):
 
 
 def test_controls_scrolled_out_of_a_pane_are_not_visible(app, app_config):
-    """A control scrolled out of its pane reports ``visible == False``.
+    """A control scrolled out of its pane reports ``visible == False``, and
+    ``hidden_reason == "scrolled_out"``.
 
-    Some UIA providers leave ``IsOffscreen`` false on content outside the
-    viewport, so without the provider's own clipping it counted as visible
-    and an auto-waiting action would act on a control nobody can see (issue
-    #502). The test first asserts that premise on the scrolled-out entry's
-    ``raw["uia_is_offscreen"]``, so it cannot pass with or without the fix.
+    On Windows, some UIA providers leave ``IsOffscreen`` false on content
+    outside the viewport, so without the provider's own clipping it counted
+    as visible and an auto-waiting action would act on a control nobody can
+    see (issue #502). The test first asserts that premise on the scrolled-out
+    entry's ``raw["uia_is_offscreen"]``, so it cannot pass with or without
+    the fix. On Linux the toolkit hides the row itself, and the provider has
+    to tell scrolling from any other hiding (#590).
     """
     pane_name = app_config.get("scrolled_pane_name")
     if not pane_name:
@@ -722,15 +743,16 @@ def test_controls_scrolled_out_of_a_pane_are_not_visible(app, app_config):
     first = app_config["scrolled_pane_first_item"]
     last = app_config["scrolled_pane_last_item"]
 
-    # The premise: UIA itself says the scrolled-out entry is on screen.
-    # Without it this test would pass with or without the fix.
     hidden = app.locator(f'[name="{last}"]').element()
-    assert hidden.raw.get("uia_is_offscreen") is False, (
-        f"{last!r} reports uia_is_offscreen="
-        f"{hidden.raw.get('uia_is_offscreen')!r}, so the fixture no longer "
-        f"exercises issue #502 (UIA leaving IsOffscreen false on a "
-        f"scrolled-out control)"
-    )
+    if sys.platform == "win32":
+        # The premise: UIA itself says the scrolled-out entry is on screen.
+        # Without it this test would pass with or without the fix.
+        assert hidden.raw.get("uia_is_offscreen") is False, (
+            f"{last!r} reports uia_is_offscreen="
+            f"{hidden.raw.get('uia_is_offscreen')!r}, so the fixture no longer "
+            f"exercises issue #502 (UIA leaving IsOffscreen false on a "
+            f"scrolled-out control)"
+        )
 
     found, listed = _scrolled_pane_visibility(app, pane_name, first, last)
     expected = {first: True, last: False}
@@ -742,6 +764,37 @@ def test_controls_scrolled_out_of_a_pane_are_not_visible(app, app_config):
         f"children(): the first entry must be visible and the last scrolled "
         f"out; got {listed}"
     )
+    # A hidden element says why, and a visible one says nothing (#590).
+    assert hidden.hidden_reason == "scrolled_out", (
+        f"{last!r} is hidden because its pane clips it, so hidden_reason "
+        f"must be 'scrolled_out'; got {hidden.hidden_reason!r}"
+    )
+    shown = app.locator(f'[name="{first}"]').element()
+    assert shown.hidden_reason is None, (
+        f"a visible element has no hidden_reason; {first!r} reports "
+        f"{shown.hidden_reason!r}"
+    )
+
+
+def test_a_control_its_container_hides_is_not_showing(app, app_config):
+    """A control on an inactive tab page reads ``hidden_reason ==
+    "not_showing"`` (#590).
+
+    A contract test: the hidden control reports no bounds, so this does not
+    exercise the scroll-role check that tells a control lying outside a
+    container that does not scroll from a scrolled-out one. The Linux unit
+    tests ``scrolled_out_needs_a_scrolling_container_on_the_climb`` and
+    ``a_hidden_row_beyond_its_list_is_scrolled_out`` guard that check.
+    """
+    name = app_config.get("not_showing_name")
+    if not name:
+        pytest.skip("this app has no control hidden by a non-scrolling container")
+    hidden = app.locator(f'[name="{name}"]').element()
+    assert hidden.visible is False, f"{name!r} is on an inactive page, so not visible"
+    assert hidden.hidden_reason == "not_showing", (
+        f"{name!r} is hidden by its tab page, which does not scroll, so "
+        f"hidden_reason must be 'not_showing'; got {hidden.hidden_reason!r}"
+    )
 
 
 def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
@@ -749,10 +802,13 @@ def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
     first does not: the clip follows the scroll position rather than a
     remembered answer.
 
-    Focus moves the viewport: the framework scrolls a pane to the control
-    that takes focus. ``scroll_into_view`` cannot, because plain buttons
-    have no UIA ScrollItem pattern. ``Element.focus`` acts without waiting
-    for ``visible``, which the scrolled-out entry is not.
+    Focus moves the WinForms viewport: the framework scrolls a pane to the
+    control that takes focus. ``scroll_into_view`` cannot, because plain
+    buttons have no UIA ScrollItem pattern. ``Element.focus`` acts without
+    waiting for ``visible``, which the scrolled-out entry is not. A Qt list
+    row offers neither focus nor AT-SPI ``ScrollTo``, so an app that sets
+    ``scrolled_pane_end_button`` / ``scrolled_pane_start_button`` scrolls by
+    pressing those instead.
     """
     pane_name = app_config.get("scrolled_pane_name")
     if not pane_name:
@@ -761,7 +817,18 @@ def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
     last = app_config["scrolled_pane_last_item"]
     expected = {first: False, last: True}
 
-    app.locator(f'[name="{last}"]').element().focus()
+    buttons = {
+        last: app_config.get("scrolled_pane_end_button"),
+        first: app_config.get("scrolled_pane_start_button"),
+    }
+
+    def bring_into_view(name: str) -> None:
+        if buttons[name]:
+            app.locator(f'button[name="{buttons[name]}"]').press()
+        else:
+            app.locator(f'[name="{name}"]').element().focus()
+
+    bring_into_view(last)
     try:
         deadline = time.monotonic() + 5.0
         while True:
@@ -776,17 +843,23 @@ def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
         assert listed == expected, (
             f"children() after scrolling to the last entry: got {listed}"
         )
-        # The premise again, from the other side: UIA still calls the entry
-        # that just scrolled out on screen, so the flip is the viewport clip.
         gone = app.locator(f'[name="{first}"]').element()
-        assert gone.raw.get("uia_is_offscreen") is False, (
-            f"{first!r} reports uia_is_offscreen="
-            f"{gone.raw.get('uia_is_offscreen')!r} after scrolling out, so "
-            f"this test no longer exercises issue #502"
+        if sys.platform == "win32":
+            # The premise again, from the other side: UIA still calls the
+            # entry that just scrolled out on screen, so the flip is the
+            # viewport clip.
+            assert gone.raw.get("uia_is_offscreen") is False, (
+                f"{first!r} reports uia_is_offscreen="
+                f"{gone.raw.get('uia_is_offscreen')!r} after scrolling out, so "
+                f"this test no longer exercises issue #502"
+            )
+        assert gone.hidden_reason == "scrolled_out", (
+            f"{first!r} scrolled out of its pane, so hidden_reason must be "
+            f"'scrolled_out'; got {gone.hidden_reason!r}"
         )
     finally:
         # Put the shared app back for the test above, whatever the order.
-        app.locator(f'[name="{first}"]').element().focus()
+        bring_into_view(first)
 
 
 def test_open_dropdown_in_a_scrolled_panel_is_visible(app, app_config):

@@ -116,6 +116,24 @@ APP_CONFIGS: dict[str, dict] = {
         # Not yet verified unknown-free on all three OSes.
         "expect_no_unknown_roles": False,
         "window_name_contains": "xa11y-qt-test-app",
+        # A list longer than its viewport (#590). Linux only: Qt's AT-SPI
+        # bridge clears VISIBLE on a row outside the view, which the provider
+        # reads as scrolled out of its list. Qt's UIA and AX bridges are not
+        # verified to say the same, so the other two OSes do not run it.
+        "scrolled_pane_name": "Long Pane" if sys.platform.startswith("linux") else None,
+        "scrolled_pane_first_item": "Long Entry 1",
+        "scrolled_pane_last_item": "Long Entry 10",
+        # Buttons that scroll the pane to its last and first entries: Qt's
+        # AT-SPI bridge cannot scroll a row into view itself.
+        "scrolled_pane_end_button": "Scroll Long Pane To End",
+        "scrolled_pane_start_button": "Scroll Long Pane To Start",
+        # A button on an inactive tab page: hidden by a container that does
+        # not scroll, so not_showing (#590). Qt reports it without bounds,
+        # so the scroll-role check is guarded by the Linux unit tests rather
+        # than here. Linux only, for the same reason as the pane above.
+        "not_showing_name": "Tab Two Button"
+        if sys.platform.startswith("linux")
+        else None,
         # Dynamic buttons for event tests
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
@@ -165,6 +183,17 @@ APP_CONFIGS: dict[str, dict] = {
         # Verified clean against a live AT-SPI session.
         "expect_no_unknown_roles": True,
         "window_name_contains": None,  # not asserted for GTK
+        # GTK 4 keeps VISIBLE and SHOWING on a widget scrolled out of a
+        # Gtk.ScrolledWindow, rows of a Gtk.ListBox included, and reports
+        # extents relative to the window, so nothing it exposes says
+        # "scrolled out" (#590; verified against a live AT-SPI session).
+        "scrolled_pane_name": unsupported(
+            "GTK 4 reports scrolled-out widgets as showing, so they are visible"
+        ),
+        # An inactive Gtk.Notebook page is not in the accessible tree at all.
+        "not_showing_name": unsupported(
+            "GTK 4 leaves hidden containers' children out of the tree"
+        ),
         # Dynamic buttons for event tests (Dynamic group in app.py).
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",

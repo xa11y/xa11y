@@ -323,6 +323,30 @@ The scroll check has limits. UIA has no viewport rectangle, so the ancestor's bo
 
 Auto-waiting actions wait for `visible`, so an action on a control scrolled out of view times out instead of acting. `scroll_into_view()` waits only for attached and enabled, but it needs the UIA ScrollItem pattern, which list items, tree items and similar controls have. A plain control such as a button has none, and the call returns `Unsupported`. For those, call `focus()` on an `Element` snapshot: frameworks such as WinForms scroll a focused control into view. `Locator.focus()` doesn't help there, because it also waits for `visible`. See the [locator reference](/reference/locator/).
 
+### Hidden reason
+
+When `visible` is false, `hidden_reason` says why, and it is `None` (`null` in JavaScript) whenever `visible` is true. When more than one reason applies, the first in this table wins:
+
+| Value | Meaning |
+| --- | --- |
+| `window_minimized` | The element's window is minimized. Restore it to act. |
+| `scrolled_out` | An ancestor that scrolls has moved the element out of its viewport. Scroll it into view to act. |
+| `not_showing` | The platform reports the element hidden for a reason it doesn't name, such as a collapsed section or a hidden page. |
+| `unknown` | The element is hidden, and xa11y couldn't tell which of the reasons above applies. |
+
+What each platform can tell apart:
+
+- **Windows** reports `window_minimized` for the contents of a minimized window and `scrolled_out` for the scroll check described above. `IsOffscreen` alone gives `not_showing`.
+- **Linux** reads the reason from AT-SPI states and, where those don't settle it, from the element's ancestors:
+  - The `Iconified` state, on the element or on an ancestor climbed past, gives `window_minimized`.
+  - For an element that keeps `Visible` but lacks `Showing`, xa11y climbs to the nearest ancestor that is showing. The reason is `scrolled_out` only when the element lies outside that ancestor's extents and one of the ancestors climbed is a scrolling container: `list`, `list box`, `scroll pane`, `table`, `tree`, `tree table`, or `viewport`. Lying outside a container that doesn't scroll gives `not_showing`.
+  - An element without `Visible` reports `not_showing`, with one exception. An item cell (`list item`, `table cell`, `table row` or `tree item`) that lies outside a showing scrolling container that is its parent reports `scrolled_out`, because Qt clears `Visible` on a row scrolled out of its view.
+  - A read that fails during these checks gives `unknown`, and so does a failed read of the element's own bounds or state set. Event targets skip the ancestor walk and report `unknown` for the `Visible`-without-`Showing` case.
+  - GTK 4 keeps `Visible` and `Showing` on widgets scrolled out of a `GtkScrolledWindow`, so they read as visible.
+- **macOS** has only `AXHidden`, which carries no reason, so every hidden element reports `not_showing`.
+
+A timeout on an element that matched but stayed hidden carries the reason in its diagnosis. See [errors](/reference/errors/).
+
 ### Selected state
 
 Per-item selection (`selected` on rows, cells, list items) is read differently:

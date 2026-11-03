@@ -705,6 +705,11 @@ reader_writer_pair! {
     fields {
         pub enabled: bool,
         pub visible: bool,
+        /// Why the element is not visible: `Some` exactly when `visible` is
+        /// `false`, `None` when it is `true`. See [`HiddenReason`] for what
+        /// each platform can tell apart.
+        #[serde(default)]
+        pub hidden_reason: Option<HiddenReason>,
         pub focused: bool,
         /// Whether this element is the active (foreground) window — the window that
         /// currently receives the user's input. Only meaningful for window-like
@@ -759,6 +764,7 @@ impl Default for StateSet {
         Self {
             enabled: true,
             visible: true,
+            hidden_reason: None,
             focused: false,
             active: false,
             minimized: None,
@@ -790,6 +796,58 @@ pub enum Toggled {
     On,
     /// Indeterminate / tri-state
     Mixed,
+}
+
+/// Why an element reads `visible: false`.
+///
+/// [`StateSet::hidden_reason`] carries one of these exactly when
+/// [`StateSet::visible`] is `false`, and is `None` when it is `true`. A
+/// provider reports the most specific reason it can establish, in the order
+/// listed here: an element in a minimized window that is also scrolled out of
+/// a list reads [`WindowMinimized`](Self::WindowMinimized), because restoring
+/// the window is the first thing that has to happen.
+///
+/// `#[non_exhaustive]`: providers map platform facts *to* a reason, never the
+/// reverse, so a new reason needs no work in a backend that cannot tell it
+/// apart, and [`Unknown`](Self::Unknown) stays the fallback.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HiddenReason {
+    /// The window that contains the element is minimized.
+    WindowMinimized,
+    /// The element lies outside the viewport of a scrolling ancestor: it is
+    /// laid out and would be drawn if that ancestor scrolled to it. This is
+    /// the reason `scroll_into_view` can fix.
+    ScrolledOut,
+    /// The platform reports the element as not drawn and gives no reason a
+    /// provider can tell apart: content of a collapsed or closed container,
+    /// an inactive tab page, an element its toolkit hid, or one outside the
+    /// screen.
+    NotShowing,
+    /// The element is not visible and the provider did not establish why,
+    /// for example an event target the event path did not inspect further.
+    Unknown,
+}
+
+impl HiddenReason {
+    /// The `snake_case` name this reason crosses the bindings, the CLI and
+    /// MCP as (`"scrolled_out"`, `"window_minimized"`, …), and that the
+    /// `hidden_reason` selector attribute matches.
+    pub fn to_snake_case(self) -> &'static str {
+        match self {
+            Self::WindowMinimized => "window_minimized",
+            Self::ScrolledOut => "scrolled_out",
+            Self::NotShowing => "not_showing",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for HiddenReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_snake_case())
+    }
 }
 
 /// Screen-pixel bounding rectangle (origin + size).
@@ -1472,5 +1530,25 @@ mod tests {
         let round: StateSet = serde_json::from_str(&json).unwrap();
         assert_eq!(round.minimized, Some(true));
         assert_eq!(round.maximized, None);
+        // Older payloads have no hidden_reason either.
+        assert_eq!(states.hidden_reason, None);
+    }
+
+    #[test]
+    fn hidden_reason_serializes_as_its_snake_case_name() {
+        // The serde spelling and `to_snake_case` are the same string, so a
+        // JSON consumer and a selector `[hidden_reason=...]` agree.
+        for reason in [
+            HiddenReason::WindowMinimized,
+            HiddenReason::ScrolledOut,
+            HiddenReason::NotShowing,
+            HiddenReason::Unknown,
+        ] {
+            let json = serde_json::to_string(&reason).expect("serializes");
+            assert_eq!(json, format!("\"{}\"", reason.to_snake_case()));
+            assert_eq!(reason.to_string(), reason.to_snake_case());
+            let back: HiddenReason = serde_json::from_str(&json).expect("round-trips");
+            assert_eq!(back, reason);
+        }
     }
 }

@@ -15,8 +15,8 @@ use rayon::prelude::*;
 use xa11y_core::Selector;
 use xa11y_core::{
     CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    Provider, Rect, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet, Subscription,
-    Toggled,
+    HiddenReason, Provider, Rect, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet,
+    Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -3727,6 +3727,13 @@ fn build_snapshot_data(
         let states: StateSet = StateParts {
             enabled: attrs.enabled.unwrap_or(true),
             visible: !attrs.hidden.unwrap_or(false),
+            // `AXHidden` is the only visibility AX reports, and it says
+            // nothing about why: AX has no scrolled-out or minimized-content
+            // signal on the element itself.
+            hidden_reason: attrs
+                .hidden
+                .unwrap_or(false)
+                .then_some(HiddenReason::NotShowing),
             focused: attrs.focused.unwrap_or(false),
             active,
             focusable,
