@@ -46,7 +46,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::element::{ElementData, Rect, StateSet, Toggled};
+use crate::element::{ElementData, HiddenReason, Rect, StateSet, Toggled};
 use crate::error::{Error, Result};
 use crate::event_provider::Subscription;
 use crate::provider::Provider;
@@ -362,6 +362,7 @@ impl Provider for MockProvider {
                 // the Locator window verbs' enabled-only gate (no `visible`)
                 // testable: a minimized window must still be actionable.
                 node.data.states.visible = false;
+                node.data.states.hidden_reason = Some(HiddenReason::WindowMinimized);
             }
         }
         self.record(el, "minimize", None)
@@ -381,6 +382,7 @@ impl Provider for MockProvider {
                 // minimize → maximize round-trip would leave the mock
                 // reporting maximized AND invisible.
                 node.data.states.visible = true;
+                node.data.states.hidden_reason = None;
             }
         }
         self.record(el, "maximize", None)
@@ -398,6 +400,7 @@ impl Provider for MockProvider {
                 node.data.states.minimized = Some(false);
                 node.data.states.maximized = Some(false);
                 node.data.states.visible = true;
+                node.data.states.hidden_reason = None;
             }
         }
         self.record(el, "enter_fullscreen", None)
@@ -412,6 +415,7 @@ impl Provider for MockProvider {
                 node.data.states.maximized = Some(false);
                 node.data.states.fullscreen = Some(false);
                 node.data.states.visible = true;
+                node.data.states.hidden_reason = None;
             }
         }
         self.record(el, "restore", None)
@@ -431,6 +435,7 @@ impl Provider for MockProvider {
                 // listed. Both flags together model the real provider result.
                 node.closed = true;
                 node.data.states.visible = false;
+                node.data.states.hidden_reason = Some(HiddenReason::NotShowing);
                 // Destroying a real window invalidates its whole subtree, not
                 // just the frame. A child handle captured before close must
                 // not keep resolving a parent or acting against the mock —
@@ -692,6 +697,7 @@ pub fn build_provider() -> Arc<MockProvider> {
             vec![],
             StateSet {
                 visible: false,
+                hidden_reason: Some(HiddenReason::NotShowing),
                 ..StateSet::default()
             },
             None,

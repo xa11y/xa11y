@@ -1261,6 +1261,22 @@ def test_find_flags_a_password_entry(mcp, app_pid, app_name):
     assert "password" not in plain[0]["states"], plain[0]
 
 
+def test_find_says_why_a_scrolled_out_element_is_hidden(mcp, app_pid, app_name):
+    """`states.hidden_reason` names why a match is hidden, and is absent on a
+    visible one (#590). Only the WinForms app has a scrolled-out control."""
+    if app_name != "winforms":
+        pytest.skip("only the WinForms app has a scrolled-out control")
+    states = {}
+    for name in ("Long Entry 1", "Long Entry 10"):
+        result = mcp.call_tool("find", {"pid": app_pid, "selector": f'[name="{name}"]'})[
+            "result"
+        ]
+        assert result["isError"] is False, result["content"]
+        states[name] = result["structuredContent"]["matches"][0]["states"]
+    assert states["Long Entry 10"].get("hidden_reason") == "scrolled_out", states
+    assert "hidden_reason" not in states["Long Entry 1"], states
+
+
 def test_bounds_and_center_are_reported_together_or_not_at_all(mcp, app_pid):
     """The handler inserts both from one `Option`, so neither can appear alone.
 

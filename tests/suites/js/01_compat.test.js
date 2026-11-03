@@ -133,3 +133,18 @@ test('descendant selector returns multiple elements', async () => {
   // separate window node it may return fewer or zero — accept either.
   assert.ok(byDescendant.length <= allMax);
 });
+
+test('hiddenReason is set exactly when an element is not visible', async () => {
+  // #590: a hidden element says why, a visible one says nothing, and the
+  // reason is one of the documented names.
+  const known = new Set(['window_minimized', 'scrolled_out', 'not_showing', 'unknown']);
+  const app = await getApp();
+  const elements = await app.locator('*').elements();
+  assert.ok(elements.length > 0, "the app's tree must not be empty");
+  const broken = elements
+    .filter((e) => (e.hiddenReason === null) !== e.visible
+      || (e.hiddenReason !== null && !known.has(e.hiddenReason)))
+    .map((e) => [e.role, e.name, e.visible, e.hiddenReason]);
+  assert.deepEqual(broken.slice(0, 20), [],
+    'hiddenReason must be a known name exactly when visible is false');
+});

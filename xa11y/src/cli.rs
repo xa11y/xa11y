@@ -1004,7 +1004,12 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
         parts.push(format!("description=\"{}\"", desc));
     }
 
-    // States
+    // States. A hidden element says why (`hidden=scrolled_out`), which is
+    // what decides how to make it visible (issue #590).
+    let hidden = match el.states.hidden_reason {
+        Some(reason) => format!("hidden={reason}"),
+        None => "hidden".to_string(),
+    };
     let mut states = Vec::new();
     if el.states.enabled {
         states.push("enabled");
@@ -1014,7 +1019,7 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     if el.states.visible {
         states.push("visible");
     } else {
-        states.push("hidden");
+        states.push(hidden.as_str());
     }
     if el.states.focused {
         states.push("focused");
@@ -3099,6 +3104,16 @@ mod tests {
         assert!(out.contains("\"OK\""));
         assert!(out.contains("enabled"));
         assert!(out.contains("visible"));
+    }
+
+    #[test]
+    fn format_element_hidden_says_why() {
+        let mut el = make_element(Role::Button, Some("Long Entry 10"));
+        el.states.visible = false;
+        el.states.hidden_reason = Some(crate::HiddenReason::ScrolledOut);
+        let out = format_element_oneline(&el);
+        assert!(out.contains("hidden=scrolled_out"), "{out}");
+        assert!(!out.contains(" visible"), "{out}");
     }
 
     #[test]

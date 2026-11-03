@@ -458,6 +458,12 @@ def test_controls_of_a_minimized_window_are_not_visible(
             "a button in a minimized window must not report visible; got "
             f"{[(e.name, e.visible) for e in still_listed]}"
         )
+        # The minimized window is the reason, ahead of anything a control's
+        # own IsOffscreen says (#590).
+        assert all(e.hidden_reason == "window_minimized" for e in still_listed), (
+            "a button in a minimized window must say why it is hidden; got "
+            f"{[(e.name, e.hidden_reason) for e in still_listed]}"
+        )
         minimized.restore()
         _settled_window(
             app, "minimize", lambda w: w.minimized is False, "restore must report restored"

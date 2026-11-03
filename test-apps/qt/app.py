@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QToolBar,
     QTreeWidget,
@@ -279,7 +280,36 @@ class TestWindow(QMainWindow):
             self.list_widget.addItem(f"Item {i + 1}")
         lay.addWidget(self.list_widget)
 
+        # A list longer than its viewport (issue #590): its first entry is in
+        # view and its last is scrolled out. Qt's AT-SPI bridge clears
+        # VISIBLE on a row outside the view, which xa11y reports as
+        # hidden_reason "scrolled_out" because the row's parent is a list
+        # and the row lies outside it.
+        self.long_pane = QListWidget()
+        self.long_pane.setAccessibleName("Long Pane")
+        self.long_pane.setFixedHeight(60)
+        for i in range(10):
+            self.long_pane.addItem(f"Long Entry {i + 1}")
+        lay.addWidget(self.long_pane)
+        # Qt's AT-SPI bridge offers no way to scroll a row into view (no
+        # ScrollTo, no focus or select action on the row), so the suite
+        # scrolls the pane by pressing these.
+        to_end = QPushButton("Scroll Long Pane To End")
+        to_end.clicked.connect(self.long_pane.scrollToBottom)
+        lay.addWidget(to_end)
+        to_start = QPushButton("Scroll Long Pane To Start")
+        to_start.clicked.connect(self.long_pane.scrollToTop)
+        lay.addWidget(to_start)
+
         parent_layout.addWidget(grp)
+
+        # An inactive tab page: hidden by a container that does not scroll,
+        # so its contents must read hidden_reason "not_showing" (#590).
+        self.tabs = QTabWidget()
+        self.tabs.setAccessibleName("Tabs")
+        self.tabs.addTab(QPushButton("Tab One Button"), "Tab One")
+        self.tabs.addTab(QPushButton("Tab Two Button"), "Tab Two")
+        parent_layout.addWidget(self.tabs)
 
     def _add_table(self, parent_layout: QVBoxLayout) -> None:
         grp = QGroupBox("Table")

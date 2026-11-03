@@ -16,6 +16,10 @@ AnchorName = Literal["center", "top_left", "top_right", "bottom_left", "bottom_r
 # binding, like every other enum value a user compares against as a literal.
 OmissionReasonName = Literal["no_bounds", "zero_area", "outside_capture"]
 
+# Why an element reads ``visible=False`` (``Element.hidden_reason``, and the
+# ``hidden_reason`` of a timeout). Identically spelled in the JS binding.
+HiddenReasonName = Literal["window_minimized", "scrolled_out", "not_showing", "unknown"]
+
 # Shell-surface kinds. Like roles and key names, these strings are identical in
 # the JS binding — a kind is a value the user writes as a literal.
 ShellSurfaceKindName = Literal[
@@ -63,6 +67,10 @@ class SelectorNotMatchedError(XA11yError):
     last_observed: str | None
     """What the failing operation last observed (e.g. ``'selector matched
     2 element(s); nth(5) requested'``)."""
+    hidden_reason: HiddenReasonName | None
+    """Why the last observed element was not visible. Set by timeouts; always
+    ``None`` for this class (present for attribute parity with
+    :class:`TimeoutError`)."""
     candidates: list[str]
     """Bounded near-miss candidates, e.g. same-role elements with different
     names, or the running applications for app lookups."""
@@ -104,6 +112,11 @@ class TimeoutError(XA11yError):
     """The last poll's observation: ``'matched button "Export"
     (visible=false, enabled=true, focused=false)'`` vs ``'selector never
     matched'``."""
+    hidden_reason: HiddenReasonName | None
+    """Why the last observed element was not visible, when it matched but
+    read ``visible=False``: ``'scrolled_out'`` (scroll it into view first),
+    ``'window_minimized'`` (restore its window), ``'not_showing'`` or
+    ``'unknown'``. ``None`` when nothing hidden was observed."""
     candidates: list[str]
     """Bounded near-miss candidates (same role, different attributes).
     Collected only when the selector never matched during the wait."""
@@ -504,6 +517,17 @@ class Element:
     def enabled(self) -> bool: ...
     @property
     def visible(self) -> bool: ...
+    @property
+    def hidden_reason(self) -> HiddenReasonName | None:
+        """Why the element is not visible, or ``None`` when it is.
+
+        ``'scrolled_out'``: outside the viewport of a scrolling ancestor, so
+        :meth:`scroll_into_view` can fix it. ``'window_minimized'``: its
+        window is minimized. ``'not_showing'``: the platform reports it not
+        drawn without saying why (a collapsed container, an inactive tab).
+        ``'unknown'``: the provider did not establish why. Which reasons a
+        platform can tell apart is in the platform details reference.
+        """
     @property
     def focused(self) -> bool: ...
     @property
