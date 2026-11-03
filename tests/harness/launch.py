@@ -7,7 +7,7 @@ between language suites.
 CLI usage:
     python tests/harness/launch.py <app> [suite ...]
 
-    <app>     one of: qt, gtk, cocoa, tauri, electron, accesskit, egui, winforms, wpf
+    <app>     one of: qt, gtk, cocoa, tauri, electron, accesskit, egui, winforms, wpf, uwp
     [suite]   optional subset: python js cli js-window python-window
               (default: all applicable)
 
@@ -70,11 +70,12 @@ SUITE_TIMEOUT_S = float(os.environ.get("XA11Y_TEST_SUITE_TIMEOUT", "900"))
 # frontmost slot — input_sim delivers CGEvents to the frontmost app, and focus
 # assertions read OS focus state. We actively claim the front before tests run
 # (see pytest_xa11y.ensure_macos_frontmost) instead of reactively killing a
-# hardcoded list of focus-stealing onboarding processes (issue #230). Excluded:
-# cocoa (--headless, accessory app — can't be frontmost) and accesskit
-# (synthesises its own focus events; its macOS coverage is the Rust integ
-# suite, and the Python harness skips all its suites on macOS anyway).
-_MACOS_FRONTMOST_APPS = {"tauri", "qt", "electron", "egui"}
+# hardcoded list of focus-stealing onboarding processes (issue #230). Cocoa is
+# launched without --headless, so it is a regular (activatable) app like the
+# rest. Excluded: accesskit (synthesises its own focus events; its macOS
+# coverage is the Rust integ suite, and the Python harness skips all its
+# suites on macOS anyway).
+_MACOS_FRONTMOST_APPS = {"tauri", "qt", "electron", "egui", "cocoa"}
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +113,10 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
         if sys.platform != "darwin":
             raise ValueError("cocoa app is only supported on macOS")
         binary = str(PROJECT_ROOT / "test-apps" / "cocoa" / "xa11y-cocoa-test-app")
+        # No --headless: an accessory app can never be frontmost, and every
+        # @pytest.mark.xa11y_frontmost test would skip (see _MACOS_FRONTMOST_APPS).
         return (
-            [binary, "--headless"],
+            [binary],
             {},
             ["xa11y-cocoa-test-app"],
             None,
@@ -215,10 +218,138 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
             'button[name="OK"]',
         )
 
+    if app == "uwp":
+        if sys.platform != "win32":
+            raise ValueError("uwp app is only supported on Windows")
+        # Built, signed and installed by test-apps/uwp/build.ps1 + install.ps1
+        # (the caller's job — CI has steps for both). A UWP app cannot be
+        # started by running its executable: the shell activates it by
+        # AppUserModelID, so the command is the activation helper, which
+        # prints the app's PID and exits. _launch_app special-cases it.
+        #
+        # TODO(#497): drop "ApplicationFrameHost". Today xa11y attributes a
+        # UWP app's only top-level window — the ApplicationFrameHost frame —
+        # to ApplicationFrameHost.exe, so neither the app's PID nor its own
+        # name ("xa11y-uwp-test-app") matches anything in App.list(). Matching
+        # the frame host's name is what works until #497 attributes the frame
+        # to the process that owns its CoreWindow.
+        return (
+            _UWP_LAUNCH_COMMAND,
+            {},
+            ["xa11y UWP Test", "xa11y-uwp-test-app", "ApplicationFrameHost"],
+            'button[name="OK"]',
+        )
+
     raise ValueError(
         f"Unknown app: {app!r}. "
-        f"Supported: qt, gtk, cocoa, tauri, electron, accesskit, egui, winforms, wpf"
+        f"Supported: qt, gtk, cocoa, tauri, electron, accesskit, egui, winforms, wpf, uwp"
     )
+
+
+# Activates the installed UWP test app by AUMID and prints its PID; see
+# test-apps/uwp/launch.ps1. Windows PowerShell rather than pwsh, because it is
+# in-box on every Windows machine.
+_UWP_LAUNCH_COMMAND = [
+    "powershell.exe",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    str(PROJECT_ROOT / "test-apps" / "uwp" / "launch.ps1"),
+]
+
+
+class ActivatedProcess:
+    """A ``Popen``-shaped handle on a process the shell started for us.
+
+    A UWP app is activated by the shell (``IApplicationActivationManager``),
+    so this harness is not its parent and has no ``Popen`` for it. This wraps
+    the PID the activation returned in the subset of the ``Popen`` interface
+    the harness uses — ``pid``, ``poll``, ``wait``, ``terminate``, ``kill``,
+    ``returncode`` and empty ``stdout``/``stderr`` — over a Win32 process
+    handle, opened once so the PID cannot be recycled out from under it.
+    """
+
+    _SYNCHRONIZE = 0x00100000
+    _PROCESS_TERMINATE = 0x0001
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _STILL_ACTIVE = 259
+    _WAIT_TIMEOUT = 0x102
+    _INFINITE = 0xFFFFFFFF
+
+    stdout = None
+    stderr = None
+
+    def __init__(self, pid: int) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        k32.GetExitCodeProcess.restype = wintypes.BOOL
+        k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k32.WaitForSingleObject.restype = wintypes.DWORD
+        k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        k32.TerminateProcess.restype = wintypes.BOOL
+        self._ctypes = ctypes
+        self._wintypes = wintypes
+        self._k32 = k32
+        handle = k32.OpenProcess(
+            self._SYNCHRONIZE | self._PROCESS_TERMINATE | self._PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
+        )
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self._handle = handle
+        self.pid = pid
+        self.returncode: int | None = None
+        # The pid xa11y reports for the app, set by _launch_app once the app
+        # is discovered. Until #497 is fixed that is ApplicationFrameHost's,
+        # not this process's; see _suite_app_pid.
+        self.accessible_pid: int = pid
+
+    def poll(self) -> int | None:
+        if self.returncode is None:
+            code = self._wintypes.DWORD()
+            if not self._k32.GetExitCodeProcess(self._handle, self._ctypes.byref(code)):
+                raise self._ctypes.WinError(self._ctypes.get_last_error())
+            if code.value != self._STILL_ACTIVE:
+                self.returncode = code.value
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        ms = self._INFINITE if timeout is None else int(timeout * 1000)
+        if self._k32.WaitForSingleObject(self._handle, ms) == self._WAIT_TIMEOUT:
+            raise subprocess.TimeoutExpired(f"pid {self.pid}", timeout or 0)
+        rc = self.poll()
+        assert rc is not None, "process handle signalled but the process reports STILL_ACTIVE"
+        return rc
+
+    def terminate(self) -> None:
+        # Termination of an already-exited process fails with ACCESS_DENIED;
+        # that is the outcome we wanted, so only a live process's failure
+        # counts.
+        if not self._k32.TerminateProcess(self._handle, 1) and self.poll() is None:
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+
+    kill = terminate
+
+
+def _activate_uwp_app(command: list[str]) -> ActivatedProcess:
+    """Run the UWP activation helper and wrap the PID it prints."""
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    lines = result.stdout.strip().splitlines()
+    if result.returncode != 0 or not lines or not lines[-1].strip().isdigit():
+        raise RuntimeError(
+            f"UWP activation failed (exit {result.returncode}): {' '.join(command)}\n"
+            f"Is the package installed? Run test-apps/uwp/build.ps1, then install.ps1.\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    return ActivatedProcess(int(lines[-1].strip()))
 
 
 # ---------------------------------------------------------------------------
@@ -298,20 +429,25 @@ def _launch_app(
     env.update(env_overrides)
 
     print(f"Launching {app} test app: {' '.join(command)}")
-    proc = subprocess.Popen(
-        command,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    if app == "uwp":
+        proc = _activate_uwp_app(command)
+        print(f"Activated UWP app: pid={proc.pid}")
+    else:
+        proc = subprocess.Popen(
+            command,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
     import xa11y  # imported late so the module is optional for callers that don't need it
 
     # Discovery is a single waited call: `App.find` polls the accessibility
     # API internally, so the harness no longer hand-rolls a retry loop. Match
     # on the PID we just launched *or* any of the platform's candidate names
-    # (the process name on Linux/macOS, the window title on Windows) — matching
-    # either absorbs the per-platform registration races in one place.
+    # (the process name on Linux/macOS, the executable's file stem on
+    # Windows) — matching either absorbs the per-platform registration races
+    # in one place.
     def _is_test_app(candidate: "xa11y.App") -> bool:
         return candidate.pid == proc.pid or candidate.name in app_names
 
@@ -350,6 +486,8 @@ def _launch_app(
         ) from exc
 
     discovered_name = app.name or app_names[0]
+    if isinstance(proc, ActivatedProcess) and app.pid is not None:
+        proc.accessible_pid = app.pid
     print(f"Test app visible: {discovered_name!r} (pid={proc.pid})")
 
     # Wait for content to be ready if a selector was specified — again one
@@ -541,7 +679,7 @@ def _suite_command(suite: str, report_path: Path) -> list[str]:
     """
     if suite == "python":
         return [
-            sys.executable, "-m", "pytest", "tests/suites/python/", "-v",
+            sys.executable, "-m", "pytest", "tests/suites/python/", "-v", "-rxXs",
             "-m", "not window_mutating",
             f"--junitxml={report_path}",
         ]
@@ -553,13 +691,13 @@ def _suite_command(suite: str, report_path: Path) -> list[str]:
         # flaky (see tests/suites/python/test_window_mutating.py).
         return [
             sys.executable, "-m", "pytest",
-            "tests/suites/python/test_window_mutating.py", "-v",
+            "tests/suites/python/test_window_mutating.py", "-v", "-rxXs",
             "-m", "window_mutating",
             f"--junitxml={report_path}",
         ]
     if suite == "cli":
         return [
-            sys.executable, "-m", "pytest", "tests/suites/cli/", "-v",
+            sys.executable, "-m", "pytest", "tests/suites/cli/", "-v", "-rxXs",
             f"--junitxml={report_path}",
         ]
     if suite == "js":
@@ -712,6 +850,24 @@ def _sample_content_state(pid: int, selector: str | None, label: str) -> None:
     _print_content_state(app, selector, label)
 
 
+def _suite_app_pid(proc: "subprocess.Popen[bytes] | ActivatedProcess") -> int:
+    """The pid the suites address the app by (``XA11Y_TEST_APP_PID``).
+
+    The launched process's pid for every app but UWP. For UWP it is the pid
+    xa11y reported when it discovered the app: the CLI and MCP suites pass
+    ``--pid`` / ``pid`` and the window suites resolve the app by pid, and
+    until #497 is fixed the only top-level window is attributed to
+    ApplicationFrameHost.exe, so the UWP process's own pid matches nothing.
+
+    TODO(#497): once the frame is attributed to the UWP process the two pids
+    are equal and this indirection can go. test_uwp.py's strict xfails are
+    what says when.
+    """
+    if isinstance(proc, ActivatedProcess):
+        return proc.accessible_pid
+    return proc.pid
+
+
 def _run_suites(
     app: str,
     suites: list[str],
@@ -722,7 +878,11 @@ def _run_suites(
     """Run each requested suite serially and return the worst exit code."""
     env = os.environ.copy()
     env["XA11Y_TEST_APP"] = app
-    env["XA11Y_TEST_APP_PID"] = str(proc.pid)
+    env["XA11Y_TEST_APP_PID"] = str(_suite_app_pid(proc))
+    if isinstance(proc, ActivatedProcess):
+        # The UWP app's own process, for the tests that check xa11y attributes
+        # the frame to it (tests/suites/python/test_uwp.py).
+        env["XA11Y_UWP_APP_PID"] = str(proc.pid)
     env["XA11Y_TEST_APP_NAME"] = discovered_name
 
     worst_rc = 0
@@ -761,7 +921,7 @@ def _run_suites(
         report_path = Path(report_name)
         cmd = _suite_command(suite, report_path)
 
-        _sample_content_state(proc.pid, content_ready_selector, f"before {suite}")
+        _sample_content_state(_suite_app_pid(proc), content_ready_selector, f"before {suite}")
         print(f"\n=== Running {suite} suite against {app} ===\n")
         try:
             result = subprocess.run(cmd, env=suite_env, cwd=str(PROJECT_ROOT), timeout=SUITE_TIMEOUT_S)
@@ -784,7 +944,7 @@ def _run_suites(
                 ledger.append((rest, _DID_NOT_RUN, "aborted: earlier suite timed out (app wedged)"))
             worst_rc = max(worst_rc, 1)
             break
-        _sample_content_state(proc.pid, content_ready_selector, f"after {suite}")
+        _sample_content_state(_suite_app_pid(proc), content_ready_selector, f"after {suite}")
         rc = result.returncode
         if rc == 0:
             rc = _check_suite_ran_tests(suite, report_path)
@@ -818,6 +978,7 @@ VALID_APPS = (
     "egui",
     "winforms",
     "wpf",
+    "uwp",
 )
 VALID_SUITES = ("python", "js", "cli", "js-window", "python-window")
 # The mutating window suites deliberately run last: every suite shares one

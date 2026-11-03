@@ -44,10 +44,9 @@ STARTUP_TIMEOUT = float(_STARTUP_TIMEOUT_ENV) if _STARTUP_TIMEOUT_ENV else None
 
 # Apps with a real, activatable macOS window whose tests depend on holding the
 # frontmost slot — input simulation delivers CGEvents there, and focus
-# assertions read it. Excluded: cocoa (runs headless as an accessory app, so
-# it cannot be frontmost) and accesskit (synthesises its own focus events).
+# assertions read it. Excluded: accesskit (synthesises its own focus events).
 # Mirrors _MACOS_FRONTMOST_APPS in tests/harness/launch.py.
-FRONTMOST_APPS = {"tauri", "qt", "electron", "egui"}
+FRONTMOST_APPS = {"tauri", "qt", "electron", "egui", "cocoa"}
 
 
 def _build(what: str, command: list[str], cwd: Path) -> None:
@@ -85,8 +84,9 @@ def _cocoa() -> AppLauncher:
         if sys.platform != "darwin":
             pytest.skip("Cocoa test app is macOS-only")
         _build("Cocoa", ["make", "build"], binary.parent)
+    # No --headless: an accessory app cannot be frontmost (see FRONTMOST_APPS).
     return AppLauncher(
-        command=[str(binary), "--headless"],
+        command=[str(binary)],
         app_names=["xa11y-cocoa-test-app"],
     )
 
@@ -178,6 +178,28 @@ def _dotnet(app: str) -> AppLauncher:
     )
 
 
+def _uwp() -> AppLauncher:
+    # A UWP app is not started by running its executable: the shell activates
+    # it by AppUserModelID. test-apps/uwp/launch.ps1 does that and exits, so
+    # this is a genuine `spawns_and_exits` shim — and, the app not being our
+    # child, the plugin cannot stop it at session end. The harness
+    # (tests/harness/launch.py) owns the app's lifetime in CI and attaches
+    # suites by PID; this recipe is for a standalone local pytest run, after
+    # build.ps1 + install.ps1.
+    if sys.platform != "win32":
+        pytest.skip("uwp test app is Windows-only")
+    from tests.harness.launch import _UWP_LAUNCH_COMMAND
+
+    return AppLauncher(
+        command=_UWP_LAUNCH_COMMAND,
+        spawns_and_exits=True,
+        # TODO(#497): drop "ApplicationFrameHost" — see _app_command("uwp")
+        # in tests/harness/launch.py.
+        app_names=["xa11y UWP Test", "xa11y-uwp-test-app", "ApplicationFrameHost"],
+        ready='button[name="OK"]',
+    )
+
+
 _BUILDERS = {
     "qt": _qt,
     "gtk": _gtk,
@@ -188,6 +210,7 @@ _BUILDERS = {
     "egui": _egui,
     "winforms": lambda: _dotnet("winforms"),
     "wpf": lambda: _dotnet("wpf"),
+    "uwp": _uwp,
 }
 
 KNOWN_APPS = tuple(_BUILDERS)

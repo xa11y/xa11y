@@ -721,34 +721,87 @@ def test_windows_tool_reports_limit_truncation_honestly(mcp, app_pid):
         assert payload["truncated"] is False, payload
 
 
-def _mcp_window_target_or_none(mcp, app_pid: int, *required_actions: str):
-    """A uniquely nameable window advertising every requested action, or None."""
+def _find_mcp_window_target(
+    mcp, app_pid: int, *required_actions: str
+) -> tuple[tuple[dict, str] | None, list[tuple[str, str, list[dict]]]]:
+    """Pick a top-level window whose `role[name=...]` selector matches it alone.
+
+    A name unique among the `windows` tool's top-level windows is not enough:
+    `action` resolves the selector against the whole tree, so a descendant
+    with the same role and name makes it ambiguous. Each candidate selector
+    is therefore resolved with `find` before it is used.
+
+    Returns the target, or None plus every ambiguous candidate as
+    (selector, name, matches) for `_no_mcp_window_target` to judge.
+    """
     result = mcp.call_tool("windows", {"pid": app_pid})["result"]
     assert result["isError"] is False, result["content"]
     windows = result["structuredContent"]["windows"]
     names = [w.get("name") for w in windows]
+    ambiguous = []
     for window in windows:
         name = window.get("name")
         actions = window.get("actions", [])
         if (
-            name
-            and '"' not in name
-            and names.count(name) == 1
-            and all(action in actions for action in required_actions)
+            not name
+            or '"' in name
+            or names.count(name) != 1
+            or not all(action in actions for action in required_actions)
         ):
-            selector = f'{window["role"]}[name="{name}"]'
-            return window, selector
-    return None
+            continue
+        selector = f'{window["role"]}[name="{name}"]'
+        found = mcp.call_tool(
+            "find", {"pid": app_pid, "selector": selector, "limit": 10}
+        )["result"]
+        assert found["isError"] is False, found["content"]
+        structured = found["structuredContent"]
+        assert structured["match_count"] >= 1, (
+            f"{selector} came from `windows` but `find` matches nothing"
+        )
+        if structured["match_count"] == 1:
+            return (window, selector), ambiguous
+        ambiguous.append((selector, name, structured["matches"]))
+    return None, ambiguous
 
 
-def _mcp_window_target(mcp, app_pid: int, *required_actions: str) -> tuple[dict, str]:
-    """Return a uniquely nameable window advertising every requested action."""
-    target = _mcp_window_target_or_none(mcp, app_pid, *required_actions)
+def _is_uwp_frame_shape(name: str, matches: list[dict]) -> bool:
+    """The three same-named windows a UWP frame exposes, and nothing else.
+
+    ApplicationFrameWindow, its title-bar window (the only one that reports
+    the title as its value), and the hosted CoreWindow.
+    """
+    return len(matches) == 3 and [m.get("value") for m in matches].count(name) == 1
+
+
+def _no_mcp_window_target(
+    app_name: str, ambiguous: list[tuple[str, str, list[dict]]], what: str
+):
+    """Skip or fail when no window could be targeted by name.
+
+    Only the uwp cell may skip for ambiguity, and only for the exact UWP
+    frame shape (`_is_uwp_frame_shape`), which is matrix gap
+    `uwp_frame_window_name_shared`. Any other ambiguity, on any cell, is a
+    regression and fails. With no candidate at all the test skips, as it
+    always has.
+    """
+    for selector, name, matches in ambiguous:
+        if app_name == "uwp" and _is_uwp_frame_shape(name, matches):
+            pytest.skip(
+                "uwp_frame_window_name_shared: the UWP frame window, its title "
+                f"bar and its CoreWindow all match {selector}"
+            )
+        pytest.fail(f"{selector} is ambiguous on {app_name}: {matches}")
+    pytest.skip(f"no uniquely named window advertises {what}")
+
+
+def _mcp_window_target(
+    mcp, app_pid: int, app_name: str, *required_actions: str
+) -> tuple[dict, str]:
+    """Return a uniquely addressable window advertising every requested action."""
+    target, ambiguous = _find_mcp_window_target(mcp, app_pid, *required_actions)
     if target is not None:
         return target
-    pytest.skip(
-        "no uniquely named window advertises " + ", ".join(required_actions)
-    )
+    _no_mcp_window_target(app_name, ambiguous, ", ".join(required_actions))
 
 
 def _mcp_window_by_selector(mcp, app_pid: int, selector: str) -> dict | None:
@@ -791,7 +844,7 @@ def test_mcp_minimize_restore_mutates_and_reports_window_state(
             "MCP request cannot target one to observe or restore it; the retained "
             f"Element path covers the {app_name} mutation"
         )
-    window, selector = _mcp_window_target(mcp, app_pid, "minimize", "restore")
+    window, selector = _mcp_window_target(mcp, app_pid, app_name, "minimize", "restore")
     assert "minimize" in window["actions"] and "restore" in window["actions"]
     needs_restore = False
     try:
@@ -843,17 +896,19 @@ def test_mcp_screen_fill_restore_mutates_and_reports_window_state(
     deliberately not the same bit.
     """
     candidate = None
+    ambiguous = []
     for action, state, other in (
         ("enter-fullscreen", "fullscreen", "maximized"),
         ("maximize", "maximized", "fullscreen"),
     ):
-        target = _mcp_window_target_or_none(mcp, app_pid, action, "restore")
+        target, why = _find_mcp_window_target(mcp, app_pid, action, "restore")
+        ambiguous.extend(why)
         if target is not None:
             candidate = (action, state, other, target)
             break
     if candidate is None:
-        pytest.skip(
-            "no uniquely named window advertises a screen-filling verb with restore"
+        _no_mcp_window_target(
+            app_name, ambiguous, "a screen-filling verb with restore"
         )
     action, state, other, (window, selector) = candidate
     assert action in window["actions"] and "restore" in window["actions"]
@@ -901,7 +956,7 @@ def test_mcp_screen_fill_restore_mutates_and_reports_window_state(
 
 def test_mcp_move_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name):
     """The MCP geometry payload must reach the platform and move the window."""
-    window, selector = _mcp_window_target(mcp, app_pid, "move_to")
+    window, selector = _mcp_window_target(mcp, app_pid, app_name, "move_to")
     bounds = window.get("bounds")
     if not bounds:
         pytest.skip("the move_to window reports no restorable bounds")
@@ -973,7 +1028,7 @@ def test_mcp_move_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name):
 
 def test_mcp_resize_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name):
     """MCP's size payload must reach the provider and change reported bounds."""
-    window, selector = _mcp_window_target(mcp, app_pid, "resize_to")
+    window, selector = _mcp_window_target(mcp, app_pid, app_name, "resize_to")
     bounds = window.get("bounds")
     if not bounds:
         pytest.skip("the resize_to window reports no restorable bounds")

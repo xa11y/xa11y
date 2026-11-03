@@ -48,6 +48,34 @@ QT = APP == "qt"
 COCOA = APP == "cocoa"
 TAURI_LINUX = APP == "tauri" and sys.platform == "linux"
 TAURI_MACOS = APP == "tauri" and sys.platform == "darwin"
+UWP = APP == "uwp"
+
+
+def uwp_frame_host_xfail(raises):
+    """Strict xfail for an event the uwp cell does not deliver until #497.
+
+    Matrix gap ``uwp_events_attributed_to_frame_host``: until #497 is fixed
+    (#567), xa11y resolves the UWP test app to ApplicationFrameHost, so the
+    suite subscribes on the frame host's pid while the XAML events come from
+    the UWP process. The same tests XPASS on the wpf cell. Strict, so the
+    #567 fix has to flip them; ``raises`` is the timeout each test reports.
+    The generic non-strict xfails below exclude uwp, so only this one
+    applies there.
+    """
+    return pytest.mark.xfail(
+        UWP,
+        reason=(
+            "uwp_events_attributed_to_frame_host (#497): the subscription is "
+            "on ApplicationFrameHost, the events come from the UWP process"
+        ),
+        strict=True,
+        raises=raises,
+    )
+
+
+# EventRecorder.expect reports a timeout with pytest.fail; the raw
+# Subscription.recv / wait_for raise xa11y.TimeoutError.
+EXPECT_TIMEOUT = pytest.fail.Exception
 
 
 # ---------------------------------------------------------------------------
@@ -104,13 +132,14 @@ def test_try_recv_returns_none_when_idle(app, xa11y_events):
     ),
 )
 @pytest.mark.xfail(
-    condition=not COCOA,
+    condition=not COCOA and not UWP,
     reason=(
         "FocusChanged delivery is unverified for this app/platform combo. "
         "Cocoa is documented reliable and asserts strictly."
     ),
     strict=False,
 )
+@uwp_frame_host_xfail(raises=EXPECT_TIMEOUT)
 def test_focus_changed_event(app, app_config, xa11y_events):
     """focus() on a focusable control fires a FocusChanged event."""
     ok_name = app_config["ok_button_name"]
@@ -155,13 +184,14 @@ def test_focus_changed_event(app, app_config, xa11y_events):
     ),
 )
 @pytest.mark.xfail(
-    condition=not COCOA,
+    condition=not COCOA and not UWP,
     reason=(
         "ValueChanged delivery is unverified for this app/platform combo. "
         "Cocoa is documented reliable and asserts strictly."
     ),
     strict=False,
 )
+@uwp_frame_host_xfail(raises=EXPECT_TIMEOUT)
 def test_value_changed_event_slider(app, app_config, xa11y_events):
     """Incrementing a slider fires a ValueChanged event."""
     sel = app_config.get("slider_selector")
@@ -211,13 +241,14 @@ def test_value_changed_event_spinbox(app, app_config, xa11y_events):
     ),
 )
 @pytest.mark.xfail(
-    condition=not COCOA,
+    condition=not COCOA and not UWP,
     reason=(
         "StateChanged delivery is unverified for this app/platform combo. "
         "Cocoa emits AXValueChanged reliably and asserts strictly."
     ),
     strict=False,
 )
+@uwp_frame_host_xfail(raises=EXPECT_TIMEOUT)
 def test_state_changed_event_checkbox(app, app_name, app_config, xa11y_events):
     """Toggling a checkbox fires StateChanged or ValueChanged."""
     if not app_config.get("has_checkbox"):
@@ -274,6 +305,7 @@ def test_state_changed_event_checkbox(app, app_name, app_config, xa11y_events):
     ),
 )
 @pytest.mark.xfail(
+    condition=not UWP,
     reason=(
         "NameChanged delivery has no documented known-good app/platform "
         "combo in this suite (Tauri-on-macOS rides the AppKit pathway, and "
@@ -282,6 +314,7 @@ def test_state_changed_event_checkbox(app, app_name, app_config, xa11y_events):
     ),
     strict=False,
 )
+@uwp_frame_host_xfail(raises=EXPECT_TIMEOUT)
 def test_name_changed_event_status_label(app, app_config, xa11y_events):
     """Pressing Submit mutates the status label → NameChanged event."""
     submit_name = app_config.get("submit_button_name")
@@ -343,6 +376,7 @@ def test_structure_changed_event_add_item(app, app_config, xa11y_events):
 
 
 @pytest.mark.xfail(
+    condition=not UWP,
     reason=(
         "Depends on at least one event being emitted; Qt and Tauri/Linux "
         "don't reliably emit events for programmatic actions, so the "
@@ -350,6 +384,7 @@ def test_structure_changed_event_add_item(app, app_config, xa11y_events):
     ),
     strict=False,
 )
+@uwp_frame_host_xfail(raises=xa11y.TimeoutError)
 def test_event_has_app_metadata(app, app_config):
     """Events carry app_name and app_pid matching the source app."""
     sel = app_config.get("slider_selector")
@@ -366,12 +401,14 @@ def test_event_has_app_metadata(app, app_config):
 
 
 @pytest.mark.xfail(
+    condition=not UWP,
     reason=(
         "Depends on a ValueChanged or other event reaching the subscription; "
         "Qt and Tauri/Linux gaps apply."
     ),
     strict=False,
 )
+@uwp_frame_host_xfail(raises=EXPECT_TIMEOUT)
 def test_event_has_target(app, app_config, xa11y_events):
     """Events carry a target element when the platform populates it."""
     sel = app_config.get("slider_selector")
@@ -390,12 +427,14 @@ def test_event_has_target(app, app_config, xa11y_events):
 
 
 @pytest.mark.xfail(
+    condition=not UWP,
     reason=(
         "wait_for is only as reliable as the underlying event stream; "
         "Qt/Tauri-Linux gaps apply."
     ),
     strict=False,
 )
+@uwp_frame_host_xfail(raises=xa11y.TimeoutError)
 def test_wait_for_event(app, app_config):
     """wait_for returns the first event matching the predicate."""
     sel = app_config.get("spinbutton_selector") or app_config.get("slider_selector")
