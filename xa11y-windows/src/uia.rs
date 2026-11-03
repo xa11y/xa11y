@@ -12,8 +12,8 @@ use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetDesktopWindow, GetForegroundWindow, GetWindowLongPtrW,
     GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
-    SendMessageTimeoutW, SetForegroundWindow, GA_PARENT, GWL_EXSTYLE, GWL_STYLE, SMTO_ABORTIFHUNG,
-    STATE_SYSTEM_SELECTED, WM_NULL, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP,
+    SendMessageTimeoutW, SetForegroundWindow, GA_PARENT, GA_ROOTOWNER, GWL_EXSTYLE, GWL_STYLE,
+    SMTO_ABORTIFHUNG, STATE_SYSTEM_SELECTED, WM_NULL, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use xa11y_core::{
@@ -1796,13 +1796,15 @@ const PROBE_WINDOW_LIMIT: usize = 64;
 /// Total time the probe may spend, whatever the window count.
 const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// What [`probe_unresponsive_windows`] found.
+/// What [`probe_windows`] found: for the desktop's visible top-level
+/// windows after a UIA timeout ([`probe_unresponsive_windows`]), or for the
+/// windows the listing left out ([`check_desktop_omissions`]).
 #[derive(Debug, Default)]
 struct ProbeReport {
     /// What the probed windows are, completing "probed N of M … window(s)".
     scope: &'static str,
     /// How many windows were to be probed.
-    visible: usize,
+    total: usize,
     /// How many of them were sent `WM_NULL`.
     probed: usize,
     /// The probed windows that did not answer in time.
@@ -1850,7 +1852,7 @@ impl ProbeReport {
     fn summary(&self) -> String {
         let mut out = format!(
             "probed {} of {} {} window(s) with WM_NULL ({} ms each, {:?} budget)",
-            self.probed, self.visible, self.scope, PROBE_WINDOW_TIMEOUT_MS, PROBE_BUDGET
+            self.probed, self.total, self.scope, PROBE_WINDOW_TIMEOUT_MS, PROBE_BUDGET
         );
         if let Some(stopped) = &self.stopped {
             out.push_str(&format!(", stopped early: {stopped}"));
@@ -1933,7 +1935,7 @@ fn probe_unresponsive_windows() -> Result<ProbeReport> {
 fn probe_windows(windows: &[HWND], scope: &'static str, start: std::time::Instant) -> ProbeReport {
     let mut report = ProbeReport {
         scope,
-        visible: windows.len(),
+        total: windows.len(),
         ..ProbeReport::default()
     };
     for (i, hwnd) in windows.iter().copied().enumerate() {
@@ -1979,7 +1981,10 @@ fn probe_windows(windows: &[HWND], scope: &'static str, start: std::time::Instan
         ) {
             ProbeMiss::Unresponsive => report.unresponsive.push(window),
             ProbeMiss::Closed => report.closed.push(window),
-            ProbeMiss::Failed => report.failed.push((window, err.to_string())),
+            ProbeMiss::Failed => report.failed.push((
+                window,
+                format!("HRESULT {:#010X}: {}", err.code().0 as u32, err.message()),
+            )),
         }
     }
     report
@@ -2096,12 +2101,13 @@ impl DesktopChildren for DesktopArray<'_> {
 struct DesktopListing<E> {
     /// The listed windows and their pids, in the order UIA returned them.
     windows: Vec<(E, u32)>,
-    /// The HWND of every child UIA returned, listed or not.
+    /// The HWND of every child UIA returned that is listed or is not a
+    /// `Window`. A `Window` the pid or name filter drops is left out.
     returned: HashSet<usize>,
 }
 
 /// Read the listing's desktop children: the windows it reports, and the
-/// HWND of every child for [`check_desktop_omissions`].
+/// HWNDs [`check_desktop_omissions`] counts as returned.
 ///
 /// A child is listed when it is a `Window` (the condition the listing's
 /// `FindAll` used to apply; it now runs unconditioned so the other children
@@ -2115,12 +2121,18 @@ fn desktop_app_windows<C: DesktopChildren>(children: &C) -> Result<DesktopListin
     for i in 0..children.len()? {
         let el = children.element(i)?;
         let hwnd = children.hwnd(&el, i)?;
-        if hwnd != 0 {
-            returned.insert(hwnd);
-        }
+        let mut mark_returned = || {
+            if hwnd != 0 {
+                returned.insert(hwnd);
+            }
+        };
         if children.control_type(&el, i)? != UIA_WindowControlTypeId.0 {
+            mark_returned();
             continue;
         }
+        // A `Window` the filters drop does not count as returned, so the
+        // omission check probes it: an unreadable owner or name is also what
+        // a window UIA could not reach looks like.
         let pid = children.pid(&el, i)?.max(0) as u32;
         if pid == 0 {
             continue;
@@ -2128,18 +2140,38 @@ fn desktop_app_windows<C: DesktopChildren>(children: &C) -> Result<DesktopListin
         if children.name(&el, i)?.is_empty() {
             continue;
         }
+        mark_returned();
         windows.push((el, pid));
     }
     Ok(DesktopListing { windows, returned })
 }
 
 /// The interactive top-level windows UIA's desktop listing did not return.
-fn omitted_windows(interactive: &[HWND], returned: &HashSet<usize>) -> Vec<HWND> {
+///
+/// An owned window (a dialog, a progress or message box, a tool palette, a
+/// drop-down) is top-level to `EnumWindows`, but UIA places it under its
+/// owner rather than at the desktop root, so it counts as returned when its
+/// root owner was. `root_owner` is `GetAncestor(GA_ROOTOWNER)`, injected so
+/// the comparison is testable without windows.
+fn omitted_windows(
+    interactive: &[HWND],
+    returned: &HashSet<usize>,
+    root_owner: impl Fn(HWND) -> HWND,
+) -> Vec<HWND> {
     interactive
         .iter()
         .copied()
-        .filter(|hwnd| !returned.contains(&(hwnd.0 as usize)))
+        .filter(|hwnd| {
+            !returned.contains(&(hwnd.0 as usize))
+                && !returned.contains(&(root_owner(*hwnd).0 as usize))
+        })
         .collect()
+}
+
+/// A window's root owner: itself when it has no owner. A window that
+/// closed meanwhile yields a null HWND, which no listing returns.
+fn root_owner(hwnd: HWND) -> HWND {
+    unsafe { GetAncestor(hwnd, GA_ROOTOWNER) }
 }
 
 /// Fail the listing when UIA silently left out a window that does not
@@ -2156,23 +2188,24 @@ fn check_desktop_omissions(
     returned: &HashSet<usize>,
     elapsed: std::time::Duration,
 ) -> Result<()> {
-    let missing = omitted_windows(interactive, returned);
+    let missing = omitted_windows(interactive, returned, root_owner);
     if missing.is_empty() {
         return Ok(());
     }
     let report = probe_windows(&missing, "missing", std::time::Instant::now());
     // Missing windows that answered, closed, or could not be probed do not
-    // fail the listing. One that answers was most likely created or changed
-    // between EnumWindows and the FindAll (a window shown or re-parented
-    // meanwhile); one that closed has nothing left to list; a failed probe
-    // (UIPI refusing a message to an elevated window, say) says nothing
-    // about whether the window answers. None of them is the dropped
-    // unresponsive window this check exists for, but each is logged rather
-    // than dropped silently, so the omission stays visible.
+    // fail the listing; the decision on #603 was to fail only on a window
+    // that does not answer. One that answers is not one UIA timed out on:
+    // it was shown, re-owned or renamed between EnumWindows and the FindAll,
+    // or it is a `Window` the listing's pid or name filter dropped (an app
+    // still starting up). One that closed has nothing left to list. A failed
+    // probe (UIPI refusing a message to an elevated window, say) says nothing
+    // about whether the window answers. Each is logged rather than dropped
+    // silently, so the omission stays visible.
     for window in &report.answered {
         eprintln!(
             "xa11y: UIA's desktop listing did not return {}, which answers messages; not \
-             treated as an error (likely created or changed during the listing)",
+             treated as an error (shown or changed during the listing, or not yet named)",
             describe_hung_window(*window)
         );
     }
@@ -2185,9 +2218,18 @@ fn check_desktop_omissions(
     }
     for (window, err) in &report.failed {
         eprintln!(
-            "xa11y: UIA's desktop listing did not return {}, and probing it failed ({err}); \
-             not treated as an error",
+            "xa11y: UIA's desktop listing did not return {}, and the WM_NULL probe of it \
+             failed ({err}), which says nothing about whether it answers; not treated as an \
+             error",
             describe_hung_window(*window)
+        );
+    }
+    if let Some(stopped) = &report.stopped {
+        eprintln!(
+            "xa11y: stopped probing the windows UIA's desktop listing did not return \
+             ({stopped}); {} of {} were not probed",
+            report.total - report.probed,
+            report.total
         );
     }
     match dropped_windows_error(&report, missing.len(), elapsed) {
@@ -7611,7 +7653,7 @@ mod tests {
             pid: 9000 + i,
         };
         let report = ProbeReport {
-            visible: 3,
+            total: 3,
             probed: 3,
             unresponsive: vec![window(1)],
             failed: vec![(window(2), "Access is denied. (0x80070005)".to_string())],
@@ -7632,7 +7674,7 @@ mod tests {
         assert!(candidates[0].contains("pid 9001"), "{candidates:?}");
 
         let only_failed = ProbeReport {
-            visible: 1,
+            total: 1,
             probed: 1,
             failed: vec![(window(3), "x".to_string())],
             ..ProbeReport::default()
@@ -7661,10 +7703,22 @@ mod tests {
         fn element(&self, i: i32) -> Result<usize> {
             Ok(i as usize)
         }
-        fn hwnd(&self, el: &usize, _: i32) -> Result<usize> {
+        fn hwnd(&self, el: &usize, i: i32) -> Result<usize> {
+            if self.rows[*el].3 == "<fail hwnd>" {
+                return Err(Error::Platform {
+                    code: -3,
+                    message: format!("hwnd #{i}"),
+                });
+            }
             Ok(self.rows[*el].0)
         }
-        fn control_type(&self, el: &usize, _: i32) -> Result<i32> {
+        fn control_type(&self, el: &usize, i: i32) -> Result<i32> {
+            if self.rows[*el].3 == "<fail control type>" {
+                return Err(Error::Platform {
+                    code: -4,
+                    message: format!("control type #{i}"),
+                });
+            }
             Ok(self.rows[*el].1)
         }
         fn pid(&self, el: &usize, _: i32) -> Result<i32> {
@@ -7672,7 +7726,7 @@ mod tests {
             Ok(self.rows[*el].2)
         }
         fn name(&self, el: &usize, i: i32) -> Result<String> {
-            if self.rows[*el].3 == "<fail>" {
+            if self.rows[*el].3 == "<fail name>" {
                 return Err(Error::Platform {
                     code: -5,
                     message: format!("name #{i}"),
@@ -7708,9 +7762,10 @@ mod tests {
             vec![(1, 100), (5, 100), (6, 400)],
             "the listing must match the Window-filtered one"
         );
-        // Every HWND UIA returned counts, Panes included; a windowless
-        // child has none.
-        let expected: HashSet<usize> = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70].into();
+        // Every HWND UIA returned counts, Panes included, except a Window
+        // the pid or name filter dropped (0x30, 0x40), which the omission
+        // check must probe. A windowless child has none.
+        let expected: HashSet<usize> = [0x10, 0x20, 0x50, 0x60, 0x70].into();
         assert_eq!(returned, expected);
         // Non-Window children are not read past their control type.
         assert_eq!(*desktop.detail_reads.borrow(), vec![1, 2, 3, 5, 6]);
@@ -7718,25 +7773,56 @@ mod tests {
 
     #[test]
     fn desktop_listing_propagates_a_failed_cached_read() {
-        let desktop = FakeDesktop {
-            rows: vec![(0x10, UIA_WindowControlTypeId.0, 7, "<fail>")],
-            detail_reads: Default::default(),
-        };
-        assert!(matches!(
-            desktop_app_windows(&desktop),
-            Err(Error::Platform { code: -5, .. })
-        ));
+        for (marker, code) in [
+            ("<fail hwnd>", -3),
+            ("<fail control type>", -4),
+            ("<fail name>", -5),
+        ] {
+            let desktop = FakeDesktop {
+                rows: vec![
+                    (0x10, UIA_WindowControlTypeId.0, 7, "fine"),
+                    (0x20, UIA_WindowControlTypeId.0, 8, marker),
+                ],
+                detail_reads: Default::default(),
+            };
+            match desktop_app_windows(&desktop) {
+                Err(Error::Platform { code: c, message }) => {
+                    assert_eq!(c, code, "{marker}: {message}");
+                    assert!(message.ends_with("#1"), "{marker}: {message}");
+                }
+                Err(other) => panic!("{marker}: expected Platform, got {other}"),
+                Ok(_) => panic!("{marker}: a failed cached read must fail the listing"),
+            }
+        }
     }
 
     #[test]
     fn omitted_windows_are_the_interactive_ones_uia_did_not_return() {
         let h = |v: usize| HWND(v as *mut core::ffi::c_void);
         let returned: HashSet<usize> = [0x10, 0x30, 0x99].into();
+        let unowned = |hwnd: HWND| hwnd;
         assert_eq!(
-            omitted_windows(&[h(0x10), h(0x20), h(0x30), h(0x40)], &returned),
+            omitted_windows(&[h(0x10), h(0x20), h(0x30), h(0x40)], &returned, unowned),
             vec![h(0x20), h(0x40)]
         );
-        assert!(omitted_windows(&[h(0x10)], &returned).is_empty());
+        assert!(omitted_windows(&[h(0x10)], &returned, unowned).is_empty());
+        // Owned windows: UIA lists 0x21 under its owner 0x10, which was
+        // returned; 0x41's owner 0x40 was not, so both of those are missing.
+        // A window that closed meanwhile has a null root owner.
+        let owners = |hwnd: HWND| match hwnd.0 as usize {
+            0x21 => h(0x10),
+            0x41 => h(0x40),
+            0x50 => h(0),
+            _ => hwnd,
+        };
+        assert_eq!(
+            omitted_windows(
+                &[h(0x10), h(0x21), h(0x40), h(0x41), h(0x50)],
+                &returned,
+                owners
+            ),
+            vec![h(0x40), h(0x41), h(0x50)]
+        );
     }
 
     #[test]
@@ -7748,7 +7834,7 @@ mod tests {
         let elapsed = Duration::from_secs(40);
         let benign = ProbeReport {
             scope: "missing",
-            visible: 3,
+            total: 3,
             probed: 3,
             answered: vec![window(1)],
             closed: vec![window(2)],
@@ -7759,7 +7845,7 @@ mod tests {
 
         let dropped = ProbeReport {
             scope: "missing",
-            visible: 2,
+            total: 2,
             probed: 2,
             unresponsive: vec![window(4)],
             answered: vec![window(1)],
@@ -7803,7 +7889,7 @@ mod tests {
     #[test]
     fn probe_report_is_bounded_and_says_what_it_skipped() {
         let report = ProbeReport {
-            visible: 80,
+            total: 80,
             probed: PROBE_WINDOW_LIMIT,
             unresponsive: (1..=12)
                 .map(|i| HungWindow {
@@ -7827,7 +7913,7 @@ mod tests {
         assert!(summary.contains("12 did not answer"), "{summary}");
 
         let quiet = ProbeReport {
-            visible: 3,
+            total: 3,
             probed: 3,
             ..ProbeReport::default()
         };
@@ -7850,7 +7936,7 @@ mod tests {
             "probe took {took:?}: {report:?}"
         );
         assert!(
-            report.probed <= report.visible.min(PROBE_WINDOW_LIMIT),
+            report.probed <= report.total.min(PROBE_WINDOW_LIMIT),
             "{report:?}"
         );
     }

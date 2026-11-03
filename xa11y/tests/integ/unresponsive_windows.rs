@@ -99,7 +99,9 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
                 // As above: a closed receiver means nobody needs the EOF.
                 let _ = tx.send(None);
             });
-            match rx.recv_timeout(Duration::from_secs(10)) {
+            // Generous: PowerShell and WinForms startup on a cold runner is
+            // not what these tests measure (a 10 s limit flaked in #600).
+            match rx.recv_timeout(Duration::from_secs(30)) {
                 Ok(Some(true)) => {}
                 Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                     let status = fixture.0.wait().expect("fixture exit status");
@@ -120,7 +122,7 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
                     // Diagnostic only: an unreadable stderr leaves it empty.
                     let _ = stderr.read_to_string(&mut err);
                     panic!(
-                        "the hung-window fixture printed no ready line within 10 s ({status}); \
+                        "the hung-window fixture printed no ready line within 30 s ({status}); \
                          PowerShell or WinForms did not start. stderr:\n{err}"
                     );
                 }
