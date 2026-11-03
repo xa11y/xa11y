@@ -136,6 +136,23 @@ pub trait Provider: Send + Sync {
         )
     }
 
+    /// Replace the terminal "not found" of a pid lookup with a more specific
+    /// error, when the backend can tell why the process stayed unreachable.
+    ///
+    /// [`App::by_pid_with`](crate::app::App::by_pid_with) calls this once,
+    /// after its poll loop gave up on [`Error::SelectorNotMatched`] from
+    /// [`app_by_pid`](Self::app_by_pid), never between attempts. It may be
+    /// as expensive as it needs to be (tenet 6: enrich where the error
+    /// reaches the user, keep the retry signal cheap). `waited` is how long
+    /// the lookup polled. `Some(err)` is returned to the caller in place of
+    /// the not-found error; `None` keeps it. The default is `None`.
+    ///
+    /// Windows uses it to name a window that stopped answering messages, which
+    /// UIA reports as "no element" rather than as an error.
+    fn app_by_pid_failure(&self, _pid: u32, _waited: std::time::Duration) -> Option<Error> {
+        None
+    }
+
     /// Identify the application that currently holds the system foreground /
     /// input focus — one attempt, no polling.
     ///
@@ -490,6 +507,9 @@ impl<T: Provider + ?Sized> Provider for &T {
     // `list_apps` and silently lose the override.
     fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
         (**self).app_by_pid(pid)
+    }
+    fn app_by_pid_failure(&self, pid: u32, waited: std::time::Duration) -> Option<Error> {
+        (**self).app_by_pid_failure(pid, waited)
     }
     fn focused_app(&self) -> Result<ElementData> {
         (**self).focused_app()
