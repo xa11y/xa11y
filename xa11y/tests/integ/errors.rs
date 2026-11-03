@@ -194,10 +194,20 @@ mod tests {
     }
 
     /// `enable_web_accessibility` on an app with no web content. On Linux and
-    /// Windows the switch is not a client request at all, so the answer is
+    /// windows the switch is not a client request at all, so the answer is
     /// `Unsupported` naming what to do instead, without touching the app. On
-    /// macOS the request is made: AccessKit takes neither switch, or takes
-    /// one and has no web area to fill, and either way the error says which.
+    /// macOS the request is made, and exactly two outcomes are accepted, each
+    /// for a stated reason:
+    ///
+    /// - `AccessibilityNotEnabled`: the app answered neither switch with a
+    ///   value that reads back as set. The error must name both attributes.
+    /// - `Timeout`: the app kept one of the values, so the request counts as
+    ///   taken, but a native app has no `web_area`, so the wait ends with the
+    ///   diagnosis "no web_area in the app's tree".
+    ///
+    /// Which one a given AppKit-style app produces depends on whether it
+    /// retains `AXEnhancedUserInterface`; the test does not assume either, but
+    /// it does not accept a success or any other error.
     #[test]
     #[ignore]
     fn error_enable_web_accessibility_on_a_native_app() {
@@ -220,6 +230,7 @@ mod tests {
             Error::Unsupported { feature } => {
                 assert!(feature.contains("UI Automation"), "{feature}");
             }
+            // Outcome 1: neither switch read back as set.
             #[cfg(target_os = "macos")]
             Error::AccessibilityNotEnabled { instructions, .. } => {
                 assert!(
@@ -231,6 +242,7 @@ mod tests {
                     "{instructions}"
                 );
             }
+            // Outcome 2: a switch was retained, and the app has no web area.
             #[cfg(target_os = "macos")]
             e @ Error::Timeout { .. } => {
                 let observed = e.diagnosis().and_then(|d| d.last_observed.clone());

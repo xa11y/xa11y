@@ -503,15 +503,7 @@ Two WebKitGTK behaviors affect `<table>` content (verified against WebKitGTK 2.5
 
 On macOS, Electron and Chromium-based apps build their web content's accessibility tree only when an assistive client asks for it. Before that, the window contains a `web_area` with no children, and a selector for anything on the page misses. The miss's diagnosis points at the empty web area.
 
-Ask for the tree from xa11y, without relaunching the app:
-
-```python
-app = xa11y.App.by_name("Visual Studio Code")
-app.enable_web_accessibility(timeout=10)
-app.locator('button[name="Run"]').press()
-```
-
-The call sets `AXManualAccessibility` and `AXEnhancedUserInterface` on the application, then waits until a `web_area` has children. It raises `AccessibilityNotEnabledError` when the app accepts neither attribute, and `TimeoutError` when the content does not appear in time. The same operation is `app.enableWebAccessibility({ timeout })` in JS, `xa11y enable-web-accessibility` on the command line, and the `enable_web_accessibility` MCP tool.
+`App.enable_web_accessibility(timeout=…)` in Python, `app.enableWebAccessibility({ timeout })` in JS, `xa11y enable-web-accessibility` on the command line, and the `enable_web_accessibility` MCP tool make that request. They set `AXManualAccessibility` on the application element, then `AXEnhancedUserInterface` if the first does not read back as set, and stop at the first that does. They then wait until some `web_area` has children. They raise `AccessibilityNotEnabledError` when neither attribute reads back as set, and `TimeoutError` when the content does not appear in time. The attribute stays set afterwards; see [the quirks page](/explanation/accessibility-quirks/#macos-web-content-needs-accessibility-turned-on-per-process) for why and for the side effects.
 
 On Linux and Windows the call raises `ActionNotSupportedError` with guidance. Linux needs a launch flag, described in the next section. On Windows, Chromium builds the tree on its own when a UI Automation client connects.
 

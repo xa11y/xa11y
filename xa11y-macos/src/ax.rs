@@ -1975,12 +1975,13 @@ fn read_switch(el_ptr: AXUIElementRef, attr_name: &str) -> SwitchReadBack {
 
 /// Ask the application `app` to build its web content's accessibility tree.
 ///
-/// Each switch in [`WEB_ACCESSIBILITY_ATTRS`] is set and then read back, and
-/// the first one that reads back `true` is the success. The set call's
-/// return code is recorded but proves nothing: Chrome answers
-/// `kAXErrorNotImplemented` to a set it carried out. Both attempts are tried
-/// in a fixed order because each switch has exactly one family of apps that
-/// answers it, and when neither takes, the error names what each returned.
+/// Each switch in [`WEB_ACCESSIBILITY_ATTRS`] is set and then read back, in
+/// order, and the first one that reads back `true` is the success; later
+/// switches are not touched. A switch that took stays set: it is not
+/// restored. The set call's return code is recorded but proves nothing: Chrome
+/// answers
+/// `kAXErrorNotImplemented` to a set it carried out. When neither
+/// takes, the error names what each returned.
 fn enable_web_accessibility_for(app: &ElementData) -> Result<()> {
     const ACTION: &str = "enable_web_accessibility";
     if app.role != Role::Application {
@@ -2023,8 +2024,9 @@ fn enable_web_accessibility_for(app: &ElementData) -> Result<()> {
     Err(Error::AccessibilityNotEnabled {
         app: format!("{name} (pid={pid})"),
         instructions: format!(
-            "the app did not take the request to build its web accessibility tree ({}). \
-             Only Chromium-based apps (Electron, Chrome) answer it.",
+            "neither web accessibility switch read back as set ({}). Chromium-based \
+             apps (Electron, Chrome) honour them; other apps may ignore both or accept \
+             one without having web content.",
             attempts.join("; ")
         ),
     })
@@ -4882,6 +4884,10 @@ impl Provider for MacOSProvider {
         }
     }
 
+    fn enable_web_accessibility(&self, app: &ElementData) -> Result<()> {
+        enable_web_accessibility_for(app)
+    }
+
     /// Enumerate the macOS shell surfaces: the frontmost application's menu
     /// bar, each process's status items, the Dock, Finder's desktop, and
     /// native status-item menus while they are open.
@@ -4907,10 +4913,6 @@ impl Provider for MacOSProvider {
     /// Failing to enumerate the processes at all propagates as
     /// [`Error::Platform`]. A failure on one process does not: it contributes
     /// no surface, and the rest of the listing stands.
-    fn enable_web_accessibility(&self, app: &ElementData) -> Result<()> {
-        enable_web_accessibility_for(app)
-    }
-
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
         let apps = Self::list_gui_apps();
         if apps.is_empty() {

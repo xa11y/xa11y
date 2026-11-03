@@ -4152,6 +4152,18 @@ impl Provider for WindowsProvider {
         Ok(Some(data))
     }
 
+    // Chromium builds its UIA tree on its own once a UI Automation client
+    // connects, so there is no switch to set.
+    fn enable_web_accessibility(&self, _app: &ElementData) -> Result<()> {
+        Err(Error::Unsupported {
+            feature: "enable_web_accessibility on Windows: Chromium and Electron build \
+                their web accessibility tree on their own when a UI Automation client \
+                connects, so there is no switch to set. If web content is still missing, \
+                relaunch the app with `--force-renderer-accessibility`."
+                .to_string(),
+        })
+    }
+
     /// Enumerate the Windows shell surfaces by classifying the UIA desktop
     /// root's **direct** children by class name.
     ///
@@ -4195,18 +4207,6 @@ impl Provider for WindowsProvider {
     /// on-screen test — propagates too, wrapped so the message names the
     /// surface it was probing and lists the surfaces classified before the
     /// scan aborted.
-    // Chromium builds its UIA tree on its own once a UI Automation client
-    // connects, so there is no switch to set.
-    fn enable_web_accessibility(&self, _app: &ElementData) -> Result<()> {
-        Err(Error::Unsupported {
-            feature: "enable_web_accessibility on Windows: Chromium and Electron build \
-                their web accessibility tree on their own when a UI Automation client \
-                connects, so there is no switch to set. If web content is still missing, \
-                relaunch the app with `--force-renderer-accessibility`."
-                .to_string(),
-        })
-    }
-
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
         let dpi = &crate::dpi::DpiScope::enter()?;
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;

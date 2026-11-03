@@ -715,25 +715,42 @@ impl Locator {
     /// request, and the symptom is a `web_area` with no children, which
     /// reads like a wrong selector. Bounded by [`DIAG_CANDIDATE_LIMIT`].
     ///
-    /// Advisory only: if the scan itself fails there is no hint, and the
-    /// candidate and scope collection above already record a failing
-    /// provider.
+    /// A scan that fails is reported in the hint rather than dropped, the
+    /// way [`role_candidates`](Self::role_candidates) records a failing
+    /// collection (tenet 1). The miss error being enriched keeps its own
+    /// variant, so the hint is the one place the failure can surface.
+    ///
+    /// The advice names the platforms where a client can act on it: macOS
+    /// has a request to make and Linux a launch flag. Windows Chromium builds
+    /// the tree itself, so the hint says nothing specific there.
     fn web_accessibility_hint(&self) -> Option<String> {
         let root = self.root.as_ref()?;
-        let selector = Selector::parse("web_area").ok()?;
-        let areas = self
-            .provider
-            .find_elements(root, &selector, Some(DIAG_CANDIDATE_LIMIT), None)
-            .ok()?;
-        let empty = areas.iter().any(|area| {
-            self.provider
-                .get_children(Some(area))
-                .is_ok_and(|children| children.is_empty())
-        });
+        let selector = match Selector::parse("web_area") {
+            Ok(s) => s,
+            Err(e) => return Some(format!("web_area check failed: {e}")),
+        };
+        let areas =
+            match self
+                .provider
+                .find_elements(root, &selector, Some(DIAG_CANDIDATE_LIMIT), None)
+            {
+                Ok(areas) => areas,
+                Err(e) => return Some(format!("web_area check failed: {e}")),
+            };
+        let mut empty = false;
+        for area in &areas {
+            match self.provider.get_children(Some(area)) {
+                Ok(children) => empty |= children.is_empty(),
+                Err(e) => return Some(format!("web_area check failed: {e}")),
+            }
+        }
         empty.then(|| {
             "the scope has a web_area with no children: a Chromium or Electron app builds \
-             its web content's accessibility tree only on request, which \
-             App.enable_web_accessibility() makes"
+             its web content's accessibility tree only on request. On macOS, enable web \
+             accessibility for the app (App.enable_web_accessibility in Rust and Python, \
+             enableWebAccessibility in JS, `xa11y enable-web-accessibility`, or the \
+             `enable_web_accessibility` MCP tool). On Linux, relaunch the app with \
+             --force-renderer-accessibility"
                 .to_string()
         })
     }

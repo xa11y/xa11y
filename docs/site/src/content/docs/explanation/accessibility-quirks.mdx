@@ -145,10 +145,19 @@ launch. A running app builds the tree when an assistive client sets
 what VoiceOver sets) to true on the **application** element. Setting either on
 the web area does nothing.
 
-`App.enable_web_accessibility()` sets both, reads each back, and then waits for
-a web area to gain children. A lookup that misses beside an empty web area says
-so in its diagnosis and names the method. Linux and Windows have no such
-switch, so the method refuses there with the platform's own guidance.
+`App.enable_web_accessibility()` sets `AXManualAccessibility` and reads it back.
+If that does not read back as set, it tries `AXEnhancedUserInterface` the same
+way, and it stops at the first one that does. It then waits for a web area to
+gain children. A lookup that misses beside an empty web area says so in its
+diagnosis and names the method. Linux and Windows have no such switch, so the
+method refuses there with the platform's own guidance.
+
+The method does not check that the app is Chromium-based. An app that retains
+either value counts as having taken the request, so a native app can end in a
+timeout rather than `AccessibilityNotEnabledError`. The attribute is left set to
+true and xa11y does not restore it. `AXEnhancedUserInterface` is known to
+disable window animations and to confuse some window managers in apps that
+react to it, which is why the method is never called implicitly.
 
 ## Roles and the role enum disagree across platforms
 

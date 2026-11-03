@@ -531,14 +531,20 @@ fn tool_definition(name: &str) -> Value {
             &format!(
                 "Ask a Chromium or Electron application (give `app` or `pid`) to build \
                  the accessibility tree for its web content, then wait for that content \
-                 to appear. Until an app is asked, `tree` shows its window and an empty \
+                 to appear. The call does not check that the app is Chromium-based. Until an app is asked, `tree` shows its window and an empty \
                  `web_area`, and `find` matches nothing on the page. A not-found failure \
                  inside such an app says so in its `last_observed`.\n\n\
                  macOS only. The request is never made implicitly. Linux and Windows \
                  return an `unsupported` failure saying what to do instead (on Linux, \
-                 relaunch the app with `--force-renderer-accessibility`). An app that \
-                 does not take the request, such as a native one, returns \
-                 `accessibility_not_enabled` naming what each switch read back.\n\n\
+                 relaunch the app with `--force-renderer-accessibility`). On macOS it \
+                 sets `AXManualAccessibility`, then `AXEnhancedUserInterface`, on the \
+                 application and reads each back; an app where neither reads back as set \
+                 returns `accessibility_not_enabled` naming what each returned. An app \
+                 that keeps a value but has no web content, such as a native one, ends in \
+                 a `timeout` instead. The attribute stays set to true afterwards and is \
+                 not restored: `AXEnhancedUserInterface` can disable window animations \
+                 or confuse a window manager in an app that reacts to it, so call this \
+                 only for apps whose web content you need.\n\n\
                  The wait runs up to the default timeout, currently {timeout}. Set \
                  {timeout_env} (in seconds) in the environment the server is launched \
                  with to change it. A `timeout` failure says how many web areas the app \

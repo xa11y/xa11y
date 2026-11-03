@@ -656,12 +656,24 @@ impl App {
     /// This method makes that request. It is never made implicitly, because
     /// building the tree costs the app memory and CPU for as long as it runs.
     ///
-    /// - **macOS**: sets `AXManualAccessibility` (Electron) or, when that
-    ///   does not read back as set, `AXEnhancedUserInterface` (Chrome) on the
-    ///   application element. The read-back is the proof that the app took
-    ///   the request, since Chrome answers the set call with an error even
-    ///   when it succeeds. If neither attribute reads back as set, this
-    ///   returns [`Error::AccessibilityNotEnabled`].
+    /// - **macOS**: sets `AXManualAccessibility` (Electron) on the
+    ///   application element and reads it back. If that does not read back
+    ///   as set, it does the same with `AXEnhancedUserInterface` (Chrome),
+    ///   and stops at the first attribute that reads back set. The
+    ///   read-back is the proof that the app took the request, since Chrome
+    ///   answers the set call with an error even when it succeeds. If
+    ///   neither attribute reads back as set, this returns
+    ///   [`Error::AccessibilityNotEnabled`] naming what each returned.
+    ///   The method does not check that the app is Chromium-based: an app
+    ///   that keeps the value of either attribute counts as having taken the
+    ///   request, and then this waits for web content that may never appear
+    ///   and returns [`Error::Timeout`].
+    ///
+    ///   **Side effect:** the attribute stays set to `true` on the app after
+    ///   this returns, and xa11y does not restore it. `AXEnhancedUserInterface`
+    ///   is known to disable window animations and to confuse some window
+    ///   managers in apps that react to it, so call this only on apps whose
+    ///   web content you need.
     /// - **Linux and Windows**: return [`Error::Unsupported`] naming what to
     ///   do instead. On Linux the switch is a launch-time flag
     ///   (`--force-renderer-accessibility`, plus `ACCESSIBILITY_ENABLED=1` in
@@ -697,17 +709,30 @@ impl App {
 
     /// One look at the app's web areas: how many there are, and how many
     /// have children. Bounded by [`WEB_AREA_SCAN_LIMIT`].
+    ///
+    /// A web area that goes stale mid-scan is the page rebuilding while the
+    /// tree fills, which is what this poll waits through, so
+    /// [`Error::ElementStale`] counts as "not yet" for that root or area.
+    /// Every other error propagates.
     fn web_content(&self) -> Result<WebContent> {
         let selector = crate::selector::Selector::parse("web_area")?;
         let mut observed = WebContent::default();
         for root in self.provider.app_roots(&self.data)? {
             let areas =
-                self.provider
-                    .find_elements(&root, &selector, Some(WEB_AREA_SCAN_LIMIT), None)?;
+                match self
+                    .provider
+                    .find_elements(&root, &selector, Some(WEB_AREA_SCAN_LIMIT), None)
+                {
+                    Ok(areas) => areas,
+                    Err(Error::ElementStale { .. }) => continue,
+                    Err(e) => return Err(e),
+                };
             for area in areas {
                 observed.areas += 1;
-                if !self.provider.get_children(Some(&area))?.is_empty() {
-                    observed.populated += 1;
+                match self.provider.get_children(Some(&area)) {
+                    Ok(children) if !children.is_empty() => observed.populated += 1,
+                    Ok(_) | Err(Error::ElementStale { .. }) => {}
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -2535,7 +2560,7 @@ mod tests {
             .and_then(|d| d.last_observed.clone())
             .unwrap_or_default();
         assert!(
-            observed.contains("App.enable_web_accessibility()"),
+            observed.contains("App.enable_web_accessibility"),
             "{observed:?}"
         );
     }

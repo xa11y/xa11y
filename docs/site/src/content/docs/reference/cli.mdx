@@ -117,7 +117,10 @@ xa11y enable-web-accessibility --app "Visual Studio Code"
 web accessibility enabled for "Visual Studio Code" (pid=4242)
 ```
 
-The wait uses the default timeout. Linux and Windows have no such request, so
+The command sets the switch, then waits up to the default timeout until some
+web area in the app has at least one child, so it succeeds when any one web
+area is populated and says nothing about the others. It leaves the switch set
+on the app and does not restore it. Linux and Windows have no such request, so
 the command exits 1 with guidance for that platform. See
 [Platform Details](/reference/platform-details/#macos-electron-and-chromium-apps).
 
