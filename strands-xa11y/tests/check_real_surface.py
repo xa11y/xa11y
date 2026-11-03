@@ -51,7 +51,16 @@ FAKE_ONLY = {
 # right at runtime — a plain exception carries none of them — and is exactly
 # why their loss would otherwise be silent: the diagnosis would just stop
 # appearing in tool results.
-DIAGNOSIS_ATTRS = ("condition", "selector", "last_observed", "hidden_reason", "elapsed", "candidates", "scope")
+DIAGNOSIS_ATTRS = (
+    "condition",
+    "selector",
+    "last_observed",
+    "hidden_reason",
+    "auto_scroll",
+    "elapsed",
+    "candidates",
+    "scope",
+)
 
 # The two xa11y errors documented to carry a full diagnosis.
 DIAGNOSIS_ERRORS = ("SelectorNotMatchedError", "TimeoutError")
