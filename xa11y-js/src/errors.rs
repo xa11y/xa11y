@@ -54,6 +54,7 @@ fn diagnosis_json(
         "elapsedMs": elapsed_ms,
         "condition": diagnosis.and_then(|d| d.condition.as_deref()),
         "lastObserved": diagnosis.and_then(|d| d.last_observed.as_deref()),
+        "hiddenReason": diagnosis.and_then(|d| d.hidden_reason.map(|r| r.to_snake_case())),
         "candidates": diagnosis.map(|d| d.candidates.clone()).unwrap_or_default(),
         "scope": diagnosis.and_then(|d| d.scope.as_deref()),
     })

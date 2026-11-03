@@ -12,15 +12,15 @@ use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetDesktopWindow, GetForegroundWindow, GetWindowLongPtrW,
     GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
-    SetForegroundWindow, GA_PARENT, GWL_EXSTYLE, GWL_STYLE, STATE_SYSTEM_SELECTED, WS_EX_LAYERED,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    SendMessageTimeoutW, SetForegroundWindow, GA_PARENT, GWL_EXSTYLE, GWL_STYLE, SMTO_ABORTIFHUNG,
+    STATE_SYSTEM_SELECTED, WM_NULL, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
     CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    Provider, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet, Subscription,
-    Toggled,
+    HiddenReason, Provider, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet,
+    Subscription, Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -589,8 +589,15 @@ impl WindowsProvider {
         } else {
             clip.clone()
         };
-        let hidden =
-            nearest.is_some_and(hwnd_in_minimized_window) || clipped_out(bounds, clip.rect);
+        // A minimized window outranks the clip: restoring the window is
+        // what has to happen first (see `HiddenReason`).
+        let hidden = if nearest.is_some_and(hwnd_in_minimized_window) {
+            Some(HiddenReason::WindowMinimized)
+        } else if clipped_out(bounds, clip.rect) {
+            Some(HiddenReason::ScrolledOut)
+        } else {
+            None
+        };
         self.clips.lock().unwrap_or_else(|e| e.into_inner()).insert(
             handle,
             ClipRecord {
@@ -1610,6 +1617,22 @@ struct HungWindow {
 /// hung, found before the desktop-wide UIA enumeration so the listing can
 /// fail fast instead of stalling on one for the transaction timeout.
 fn hung_top_level_windows() -> Result<Vec<HungWindow>> {
+    let mut hung = Vec::new();
+    for hwnd in interactive_top_level_windows("checking for hung windows")? {
+        if window_is_hung(hwnd) {
+            hung.push(HungWindow {
+                hwnd,
+                pid: hwnd_pid(hwnd),
+            });
+        }
+    }
+    Ok(hung)
+}
+
+/// Every interactive top-level window on the desktop: the windows a desktop
+/// listing reads. One that closes while it is being classified is skipped.
+/// `purpose` completes "EnumWindows failed while …".
+fn interactive_top_level_windows(purpose: &str) -> Result<Vec<HWND>> {
     unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
         let all = unsafe { &mut *(param.0 as *mut Vec<HWND>) };
         all.push(hwnd);
@@ -1619,24 +1642,26 @@ fn hung_top_level_windows() -> Result<Vec<HungWindow>> {
     unsafe { EnumWindows(Some(collect), LPARAM((&raw mut all) as isize)) }.map_err(|e| {
         Error::Platform {
             code: e.code().0 as i64,
-            message: format!("EnumWindows failed while checking for hung windows: {e}"),
+            message: format!("EnumWindows failed while {purpose}: {e}"),
         }
     })?;
-    let mut hung = Vec::new();
+    let mut interactive = Vec::new();
     for hwnd in all {
-        // Only windows a listing would read; a closed one is skipped.
-        let interactive = match is_interactive_top_level(hwnd) {
-            Ok(interactive) => interactive,
-            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => continue,
+        match is_interactive_top_level(hwnd) {
+            Ok(true) => interactive.push(hwnd),
+            Ok(false) => {}
+            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => {}
             Err(e) => return Err(e),
-        };
-        if interactive && window_is_hung(hwnd) {
-            let mut pid = 0u32;
-            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-            hung.push(HungWindow { hwnd, pid });
         }
     }
-    Ok(hung)
+    Ok(interactive)
+}
+
+/// The pid owning `hwnd`, from the window manager (0 when it cannot say).
+fn hwnd_pid(hwnd: HWND) -> u32 {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    pid
 }
 
 /// Longest list of hung windows a diagnosis carries (tenet 6: bounded).
@@ -1685,30 +1710,296 @@ fn hung_windows_error(condition: String, hung: &[HungWindow]) -> Error {
     )
 }
 
-/// Map a UIA call that ran out its transaction timeout to the same
+/// Run `f`, returning its result and how long it took.
+///
+/// The discovery call sites time their UIA call so a `UIA_E_TIMEOUT` can be
+/// reported with the wait that actually happened (see
+/// [`uia_timeout_as_timeout`]).
+fn timed<T>(f: impl FnOnce() -> T) -> (T, std::time::Duration) {
+    let start = std::time::Instant::now();
+    let out = f();
+    (out, start.elapsed())
+}
+
+/// The message of a `UIA_E_TIMEOUT` platform error, `None` for any other
+/// error.
+fn uia_timeout_message(err: &Error) -> Option<&str> {
+    match err {
+        Error::Platform { code, message } if *code == i64::from(UIA_E_TIMEOUT as i32) => {
+            Some(message)
+        }
+        _ => None,
+    }
+}
+
+/// Which of the two UIA limits a `UIA_E_TIMEOUT` after `elapsed` fits.
+///
+/// The HRESULT is the same for both, so this is read off the wait itself. A
+/// call that gave up before the transaction timeout could have elapsed can
+/// only have hit the connection timeout. A longer wait is *consistent with*
+/// the transaction timeout but does not prove it (a slow connection attempt
+/// can follow a slow transaction), so it is stated as such.
+fn uia_timeout_which(elapsed: std::time::Duration) -> String {
+    if elapsed < std::time::Duration::from_millis(u64::from(UIA_TRANSACTION_TIMEOUT_MS)) {
+        format!(
+            "too soon for the {UIA_TRANSACTION_TIMEOUT_MS} ms transaction timeout, so it was \
+             the {UIA_CONNECTION_TIMEOUT_MS} ms connection timeout: UIA could not reach a \
+             window's provider"
+        )
+    } else {
+        format!(
+            "consistent with the {UIA_TRANSACTION_TIMEOUT_MS} ms transaction timeout: a \
+             provider took the call but did not finish it"
+        )
+    }
+}
+
+/// The `last_observed` text for a `UIA_E_TIMEOUT` after `elapsed`.
+fn uia_timeout_observed(elapsed: std::time::Duration, message: &str) -> String {
+    format!(
+        "UIA gave up after {elapsed:.1?} (UIA_E_TIMEOUT), {}: {message}",
+        uia_timeout_which(elapsed)
+    )
+}
+
+/// Map a UIA call that ran out one of its timeouts to the same
 /// [`Error::Timeout`] form; every other error passes through unchanged.
+///
+/// `elapsed` is how long the call ran (see [`timed`]) and is the elapsed time
+/// the error reports. `UIA_E_TIMEOUT` does not say whether the connection or
+/// the transaction timeout fired, and the two differ tenfold, so the error
+/// must not assert either one; [`uia_timeout_which`] reads it off `elapsed`.
 ///
 /// Applied at the app-discovery call sites (desktop listing, a pid's
 /// windows, `app_by_pid`, `focused_app`), which are where one hung app
 /// stalls everything. Element-level calls keep reporting `UIA_E_TIMEOUT` as
 /// the `Platform` error it arrives as.
-fn uia_timeout_as_timeout(err: Error, condition: impl FnOnce() -> String) -> Error {
-    match err {
-        Error::Platform { code, message } if code == i64::from(UIA_E_TIMEOUT as i32) => {
-            Error::timeout(std::time::Duration::from_millis(u64::from(
-                UIA_TRANSACTION_TIMEOUT_MS,
-            )))
-            .diagnose(
-                xa11y_core::Diagnosis::new()
-                    .condition(condition())
-                    .last_observed(format!(
-                        "no answer within the {UIA_TRANSACTION_TIMEOUT_MS} ms UIA transaction \
-                         timeout (UIA_E_TIMEOUT): {message}"
-                    )),
-            )
-        }
-        other => other,
+fn uia_timeout_as_timeout(
+    err: Error,
+    elapsed: std::time::Duration,
+    condition: impl FnOnce() -> String,
+) -> Error {
+    let Some(message) = uia_timeout_message(&err) else {
+        return err;
+    };
+    let observed = uia_timeout_observed(elapsed, message);
+    Error::timeout(elapsed).diagnose(
+        xa11y_core::Diagnosis::new()
+            .condition(condition())
+            .last_observed(observed),
+    )
+}
+
+/// How long one window gets to answer the `WM_NULL` probe.
+const PROBE_WINDOW_TIMEOUT_MS: u32 = 250;
+/// Most windows the probe sends to.
+const PROBE_WINDOW_LIMIT: usize = 64;
+/// Total time the probe may spend, whatever the window count.
+const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What [`probe_unresponsive_windows`] found.
+#[derive(Debug, Default)]
+struct ProbeReport {
+    /// Interactive top-level windows on the desktop.
+    visible: usize,
+    /// How many of them were sent `WM_NULL`.
+    probed: usize,
+    /// The probed windows that did not answer in time.
+    unresponsive: Vec<HungWindow>,
+    /// The probed windows whose `SendMessageTimeoutW` failed for another
+    /// reason (for example UIPI refusing a message to an elevated window),
+    /// with that error. Not suspects: they say nothing about responsiveness.
+    failed: Vec<(HungWindow, String)>,
+    /// Why probing stopped before every window was sent to, if it did.
+    stopped: Option<String>,
+}
+
+/// What one zero return from `SendMessageTimeoutW` means for the probe.
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeMiss {
+    /// The window did not answer: `ERROR_TIMEOUT`, or the OS considers it
+    /// hung (`SMTO_ABORTIFHUNG` returns at once for those).
+    Unresponsive,
+    /// The window closed while it was probed; it is not what UIA waits on.
+    Closed,
+    /// The send failed for another reason, which says nothing about whether
+    /// the window answers.
+    Failed,
+}
+
+/// Classify a failed probe send. `code` is the thread's last error, read
+/// straight after the send; `hung` is `IsHungAppWindow`; `exists` is
+/// `IsWindow`.
+fn classify_probe_miss(code: windows::core::HRESULT, hung: bool, exists: bool) -> ProbeMiss {
+    if code == windows::core::HRESULT::from_win32(ERROR_TIMEOUT.0) || (exists && hung) {
+        ProbeMiss::Unresponsive
+    } else if !exists {
+        ProbeMiss::Closed
+    } else {
+        ProbeMiss::Failed
     }
+}
+
+impl ProbeReport {
+    /// One clause for `last_observed`: what was probed, how, and the result.
+    fn summary(&self) -> String {
+        let mut out = format!(
+            "probed {} of {} visible top-level window(s) with WM_NULL ({} ms each, {:?} \
+             budget)",
+            self.probed, self.visible, PROBE_WINDOW_TIMEOUT_MS, PROBE_BUDGET
+        );
+        if let Some(stopped) = &self.stopped {
+            out.push_str(&format!(", stopped early: {stopped}"));
+        }
+        if self.unresponsive.is_empty() && self.failed.is_empty() {
+            out.push_str(
+                "; every probed window answered, so the window UIA could not reach recovered \
+                 before the probe, or its message loop is fine and its UIA provider is not",
+            );
+        } else if self.unresponsive.is_empty() {
+            out.push_str("; no probed window timed out");
+        } else {
+            out.push_str(&format!(
+                "; {} did not answer: {}",
+                self.unresponsive.len(),
+                self.candidates().join("; ")
+            ));
+        }
+        if !self.failed.is_empty() {
+            let mut failed: Vec<String> = self
+                .failed
+                .iter()
+                .take(DIAG_HUNG_WINDOW_LIMIT)
+                .map(|(w, err)| format!("probe of {} failed: {err}", describe_hung_window(*w)))
+                .collect();
+            if self.failed.len() > DIAG_HUNG_WINDOW_LIMIT {
+                failed.push(format!(
+                    "… (+{} more)",
+                    self.failed.len() - DIAG_HUNG_WINDOW_LIMIT
+                ));
+            }
+            out.push_str(&format!(
+                "; {} probe(s) failed and say nothing about responsiveness: {}",
+                self.failed.len(),
+                failed.join("; ")
+            ));
+        }
+        out
+    }
+
+    /// The unresponsive windows, described and bounded like
+    /// [`hung_windows_error`]'s list.
+    fn candidates(&self) -> Vec<String> {
+        let mut listed: Vec<String> = self
+            .unresponsive
+            .iter()
+            .take(DIAG_HUNG_WINDOW_LIMIT)
+            .map(|w| describe_hung_window(*w))
+            .collect();
+        if self.unresponsive.len() > DIAG_HUNG_WINDOW_LIMIT {
+            listed.push(format!(
+                "… (+{} more)",
+                self.unresponsive.len() - DIAG_HUNG_WINDOW_LIMIT
+            ));
+        }
+        listed
+    }
+}
+
+/// Find which top-level windows are not answering messages right now.
+///
+/// Failure path only: the desktop listing calls it after its `FindAll` came
+/// back `UIA_E_TIMEOUT`, which names no window. Each interactive top-level
+/// window gets `WM_NULL` through `SendMessageTimeoutW`; one that does not
+/// answer within [`PROBE_WINDOW_TIMEOUT_MS`] is the window UIA could not
+/// reach, or one like it. `SMTO_ABORTIFHUNG` returns at once for a window the
+/// OS already considers hung. Bounded by [`PROBE_WINDOW_LIMIT`] windows and
+/// [`PROBE_BUDGET`] in total, so it never costs more than the timeout that
+/// led here (tenet 6: rich, but bounded).
+fn probe_unresponsive_windows() -> Result<ProbeReport> {
+    // The budget covers enumerating and classifying the windows too.
+    let start = std::time::Instant::now();
+    let windows = interactive_top_level_windows("probing for an unresponsive window")?;
+    let mut report = ProbeReport {
+        visible: windows.len(),
+        ..ProbeReport::default()
+    };
+    for (i, hwnd) in windows.iter().copied().enumerate() {
+        if i == PROBE_WINDOW_LIMIT {
+            report.stopped = Some(format!("window limit of {PROBE_WINDOW_LIMIT} reached"));
+            break;
+        }
+        if start.elapsed() >= PROBE_BUDGET {
+            report.stopped = Some(format!("{PROBE_BUDGET:?} budget spent"));
+            break;
+        }
+        report.probed += 1;
+        let mut result = 0usize;
+        let answered = unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                WM_NULL,
+                WPARAM(0),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG,
+                PROBE_WINDOW_TIMEOUT_MS,
+                Some(&mut result),
+            )
+        };
+        if answered.0 != 0 {
+            continue;
+        }
+        // Zero means "failed or timed out". Read the reason before any other
+        // call can overwrite the thread's last error.
+        let err = windows::core::Error::from_thread();
+        let window = HungWindow {
+            hwnd,
+            pid: hwnd_pid(hwnd),
+        };
+        match classify_probe_miss(
+            err.code(),
+            window_is_hung(hwnd),
+            unsafe { IsWindow(Some(hwnd)) }.as_bool(),
+        ) {
+            ProbeMiss::Unresponsive => report.unresponsive.push(window),
+            ProbeMiss::Closed => {}
+            ProbeMiss::Failed => report.failed.push((window, err.to_string())),
+        }
+    }
+    Ok(report)
+}
+
+/// [`uia_timeout_as_timeout`] for the desktop-wide listing, whose
+/// `FindAll` does not say which window it could not reach: the diagnosis
+/// adds a [`probe_unresponsive_windows`] report and names the windows that
+/// did not answer as its candidates. A failed probe is reported in the
+/// diagnosis and does not replace the timeout, which is the failure.
+///
+/// The listing's `Timeout` is terminal: no poll loop retries it (`App::find`
+/// retries only `SelectorNotMatched`), so the probe runs once, for the error
+/// the caller sees.
+///
+/// `elapsed` is the `FindAll` call alone, and it is what the `Timeout`
+/// reports. The probe runs afterwards and its time (at most
+/// [`PROBE_BUDGET`] plus one window's wait) is not included.
+fn desktop_listing_timeout(err: Error, elapsed: std::time::Duration) -> Error {
+    let Some(message) = uia_timeout_message(&err) else {
+        return err;
+    };
+    let mut observed = uia_timeout_observed(elapsed, message);
+    let mut diagnosis =
+        xa11y_core::Diagnosis::new().condition("the desktop's top-level windows".to_string());
+    match probe_unresponsive_windows() {
+        Ok(report) => {
+            observed.push_str("; ");
+            observed.push_str(&report.summary());
+            diagnosis = diagnosis.candidates(report.candidates());
+        }
+        Err(e) => observed.push_str(&format!(
+            "; probing the top-level windows for the one that did not answer failed: {e}"
+        )),
+    }
+    Error::timeout(elapsed).diagnose(diagnosis.last_observed(observed))
 }
 
 /// A window's title without sending it a message (`GetWindowTextW` reads
@@ -1766,11 +2057,13 @@ fn native_windows_of_pid_with(
                 &[HungWindow { hwnd, pid }],
             ));
         }
-        match uia_call(|| unsafe { autom.ElementFromHandleBuildCache(hwnd, cache) }) {
+        let (result, elapsed) =
+            timed(|| uia_call(|| unsafe { autom.ElementFromHandleBuildCache(hwnd, cache) }));
+        match result {
             Ok(el) => out.push(el),
             Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => {}
             Err(e) => {
-                return Err(uia_timeout_as_timeout(e, || {
+                return Err(uia_timeout_as_timeout(e, elapsed, || {
                     format!(
                         "HWND {:#x} \"{}\" of pid {pid} to answer UIA",
                         hwnd.0 as usize,
@@ -2092,15 +2385,15 @@ fn uia_cached_i32(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Opti
 /// because event targets are snapshots — callers don't act on them directly).
 ///
 /// `hidden_by_ancestor`: something above the element hides it although UIA
-/// leaves `IsOffscreen` false, namely a minimized window (issue #501) or a
-/// scrolling ancestor it is scrolled out of (issue #502).
+/// may leave `IsOffscreen` false, and why: a minimized window (issue #501)
+/// or a scrolling ancestor it is scrolled out of (issue #502).
 fn build_snapshot_data(
     dpi: &crate::dpi::DpiScope,
     element: &IUIAutomationElement,
     pid: Option<u32>,
     handle: u64,
     walker: Option<&IUIAutomationTreeWalker>,
-    hidden_by_ancestor: bool,
+    hidden_by_ancestor: Option<HiddenReason>,
 ) -> Result<ElementData> {
     let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
     let is_table_item = (control_type == UIA_DataItemControlTypeId
@@ -3279,16 +3572,16 @@ impl Provider for WindowsProvider {
                         &VARIANT::from(UIA_WindowControlTypeId.0),
                     )
                 })?;
-                let found = uia_call(|| unsafe {
-                    root.FindAllBuildCache(
-                        TreeScope_Children,
-                        &condition,
-                        self.batch_request.get(dpi),
-                    )
-                })
-                .map_err(|e| {
-                    uia_timeout_as_timeout(e, || "the desktop's top-level windows".to_string())
-                })?;
+                let (found, elapsed) = timed(|| {
+                    uia_call(|| unsafe {
+                        root.FindAllBuildCache(
+                            TreeScope_Children,
+                            &condition,
+                            self.batch_request.get(dpi),
+                        )
+                    })
+                });
+                let found = found.map_err(|e| desktop_listing_timeout(e, elapsed))?;
 
                 let mut windows: Vec<(IUIAutomationElement, u32)> = Vec::new();
                 // Strict iteration: `Length` and `GetElement` failures are real COM
@@ -3726,9 +4019,10 @@ impl Provider for WindowsProvider {
         // S_OK HRESULT. That case is "process not in the UIA tree yet" —
         // SelectorNotMatched, so the core poll loop retries — while a
         // failing HRESULT is a genuine UIA error and short-circuits.
-        let el = match unsafe {
+        let (found, elapsed) = timed(|| unsafe {
             root.FindFirstBuildCache(TreeScope_Children, &condition, self.batch_request.get(dpi))
-        } {
+        });
+        let el = match found {
             Ok(el) => el,
             Err(e) if e.code().is_ok() => {
                 return Err(
@@ -3744,6 +4038,7 @@ impl Provider for WindowsProvider {
                         code: e.code().0 as i64,
                         message: format!("FindFirstBuildCache(ProcessId={pid}) failed: {e}"),
                     },
+                    elapsed,
                     || format!("a top-level window of pid {pid}"),
                 ));
             }
@@ -3793,8 +4088,10 @@ impl Provider for WindowsProvider {
                 &[HungWindow { hwnd, pid }],
             ));
         }
-        let el = uia_call(|| unsafe { self.automation.ElementFromHandle(hwnd) }).map_err(|e| {
-            uia_timeout_as_timeout(e, || {
+        let (el, elapsed) =
+            timed(|| uia_call(|| unsafe { self.automation.ElementFromHandle(hwnd) }));
+        let el = el.map_err(|e| {
+            uia_timeout_as_timeout(e, elapsed, || {
                 format!(
                     "the foreground window HWND {:#x} \"{}\" (pid {pid}) to answer UIA",
                     hwnd.0 as usize,
@@ -5162,6 +5459,24 @@ fn get_actions(
     Ok(actions)
 }
 
+/// Why an element is not visible, or `None` when it is.
+///
+/// What the provider established about the element's ancestors wins over
+/// `IsOffscreen`, because it is the more specific answer: UIA sets
+/// `IsOffscreen` on a WPF `ListBoxItem` scrolled out of its list and on the
+/// content of a minimized window alike, and on a collapsed menu's items too,
+/// so on its own it says only that the element is not drawn.
+fn hidden_reason(
+    offscreen: bool,
+    hidden_by_ancestor: Option<HiddenReason>,
+) -> Option<HiddenReason> {
+    match hidden_by_ancestor {
+        Some(reason) => Some(reason),
+        None if offscreen => Some(HiddenReason::NotShowing),
+        None => None,
+    }
+}
+
 /// Parse UIA element properties into xa11y StateSet using pre-queried patterns.
 #[allow(non_upper_case_globals)]
 fn parse_states(
@@ -5169,7 +5484,7 @@ fn parse_states(
     site: ReadSite<'_>,
     patterns: &ElementPatterns,
     password: bool,
-    hidden_by_ancestor: bool,
+    hidden_by_ancestor: Option<HiddenReason>,
 ) -> Result<StateSet> {
     let role = site.role;
     let enabled = unsafe { element.CachedIsEnabled() }
@@ -5181,7 +5496,8 @@ fn parse_states(
     // A minimized window's content (issue #501) and an item scrolled out of
     // its list (issue #502) are not visible, even though UIA leaves
     // `IsOffscreen` false on them.
-    let visible = !offscreen && !hidden_by_ancestor;
+    let hidden_reason = hidden_reason(offscreen, hidden_by_ancestor);
+    let visible = hidden_reason.is_none();
     let focused = unsafe { element.CachedHasKeyboardFocus() }
         .unwrap_or(BOOL(0))
         .as_bool();
@@ -5328,6 +5644,7 @@ fn parse_states(
     Ok(StateParts {
         enabled,
         visible,
+        hidden_reason,
         focused,
         active,
         focusable,
@@ -6308,7 +6625,7 @@ impl EventContext {
             Some(self.app_pid),
             0,
             Some(&self.walker),
-            in_minimized_window,
+            in_minimized_window.then_some(HiddenReason::WindowMinimized),
         )
     }
 
@@ -6963,6 +7280,7 @@ impl WindowsProvider {
 #[allow(non_upper_case_globals)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// Build a shell-scan partial result of `n` classified surfaces.
     fn classified(n: usize) -> Vec<(u8, ShellSurfaceKind, ElementData)> {
@@ -7156,6 +7474,26 @@ mod tests {
     }
 
     #[test]
+    fn hidden_reason_prefers_what_the_ancestors_say() {
+        // Visible only when nothing hides it.
+        assert_eq!(hidden_reason(false, None), None);
+        // IsOffscreen alone says only "not drawn".
+        assert_eq!(hidden_reason(true, None), Some(HiddenReason::NotShowing));
+        // A WPF ListBoxItem scrolled out reports IsOffscreen too; the clip
+        // is the more specific answer.
+        for offscreen in [false, true] {
+            assert_eq!(
+                hidden_reason(offscreen, Some(HiddenReason::ScrolledOut)),
+                Some(HiddenReason::ScrolledOut)
+            );
+            assert_eq!(
+                hidden_reason(offscreen, Some(HiddenReason::WindowMinimized)),
+                Some(HiddenReason::WindowMinimized)
+            );
+        }
+    }
+
+    #[test]
     fn clipped_out_needs_no_overlap_at_all() {
         let clip = Some(rect(0, 0, 100, 100));
         // Inside and partly inside: showing.
@@ -7226,20 +7564,165 @@ mod tests {
             code: i64::from(UIA_E_TIMEOUT as i32),
             message: "FindAll".into(),
         };
-        let err = uia_timeout_as_timeout(timed_out, || "the desktop".into());
-        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
-        assert_eq!(
-            err.diagnosis().and_then(|d| d.condition.clone()).as_deref(),
-            Some("the desktop")
-        );
+        let took = Duration::from_millis(2_031);
+        let err = uia_timeout_as_timeout(timed_out, took, || "the desktop".into());
+        let Error::Timeout { elapsed, diagnosis } = &err else {
+            panic!("expected Timeout, got {err:?}");
+        };
+        // The wait that happened, not a constant (#599).
+        assert_eq!(*elapsed, took);
+        let d = diagnosis.as_deref().expect("diagnosis attached");
+        assert_eq!(d.condition.as_deref(), Some("the desktop"));
+        let observed = d.last_observed.as_deref().expect("last_observed");
+        assert!(observed.contains("2.0s"), "{observed}");
+        assert!(observed.contains("connection timeout"), "{observed}");
+        assert!(observed.ends_with(": FindAll"), "{observed}");
         let other = Error::Platform {
             code: -1,
             message: "x".into(),
         };
         assert!(matches!(
-            uia_timeout_as_timeout(other, || unreachable!()),
+            uia_timeout_as_timeout(other, took, || unreachable!()),
             Error::Platform { code: -1, .. }
         ));
+    }
+
+    #[test]
+    fn uia_timeout_names_the_limit_its_elapsed_time_fits() {
+        let txn = Duration::from_millis(u64::from(UIA_TRANSACTION_TIMEOUT_MS));
+        assert!(uia_timeout_which(Duration::from_millis(2_000)).contains("connection timeout"));
+        assert!(uia_timeout_which(txn - Duration::from_millis(1)).contains("connection timeout"));
+        // A long wait fits the transaction timeout but does not prove it.
+        assert!(uia_timeout_which(txn).starts_with("consistent with the 20000 ms transaction"));
+        assert!(uia_timeout_which(txn + Duration::from_secs(1)).contains("transaction timeout"));
+    }
+
+    #[test]
+    fn a_probe_miss_counts_as_unresponsive_only_on_timeout_or_hung() {
+        let timeout = windows::core::HRESULT::from_win32(ERROR_TIMEOUT.0);
+        let denied = windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0);
+        assert_eq!(
+            classify_probe_miss(timeout, false, true),
+            ProbeMiss::Unresponsive
+        );
+        // SMTO_ABORTIFHUNG returns at once for a hung window, whatever the
+        // last error says.
+        assert_eq!(
+            classify_probe_miss(denied, true, true),
+            ProbeMiss::Unresponsive
+        );
+        // UIPI refusing a message to an elevated window is not a suspect.
+        assert_eq!(classify_probe_miss(denied, false, true), ProbeMiss::Failed);
+        assert_eq!(classify_probe_miss(denied, false, false), ProbeMiss::Closed);
+    }
+
+    #[test]
+    fn probe_report_lists_failed_probes_apart_from_suspects() {
+        let window = |i: u32| HungWindow {
+            hwnd: HWND(i as usize as *mut core::ffi::c_void),
+            pid: 9000 + i,
+        };
+        let report = ProbeReport {
+            visible: 3,
+            probed: 3,
+            unresponsive: vec![window(1)],
+            failed: vec![(window(2), "Access is denied. (0x80070005)".to_string())],
+            stopped: None,
+        };
+        let summary = report.summary();
+        assert!(summary.contains("1 did not answer"), "{summary}");
+        assert!(
+            summary.contains("1 probe(s) failed and say nothing about responsiveness"),
+            "{summary}"
+        );
+        assert!(summary.contains("probe of HWND 0x2"), "{summary}");
+        assert!(summary.contains("(pid 9002"), "{summary}");
+        assert!(summary.contains("failed: Access is denied."), "{summary}");
+        // Only the window that did not answer is a candidate.
+        let candidates = report.candidates();
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert!(candidates[0].contains("pid 9001"), "{candidates:?}");
+
+        let only_failed = ProbeReport {
+            visible: 1,
+            probed: 1,
+            failed: vec![(window(3), "x".to_string())],
+            ..ProbeReport::default()
+        };
+        let summary = only_failed.summary();
+        assert!(summary.contains("no probed window timed out"), "{summary}");
+        assert!(
+            !summary.contains("every probed window answered"),
+            "{summary}"
+        );
+        assert!(only_failed.candidates().is_empty());
+    }
+
+    #[test]
+    fn desktop_listing_timeout_passes_other_errors_through_unprobed() {
+        let other = Error::Platform {
+            code: -7,
+            message: "x".into(),
+        };
+        assert!(matches!(
+            desktop_listing_timeout(other, Duration::from_secs(1)),
+            Error::Platform { code: -7, .. }
+        ));
+    }
+
+    #[test]
+    fn probe_report_is_bounded_and_says_what_it_skipped() {
+        let report = ProbeReport {
+            visible: 80,
+            probed: PROBE_WINDOW_LIMIT,
+            unresponsive: (1..=12)
+                .map(|i| HungWindow {
+                    hwnd: HWND(i as *mut core::ffi::c_void),
+                    pid: 7000 + i,
+                })
+                .collect(),
+            failed: Vec::new(),
+            stopped: Some(format!("window limit of {PROBE_WINDOW_LIMIT} reached")),
+        };
+        let candidates = report.candidates();
+        assert_eq!(candidates.len(), DIAG_HUNG_WINDOW_LIMIT + 1);
+        assert!(candidates[0].contains("pid 7001"), "{candidates:?}");
+        assert!(candidates.last().is_some_and(|c| c.contains("+2 more")));
+        let summary = report.summary();
+        assert!(
+            summary.contains(&format!("probed {PROBE_WINDOW_LIMIT} of 80")),
+            "{summary}"
+        );
+        assert!(summary.contains("stopped early: window limit"), "{summary}");
+        assert!(summary.contains("12 did not answer"), "{summary}");
+
+        let quiet = ProbeReport {
+            visible: 3,
+            probed: 3,
+            ..ProbeReport::default()
+        };
+        assert!(quiet.candidates().is_empty());
+        assert!(
+            quiet.summary().contains("every probed window answered"),
+            "{}",
+            quiet.summary()
+        );
+    }
+
+    #[test]
+    fn probe_of_the_live_desktop_stays_inside_its_budget() {
+        let start = std::time::Instant::now();
+        let report = probe_unresponsive_windows().expect("EnumWindows works on a desktop");
+        let took = start.elapsed();
+        // One window may start its 250 ms wait just inside the budget.
+        assert!(
+            took <= PROBE_BUDGET + Duration::from_millis(u64::from(PROBE_WINDOW_TIMEOUT_MS) + 250),
+            "probe took {took:?}: {report:?}"
+        );
+        assert!(
+            report.probed <= report.visible.min(PROBE_WINDOW_LIMIT),
+            "{report:?}"
+        );
     }
 
     #[test]

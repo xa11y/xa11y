@@ -137,6 +137,19 @@ impl Element {
         self.data.states.visible
     }
 
+    /// Why the element is not visible: `"scrolled_out"` (outside a scrolling
+    /// ancestor's viewport, so `scrollIntoView()` can fix it),
+    /// `"window_minimized"`, `"not_showing"` (the platform says it is not
+    /// drawn without saying why) or `"unknown"`. `null` exactly when
+    /// `visible` is `true`.
+    #[napi(getter)]
+    pub fn hidden_reason(&self) -> Option<String> {
+        self.data
+            .states
+            .hidden_reason
+            .map(|r| r.to_snake_case().to_string())
+    }
+
     /// `true` if the element currently has keyboard focus.
     #[napi(getter)]
     pub fn focused(&self) -> bool {

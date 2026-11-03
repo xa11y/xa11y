@@ -1206,6 +1206,42 @@ mod tests {
         assert!(submit.states.visible, "Submit should be visible");
     }
 
+    /// `hidden_reason` is set exactly when `visible` is false, on every
+    /// element the provider reports (#590). A visible element must not carry
+    /// a reason, and a hidden one must say why, even if only `Unknown`.
+    #[test]
+    #[ignore]
+    fn hidden_reason_is_set_exactly_when_not_visible() {
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
+        assert_eq!(
+            submit.states.hidden_reason, None,
+            "a visible Submit must report no hidden_reason"
+        );
+        let all = app
+            .locator("*")
+            .elements()
+            .expect("enumerating the test app's tree");
+        assert!(!all.is_empty(), "the test app's tree must not be empty");
+        let broken: Vec<_> = all
+            .iter()
+            .filter(|e| e.states.hidden_reason.is_some() == e.states.visible)
+            .map(|e| {
+                (
+                    e.role,
+                    e.name.clone(),
+                    e.states.visible,
+                    e.states.hidden_reason,
+                )
+            })
+            .collect();
+        assert!(
+            broken.is_empty(),
+            "hidden_reason must be Some exactly when visible is false; \
+             these elements break it: {broken:?}"
+        );
+    }
+
     #[test]
     #[ignore]
     fn state_focused_after_focus_action() {

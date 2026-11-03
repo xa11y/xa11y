@@ -1723,9 +1723,11 @@ mod tests {
         let provider = Arc::new(MultiWindowProvider::new());
         let mut hidden = MultiWindowProvider::window("Provider-reported", 100, false);
         hidden.states.visible = false;
+        hidden.states.hidden_reason = Some(crate::HiddenReason::NotShowing);
         hidden.states.minimized = Some(false);
         let mut minimized = MultiWindowProvider::window("Minimized", 101, false);
         minimized.states.visible = false;
+        minimized.states.hidden_reason = Some(crate::HiddenReason::WindowMinimized);
         minimized.states.minimized = Some(true);
         provider.replace_windows(vec![hidden, minimized]);
         let any: Arc<dyn Provider> = provider;

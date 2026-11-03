@@ -363,7 +363,12 @@ def test_atspi_geometry_capability_is_measured_for_gtk_and_qt(app: xa11y.App) ->
     listed since role numbers take precedence over its misleading
     ``application`` role name (issue #485), and it does not advertise AT-SPI
     geometry either. Neither therefore provides a capability xa11y can
-    honestly advertise.
+    honestly advertise through AT-SPI.
+
+    Under a window manager, ``move_to`` / ``resize_to`` come from the native
+    EWMH backend instead, which binds GTK 4's window by pid and title (issue
+    #487). CI's gtk cell runs one, so there the verbs must be advertised and
+    must really move and resize the window; the Qt cell runs none.
     """
     if APP not in {"gtk", "qt"}:
         pytest.skip("this probe is specifically for the GTK and Qt adapters")
@@ -373,14 +378,61 @@ def test_atspi_geometry_capability_is_measured_for_gtk_and_qt(app: xa11y.App) ->
     else:
         assert windows, "Qt must expose its top-level window through AT-SPI"
     win = windows[0]
-    assert "move_to" not in win.actions, win.actions
-    assert "resize_to" not in win.actions, win.actions
     bounds = win.bounds
     assert bounds is not None
-    with pytest.raises(xa11y.ActionNotSupportedError):
-        win.move_to(bounds.x + 10, bounds.y + 10)
-    with pytest.raises(xa11y.ActionNotSupportedError):
-        win.resize_to(bounds.width + 10, bounds.height + 10)
+    # `minimize` is advertised by the X11 backend exactly when a window
+    # manager runs (and by the Wayland backend never).
+    if "minimize" not in win.actions:
+        assert "move_to" not in win.actions, win.actions
+        assert "resize_to" not in win.actions, win.actions
+        with pytest.raises(xa11y.ActionNotSupportedError):
+            win.move_to(bounds.x + 10, bounds.y + 10)
+        with pytest.raises(xa11y.ActionNotSupportedError):
+            win.resize_to(bounds.width + 10, bounds.height + 10)
+        return
+    assert "move_to" in win.actions and "resize_to" in win.actions, (
+        f"under a window manager the EWMH verbs must be advertised: {win.actions}"
+    )
+
+    def current():
+        found = app.windows()
+        return found[0].bounds if found else None
+
+    try:
+        win.move_to(bounds.x + 40, bounds.y + 30)
+        moved = _wait_until(
+            lambda: (
+                (b := current()) is not None
+                and (b.x, b.y) != (bounds.x, bounds.y)
+                and b
+            ),
+            5.0,
+            "the window bounds to change after move_to",
+        )
+        assert (moved.x - bounds.x, moved.y - bounds.y) == (40, 30), (bounds, moved)
+        win.resize_to(bounds.width - 50, bounds.height - 40)
+        resized = _wait_until(
+            lambda: (b := current()) is not None and b.width != bounds.width and b,
+            5.0,
+            "the window bounds to change after resize_to",
+        )
+        assert (resized.width, resized.height) == (
+            bounds.width - 50,
+            bounds.height - 40,
+        ), (bounds, resized)
+    finally:
+        restore = app.windows()[0]
+        restore.resize_to(bounds.width, bounds.height)
+        restore.move_to(bounds.x, bounds.y)
+    # The shared app must leave this test at its original size and place:
+    # later tests read positions inside it (issue #487's CI failure was a
+    # window left 50x40 smaller, which scrolled their target out of view).
+    _wait_until(
+        lambda: (b := current()) is not None
+        and (b.x, b.y, b.width, b.height) == (bounds.x, bounds.y, bounds.width, bounds.height),
+        5.0,
+        f"the window to return to {bounds}",
+    )
 
 
 def test_minimize_and_restore(app: xa11y.App) -> None:
@@ -457,6 +509,12 @@ def test_controls_of_a_minimized_window_are_not_visible(
         assert all(e.visible is False for e in still_listed), (
             "a button in a minimized window must not report visible; got "
             f"{[(e.name, e.visible) for e in still_listed]}"
+        )
+        # The minimized window is the reason, ahead of anything a control's
+        # own IsOffscreen says (#590).
+        assert all(e.hidden_reason == "window_minimized" for e in still_listed), (
+            "a button in a minimized window must say why it is hidden; got "
+            f"{[(e.name, e.hidden_reason) for e in still_listed]}"
         )
         minimized.restore()
         _settled_window(
@@ -1240,3 +1298,223 @@ def test_fullscreen_state_enters_and_reads_true(app: xa11y.App) -> None:
         except Exception:  # best-effort cleanup; the original error wins
             pass
         raise
+
+
+def _x11_move_client_window(pid: int, title: str, x: int, y: int) -> None:
+    """Move ``pid``'s X11 window titled ``title`` to (x, y) through Xlib.
+
+    Matched on title as well as pid: GTK also gives its unmapped client
+    leader window the process's ``_NET_WM_PID``.
+
+    The test moves the window itself, from outside xa11y, so it checks that
+    element bounds follow the window rather than xa11y's own move_to.
+    """
+    import ctypes
+    import ctypes.util
+
+    lib = ctypes.util.find_library("X11")
+    if not lib:
+        pytest.skip("libX11 is not available to move the window")
+    x11 = ctypes.cdll.LoadLibrary(lib)
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XDefaultRootWindow.restype = ctypes.c_ulong
+    x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    x11.XInternAtom.restype = ctypes.c_ulong
+    x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x11.XQueryTree.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.POINTER(ctypes.c_ulong)),
+        ctypes.POINTER(ctypes.c_uint),
+    ]
+    x11.XGetWindowProperty.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_long,
+        ctypes.c_long,
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte)),
+    ]
+    x11.XFetchName.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_char_p),
+    ]
+    x11.XMoveWindow.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
+    x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    x11.XFree.argtypes = [ctypes.c_void_p]
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+
+    display = x11.XOpenDisplay(None)
+    if not display:
+        pytest.skip("no X display to move the window on")
+    try:
+        net_wm_pid = x11.XInternAtom(display, b"_NET_WM_PID", 0)
+
+        def window_pid(window: int) -> int | None:
+            actual_type = ctypes.c_ulong()
+            actual_format = ctypes.c_int()
+            n_items = ctypes.c_ulong()
+            after = ctypes.c_ulong()
+            data = ctypes.POINTER(ctypes.c_ubyte)()
+            status = x11.XGetWindowProperty(
+                display,
+                window,
+                net_wm_pid,
+                0,
+                1,
+                0,
+                6,  # XA_CARDINAL
+                ctypes.byref(actual_type),
+                ctypes.byref(actual_format),
+                ctypes.byref(n_items),
+                ctypes.byref(after),
+                ctypes.byref(data),
+            )
+            if status != 0 or not data:
+                return None
+            try:
+                if n_items.value < 1:
+                    return None
+                return ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))[0]
+            finally:
+                x11.XFree(data)
+
+        def walk(window: int):
+            root_ret = ctypes.c_ulong()
+            parent = ctypes.c_ulong()
+            children = ctypes.POINTER(ctypes.c_ulong)()
+            count = ctypes.c_uint()
+            if not x11.XQueryTree(
+                display,
+                window,
+                ctypes.byref(root_ret),
+                ctypes.byref(parent),
+                ctypes.byref(children),
+                ctypes.byref(count),
+            ):
+                return
+            try:
+                kids = [children[i] for i in range(count.value)]
+            finally:
+                if children:
+                    x11.XFree(children)
+            for kid in kids:
+                yield kid
+                yield from walk(kid)
+
+        def window_name(window: int) -> str | None:
+            name = ctypes.c_char_p()
+            if (
+                not x11.XFetchName(display, window, ctypes.byref(name))
+                or not name.value
+            ):
+                return None
+            value = name.value.decode("utf-8", "replace")
+            x11.XFree(ctypes.cast(name, ctypes.c_void_p))
+            return value
+
+        root = x11.XDefaultRootWindow(display)
+        matches = [
+            w for w in walk(root) if window_pid(w) == pid and window_name(w) == title
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"expected one X11 window with pid {pid} titled {title!r}, found {len(matches)}"
+            )
+        x11.XMoveWindow(display, matches[0], x, y)
+        x11.XSync(display, 0)
+    finally:
+        x11.XCloseDisplay(display)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="GTK 4 X11 extents are Linux-only")
+def test_gtk4_element_bounds_follow_the_window(app: xa11y.App) -> None:
+    """GTK 4 element bounds move with the window on X11 (issue #487).
+
+    GTK 4 reports screen extents as (0, 0) for every widget, or relative to
+    its window, wherever the window is. xa11y computes them as the window
+    extents plus the X11 client window's origin, so a button's bounds must
+    shift by exactly as much as the window moved.
+    """
+    if APP != "gtk":
+        pytest.skip("pins GTK 4's extents")
+    if os.environ.get("XDG_SESSION_TYPE") == "wayland" or not os.environ.get("DISPLAY"):
+        pytest.skip("X11 only: a Wayland client has no global origin")
+    button = app.locator('button[name="OK"]')
+    windows = app.windows()
+    assert windows and windows[0].name, "GTK 4 must list its titled window (#485)"
+    title = windows[0].name
+
+    def ok_bounds():
+        return button.element().bounds
+
+    # The window's direct child is the app's ScrolledWindow. Unlike the OK
+    # button inside it, its position does not depend on how far earlier
+    # suites scrolled, so it is the element the absolute check uses.
+    viewport = app.locator(f'window[name="{title}"] > group')
+
+    def assert_viewport_inside_window() -> None:
+        # Absolute, not just relative: GTK 4 bounds land on the window,
+        # whose bounds the window backend reads from the X server.
+        inner = viewport.element().bounds
+        outer = app.windows()[0].bounds
+        assert inner is not None, "GTK 4 scrolled window has no bounds on X11"
+        assert outer is not None, "GTK 4 window has no bounds on X11"
+        assert (
+            outer.x <= inner.x
+            and outer.y <= inner.y
+            and inner.x + inner.width <= outer.x + outer.width
+            and inner.y + inner.height <= outer.y + outer.height
+        ), f"scrolled window {inner} is not inside window {outer}"
+
+    before = ok_bounds()
+    assert before is not None, "GTK 4 button has no bounds on X11"
+    assert (before.x, before.y) != (0, 0), (
+        f"GTK 4 button bounds look like raw screen extents: {before}"
+    )
+    assert_viewport_inside_window()
+    try:
+        _x11_move_client_window(app.pid, title, 200, 150)
+        _wait_until(
+            lambda: (
+                (b := ok_bounds()) is not None and (b.x, b.y) != (before.x, before.y)
+            ),
+            5.0,
+            "the button bounds to change after the window moved",
+        )
+        after = ok_bounds()
+        assert after is not None
+        assert (after.width, after.height) == (before.width, before.height)
+        _x11_move_client_window(app.pid, title, 320, 240)
+        _wait_until(
+            lambda: (b := ok_bounds()) is not None and (b.x, b.y) != (after.x, after.y),
+            5.0,
+            "the button bounds to change after the second move",
+        )
+        again = ok_bounds()
+        assert again is not None
+        # Two moves of the same client window by (+120, +90): the button
+        # moves by the same amount.
+        assert (again.x - after.x, again.y - after.y) == (120, 90), (
+            before,
+            after,
+            again,
+        )
+        assert_viewport_inside_window()
+    finally:
+        _x11_move_client_window(app.pid, title, 0, 0)

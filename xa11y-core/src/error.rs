@@ -31,6 +31,7 @@
 //!    JS) in addition to rendering it into the message. New fields belong on
 //!    [`Diagnosis`], not interpolated into ad-hoc message strings.
 
+use crate::element::HiddenReason;
 use crate::role::Role;
 
 /// Result type alias for xa11y operations.
@@ -71,6 +72,11 @@ pub struct Diagnosis {
     /// `"selector never matched"`, or
     /// `"3 event(s) received, none matched"`.
     pub last_observed: Option<String>,
+    /// Why the last observed element was not visible, when a wait failed on
+    /// an element that matched but read `visible: false`. A harness can act
+    /// on it (`ScrolledOut` is what `scroll_into_view` fixes; a minimized
+    /// window needs restoring) without parsing `last_observed`.
+    pub hidden_reason: Option<HiddenReason>,
     /// Bounded list of near-miss candidates — elements or applications that
     /// were present in the search scope and partially matched (e.g. same
     /// role, different name).
@@ -108,6 +114,13 @@ impl Diagnosis {
         self
     }
 
+    /// Set why the last observed element was not visible.
+    #[must_use]
+    pub fn hidden_reason(mut self, reason: HiddenReason) -> Self {
+        self.hidden_reason = Some(reason);
+        self
+    }
+
     /// Set the bounded list of near-miss candidates.
     #[must_use]
     pub fn candidates(mut self, candidates: impl IntoIterator<Item = String>) -> Self {
@@ -127,6 +140,7 @@ impl Diagnosis {
         self.condition.is_none()
             && self.selector.is_none()
             && self.last_observed.is_none()
+            && self.hidden_reason.is_none()
             && self.candidates.is_empty()
             && self.scope.is_none()
     }
@@ -139,6 +153,18 @@ impl std::fmt::Display for Diagnosis {
     /// ```text
     /// ; waiting for: visible; last observed: selector never matched;
     /// candidates: button "Back", button "Forward"
+    /// ```
+    ///
+    /// or, for an element that matched but was not visible:
+    ///
+    /// ```text
+    /// ; waiting for: visible; last observed: matched button "Save"
+    /// (visible=false, enabled=true, focused=false); hidden because: scrolled_out
+    /// ```
+    ///
+    /// The scope, when present, follows on its own lines:
+    ///
+    /// ```text
     /// search scope (bounded):
     ///   window "Main"
     ///     ...
@@ -152,6 +178,9 @@ impl std::fmt::Display for Diagnosis {
         }
         if let Some(last) = &self.last_observed {
             write!(f, "; last observed: {last}")?;
+        }
+        if let Some(reason) = self.hidden_reason {
+            write!(f, "; hidden because: {reason}")?;
         }
         if !self.candidates.is_empty() {
             write!(f, "; candidates: {}", self.candidates.join(", "))?;

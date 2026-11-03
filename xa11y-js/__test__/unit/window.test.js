@@ -114,11 +114,13 @@ test('window state getters default to null and round-trip minimize/restore', asy
   // the mock models that decision as false, not unknown.
   assert.equal(minimized.el.fullscreen, false);
   assert.equal(minimized.el.visible, false);
+  assert.equal(minimized.el.hiddenReason, 'window_minimized');
 
   await minimized.el.restore();
   const restored = await probeWindow((e) => e.role === 'window', probe);
   assert.equal(restored.el.minimized, false);
   assert.equal(restored.el.visible, true);
+  assert.equal(restored.el.hiddenReason, null);
 });
 
 test('enterFullscreen/minimize sequence keeps every step honest', async () => {
