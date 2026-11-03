@@ -20,6 +20,10 @@ OmissionReasonName = Literal["no_bounds", "zero_area", "outside_capture"]
 # ``hidden_reason`` of a timeout). Identically spelled in the JS binding.
 HiddenReasonName = Literal["window_minimized", "scrolled_out", "not_showing", "unknown"]
 
+# What an auto-waiting action's scroll attempt came to (the ``auto_scroll`` of
+# a timeout). Identically spelled in the JS binding.
+AutoScrollOutcomeName = Literal["refused", "no_effect", "revealed"]
+
 # Shell-surface kinds. Like roles and key names, these strings are identical in
 # the JS binding — a kind is a value the user writes as a literal.
 ShellSurfaceKindName = Literal[
@@ -71,6 +75,10 @@ class SelectorNotMatchedError(XA11yError):
     """Why the last observed element was not visible. Set by timeouts; always
     ``None`` for this class (present for attribute parity with
     :class:`TimeoutError`)."""
+    auto_scroll: AutoScrollOutcomeName | None
+    """What an auto-waiting action's scroll attempt came to. Set by timeouts;
+    always ``None`` for this class (present for attribute parity with
+    :class:`TimeoutError`)."""
     candidates: list[str]
     """Bounded near-miss candidates, e.g. same-role elements with different
     names, or the running applications for app lookups."""
@@ -117,6 +125,14 @@ class TimeoutError(XA11yError):
     read ``visible=False``: ``'scrolled_out'`` (scroll it into view first),
     ``'window_minimized'`` (restore its window), ``'not_showing'`` or
     ``'unknown'``. ``None`` when nothing hidden was observed."""
+    auto_scroll: AutoScrollOutcomeName | None
+    """What the action's auto-scroll came to, when its target was enabled
+    and ``hidden_reason == 'scrolled_out'``: ``'refused'`` (the element has
+    no semantic scroll; it was asked once), ``'no_effect'`` (the platform
+    accepted the call, and a later poll still read ``scrolled_out``) or
+    ``'revealed'`` (the scroll worked and something else, such as
+    ``enabled=False``, kept the wait going). ``None`` when the wait never
+    tried to scroll."""
     candidates: list[str]
     """Bounded near-miss candidates (same role, different attributes).
     Collected only when the selector never matched during the wait."""

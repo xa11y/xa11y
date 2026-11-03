@@ -129,7 +129,9 @@ APP_CONFIGS: dict[str, dict] = {
         "scrolled_pane_start_button": "Scroll Long Pane To Start",
         # Qt implements no AT-SPI Component.ScrollTo, so an action on a
         # scrolled-out row cannot scroll it into view and waits it out (#590).
-        "scrolled_pane_refuses_scroll_into_view": True,
+        # Linux only, like the pane itself: elsewhere the row is not reported
+        # scrolled out, so no scroll is attempted to be refused.
+        "scrolled_pane_refuses_scroll_into_view": sys.platform.startswith("linux"),
         # A button on an inactive tab page: hidden by a container that does
         # not scroll, so not_showing (#590). Qt reports it without bounds,
         # so the scroll-role check is guarded by the Linux unit tests rather
@@ -787,7 +789,8 @@ APP_CONFIGS: dict[str, dict] = {
         # Windows.UI.Xaml ships no spin-button control (NumberBox is WinUI 2,
         # a NuGet dependency this app deliberately does not take).
         "spinbutton_selector": unsupported(
-            "Windows.UI.Xaml ships no in-box control that reports ControlType.Spinner"
+            "Windows.UI.Xaml ships no in-box control that reports "
+            "ControlType.Spinner"
         ),
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',

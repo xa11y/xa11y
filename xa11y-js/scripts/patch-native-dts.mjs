@@ -5,7 +5,7 @@
 //
 // Responsibilities:
 //   1. Prepend shared type aliases (`CheckedState`, `HiddenReasonName`,
-//      `EventTypeName`, `MouseButtonName`, `AnchorName`,
+//      `AutoScrollOutcomeName`, `EventTypeName`, `MouseButtonName`, `AnchorName`,
 //      `ShellSurfaceKindName`) that the Rust side can't express.
 //   2. Narrow `Element.checked: string | null` -> `CheckedState | null`, and
 //      `Element.hiddenReason` -> `HiddenReasonName | null`.
@@ -71,6 +71,9 @@ export type HiddenReasonName =
   | 'scrolled_out'
   | 'not_showing'
   | 'unknown';
+
+/** What an auto-waiting action's scroll attempt came to. Spelled as in Python. */
+export type AutoScrollOutcomeName = 'refused' | 'no_effect' | 'revealed';
 
 /** Why an annotated element is not in the image. Spelled as in Python. */
 export type OmissionReasonName = 'no_bounds' | 'zero_area' | 'outside_capture';

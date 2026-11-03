@@ -77,6 +77,12 @@ pub struct Diagnosis {
     /// on it (`ScrolledOut` is what `scroll_into_view` fixes; a minimized
     /// window needs restoring) without parsing `last_observed`.
     pub hidden_reason: Option<HiddenReason>,
+    /// What an auto-waiting action did about a target that was hidden only
+    /// because it was scrolled out: whether the platform refused to scroll
+    /// it, scrolled it without effect, or brought it into view (after which
+    /// something else, such as `enabled=false`, kept the wait going).
+    /// `None` when the wait never tried to scroll.
+    pub auto_scroll: Option<AutoScrollOutcome>,
     /// Bounded list of near-miss candidates — elements or applications that
     /// were present in the search scope and partially matched (e.g. same
     /// role, different name).
@@ -114,6 +120,13 @@ impl Diagnosis {
         self
     }
 
+    /// Set what an auto-waiting action's scroll attempt came to.
+    #[must_use]
+    pub fn auto_scroll(mut self, outcome: AutoScrollOutcome) -> Self {
+        self.auto_scroll = Some(outcome);
+        self
+    }
+
     /// Set why the last observed element was not visible.
     #[must_use]
     pub fn hidden_reason(mut self, reason: HiddenReason) -> Self {
@@ -141,6 +154,7 @@ impl Diagnosis {
             && self.selector.is_none()
             && self.last_observed.is_none()
             && self.hidden_reason.is_none()
+            && self.auto_scroll.is_none()
             && self.candidates.is_empty()
             && self.scope.is_none()
     }
@@ -182,6 +196,9 @@ impl std::fmt::Display for Diagnosis {
         if let Some(reason) = self.hidden_reason {
             write!(f, "; hidden because: {reason}")?;
         }
+        if let Some(outcome) = self.auto_scroll {
+            write!(f, "; auto-scroll: {outcome}")?;
+        }
         if !self.candidates.is_empty() {
             write!(f, "; candidates: {}", self.candidates.join(", "))?;
         }
@@ -198,6 +215,46 @@ fn diagnosis_suffix(diagnosis: &Option<Box<Diagnosis>>) -> String {
     match diagnosis {
         Some(d) if !d.is_empty() => d.to_string(),
         _ => String::new(),
+    }
+}
+
+/// How an auto-waiting action's attempt to scroll its target into view ended.
+///
+/// An action waits for its target to be visible. When the target is enabled
+/// and hidden only because it is scrolled out, the wait calls the platform's
+/// `scroll_into_view` on it, and a timeout reports the outcome here.
+///
+/// `#[non_exhaustive]`: only the bindings map it, as snake_case strings, and
+/// `[[types.variant_coverage]]` guards their hand-written type declarations.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AutoScrollOutcome {
+    /// The platform refused to scroll this element (it has no semantic
+    /// scroll call for it). The wait asked once and kept polling.
+    Refused,
+    /// The platform accepted the call, but the element still read
+    /// `scrolled_out` when it was next observed.
+    NoEffect,
+    /// The scroll brought the element into view; something else kept the
+    /// action from running (it was disabled, or hidden for another reason).
+    Revealed,
+}
+
+impl AutoScrollOutcome {
+    /// The `snake_case` name this outcome crosses the bindings, the CLI and
+    /// MCP as (`"refused"`, `"no_effect"`, `"revealed"`).
+    pub fn to_snake_case(self) -> &'static str {
+        match self {
+            Self::Refused => "refused",
+            Self::NoEffect => "no_effect",
+            Self::Revealed => "revealed",
+        }
+    }
+}
+
+impl std::fmt::Display for AutoScrollOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_snake_case())
     }
 }
 

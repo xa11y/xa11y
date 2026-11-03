@@ -878,7 +878,8 @@ def test_an_action_scrolls_its_scrolled_out_target_into_view(app, app_config):
     ``select`` waits for ``visible``, which the last row starts without. The
     test asserts that premise first, so it cannot pass on a list whose rows
     were all in view anyway. It then selects the first row again, which has
-    to scroll back the other way, and that puts the shared app back as it was.
+    to scroll back the other way: the list is scrolled back to its top, and
+    the first row (not whichever row was selected before) is left selected.
     """
     list_name = app_config.get("auto_scroll_list_name")
     if not list_name:
@@ -906,8 +907,17 @@ def test_an_action_scrolls_its_scrolled_out_target_into_view(app, app_config):
             f"scrolling to {last!r} must scroll {first!r} out; got "
             f"{row(first).hidden_reason!r}"
         )
-    finally:
-        app.locator(f'list_item[name="{first}"]').select()
+    except BaseException:
+        # Restore on a best-effort basis, without letting a failure here
+        # replace the assertion that actually failed.
+        try:
+            app.locator(f'list_item[name="{first}"]').select()
+        except xa11y.XA11yError as cleanup:
+            print(f"cleanup: selecting {first!r} failed too: {cleanup}")
+        raise
+    # The scroll back is half the test (the other direction), so it runs
+    # outside the cleanup path and fails loudly.
+    app.locator(f'list_item[name="{first}"]').select()
     assert _wait_for(lambda: row(first).visible), (
         f"selecting {first!r} must scroll it back into view"
     )
@@ -918,6 +928,8 @@ def test_an_action_on_a_target_nothing_can_scroll_waits_it_out(app, app_config):
     the action waits as before and its timeout says the scroll was refused
     (#590): "nothing can scroll this" reads differently from "the scroll did
     not help"."""
+    if not app_config.get("scrolled_pane_name"):
+        pytest.skip("this app reports no control as scrolled out")
     if not app_config.get("scrolled_pane_refuses_scroll_into_view"):
         pytest.skip("this app has no scrolled-out control that refuses scrolling")
     last = app_config["scrolled_pane_last_item"]
@@ -933,9 +945,13 @@ def test_an_action_on_a_target_nothing_can_scroll_waits_it_out(app, app_config):
     assert err.hidden_reason == "scrolled_out", (
         f"{last!r} is scrolled out of its pane; got {err.hidden_reason!r}"
     )
-    assert "scroll_into_view was refused" in (err.last_observed or ""), (
+    assert err.auto_scroll == "refused", (
         f"the diagnosis must say the auto-scroll was refused; got "
-        f"{err.last_observed!r}"
+        f"auto_scroll={err.auto_scroll!r}, last_observed={err.last_observed!r}"
+    )
+    # The prose stays for a reader of the message.
+    assert "scroll_into_view was refused" in (err.last_observed or ""), (
+        err.last_observed
     )
 
 

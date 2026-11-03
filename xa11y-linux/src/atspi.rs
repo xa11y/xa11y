@@ -3280,13 +3280,32 @@ impl Provider for LinuxProvider {
             // destroyed object with UnknownMethod. One GetState read on the
             // same path says which: an object that still answers it is alive
             // and simply cannot be scrolled; one that does not is gone.
+            //
+            // A probe that itself fails names the ScrollTo reply too, so the
+            // error says what was being disambiguated (tenet 6).
             Err(e) if is_absent_member(&e) => {
-                return match self.scan_state_bits(&target)? {
-                    Some(_) => Err(not_supported()),
-                    None => Err(Error::ElementStale {
+                return match self.scan_state_bits(&target) {
+                    Ok(Some(_)) => Err(not_supported()),
+                    Ok(None) => Err(Error::ElementStale {
                         selector: format!("{}{}", target.bus_name, target.path),
                     }),
+                    Err(Error::Timeout { .. }) => Err(self.unresponsive_peer(
+                        &target,
+                        &format!(
+                            "Accessible.GetState (probing after Component.ScrollTo answered: {e})"
+                        ),
+                    )),
+                    Err(probe) => Err(Error::Platform {
+                        code: -1,
+                        message: format!(
+                            "Component.ScrollTo answered {e}; probing GetState to tell a live \
+                             object from a destroyed one then failed: {probe}"
+                        ),
+                    }),
                 };
+            }
+            Err(e) if is_timeout(&e) => {
+                return Err(self.unresponsive_peer(&target, "Component.ScrollTo"))
             }
             Err(e) if is_peer_gone(&e) => {
                 return Err(Error::ElementStale {
@@ -5769,12 +5788,18 @@ mod tests {
 
     /// Accessible half of the `scroll_into_view` fixture: answers `GetState`,
     /// which is how the provider tells a live object from a destroyed one.
-    struct ScrollAccessible;
+    struct ScrollAccessible {
+        /// `GetState` fails, so the absent-ScrollTo probe cannot decide.
+        state_fails: bool,
+    }
 
     #[zbus::interface(name = "org.a11y.atspi.Accessible")]
     impl ScrollAccessible {
-        fn get_state(&self) -> Vec<u32> {
-            vec![0, 0]
+        fn get_state(&self) -> zbus::fdo::Result<Vec<u32>> {
+            if self.state_fails {
+                return Err(zbus::fdo::Error::Failed("state unreadable".into()));
+            }
+            Ok(vec![0, 0])
         }
     }
 
@@ -5817,9 +5842,12 @@ mod tests {
                 ("/broken", Some("Failed")),
                 // Qt: the object answers GetState but has no Component.ScrollTo.
                 ("/qt", None),
+                // No ScrollTo, and the GetState probe fails too.
+                ("/unprobed", None),
             ] {
+                let state_fails = path == "/unprobed";
                 builder = builder
-                    .serve_at(path, ScrollAccessible)
+                    .serve_at(path, ScrollAccessible { state_fails })
                     .expect("accessible");
                 if let Some(reply) = reply {
                     builder = builder
@@ -5840,6 +5868,7 @@ mod tests {
             "/refuses",
             "/broken",
             "/qt",
+            "/unprobed",
             "/gone",
         ];
         let provider = LinuxProvider {
@@ -5884,6 +5913,15 @@ mod tests {
         let result = scroll("/broken");
         assert!(
             matches!(&result, Err(Error::Platform { message, .. }) if message.contains("layout busy")),
+            "{result:?}"
+        );
+        // A failed probe names both replies: what ScrollTo said, and why the
+        // probe could not tell what that meant.
+        let result = scroll("/unprobed");
+        assert!(
+            matches!(&result, Err(Error::Platform { message, .. })
+                if message.contains("Component.ScrollTo answered")
+                    && message.contains("state unreadable")),
             "{result:?}"
         );
     }
