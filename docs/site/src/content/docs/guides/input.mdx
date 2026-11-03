@@ -130,6 +130,22 @@ Every pointer method accepts either a screen-space point or an `Element`:
 - **Point** is an absolute desktop coordinate. Windows uses physical pixels. macOS uses points. Linux uses logical pixels, or physical pixels where the HiDPI scale can't be read reliably (see [platform details](/reference/platform-details/#coordinates-and-hidpi)). Origin is the top-left of the primary display, and negative values are valid on multi-monitor setups.
 - **Element** uses the centre of the element's `bounds` at the time of the call. Rectangles are half-open. Right and bottom anchors use the last coordinate inside the bounds rather than the exclusive far edge. `InputSim` does not re-read the accessibility tree for you, so re-fetch via a locator first if the UI may have moved.
 
+### Clicking something that is still moving
+
+An element sliding in, or a dialog still settling after a layout change, has
+bounds that are already stale by the time the click is sent. Fetch it with the
+locator's `wait_stable()` (`waitStable()` in JS) instead of `element()`. It
+returns once the bounds are unchanged across two consecutive polls, so the
+`Element` you hand to `InputSim` holds where the element comes to rest:
+
+```python
+panel_button = app.locator('button[name="Save"]').wait_stable(timeout=5)
+sim.click(panel_button)
+```
+
+The CLI spelling is `xa11y find ... -o center --stable`. See the
+[locator reference](/reference/locator/#waits) for the timeout diagnosis.
+
 On a Linux Wayland session, `Element` targets are refused with `Unsupported`. Wayland clients don't know their global position, so the bounds AT-SPI reports are not screen coordinates. Use a semantic action such as `press` or `focus` there, or pass a raw point. See [platform details](/reference/platform-details/).
 
 To click a location selected from a screenshot, convert the image pixel with

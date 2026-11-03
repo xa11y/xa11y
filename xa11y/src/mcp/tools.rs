@@ -579,6 +579,15 @@ fn tool_definition(name: &str) -> Value {
                     "Maximum matches to return. Default {FIND_DEFAULT_LIMIT}."
                 )),
             );
+            props.insert(
+                "stable".into(),
+                json!({
+                    "type": "boolean",
+                    "description": "Wait until the one match is visible and its bounds \
+                                    are unchanged across two consecutive polls before \
+                                    reporting it. Default false.",
+                }),
+            );
             tool(
                 "find",
                 "Find elements",
@@ -589,9 +598,24 @@ fn tool_definition(name: &str) -> Value {
                      the actions the application advertises. A selector that matches \
                      nothing comes back with the near-miss candidates that were in \
                      scope, so read those before guessing again.\n\n\
+                     Without `stable` this reads the tree once and does not wait. Set \
+                     `stable: true` before clicking or dragging something that may \
+                     still be moving (sliding in, resizing, settling after a layout \
+                     change): the call then waits up to the default timeout, \
+                     currently {timeout} (set {timeout_env}, in seconds, where the \
+                     server is launched to change it), until the match is visible and \
+                     its bounds are unchanged across two consecutive polls, and \
+                     reports those settled coordinates. With `stable` the selector \
+                     must match exactly one element: one that matches several is \
+                     refused with an `ambiguous_selector` failure listing what it \
+                     matched. A match that never settles returns a `timeout` failure \
+                     naming the last two bounds it saw; one that never appears \
+                     returns the usual not-found failure once the wait is over.\n\n\
                      {field_cap}\n\n\
                      {ACTIONS_FIELD_NOTE}",
                     field_cap = field_cap_note(),
+                    timeout = default_timeout_label(),
+                    timeout_env = crate::DEFAULT_TIMEOUT_ENV_VAR,
                 ),
                 object_schema(props, &["selector"]),
             )
@@ -1118,6 +1142,16 @@ fn opt_str<'a>(args: &'a Value, key: &str) -> CliResult<Option<&'a str>> {
     }
 }
 
+/// Read a boolean argument, rejecting any other JSON type rather than
+/// guessing at truthiness.
+fn opt_bool(args: &Value, key: &str) -> CliResult<Option<bool>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(usage(format!("\"{key}\" must be a boolean"))),
+    }
+}
+
 /// Read an integer argument, rejecting non-integers and out-of-range values
 /// explicitly rather than letting a lossy `as` cast invent a coordinate.
 fn opt_int(args: &Value, key: &str) -> CliResult<Option<i64>> {
@@ -1485,7 +1519,16 @@ fn build_node(
 fn tool_find(args: &Value) -> CliResult<ToolOutput> {
     let selector = req_str(args, "selector")?;
     let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT)?;
+    let stable = opt_bool(args, "stable")?.unwrap_or(false);
     let target = target(args)?;
+
+    if stable {
+        let element = match cli::find_stable(&target, selector)? {
+            Ok(element) => element,
+            Err(matches) => return Err(ambiguous(selector, &matches)),
+        };
+        return Ok(find_output(selector, &target, &[element], limit));
+    }
 
     let locator = target.locator(selector);
     let mut elements = locator.elements()?;
@@ -1506,6 +1549,12 @@ fn tool_find(args: &Value) -> CliResult<ToolOutput> {
         }
     }
 
+    Ok(find_output(selector, &target, &elements, limit))
+}
+
+/// The `find` result: at most `limit` of `elements`, with the counts that
+/// say whether the list was cut.
+fn find_output(selector: &str, target: &Target, elements: &[Element], limit: usize) -> ToolOutput {
     let total = elements.len();
     let matches: Vec<Value> = elements
         .iter()
@@ -1515,12 +1564,12 @@ fn tool_find(args: &Value) -> CliResult<ToolOutput> {
 
     let mut out = Map::new();
     out.insert("selector".into(), json!(selector));
-    target_fields(&target, &mut out);
+    target_fields(target, &mut out);
     out.insert("match_count".into(), json!(total));
     out.insert("returned".into(), json!(matches.len()));
     out.insert("truncated".into(), json!(total > matches.len()));
     out.insert("matches".into(), Value::Array(matches));
-    Ok(ToolOutput::json(Value::Object(out)))
+    ToolOutput::json(Value::Object(out))
 }
 
 fn tool_action(args: &Value) -> CliResult<ToolOutput> {
@@ -1742,26 +1791,9 @@ fn truncate(text: &str, max: usize) -> String {
 /// the rendered message is bounded too — it is the only copy a client on a
 /// revision without `structuredContent` sees.
 fn ambiguous(selector: &str, matches: &[Element]) -> CliError {
-    let mut candidates: Vec<String> = matches
-        .iter()
-        .take(MAX_DIAGNOSIS_CANDIDATES)
-        .map(|el| describe_candidate(el))
-        .collect();
-    if matches.len() > MAX_DIAGNOSIS_CANDIDATES {
-        candidates.push(format!(
-            "… (+{} more matches)",
-            matches.len() - MAX_DIAGNOSIS_CANDIDATES
-        ));
-    }
-    CliError::Ambiguous {
-        count: matches.len(),
-        diagnosis: Box::new(
-            crate::Diagnosis::new()
-                .selector(selector)
-                .last_observed(format!("selector matched {} elements", matches.len()))
-                .candidates(candidates),
-        ),
-    }
+    cli::ambiguous_selector(selector, matches, MAX_DIAGNOSIS_CANDIDATES, |el| {
+        describe_candidate(el)
+    })
 }
 
 fn tool_click(args: &Value) -> CliResult<ToolOutput> {
@@ -3895,6 +3927,62 @@ mod tests {
                 .iter()
                 .any(|(_, name, data)| name == "resize_to" && data.as_deref() == Some("800x600")),
             "the dispatching must reach the resize_to verb with the parsed size: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn stable_find_returns_the_settled_bounds_of_the_one_match() {
+        let (target, provider) = mock_target_app();
+        let settled = xa11y_core::Rect {
+            x: 300,
+            y: 60,
+            width: 50,
+            height: 30,
+        };
+        let moving = |x| xa11y_core::Rect { x, ..settled };
+        provider.animate(
+            "Back",
+            vec![
+                (Some(moving(100)), true),
+                (Some(moving(200)), true),
+                (Some(settled), true),
+            ],
+        );
+        let element = cli::find_stable(&target, r#"button[name="Back"]"#)
+            .expect("the wait succeeds")
+            .expect("one match");
+        assert_eq!(element.bounds, Some(settled));
+        let out = find_output(r#"button[name="Back"]"#, &target, &[element], 1);
+        let structured = out.structured.expect("find results are structured");
+        assert_eq!(structured["match_count"], 1);
+        assert_eq!(structured["matches"][0]["bounds"]["x"], 300);
+    }
+
+    #[test]
+    fn stable_find_refuses_several_matches_with_the_candidates() {
+        let (target, _provider) = mock_target_app();
+        let matches = cli::find_stable(&target, "button")
+            .expect("no wait error")
+            .expect_err("two buttons match");
+        let err = ambiguous("button", &matches);
+        let CliError::Ambiguous { count, diagnosis } = err else {
+            panic!("expected ambiguous_selector, got {err:?}");
+        };
+        assert_eq!(count, 2);
+        assert!(
+            diagnosis.candidates.iter().any(|c| c.contains("Back")),
+            "{:?}",
+            diagnosis.candidates
+        );
+    }
+
+    #[test]
+    fn find_refuses_a_non_boolean_stable_before_resolving_a_target() {
+        let err = tool_find(&json!({ "selector": "button", "stable": "yes" }))
+            .expect_err("a string is not a boolean");
+        assert!(
+            err.to_string().contains("\"stable\" must be a boolean"),
+            "{err}"
         );
     }
 

@@ -27,7 +27,9 @@ window focus and without the element being on screen. The coordinate tools
 (`click`, `move`, `drag`, `scroll`, `key`, `type`) post synthetic input
 instead. Use them for what has no accessibility action, such as a drag. They
 take screen coordinates, which `find` reports as each match's `bounds` and
-`center`.
+`center`. If the target may still be moving, call `find` with `stable: true`
+first. It waits for the one match to hold still, so the coordinates are where
+it comes to rest.
 
 OS shell UI is reached the same way. `shell` lists the surfaces on screen,
 such as the taskbar, the dock, panels, the menu bar, status items and open

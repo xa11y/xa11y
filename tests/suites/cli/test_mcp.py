@@ -1537,7 +1537,16 @@ def test_a_second_selector_is_a_second_group_lettered_b(mcp, app_pid):
         assert entry["group"] in by_group, entry
         by_group[entry["group"]].append(entry)
     assert by_group[1] and by_group[2], "the same selector twice is two groups"
-    assert len(by_group[1]) == len(by_group[2])
+    first = [e["index"] for e in by_group[1]]
+    second = [e["index"] for e in by_group[2]]
+    if structured["truncated"] == 0:
+        assert first == second, "each element is boxed once per group"
+    else:
+        # The cap counts matches across groups, so it cuts the second group
+        # short: on Windows, Tauri's button count includes WebView2's own
+        # chrome, and twice that passes the cap. What survives is still the
+        # same elements as the first group's, in the same order.
+        assert second == first[: len(second)], (first, second)
     assert all(e["tag"].startswith("A") for e in by_group[1])
     assert all(e["tag"].startswith("B") for e in by_group[2])
 
@@ -2111,3 +2120,124 @@ def test_an_action_reaches_a_poll_as_a_shaped_event(
             assert first["target"]["role"], "a target is shaped like a find match"
     finally:
         mcp.call_tool("events_stop", {"subscription_id": handle}, id_=98)
+
+
+# ── find with stable: true (#530) ────────────────────────────────────────────
+#
+# "Start slide" restarts a three-second slide of "Slide target" that ends
+# where the target already rests. On the apps in SLIDE_APPS the widget is
+# required, so its absence fails rather than skips (#383).
+
+_START_SLIDE = 'button[name="Start slide"]'
+_SLIDE_TARGET = 'button[name="Slide target"]'
+SLIDE_APPS = {"tauri", "accesskit"}
+
+
+def _session_with_timeout(entry_point, monkeypatch, seconds: str) -> McpSession:
+    """A handshaken session whose server runs with this default timeout."""
+    monkeypatch.setenv("XA11Y_DEFAULT_TIMEOUT", seconds)
+    session = McpSession(entry_point)
+    session.request(
+        "init",
+        "initialize",
+        {
+            "protocolVersion": LEGACY_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "pytest"},
+        },
+    )
+    session.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    return session
+
+
+def _stable_find(mcp, app_pid, selector: str) -> dict:
+    return mcp.call_tool(
+        "find", {"pid": app_pid, "selector": selector, "stable": True}
+    )["result"]
+
+
+def test_the_find_description_states_what_stable_costs_and_requires(mcp):
+    """The wait and the uniqueness rule are the contract a model plans with."""
+    tools = {t["name"]: t for t in mcp.request(1, "tools/list")["result"]["tools"]}
+    find = tools["find"]
+    assert find["inputSchema"]["properties"]["stable"]["type"] == "boolean"
+    description = find["description"]
+    assert "XA11Y_DEFAULT_TIMEOUT" in description
+    assert "exactly one" in description
+    assert "ambiguous_selector" in description
+
+
+def test_stable_find_returns_the_bounds_a_slide_ends_at(
+    entry_point, app_pid, app_name, monkeypatch
+):
+    """With stable set, find waits out the motion and reports the final bounds.
+
+    The server runs with a 15 s default timeout, comfortably longer than the
+    slide; the 1.5 s floor leaves the rest of the 3 s slide for press latency.
+    """
+    if app_name not in SLIDE_APPS:
+        pytest.skip("this app has no sliding widget")
+    mcp = _session_with_timeout(entry_point, monkeypatch, "15")
+    try:
+        _assert_stable_find_waits_out_a_slide(mcp, app_pid)
+    finally:
+        mcp.kill()
+
+
+def _assert_stable_find_waits_out_a_slide(mcp, app_pid):
+    probe = mcp.call_tool("find", {"pid": app_pid, "selector": _START_SLIDE})["result"]
+    assert probe["isError"] is False, f"the app's Start slide button is missing: {probe}"
+    rest = _stable_find(mcp, app_pid, _SLIDE_TARGET)
+    assert rest["isError"] is False, rest["content"]
+    rest_bounds = rest["structuredContent"]["matches"][0]["bounds"]
+
+    pressed = mcp.call_tool(
+        "action", {"pid": app_pid, "action": "press", "selector": _START_SLIDE}
+    )["result"]
+    assert pressed["isError"] is False, pressed["content"]
+    started = time.monotonic()
+    settled = _stable_find(mcp, app_pid, _SLIDE_TARGET)
+    waited = time.monotonic() - started
+    assert settled["isError"] is False, settled["content"]
+    structured = settled["structuredContent"]
+    assert structured["match_count"] == 1
+    assert structured["matches"][0]["bounds"] == rest_bounds, (
+        f"stable find reported mid-slide bounds after {waited:.2f}s"
+    )
+    assert waited >= 1.5, f"a 3 s slide cannot be proven stable in {waited:.2f}s"
+
+
+def test_stable_find_refuses_a_selector_that_matches_several(mcp, app_pid):
+    """Stability is a claim about one element, so several is refused."""
+    result = _stable_find(mcp, app_pid, "button")
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "ambiguous_selector"
+    assert structured["match_count"] >= 2
+    assert structured["diagnosis"]["candidates"], "the candidates are the way out"
+
+
+def test_stable_must_be_a_boolean(mcp, app_pid):
+    result = mcp.call_tool(
+        "find", {"pid": app_pid, "selector": "button", "stable": "yes"}
+    )["result"]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "invalid_arguments"
+    assert '"stable"' in structured["message"]
+
+
+def test_a_stable_find_that_never_matches_is_a_diagnosed_miss(
+    entry_point, app_pid, monkeypatch
+):
+    """After the wait, a miss reports as `no_match`, not as a timeout."""
+    session = _session_with_timeout(entry_point, monkeypatch, "0.5")
+    try:
+        selector = 'button[name="Sbumit"]'
+        result = _stable_find(session, app_pid, selector)
+    finally:
+        session.kill()
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "no_match", structured
+    assert structured["diagnosis"]["selector"] == selector

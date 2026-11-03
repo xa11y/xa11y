@@ -80,6 +80,21 @@ def test_wait_visible_releases_gil(test_app):
     )
 
 
+def test_wait_stable_releases_gil(test_app):
+    # A hidden element never stabilises, so the wait runs its full timeout.
+    hidden = test_app.descendant("static_text")
+
+    def blocked():
+        with pytest.raises(xa11y.TimeoutError):
+            hidden.wait_stable(timeout=_WAIT_S)
+
+    ticks = _ticks_during(blocked)
+    assert ticks >= _MIN_TICKS, (
+        f"background thread made only {ticks} iterations during a "
+        f"{_WAIT_S}s wait_stable — the wait is holding the GIL (tenet 5)"
+    )
+
+
 def test_wait_detached_releases_gil(test_app):
     present = test_app.descendant("button")
 
