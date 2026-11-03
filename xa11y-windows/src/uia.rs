@@ -10,10 +10,10 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetAncestor, GetDesktopWindow, GetForegroundWindow, GetWindowLongPtrW,
+    EnumWindows, GetAncestor, GetDesktopWindow, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
     GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
-    SendMessageTimeoutW, SetForegroundWindow, GA_PARENT, GWL_EXSTYLE, GWL_STYLE, SMTO_ABORTIFHUNG,
-    STATE_SYSTEM_SELECTED, WM_NULL, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP,
+    SendMessageTimeoutW, SetForegroundWindow, GA_PARENT, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
+    SMTO_ABORTIFHUNG, STATE_SYSTEM_SELECTED, WM_NULL, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use xa11y_core::{
@@ -1617,16 +1617,22 @@ struct HungWindow {
 /// hung, found before the desktop-wide UIA enumeration so the listing can
 /// fail fast instead of stalling on one for the transaction timeout.
 fn hung_top_level_windows() -> Result<Vec<HungWindow>> {
-    let mut hung = Vec::new();
-    for hwnd in interactive_top_level_windows("checking for hung windows")? {
-        if window_is_hung(hwnd) {
-            hung.push(HungWindow {
-                hwnd,
-                pid: hwnd_pid(hwnd),
-            });
-        }
-    }
-    Ok(hung)
+    Ok(hung_among(&interactive_top_level_windows(
+        "checking for hung windows",
+    )?))
+}
+
+/// The windows of `windows` that Windows considers hung.
+fn hung_among(windows: &[HWND]) -> Vec<HungWindow> {
+    windows
+        .iter()
+        .copied()
+        .filter(|hwnd| window_is_hung(*hwnd))
+        .map(|hwnd| HungWindow {
+            hwnd,
+            pid: hwnd_pid(hwnd),
+        })
+        .collect()
 }
 
 /// Every interactive top-level window on the desktop: the windows a desktop
@@ -1797,11 +1803,15 @@ const PROBE_WINDOW_LIMIT: usize = 64;
 /// Total time the probe may spend, whatever the window count.
 const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// What [`probe_unresponsive_windows`] found.
+/// What [`probe_windows`] found: for the desktop's visible top-level
+/// windows after a UIA timeout ([`probe_unresponsive_windows`]), or for the
+/// windows the listing left out ([`check_desktop_omissions`]).
 #[derive(Debug, Default)]
 struct ProbeReport {
-    /// Interactive top-level windows on the desktop.
-    visible: usize,
+    /// What the probed windows are, completing "probed N of M … window(s)".
+    scope: &'static str,
+    /// How many windows were to be probed.
+    total: usize,
     /// How many of them were sent `WM_NULL`.
     probed: usize,
     /// The probed windows that did not answer in time.
@@ -1810,6 +1820,10 @@ struct ProbeReport {
     /// reason (for example UIPI refusing a message to an elevated window),
     /// with that error. Not suspects: they say nothing about responsiveness.
     failed: Vec<(HungWindow, String)>,
+    /// The probed windows that answered.
+    answered: Vec<HungWindow>,
+    /// The probed windows that closed before or while they were probed.
+    closed: Vec<HungWindow>,
     /// Why probing stopped before every window was sent to, if it did.
     stopped: Option<String>,
 }
@@ -1844,9 +1858,8 @@ impl ProbeReport {
     /// One clause for `last_observed`: what was probed, how, and the result.
     fn summary(&self) -> String {
         let mut out = format!(
-            "probed {} of {} visible top-level window(s) with WM_NULL ({} ms each, {:?} \
-             budget)",
-            self.probed, self.visible, PROBE_WINDOW_TIMEOUT_MS, PROBE_BUDGET
+            "probed {} of {} {} window(s) with WM_NULL ({} ms each, {:?} budget)",
+            self.probed, self.total, self.scope, PROBE_WINDOW_TIMEOUT_MS, PROBE_BUDGET
         );
         if let Some(stopped) = &self.stopped {
             out.push_str(&format!(", stopped early: {stopped}"));
@@ -1920,8 +1933,16 @@ fn probe_unresponsive_windows() -> Result<ProbeReport> {
     // The budget covers enumerating and classifying the windows too.
     let start = std::time::Instant::now();
     let windows = interactive_top_level_windows("probing for an unresponsive window")?;
+    Ok(probe_windows(&windows, "visible top-level", start))
+}
+
+/// Send each of `windows` `WM_NULL` and sort them by how they answered,
+/// within [`PROBE_WINDOW_LIMIT`] windows and [`PROBE_BUDGET`] counted from
+/// `start`. `scope` says what the windows are, for the report's summary.
+fn probe_windows(windows: &[HWND], scope: &'static str, start: std::time::Instant) -> ProbeReport {
     let mut report = ProbeReport {
-        visible: windows.len(),
+        scope,
+        total: windows.len(),
         ..ProbeReport::default()
     };
     for (i, hwnd) in windows.iter().copied().enumerate() {
@@ -1947,6 +1968,10 @@ fn probe_unresponsive_windows() -> Result<ProbeReport> {
             )
         };
         if answered.0 != 0 {
+            report.answered.push(HungWindow {
+                hwnd,
+                pid: hwnd_pid(hwnd),
+            });
             continue;
         }
         // Zero means "failed or timed out". Read the reason before any other
@@ -1962,11 +1987,14 @@ fn probe_unresponsive_windows() -> Result<ProbeReport> {
             unsafe { IsWindow(Some(hwnd)) }.as_bool(),
         ) {
             ProbeMiss::Unresponsive => report.unresponsive.push(window),
-            ProbeMiss::Closed => {}
-            ProbeMiss::Failed => report.failed.push((window, err.to_string())),
+            ProbeMiss::Closed => report.closed.push(window),
+            ProbeMiss::Failed => report.failed.push((
+                window,
+                format!("HRESULT {:#010X}: {}", err.code().0 as u32, err.message()),
+            )),
         }
     }
-    Ok(report)
+    report
 }
 
 /// [`uia_timeout_as_timeout`] for the desktop-wide listing, whose
@@ -2000,6 +2028,266 @@ fn desktop_listing_timeout(err: Error, elapsed: std::time::Duration) -> Error {
         )),
     }
     Error::timeout(elapsed).diagnose(diagnosis.last_observed(observed))
+}
+
+/// The desktop root's children as the listing reads them: each one's cached
+/// HWND, control type, pid and name. A trait so [`desktop_app_windows`] can
+/// be tested without a live UIA.
+trait DesktopChildren {
+    type Element;
+    fn len(&self) -> Result<i32>;
+    fn element(&self, i: i32) -> Result<Self::Element>;
+    /// The element's native window, 0 when it has none.
+    fn hwnd(&self, el: &Self::Element, i: i32) -> Result<usize>;
+    fn control_type(&self, el: &Self::Element, i: i32) -> Result<i32>;
+    fn pid(&self, el: &Self::Element, i: i32) -> Result<i32>;
+    fn name(&self, el: &Self::Element, i: i32) -> Result<String>;
+}
+
+/// The listing's `FindAllBuildCache` result, read from its batch cache.
+struct DesktopArray<'a>(&'a IUIAutomationElementArray);
+
+/// Prefix a platform error's message with what was being read.
+fn reading(what: impl FnOnce() -> String) -> impl FnOnce(Error) -> Error {
+    move |e| match e {
+        Error::Platform { code, message } => Error::Platform {
+            code,
+            message: format!("{} failed: {message}", what()),
+        },
+        other => other,
+    }
+}
+
+// Strict reads: `Length` and `GetElement` failures are real COM failures,
+// not absent windows, so propagating keeps a transient UIA failure from
+// silently truncating the process list (tenet 1). `uia_call` retries the
+// classified-transient HRESULTs first; what survives is persistent. The
+// Cached* reads come from the batch cache FindAllBuildCache populated, so a
+// failure there is an enumeration failure rather than an absent value, and
+// it propagates with the index it failed for (tenet 6), instead of letting
+// the `pid == 0` / empty-name filters turn it into a silent dismissal.
+impl DesktopChildren for DesktopArray<'_> {
+    type Element = IUIAutomationElement;
+    fn len(&self) -> Result<i32> {
+        uia_call(|| unsafe { self.0.Length() })
+    }
+    fn element(&self, i: i32) -> Result<IUIAutomationElement> {
+        uia_call(|| unsafe { self.0.GetElement(i) }).map_err(reading(|| {
+            format!("IUIAutomationElementArray.GetElement({i})")
+        }))
+    }
+    fn hwnd(&self, el: &IUIAutomationElement, i: i32) -> Result<usize> {
+        uia_call(|| unsafe { el.CachedNativeWindowHandle() })
+            .map(|h| h.0 as usize)
+            .map_err(reading(|| {
+                format!("reading the native window of desktop window #{i}")
+            }))
+    }
+    fn control_type(&self, el: &IUIAutomationElement, i: i32) -> Result<i32> {
+        uia_call(|| unsafe { el.CachedControlType() })
+            .map(|c| c.0)
+            .map_err(reading(|| {
+                format!("reading the control type of desktop window #{i}")
+            }))
+    }
+    fn pid(&self, el: &IUIAutomationElement, i: i32) -> Result<i32> {
+        uia_call(|| unsafe { el.CachedProcessId() }).map_err(reading(|| {
+            format!("reading the process id of desktop window #{i}")
+        }))
+    }
+    fn name(&self, el: &IUIAutomationElement, i: i32) -> Result<String> {
+        uia_call(|| unsafe { el.CachedName() })
+            .map(|n| n.to_string())
+            .map_err(reading(|| {
+                format!("reading the name of desktop window #{i}")
+            }))
+    }
+}
+
+/// What [`desktop_app_windows`] read from the desktop's children.
+struct DesktopListing<E> {
+    /// The listed windows and their pids, in the order UIA returned them.
+    windows: Vec<(E, u32)>,
+    /// The HWND of every child UIA returned that is listed or is not a
+    /// `Window`. A `Window` the pid or name filter drops is left out.
+    returned: HashSet<usize>,
+}
+
+/// Read the listing's desktop children: the windows it reports, and the
+/// HWNDs [`check_desktop_omissions`] counts as returned.
+///
+/// A child is listed when it is a `Window` (the condition the listing's
+/// `FindAll` used to apply; it now runs unconditioned so the other children
+/// count as returned), has an owning process, and has a name. `pid == 0`
+/// skips windows with no resolvable owning process, and the empty-name skip
+/// drops windows still unnamed mid-startup. The pid and name of a child that
+/// is not a `Window` are not read, as before.
+fn desktop_app_windows<C: DesktopChildren>(children: &C) -> Result<DesktopListing<C::Element>> {
+    let mut windows = Vec::new();
+    let mut returned = HashSet::new();
+    for i in 0..children.len()? {
+        let el = children.element(i)?;
+        let hwnd = children.hwnd(&el, i)?;
+        let mut mark_returned = || {
+            if hwnd != 0 {
+                returned.insert(hwnd);
+            }
+        };
+        if children.control_type(&el, i)? != UIA_WindowControlTypeId.0 {
+            mark_returned();
+            continue;
+        }
+        // A `Window` the filters drop does not count as returned, so the
+        // omission check probes it: an unreadable owner or name is also what
+        // a window UIA could not reach looks like.
+        let pid = children.pid(&el, i)?.max(0) as u32;
+        if pid == 0 {
+            continue;
+        }
+        if children.name(&el, i)?.is_empty() {
+            continue;
+        }
+        mark_returned();
+        windows.push((el, pid));
+    }
+    Ok(DesktopListing { windows, returned })
+}
+
+/// The interactive top-level windows UIA's desktop listing did not return.
+///
+/// An owned window (a dialog, a progress or message box, a tool palette, a
+/// drop-down) is top-level to `EnumWindows`, but UIA places it under its
+/// owner rather than at the desktop root, so it counts as returned when its
+/// root owner was. `root_owner` is [`root_owner`], injected so the
+/// comparison is testable without windows.
+fn omitted_windows(
+    interactive: &[HWND],
+    returned: &HashSet<usize>,
+    root_owner: impl Fn(HWND) -> HWND,
+) -> Vec<HWND> {
+    interactive
+        .iter()
+        .copied()
+        .filter(|hwnd| {
+            !returned.contains(&(hwnd.0 as usize))
+                && !returned.contains(&(root_owner(*hwnd).0 as usize))
+        })
+        .collect()
+}
+
+/// Longest owner chain [`root_owner`] follows; real chains are a few deep,
+/// and the bound keeps a cycle from looping.
+const OWNER_CHAIN_LIMIT: usize = 32;
+
+/// A window's root owner, following `GetWindow(GW_OWNER)`: itself when it
+/// has no owner.
+///
+/// Not `GetAncestor(GA_ROOTOWNER)`: that walks `GetParent`, which reports
+/// the owner of a `WS_POPUP` window only. A WinForms or WPF dialog shown
+/// with an owner is an overlapped window, so `GA_ROOTOWNER` returns the
+/// dialog itself (measured on the Windows runner for #603).
+fn root_owner(hwnd: HWND) -> HWND {
+    let mut current = hwnd;
+    for _ in 0..OWNER_CHAIN_LIMIT {
+        // `GetWindow` fails with a null HWND when there is no owner, and
+        // otherwise only for a window that closed meanwhile. Either way the
+        // chain ends here: a closed window is classified by the probe.
+        match unsafe { GetWindow(current, GW_OWNER) } {
+            Ok(owner) if !owner.0.is_null() => current = owner,
+            _ => break,
+        }
+    }
+    current
+}
+
+/// Fail the listing when UIA silently left out a window that does not
+/// answer (issue #603).
+///
+/// A window that stopped pumping messages less than the OS's 5 s ago passes
+/// the hung pre-check; UIA's desktop `FindAll` then waits out its timeouts
+/// on it and returns `S_OK` without it. The listing compares the interactive
+/// windows `EnumWindows` reported before the `FindAll` with the HWNDs UIA
+/// returned, and probes the missing ones only, so a listing with nothing
+/// missing costs no more than the hung pre-check already did.
+fn check_desktop_omissions(
+    interactive: &[HWND],
+    returned: &HashSet<usize>,
+    elapsed: std::time::Duration,
+) -> Result<()> {
+    let missing = omitted_windows(interactive, returned, root_owner);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let report = probe_windows(&missing, "missing", std::time::Instant::now());
+    // Missing windows that answered, closed, or could not be probed do not
+    // fail the listing; the decision on #603 was to fail only on a window
+    // that does not answer. One that answers is not one UIA timed out on:
+    // it was shown, re-owned or renamed between EnumWindows and the FindAll,
+    // or it is a `Window` the listing's pid or name filter dropped (an app
+    // still starting up). One that closed has nothing left to list. A failed
+    // probe (UIPI refusing a message to an elevated window, say) says nothing
+    // about whether the window answers. Each is logged rather than dropped
+    // silently, so the omission stays visible.
+    for window in &report.answered {
+        eprintln!(
+            "xa11y: UIA's desktop listing did not return {}, which answers messages; not \
+             treated as an error (shown or changed during the listing, or not yet named)",
+            describe_hung_window(*window)
+        );
+    }
+    for window in &report.closed {
+        eprintln!(
+            "xa11y: UIA's desktop listing did not return HWND {:#x} (pid {}), which has \
+             since closed; not treated as an error",
+            window.hwnd.0 as usize, window.pid
+        );
+    }
+    for (window, err) in &report.failed {
+        eprintln!(
+            "xa11y: UIA's desktop listing did not return {}, and the WM_NULL probe of it \
+             failed ({err}), which says nothing about whether it answers; not treated as an \
+             error",
+            describe_hung_window(*window)
+        );
+    }
+    if let Some(stopped) = &report.stopped {
+        eprintln!(
+            "xa11y: stopped probing the windows UIA's desktop listing did not return \
+             ({stopped}); {} of {} were not probed",
+            report.total - report.probed,
+            report.total
+        );
+    }
+    match dropped_windows_error(&report, missing.len(), elapsed) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// The [`Error::Timeout`] for windows UIA's desktop listing left out and
+/// that then did not answer a probe, `None` when there are none. The
+/// elapsed time is the `FindAll`'s, the wait UIA spent on them.
+fn dropped_windows_error(
+    report: &ProbeReport,
+    missing: usize,
+    elapsed: std::time::Duration,
+) -> Option<Error> {
+    if report.unresponsive.is_empty() {
+        return None;
+    }
+    Some(
+        Error::timeout(elapsed).diagnose(
+            xa11y_core::Diagnosis::new()
+                .condition("every top-level window on the desktop to respond")
+                .last_observed(format!(
+                    "UIA's desktop listing returned after {elapsed:.1?} without {missing} \
+                     interactive top-level window(s) that EnumWindows reports, which UIA does \
+                     when it cannot reach a window within its timeouts; {}",
+                    report.summary()
+                ))
+                .candidates(report.candidates()),
+        ),
+    )
 }
 
 /// A window's title without sending it a message (`GetWindowTextW` reads
@@ -3559,19 +3847,20 @@ impl Provider for WindowsProvider {
                 // for the transaction timeout. Check first and fail the
                 // listing with every hung window named, as the Linux backend
                 // does, rather than stall or drop the app (issue #507).
-                let hung = hung_top_level_windows()?;
+                let interactive = interactive_top_level_windows("checking for hung windows")?;
+                let hung = hung_among(&interactive);
                 if !hung.is_empty() {
                     return Err(hung_windows_error(
                         "every top-level window on the desktop to respond".to_string(),
                         &hung,
                     ));
                 }
-                let condition = uia_call(|| unsafe {
-                    self.automation.CreatePropertyCondition(
-                        UIA_ControlTypePropertyId,
-                        &VARIANT::from(UIA_WindowControlTypeId.0),
-                    )
-                })?;
+                // Every desktop child, not only `Window`-type ones: the
+                // listing keeps the `Window`s below, from the cached control
+                // type, and the rest (the taskbar and desktop are `Pane`s)
+                // are what tells a window UIA dropped from one it merely
+                // does not list (issue #603).
+                let condition = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
                 let (found, elapsed) = timed(|| {
                     uia_call(|| unsafe {
                         root.FindAllBuildCache(
@@ -3582,71 +3871,12 @@ impl Provider for WindowsProvider {
                     })
                 });
                 let found = found.map_err(|e| desktop_listing_timeout(e, elapsed))?;
-
-                let mut windows: Vec<(IUIAutomationElement, u32)> = Vec::new();
-                // Strict iteration: `Length` and `GetElement` failures are real COM
-                // failures, not absent windows — propagating keeps a transient
-                // UIA failure from silently truncating the process list to
-                // zero or a partial subset (tenet 1). `uia_call` retries the
-                // classified-transient HRESULTs first; what survives is
-                // persistent and must surface.
-                let len = uia_call(|| unsafe { found.Length() })?;
-                for i in 0..len {
-                    let el = uia_call(|| unsafe { found.GetElement(i) }).map_err(|e| match e {
-                        Error::Platform { code, message } => Error::Platform {
-                            code,
-                            message: format!(
-                                "IUIAutomationElementArray.GetElement({i}) failed: {message}"
-                            ),
-                        },
-                        other => other,
-                    })?;
-                    // The Cached* reads come from the batch cache populated by
-                    // FindAllBuildCache, so a failure here is an enumeration
-                    // failure rather than an absent value — propagate it with
-                    // the index it failed for (tenet 6), instead of letting
-                    // `pid == 0` / empty-name filters turn it into a silent
-                    // dismissal of the window.
-                    let pid = uia_call(|| unsafe { el.CachedProcessId() })
-                        .map_err(|e| match e {
-                            Error::Platform { code, message } => Error::Platform {
-                                code,
-                                message: format!(
-                                    "reading the process id of desktop window #{i} failed: \
-                                     {message}"
-                                ),
-                            },
-                            other => other,
-                        })?
-                        .max(0) as u32;
-                    // `pid == 0` skips windows with no resolvable owning
-                    // process; the empty-name skip drops windows that are
-                    // still unnamed mid-startup. Both are the same filters
-                    // the pre-unification enumeration applied.
-                    if pid == 0 {
-                        continue;
-                    }
-                    let name = uia_call(|| unsafe { el.CachedName() })
-                        .map_err(|e| match e {
-                            Error::Platform { code, message } => Error::Platform {
-                                code,
-                                message: format!(
-                                    "reading the name of desktop window #{i} failed: \
-                                     {message}"
-                                ),
-                            },
-                            other => other,
-                        })?
-                        .to_string();
-                    if name.is_empty() {
-                        continue;
-                    }
-                    windows.push((el, pid));
-                }
+                let listing = desktop_app_windows(&DesktopArray(&found))?;
+                check_desktop_omissions(&interactive, &listing.returned, elapsed)?;
 
                 let mut seen = HashSet::new();
                 let mut results = Vec::new();
-                for (el, pid) in windows {
+                for (el, pid) in listing.windows {
                     if !seen.insert(pid) {
                         continue;
                     }
@@ -7655,11 +7885,11 @@ mod tests {
             pid: 9000 + i,
         };
         let report = ProbeReport {
-            visible: 3,
+            total: 3,
             probed: 3,
             unresponsive: vec![window(1)],
             failed: vec![(window(2), "Access is denied. (0x80070005)".to_string())],
-            stopped: None,
+            ..ProbeReport::default()
         };
         let summary = report.summary();
         assert!(summary.contains("1 did not answer"), "{summary}");
@@ -7676,7 +7906,7 @@ mod tests {
         assert!(candidates[0].contains("pid 9001"), "{candidates:?}");
 
         let only_failed = ProbeReport {
-            visible: 1,
+            total: 1,
             probed: 1,
             failed: vec![(window(3), "x".to_string())],
             ..ProbeReport::default()
@@ -7688,6 +7918,192 @@ mod tests {
             "{summary}"
         );
         assert!(only_failed.candidates().is_empty());
+    }
+
+    /// A fake desktop: (hwnd, control type, pid, name) per child, counting
+    /// pid and name reads so the test can see which children were read.
+    struct FakeDesktop {
+        rows: Vec<(usize, i32, i32, &'static str)>,
+        detail_reads: std::cell::RefCell<Vec<usize>>,
+    }
+
+    impl DesktopChildren for FakeDesktop {
+        type Element = usize;
+        fn len(&self) -> Result<i32> {
+            Ok(self.rows.len() as i32)
+        }
+        fn element(&self, i: i32) -> Result<usize> {
+            Ok(i as usize)
+        }
+        fn hwnd(&self, el: &usize, i: i32) -> Result<usize> {
+            if self.rows[*el].3 == "<fail hwnd>" {
+                return Err(Error::Platform {
+                    code: -3,
+                    message: format!("hwnd #{i}"),
+                });
+            }
+            Ok(self.rows[*el].0)
+        }
+        fn control_type(&self, el: &usize, i: i32) -> Result<i32> {
+            if self.rows[*el].3 == "<fail control type>" {
+                return Err(Error::Platform {
+                    code: -4,
+                    message: format!("control type #{i}"),
+                });
+            }
+            Ok(self.rows[*el].1)
+        }
+        fn pid(&self, el: &usize, _: i32) -> Result<i32> {
+            self.detail_reads.borrow_mut().push(*el);
+            Ok(self.rows[*el].2)
+        }
+        fn name(&self, el: &usize, i: i32) -> Result<String> {
+            if self.rows[*el].3 == "<fail name>" {
+                return Err(Error::Platform {
+                    code: -5,
+                    message: format!("name #{i}"),
+                });
+            }
+            Ok(self.rows[*el].3.to_string())
+        }
+    }
+
+    #[test]
+    fn desktop_listing_keeps_named_owned_windows_in_order_and_returns_every_hwnd() {
+        let window = UIA_WindowControlTypeId.0;
+        let pane = UIA_PaneControlTypeId.0;
+        let desktop = FakeDesktop {
+            rows: vec![
+                (0x10, pane, 832, "Taskbar"),
+                (0x20, window, 100, "Second app"),
+                (0x30, window, 0, "no owner"),
+                (0x40, window, 200, ""),
+                (0, pane, 300, "windowless pane"),
+                (0x50, window, 100, "Second app, again"),
+                (0x60, window, 400, "Third app"),
+                (0x70, pane, 832, "Program Manager"),
+            ],
+            detail_reads: Default::default(),
+        };
+        let DesktopListing { windows, returned } =
+            desktop_app_windows(&desktop).expect("fake reads succeed");
+        // Exactly the children a `ControlType == Window` FindAll followed by
+        // the pid and name filters kept, in the order UIA returned them.
+        assert_eq!(
+            windows,
+            vec![(1, 100), (5, 100), (6, 400)],
+            "the listing must match the Window-filtered one"
+        );
+        // Every HWND UIA returned counts, Panes included, except a Window
+        // the pid or name filter dropped (0x30, 0x40), which the omission
+        // check must probe. A windowless child has none.
+        let expected: HashSet<usize> = [0x10, 0x20, 0x50, 0x60, 0x70].into();
+        assert_eq!(returned, expected);
+        // Non-Window children are not read past their control type.
+        assert_eq!(*desktop.detail_reads.borrow(), vec![1, 2, 3, 5, 6]);
+    }
+
+    #[test]
+    fn desktop_listing_propagates_a_failed_cached_read() {
+        for (marker, code) in [
+            ("<fail hwnd>", -3),
+            ("<fail control type>", -4),
+            ("<fail name>", -5),
+        ] {
+            let desktop = FakeDesktop {
+                rows: vec![
+                    (0x10, UIA_WindowControlTypeId.0, 7, "fine"),
+                    (0x20, UIA_WindowControlTypeId.0, 8, marker),
+                ],
+                detail_reads: Default::default(),
+            };
+            match desktop_app_windows(&desktop) {
+                Err(Error::Platform { code: c, message }) => {
+                    assert_eq!(c, code, "{marker}: {message}");
+                    assert!(message.ends_with("#1"), "{marker}: {message}");
+                }
+                Err(other) => panic!("{marker}: expected Platform, got {other}"),
+                Ok(_) => panic!("{marker}: a failed cached read must fail the listing"),
+            }
+        }
+    }
+
+    #[test]
+    fn omitted_windows_are_the_interactive_ones_uia_did_not_return() {
+        let h = |v: usize| HWND(v as *mut core::ffi::c_void);
+        let returned: HashSet<usize> = [0x10, 0x30, 0x99].into();
+        let unowned = |hwnd: HWND| hwnd;
+        assert_eq!(
+            omitted_windows(&[h(0x10), h(0x20), h(0x30), h(0x40)], &returned, unowned),
+            vec![h(0x20), h(0x40)]
+        );
+        assert!(omitted_windows(&[h(0x10)], &returned, unowned).is_empty());
+        // Owned windows: UIA lists 0x21 under its owner 0x10, which was
+        // returned; 0x41's owner 0x40 was not, so both of those are missing.
+        // A window that closed meanwhile has a null root owner.
+        let owners = |hwnd: HWND| match hwnd.0 as usize {
+            0x21 => h(0x10),
+            0x41 => h(0x40),
+            0x50 => h(0),
+            _ => hwnd,
+        };
+        assert_eq!(
+            omitted_windows(
+                &[h(0x10), h(0x21), h(0x40), h(0x41), h(0x50)],
+                &returned,
+                owners
+            ),
+            vec![h(0x40), h(0x41), h(0x50)]
+        );
+    }
+
+    #[test]
+    fn only_an_unresponsive_omitted_window_fails_the_listing() {
+        let window = |i: u32| HungWindow {
+            hwnd: HWND(i as usize as *mut core::ffi::c_void),
+            pid: 6000 + i,
+        };
+        let elapsed = Duration::from_secs(40);
+        let benign = ProbeReport {
+            scope: "missing",
+            total: 3,
+            probed: 3,
+            answered: vec![window(1)],
+            closed: vec![window(2)],
+            failed: vec![(window(3), "Access is denied.".to_string())],
+            ..ProbeReport::default()
+        };
+        assert!(dropped_windows_error(&benign, 3, elapsed).is_none());
+
+        let dropped = ProbeReport {
+            scope: "missing",
+            total: 2,
+            probed: 2,
+            unresponsive: vec![window(4)],
+            answered: vec![window(1)],
+            ..ProbeReport::default()
+        };
+        let err = dropped_windows_error(&dropped, 2, elapsed).expect("an error");
+        let Error::Timeout {
+            elapsed: reported, ..
+        } = &err
+        else {
+            panic!("expected Error::Timeout, got: {err}");
+        };
+        assert_eq!(*reported, elapsed);
+        let diagnosis = err.diagnosis().expect("a diagnosis");
+        let observed = diagnosis.last_observed.clone().unwrap_or_default();
+        assert!(
+            observed.contains("returned after 40.0s without 2"),
+            "{observed}"
+        );
+        assert!(
+            observed.contains("probed 2 of 2 missing window(s)"),
+            "{observed}"
+        );
+        assert!(observed.contains("1 did not answer"), "{observed}");
+        assert_eq!(diagnosis.candidates.len(), 1, "{:?}", diagnosis.candidates);
+        assert!(diagnosis.candidates[0].contains("(pid 6004"));
     }
 
     #[test]
@@ -7705,7 +8121,7 @@ mod tests {
     #[test]
     fn probe_report_is_bounded_and_says_what_it_skipped() {
         let report = ProbeReport {
-            visible: 80,
+            total: 80,
             probed: PROBE_WINDOW_LIMIT,
             unresponsive: (1..=12)
                 .map(|i| HungWindow {
@@ -7713,8 +8129,8 @@ mod tests {
                     pid: 7000 + i,
                 })
                 .collect(),
-            failed: Vec::new(),
             stopped: Some(format!("window limit of {PROBE_WINDOW_LIMIT} reached")),
+            ..ProbeReport::default()
         };
         let candidates = report.candidates();
         assert_eq!(candidates.len(), DIAG_HUNG_WINDOW_LIMIT + 1);
@@ -7729,7 +8145,7 @@ mod tests {
         assert!(summary.contains("12 did not answer"), "{summary}");
 
         let quiet = ProbeReport {
-            visible: 3,
+            total: 3,
             probed: 3,
             ..ProbeReport::default()
         };
@@ -7752,7 +8168,7 @@ mod tests {
             "probe took {took:?}: {report:?}"
         );
         assert!(
-            report.probed <= report.visible.min(PROBE_WINDOW_LIMIT),
+            report.probed <= report.total.min(PROBE_WINDOW_LIMIT),
             "{report:?}"
         );
     }

@@ -9,8 +9,9 @@
 //!   would never count as hung);
 //! - the form overrides `ShowWithoutActivation`, so it does not take the
 //!   foreground from the test app;
-//! - it prints a ready line once the form is up, and the test then waits past
-//!   Windows' 5 s threshold, so the first listing already sees it hung.
+//! - it prints a ready line once the form is up. The hung-window test then
+//!   waits past Windows' 5 s threshold, so the first listing already sees it
+//!   hung; the #603 test lists at once, while the OS does not call it hung yet.
 //!
 //! It is killed on drop, so a failed assertion cannot leave it on the desktop
 //! for the tests after it.
@@ -33,9 +34,15 @@ mod tests {
     struct HungFixture(Child);
 
     impl HungFixture {
-        /// Start the fixture and return once its window is shown and its UI
-        /// thread has stopped pumping.
+        /// Start the fixture and return once Windows considers its window
+        /// hung (no message pumped for longer than the OS's 5 s threshold).
         fn start() -> Self {
+            Self::start_then_wait(Duration::from_secs(7))
+        }
+
+        /// Start the fixture and return `settle` after its window is shown
+        /// and its UI thread has stopped pumping.
+        fn start_then_wait(settle: Duration) -> Self {
             let script = format!(
                 r#"
 $ErrorActionPreference = 'Stop'
@@ -92,7 +99,9 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
                 // As above: a closed receiver means nobody needs the EOF.
                 let _ = tx.send(None);
             });
-            match rx.recv_timeout(Duration::from_secs(10)) {
+            // Generous: PowerShell and WinForms startup on a cold runner is
+            // not what these tests measure (a 10 s limit flaked in #600).
+            match rx.recv_timeout(Duration::from_secs(30)) {
                 Ok(Some(true)) => {}
                 Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                     let status = fixture.0.wait().expect("fixture exit status");
@@ -113,13 +122,13 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
                     // Diagnostic only: an unreadable stderr leaves it empty.
                     let _ = stderr.read_to_string(&mut err);
                     panic!(
-                        "the hung-window fixture printed no ready line within 10 s ({status}); \
+                        "the hung-window fixture printed no ready line within 30 s ({status}); \
                          PowerShell or WinForms did not start. stderr:\n{err}"
                     );
                 }
             }
             // The UI thread is now blocked; Windows calls it hung after 5 s.
-            std::thread::sleep(Duration::from_secs(7));
+            std::thread::sleep(settle);
             fixture
         }
 
@@ -155,6 +164,60 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
                 && observed.contains(FIXTURE_TITLE),
             "{what}: the diagnosis should name the hung window (pid {pid}, \
              {FIXTURE_TITLE:?}): {err}"
+        );
+    }
+
+    /// Issue #603: a window that has *just* stopped answering is not hung by
+    /// the OS's 5 s rule yet, so the listing's hung pre-check passes it. UIA
+    /// then waits out its timeouts on the window and leaves it out of a
+    /// listing that otherwise succeeds. The listing must instead fail with a
+    /// `Timeout` that names the window, as it does for an OS-hung one.
+    #[test]
+    #[ignore]
+    fn listing_fails_naming_a_window_that_stopped_answering_before_the_os_calls_it_hung() {
+        let fixture = HungFixture::start_then_wait(Duration::ZERO);
+        let pid = fixture.pid();
+
+        let start = Instant::now();
+        let listed = App::list();
+        let elapsed = start.elapsed();
+        eprintln!("App::list with a freshly unresponsive window took {elapsed:?}: {listed:?}");
+        let err = match listed {
+            Err(e) => e,
+            Ok(apps) => panic!(
+                "App::list succeeded while a window was not answering messages, leaving it \
+                 out (#603). Listed: {:?}",
+                apps.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+            ),
+        };
+        let Error::Timeout {
+            elapsed: reported, ..
+        } = &err
+        else {
+            panic!("expected Error::Timeout, got: {err}");
+        };
+        assert!(
+            *reported <= elapsed,
+            "reported {reported:?}, measured {elapsed:?}: {err}"
+        );
+        let diagnosis = err.diagnosis().expect("the timeout carries a diagnosis");
+        let observed = diagnosis.last_observed.clone().unwrap_or_default();
+        // The OS-hung form means the fixture had already gone 5 s without
+        // pumping before the listing began: the runner stalled between the
+        // fixture's ready line and the listing, so this run did not exercise
+        // the #603 path.
+        assert!(
+            observed.contains("UIA's desktop listing returned after"),
+            "the listing did not fail through the omission check (listing took {elapsed:?}); \
+             if this is the IsHungAppWindow form, the runner stalled for more than 5 s after \
+             the fixture stopped pumping: {err}"
+        );
+        assert!(
+            diagnosis
+                .candidates
+                .iter()
+                .any(|c| c.contains(&format!("pid {pid}")) && c.contains(FIXTURE_TITLE)),
+            "the candidates should name the fixture window (pid {pid}, {FIXTURE_TITLE:?}): {err}"
         );
     }
 
