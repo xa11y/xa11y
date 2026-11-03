@@ -2693,6 +2693,9 @@ fn create_cache_request(
     crate::coords::BoundsCacheRequest::new(request)
 }
 
+// TEMPORARY (#603 investigation, not for merge).
+mod diag603;
+
 /// Properties pre-fetched in every bulk query, besides the bounds that
 /// [`crate::coords::BoundsCacheRequest`] adds.
 const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
@@ -3504,7 +3507,36 @@ impl Provider for WindowsProvider {
                         )
                     })
                 });
+                // TEMPORARY (#603 investigation, not for merge).
+                let diag = diag603::enabled();
+                if diag {
+                    match &found {
+                        Ok(arr) => diag603::log_array("Window-type FindAll", arr, elapsed),
+                        Err(e) => {
+                            eprintln!("[diag603] Window-type FindAll failed after {elapsed:?}: {e}")
+                        }
+                    }
+                }
                 let found = found.map_err(|e| desktop_listing_timeout(e, elapsed))?;
+                if diag {
+                    let interactive = interactive_top_level_windows("diag603").unwrap_or_default();
+                    eprintln!(
+                        "[diag603] interactive top-level windows: {}",
+                        interactive.len()
+                    );
+                    for h in &interactive {
+                        eprintln!("[diag603]   {}", diag603::describe(*h));
+                    }
+                    let listed = diag603::hwnds_of(&found);
+                    diag603::after_listing(
+                        &self.automation,
+                        &root,
+                        self.batch_request.get(dpi),
+                        &interactive,
+                        &listed,
+                    );
+                }
+                let iter_start = std::time::Instant::now();
 
                 let mut windows: Vec<(IUIAutomationElement, u32)> = Vec::new();
                 // Strict iteration: `Length` and `GetElement` failures are real COM
@@ -3573,7 +3605,20 @@ impl Provider for WindowsProvider {
                     if !seen.insert(pid) {
                         continue;
                     }
+                    let t = std::time::Instant::now();
                     results.push(self.build_synthetic_app_data(pid, &el)?);
+                    if diag {
+                        eprintln!(
+                            "[diag603] build_synthetic_app_data(pid {pid}) took {:?}",
+                            t.elapsed()
+                        );
+                    }
+                }
+                if diag {
+                    eprintln!(
+                        "[diag603] iteration after FindAll took {:?}",
+                        iter_start.elapsed()
+                    );
                 }
                 Ok(results)
             }
