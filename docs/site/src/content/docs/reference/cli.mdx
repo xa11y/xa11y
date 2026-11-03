@@ -582,7 +582,7 @@ xa11y click --at "$(xa11y find 'button[name="OK"]' --app Safari -o center)"
 ```
 
 Add `--stable` to the `find` when the target may still be animating into
-place, so the click lands where it comes to rest:
+place, so the click goes to the point where it comes to rest:
 
 ```bash
 xa11y click --at "$(xa11y find 'button[name="OK"]' --app Safari -o center --stable)"

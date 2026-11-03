@@ -183,16 +183,27 @@ def test_find_says_why_a_scrolled_out_element_is_hidden(run_cli, app_pid, app_na
 
 # ── find --stable (#530) ──────────────────────────────────────────────────────
 #
-# "Start slide" restarts a two-second slide of "Slide target" that ends where
-# the target already rests. Apps without the widget skip.
+# "Start slide" restarts a three-second slide of "Slide target" that ends
+# where the target already rests. On the apps in SLIDE_APPS the widget is
+# required, so its absence fails rather than skips (#383).
 
 _START_SLIDE = 'button[name="Start slide"]'
 _SLIDE_TARGET = 'button[name="Slide target"]'
+SLIDE_APPS = {"tauri", "accesskit"}
+# Comfortably longer than the slide, so a slow resolve cannot eat the budget.
+_STABLE_ENV = {**os.environ, "XA11Y_DEFAULT_TIMEOUT": "15"}
 
 
 def _stable_bounds(run_cli, app_pid) -> str:
     rc, stdout, stderr = run_cli(
-        "find", _SLIDE_TARGET, "--pid", str(app_pid), "-o", "bounds", "--stable"
+        "find",
+        _SLIDE_TARGET,
+        "--pid",
+        str(app_pid),
+        "-o",
+        "bounds",
+        "--stable",
+        env=_STABLE_ENV,
     )
     assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
     lines = stdout.strip().splitlines()
@@ -200,10 +211,18 @@ def _stable_bounds(run_cli, app_pid) -> str:
     return lines[0]
 
 
-def test_find_stable_prints_the_bounds_a_slide_ends_at(run_cli, app, app_pid):
-    """``find --stable`` waits out the slide and prints where it ended."""
-    if app.locator(_START_SLIDE).count() == 0:
+def test_find_stable_prints_the_bounds_a_slide_ends_at(
+    run_cli, app, app_pid, app_name
+):
+    """``find --stable`` waits out the slide and prints where it ended.
+
+    The 1.5 s floor leaves the rest of the 3 s slide for press latency.
+    """
+    if app_name not in SLIDE_APPS:
         pytest.skip("this app has no sliding widget")
+    assert app.locator(_START_SLIDE).count() == 1, (
+        "the app's Start slide button is missing"
+    )
     rest = _stable_bounds(run_cli, app_pid)
 
     app.locator(_START_SLIDE).press()
@@ -211,7 +230,7 @@ def test_find_stable_prints_the_bounds_a_slide_ends_at(run_cli, app, app_pid):
     settled = _stable_bounds(run_cli, app_pid)
     waited = time.monotonic() - started
     assert settled == rest, f"--stable printed mid-slide bounds after {waited:.2f}s"
-    assert waited >= 1.5, f"a 2 s slide cannot be proven stable in {waited:.2f}s"
+    assert waited >= 1.5, f"a 3 s slide cannot be proven stable in {waited:.2f}s"
 
 
 def test_find_stable_refuses_an_ambiguous_selector(run_cli, app_pid):

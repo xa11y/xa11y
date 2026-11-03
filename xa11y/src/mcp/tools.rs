@@ -1791,26 +1791,9 @@ fn truncate(text: &str, max: usize) -> String {
 /// the rendered message is bounded too — it is the only copy a client on a
 /// revision without `structuredContent` sees.
 fn ambiguous(selector: &str, matches: &[Element]) -> CliError {
-    let mut candidates: Vec<String> = matches
-        .iter()
-        .take(MAX_DIAGNOSIS_CANDIDATES)
-        .map(|el| describe_candidate(el))
-        .collect();
-    if matches.len() > MAX_DIAGNOSIS_CANDIDATES {
-        candidates.push(format!(
-            "… (+{} more matches)",
-            matches.len() - MAX_DIAGNOSIS_CANDIDATES
-        ));
-    }
-    CliError::Ambiguous {
-        count: matches.len(),
-        diagnosis: Box::new(
-            crate::Diagnosis::new()
-                .selector(selector)
-                .last_observed(format!("selector matched {} elements", matches.len()))
-                .candidates(candidates),
-        ),
-    }
+    cli::ambiguous_selector(selector, matches, MAX_DIAGNOSIS_CANDIDATES, |el| {
+        describe_candidate(el)
+    })
 }
 
 fn tool_click(args: &Value) -> CliResult<ToolOutput> {

@@ -147,7 +147,7 @@ const START_SLIDE_BTN: NodeId = NodeId(80);
 const SLIDE_TARGET: NodeId = NodeId(81);
 /// How long one slide takes. Long enough that a short `wait_stable` started
 /// right after the press is guaranteed to see it moving.
-const SLIDE_DURATION: Duration = Duration::from_millis(2000);
+const SLIDE_DURATION: Duration = Duration::from_millis(3000);
 /// Tree updates while sliding. Well under the 100 ms `wait_*` poll interval,
 /// so two polls never see the same mid-slide position.
 const SLIDE_TICK: Duration = Duration::from_millis(30);
@@ -262,6 +262,7 @@ fn build_tree(state: &AppState) -> TreeUpdate {
 
     // ── Main Panel ──
     build_main_panel(state, &mut nodes);
+    build_slide(state, &mut nodes);
 
     // ── Lists Panel ──
     build_lists_panel(state, &mut nodes);
@@ -385,6 +386,12 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         WELCOME_TEXT,
         NAME_ROW,
         BUTTON_ROW,
+        // Right after the button row so that, in document order, these two
+        // bounded buttons come before every bounds-less one (More Details,
+        // Add, Remove, Announce): annotation numbering counts matches, and a
+        // drawn button after an undrawn one leaves a gap in the legend.
+        START_SLIDE_BTN,
+        SLIDE_TARGET,
         CHECKBOX,
         RADIO_GROUP,
         SLIDER,
@@ -771,27 +778,9 @@ fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     }
 }
 
-fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
-    let mut extra_panel = Node::new(Role::GenericContainer);
-    extra_panel.set_label("Extra Panel");
-    extra_panel.set_children(vec![
-        VISIT_LINK,
-        ROOT_TREE_ITEM,
-        SETTINGS_DIALOG,
-        SAMPLE_ALERT,
-        SECTION_HEADING,
-        SCROLL_BAR_NODE,
-        SPLIT_GROUP_NODE,
-        ANNOUNCE_BTN,
-        ANNOUNCE_LIVE_REGION,
-        READONLY_FIELD,
-        PASSWORD_FIELD,
-        LONG_TEXT,
-        START_SLIDE_BTN,
-        SLIDE_TARGET,
-    ]);
-    nodes.push((EXTRA_PANEL, extra_panel));
-
+/// "Start slide" restarts a slide of "Slide target" that ends where the
+/// target already rests; `about_to_wait` drives the frames.
+fn build_slide(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     let mut start_slide = Node::new(Role::Button);
     start_slide.set_label("Start slide");
     start_slide.add_action(Action::Click);
@@ -816,6 +805,26 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         y1: 530.0,
     });
     nodes.push((SLIDE_TARGET, slide_target));
+}
+
+fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
+    let mut extra_panel = Node::new(Role::GenericContainer);
+    extra_panel.set_label("Extra Panel");
+    extra_panel.set_children(vec![
+        VISIT_LINK,
+        ROOT_TREE_ITEM,
+        SETTINGS_DIALOG,
+        SAMPLE_ALERT,
+        SECTION_HEADING,
+        SCROLL_BAR_NODE,
+        SPLIT_GROUP_NODE,
+        ANNOUNCE_BTN,
+        ANNOUNCE_LIVE_REGION,
+        READONLY_FIELD,
+        PASSWORD_FIELD,
+        LONG_TEXT,
+    ]);
+    nodes.push((EXTRA_PANEL, extra_panel));
 
     let mut password = Node::new(Role::PasswordInput);
     password.set_label("Password");

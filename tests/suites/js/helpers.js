@@ -19,6 +19,9 @@ const { App, SelectorNotMatchedError, PlatformError, TimeoutError, ActionNotSupp
 
 const APP_CONFIG = {
   accesskit: {
+    // "Start slide" / "Slide target" (#530): required, so a missing widget
+    // fails the waitStable tests instead of skipping them.
+    hasSlideWidget: true,
     okButtonName: 'Submit',        // AccessKit test app uses "Submit" as the primary button
     textFieldName: 'Name',
     minButtons: 2,
@@ -53,6 +56,9 @@ const APP_CONFIG = {
     hasRadio: true,
   },
   tauri: {
+    // "Start slide" / "Slide target" (#530): required, so a missing widget
+    // fails the waitStable tests instead of skipping them.
+    hasSlideWidget: true,
     okButtonName: 'OK',
     textFieldName: 'Search',
     minButtons: 2,

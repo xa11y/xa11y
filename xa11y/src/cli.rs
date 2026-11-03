@@ -1391,7 +1391,11 @@ fn cmd_find(args: &[String]) -> CliResult<()> {
     let elements = if opts.stable {
         match find_stable(&target, selector)? {
             Ok(element) => vec![element],
-            Err(matches) => return Err(ambiguous_selector(selector, &matches)),
+            Err(matches) => {
+                return Err(ambiguous_selector(selector, &matches, 8, |el| {
+                    format_element_oneline(el)
+                }))
+            }
         }
     } else {
         target.locator(selector).elements()?
@@ -1466,7 +1470,10 @@ pub(crate) fn find_stable(
             return match locator.element() {
                 // Nothing matches now: the diagnosed miss is the failure to
                 // report (any other error from the re-query propagates).
-                Err(miss) => Err(miss.into()),
+                Err(miss @ Error::SelectorNotMatched { .. }) => {
+                    Err(miss_after_stable_wait(miss, &timeout).into())
+                }
+                Err(other) => Err(other.into()),
                 // Something matches; it just never held still.
                 Ok(_) => Err(timeout.into()),
             };
@@ -1480,19 +1487,44 @@ pub(crate) fn find_stable(
     Ok(Ok(element))
 }
 
-/// The CLI's "matched more than one" failure for an operation that acts on
-/// exactly one element, with a bounded candidate list (tenet 6).
-pub(crate) fn ambiguous_selector(selector: &str, matches: &[Element]) -> CliError {
-    const MAX_CANDIDATES: usize = 8;
-    let mut candidates: Vec<String> = matches
-        .iter()
-        .take(MAX_CANDIDATES)
-        .map(|el| format_element_oneline(el))
-        .collect();
-    if matches.len() > MAX_CANDIDATES {
+/// The not-found error a `--stable` wait ends with when nothing matches any
+/// more. The miss carries the near-miss candidates and scope; the wait's own
+/// timeout knew whether the selector matched at some point during it, and
+/// that is kept as the miss's `last_observed` rather than dropped (tenet 6).
+fn miss_after_stable_wait(miss: Error, timeout: &Error) -> Error {
+    let waited = timeout
+        .diagnosis()
+        .and_then(|d| d.last_observed.as_deref())
+        .filter(|seen| seen.contains("matched earlier"));
+    let Some(waited) = waited else {
+        return miss;
+    };
+    let mut d = miss.diagnosis().cloned().unwrap_or_default();
+    d.last_observed = Some(match d.last_observed.take() {
+        Some(now) => format!("{waited}; {now}"),
+        None => waited.to_string(),
+    });
+    miss.diagnose(d)
+}
+
+/// The "matched more than one" failure for an operation that acts on exactly
+/// one element, with a bounded candidate list (tenet 6). Shared by the CLI
+/// and the MCP tools, which differ only in how a candidate is rendered and
+/// how many are listed.
+///
+/// The list is bounded *here*, not only where it is serialized, so the
+/// rendered message is bounded too.
+pub(crate) fn ambiguous_selector(
+    selector: &str,
+    matches: &[Element],
+    max_candidates: usize,
+    describe: impl Fn(&Element) -> String,
+) -> CliError {
+    let mut candidates: Vec<String> = matches.iter().take(max_candidates).map(describe).collect();
+    if matches.len() > max_candidates {
         candidates.push(format!(
             "… (+{} more matches)",
-            matches.len() - MAX_CANDIDATES
+            matches.len() - max_candidates
         ));
     }
     CliError::Ambiguous {
@@ -2558,6 +2590,40 @@ mod tests {
         assert_eq!(opts.app.as_deref(), Some("Safari"));
         assert!(opts.pid.is_none());
         assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn a_stable_miss_keeps_that_the_selector_matched_during_the_wait() {
+        let miss = Error::selector_not_matched("button[name=\"Gone\"]").diagnose(
+            Diagnosis::new()
+                .last_observed("2 near misses")
+                .candidates(vec!["button \"Go\"".into()]),
+        );
+        let timeout = Error::timeout(std::time::Duration::from_secs(1)).diagnose(
+            Diagnosis::new()
+                .last_observed("selector matched earlier in the wait but no longer matches"),
+        );
+        let err = miss_after_stable_wait(miss, &timeout);
+        assert!(matches!(err, Error::SelectorNotMatched { .. }), "{err:?}");
+        let d = err.diagnosis().expect("the miss keeps its diagnosis");
+        assert_eq!(
+            d.last_observed.as_deref(),
+            Some("selector matched earlier in the wait but no longer matches; 2 near misses")
+        );
+        assert_eq!(d.candidates, vec!["button \"Go\"".to_string()]);
+    }
+
+    #[test]
+    fn a_stable_miss_that_never_matched_is_the_plain_miss() {
+        let miss = Error::selector_not_matched("x")
+            .diagnose(Diagnosis::new().last_observed("nothing close"));
+        let timeout = Error::timeout(std::time::Duration::from_secs(1))
+            .diagnose(Diagnosis::new().last_observed("selector never matched"));
+        let err = miss_after_stable_wait(miss, &timeout);
+        assert_eq!(
+            err.diagnosis().and_then(|d| d.last_observed.as_deref()),
+            Some("nothing close")
+        );
     }
 
     #[test]

@@ -643,23 +643,29 @@ _START_SLIDE = 'button[name="Start slide"]'
 _SLIDE_TARGET = 'button[name="Slide target"]'
 
 
-def _slide_app(app):
-    if app.locator(_START_SLIDE).count() == 0:
+def _slide_app(app, app_config):
+    if not app_config.get("has_slide_widget"):
         pytest.skip("this app has no sliding widget")
+    # Required where the config claims it: a skip on a missing widget would
+    # pass just as well when the widget, or the selector, broke (#383).
+    assert app.locator(_START_SLIDE).count() == 1, (
+        "the app's Start slide button is missing"
+    )
     target = app.locator(_SLIDE_TARGET)
     rest = target.wait_stable(timeout=10).bounds
     assert rest is not None, "the slide target reports no bounds"
     return target, rest
 
 
-def test_wait_stable_returns_where_a_slide_ends(app):
+def test_wait_stable_returns_where_a_slide_ends(app, app_config):
     """``wait_stable`` returns the bounds the widget comes to rest at.
 
-    "Start slide" restarts a two-second slide that ends where the target
+    "Start slide" restarts a three-second slide that ends where the target
     already rests, so the bounds a correct wait returns equal the resting
-    ones, and the wait cannot finish in much under the slide's length.
+    ones, and the wait cannot finish in much under the slide's length. The
+    1.5 s floor leaves the rest for press latency.
     """
-    target, rest = _slide_app(app)
+    target, rest = _slide_app(app, app_config)
     app.locator(_START_SLIDE).press()
     started = time.monotonic()
     settled = target.wait_stable(timeout=10)
@@ -668,12 +674,12 @@ def test_wait_stable_returns_where_a_slide_ends(app):
         f"wait_stable returned mid-slide after {waited:.2f}s: "
         f"{settled.bounds} vs rest {rest}"
     )
-    assert waited >= 1.5, f"a 2 s slide cannot be proven stable in {waited:.2f}s"
+    assert waited >= 1.5, f"a 3 s slide cannot be proven stable in {waited:.2f}s"
 
 
-def test_wait_stable_timeout_names_the_moving_bounds(app):
+def test_wait_stable_timeout_names_the_moving_bounds(app, app_config):
     """A slide outlasting the timeout fails with both rectangles named."""
-    target, _ = _slide_app(app)
+    target, _ = _slide_app(app, app_config)
     app.locator(_START_SLIDE).press()
     try:
         with pytest.raises(xa11y.TimeoutError) as info:

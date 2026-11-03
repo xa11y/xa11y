@@ -220,7 +220,7 @@ Line 3</textarea>
       <button id="remove-item-button" aria-label="Remove Item">Remove Item</button>
     </div>
     <!-- Motion for Locator.wait_stable (#530). "Start slide" restarts a
-         two-second slide of "Slide target" along the track; it rests at the
+         three-second slide of "Slide target" along the track; it rests at the
          far end. The slide moves the layout box (`left`), not a transform,
          so the accessibility bounds move with it on every engine. -->
     <div class="row">
@@ -287,10 +287,10 @@ Line 3</textarea>
       if (last) itemsList.removeChild(last);
     });
 
-    // Start slide restarts a 2 s slide of the target, 0 → 120 px, one step
+    // Start slide restarts a 3 s slide of the target, 0 → 120 px, one step
     // every 30 ms, so every 100 ms wait_stable poll sees a new position.
     const slideTarget = document.getElementById('slide-target');
-    const SLIDE_MS = 2000;
+    const SLIDE_MS = 3000;
     const SLIDE_TO_PX = 120;
     let slideTimer = null;
     document.getElementById('start-slide-button').addEventListener('click', () => {

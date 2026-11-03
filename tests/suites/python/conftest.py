@@ -248,6 +248,9 @@ APP_CONFIGS: dict[str, dict] = {
         "remove_item_button_name": "Remove Item",
     },
     "tauri": {
+        # "Start slide" / "Slide target" (#530): required, so a missing
+        # widget fails the wait_stable tests instead of skipping them.
+        "has_slide_widget": True,
         # Not instrumented yet: the webview could expose an ARIA dialog, but
         # the Tauri test page has no dialog-opening button.
         "dialog_button_name": None,
@@ -372,6 +375,9 @@ APP_CONFIGS: dict[str, dict] = {
         "remove_item_button_name": None,
     },
     "accesskit": {
+        # "Start slide" / "Slide target" (#530): required, so a missing
+        # widget fails the wait_stable tests instead of skipping them.
+        "has_slide_widget": True,
         # The AccessKit test app (test-apps/accesskit/src/main.rs) is the
         # canonical AccessKit-on-AT-SPI target on Linux. Its widget schema
         # differs from the shared toolkit fixtures: buttons are Submit/Cancel

@@ -1127,17 +1127,24 @@ impl Locator {
     /// as stable. Semantic actions (`press`, `toggle`, …) do not need this:
     /// they do not depend on position.
     ///
+    /// Only bounds are compared, not identity: if the selector resolves to a
+    /// different element on the second poll whose bounds equal the first
+    /// one's, that element is returned. For pointer targeting this is
+    /// harmless — the point clicked is the same either way.
+    ///
     /// On timeout the error's [`Diagnosis`] says what blocked stability: the
-    /// last two differing rectangles, a match that is not visible, or a
-    /// selector that never matched.
+    /// last two differing rectangles, a match that is not visible, a match
+    /// that reports no bounds, or a selector that never matched.
     pub fn wait_stable(&self, timeout: Duration) -> Result<Element> {
         let start = std::time::Instant::now();
         let mut ever_matched = false;
         // Bounds from the previous poll, when that poll saw the element
         // visible with bounds. Two equal in a row is stability.
         let mut prev: Option<Rect> = None;
+        let mut polls: u32 = 0;
 
         loop {
+            polls = polls.saturating_add(1);
             let matched = match self.resolve_data() {
                 Ok(data) => Some(data),
                 Err(Error::SelectorNotMatched { .. }) => None,
@@ -1167,6 +1174,7 @@ impl Locator {
                     matched.as_ref(),
                     ever_matched,
                     last_change,
+                    polls == 1,
                 ));
             }
             std::thread::sleep(WAIT_POLL_INTERVAL);
@@ -1182,6 +1190,7 @@ impl Locator {
         last: Option<&ElementData>,
         ever_matched: bool,
         last_change: Option<(Rect, Rect)>,
+        first_poll: bool,
     ) -> Error {
         let condition = STABLE_CONDITION.to_string();
         let Some(data) = last else {
@@ -1198,9 +1207,19 @@ impl Locator {
                     describe_rect(&after),
                     short_describe(data)
                 ),
-                (Some(b), None) => format!(
+                // The timeout expired after a single poll, so there was never
+                // a second one to compare against.
+                (Some(b), None) if first_poll => format!(
                     "bounds {} seen on only one poll of {}; stability needs two \
                      (timeout shorter than the poll interval?)",
+                    describe_rect(&b),
+                    short_describe(data)
+                ),
+                // Earlier polls ran, but the one just before this saw the
+                // element missing, hidden, or without bounds.
+                (Some(b), None) => format!(
+                    "bounds {} on {}, but the poll before saw it missing, hidden, \
+                     or without bounds; stability needs two such polls in a row",
                     describe_rect(&b),
                     short_describe(data)
                 ),
@@ -2403,5 +2422,22 @@ mod wait_stable_tests {
         let (_p, loc) = animated(vec![]);
         let err = loc.wait_stable(Duration::ZERO).expect_err("one poll only");
         assert!(observed(&err).contains("seen on only one poll"));
+    }
+
+    #[test]
+    fn a_timeout_after_a_hidden_poll_does_not_blame_the_timeout_length() {
+        // Poll 1 sees it hidden; poll 2 (after the 50 ms timeout) sees it
+        // visible with nothing to compare against. That is not the
+        // "timeout shorter than the poll interval" case.
+        let (_p, loc) = animated(vec![(Some(rect(110)), false), (Some(rect(110)), true)]);
+        let err = loc
+            .wait_stable(Duration::from_millis(50))
+            .expect_err("a hidden poll resets the comparison");
+        let observed = observed(&err);
+        assert!(
+            observed.contains("the poll before saw it missing, hidden"),
+            "{observed}"
+        );
+        assert!(!observed.contains("timeout shorter"), "{observed}");
     }
 }

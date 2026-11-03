@@ -133,7 +133,7 @@ Every pointer method accepts either a screen-space point or an `Element`:
 ### Clicking something that is still moving
 
 An element sliding in, or a dialog still settling after a layout change, has
-bounds that are already stale when the click lands. Fetch it with the
+bounds that are already stale by the time the click is sent. Fetch it with the
 locator's `wait_stable()` (`waitStable()` in JS) instead of `element()`. It
 returns once the bounds are unchanged across two consecutive polls, so the
 `Element` you hand to `InputSim` holds where the element comes to rest:

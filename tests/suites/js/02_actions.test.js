@@ -341,16 +341,27 @@ test('snapshot-bound Element can be pressed twice', async () => {
 
 // ── waitStable (#530): a widget that moves ──────────────────────────────────
 //
-// "Start slide" restarts a two-second slide of "Slide target" that ends where
-// the target already rests (AccessKit and Tauri test apps). Apps without the
-// widget skip.
+// "Start slide" restarts a three-second slide of "Slide target" that ends
+// where the target already rests. `appConfig.hasSlideWidget` marks the apps
+// that have it (AccessKit, Tauri); there a missing widget fails rather than
+// skips, since a skip would pass just as well when the widget broke (#383).
 
 const START_SLIDE = 'button[name="Start slide"]';
 const SLIDE_TARGET = 'button[name="Slide target"]';
 
-test('waitStable resolves with the bounds a slide ends at', async () => {
+async function slideApp(t) {
+  if (!appConfig.hasSlideWidget) {
+    t.skip('this app has no sliding widget');
+    return null;
+  }
   const app = await getApp();
-  if ((await app.locator(START_SLIDE).count()) === 0) return; // no sliding widget
+  assert.equal(await app.locator(START_SLIDE).count(), 1, "the app's Start slide button is missing");
+  return app;
+}
+
+test('waitStable resolves with the bounds a slide ends at', async (t) => {
+  const app = await slideApp(t);
+  if (!app) return;
   const target = app.locator(SLIDE_TARGET);
   const rest = (await target.waitStable(10)).bounds;
   assert.ok(rest, 'the slide target reports no bounds');
@@ -360,12 +371,13 @@ test('waitStable resolves with the bounds a slide ends at', async () => {
   const settled = await target.waitStable(10);
   const waitedMs = Date.now() - started;
   assert.deepEqual(settled.bounds, rest, `waitStable returned mid-slide after ${waitedMs} ms`);
-  assert.ok(waitedMs >= 1500, `a 2 s slide cannot be proven stable in ${waitedMs} ms`);
+  // The 1.5 s floor leaves the rest of the 3 s slide for press latency.
+  assert.ok(waitedMs >= 1500, `a 3 s slide cannot be proven stable in ${waitedMs} ms`);
 });
 
-test('waitStable times out naming the moving bounds', async () => {
-  const app = await getApp();
-  if ((await app.locator(START_SLIDE).count()) === 0) return; // no sliding widget
+test('waitStable times out naming the moving bounds', async (t) => {
+  const app = await slideApp(t);
+  if (!app) return;
   const target = app.locator(SLIDE_TARGET);
   await target.waitStable(10);
 

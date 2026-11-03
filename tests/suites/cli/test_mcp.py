@@ -2115,11 +2115,30 @@ def test_an_action_reaches_a_poll_as_a_shaped_event(
 
 # ── find with stable: true (#530) ────────────────────────────────────────────
 #
-# "Start slide" restarts a two-second slide of "Slide target" that ends where
-# the target already rests. Apps without the widget skip.
+# "Start slide" restarts a three-second slide of "Slide target" that ends
+# where the target already rests. On the apps in SLIDE_APPS the widget is
+# required, so its absence fails rather than skips (#383).
 
 _START_SLIDE = 'button[name="Start slide"]'
 _SLIDE_TARGET = 'button[name="Slide target"]'
+SLIDE_APPS = {"tauri", "accesskit"}
+
+
+def _session_with_timeout(entry_point, monkeypatch, seconds: str) -> McpSession:
+    """A handshaken session whose server runs with this default timeout."""
+    monkeypatch.setenv("XA11Y_DEFAULT_TIMEOUT", seconds)
+    session = McpSession(entry_point)
+    session.request(
+        "init",
+        "initialize",
+        {
+            "protocolVersion": LEGACY_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "pytest"},
+        },
+    )
+    session.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    return session
 
 
 def _stable_find(mcp, app_pid, selector: str) -> dict:
@@ -2139,11 +2158,26 @@ def test_the_find_description_states_what_stable_costs_and_requires(mcp):
     assert "ambiguous_selector" in description
 
 
-def test_stable_find_returns_the_bounds_a_slide_ends_at(mcp, app_pid):
-    """With stable set, find waits out the motion and reports the final bounds."""
-    probe = mcp.call_tool("find", {"pid": app_pid, "selector": _START_SLIDE})["result"]
-    if probe["isError"]:
+def test_stable_find_returns_the_bounds_a_slide_ends_at(
+    entry_point, app_pid, app_name, monkeypatch
+):
+    """With stable set, find waits out the motion and reports the final bounds.
+
+    The server runs with a 15 s default timeout, comfortably longer than the
+    slide; the 1.5 s floor leaves the rest of the 3 s slide for press latency.
+    """
+    if app_name not in SLIDE_APPS:
         pytest.skip("this app has no sliding widget")
+    mcp = _session_with_timeout(entry_point, monkeypatch, "15")
+    try:
+        _assert_stable_find_waits_out_a_slide(mcp, app_pid)
+    finally:
+        mcp.kill()
+
+
+def _assert_stable_find_waits_out_a_slide(mcp, app_pid):
+    probe = mcp.call_tool("find", {"pid": app_pid, "selector": _START_SLIDE})["result"]
+    assert probe["isError"] is False, f"the app's Start slide button is missing: {probe}"
     rest = _stable_find(mcp, app_pid, _SLIDE_TARGET)
     assert rest["isError"] is False, rest["content"]
     rest_bounds = rest["structuredContent"]["matches"][0]["bounds"]
@@ -2161,7 +2195,7 @@ def test_stable_find_returns_the_bounds_a_slide_ends_at(mcp, app_pid):
     assert structured["matches"][0]["bounds"] == rest_bounds, (
         f"stable find reported mid-slide bounds after {waited:.2f}s"
     )
-    assert waited >= 1.5, f"a 2 s slide cannot be proven stable in {waited:.2f}s"
+    assert waited >= 1.5, f"a 3 s slide cannot be proven stable in {waited:.2f}s"
 
 
 def test_stable_find_refuses_a_selector_that_matches_several(mcp, app_pid):
@@ -2188,19 +2222,8 @@ def test_a_stable_find_that_never_matches_is_a_diagnosed_miss(
     entry_point, app_pid, monkeypatch
 ):
     """After the wait, a miss reports as `no_match`, not as a timeout."""
-    monkeypatch.setenv("XA11Y_DEFAULT_TIMEOUT", "0.5")
-    session = McpSession(entry_point)
+    session = _session_with_timeout(entry_point, monkeypatch, "0.5")
     try:
-        session.request(
-            "init",
-            "initialize",
-            {
-                "protocolVersion": LEGACY_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "pytest"},
-            },
-        )
-        session.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         selector = 'button[name="Sbumit"]'
         result = _stable_find(session, app_pid, selector)
     finally:

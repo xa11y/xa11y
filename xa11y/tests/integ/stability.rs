@@ -1,6 +1,6 @@
 //! `Locator::wait_stable` against a widget that really moves (issue #530).
 //!
-//! The test app's "Start slide" button restarts a two-second slide of the
+//! The test app's "Start slide" button restarts a three-second slide of the
 //! "Slide target" button, pushing a tree update every 30 ms, so every
 //! `wait_*` poll (100 ms apart) sees a different position until it stops.
 
@@ -46,7 +46,7 @@ mod tests {
         );
         assert!(
             waited >= Duration::from_millis(1500),
-            "the slide takes 2 s, so the wait cannot have proven stability in {waited:?}"
+            "the slide takes 3 s, so the wait cannot have proven stability in {waited:?}"
         );
     }
 
@@ -60,7 +60,7 @@ mod tests {
         let err = app
             .locator(TARGET)
             .wait_stable(Duration::from_millis(600))
-            .expect_err("a 2 s slide cannot settle within 600 ms");
+            .expect_err("a 3 s slide cannot settle within 600 ms");
         let Error::Timeout { .. } = err else {
             panic!("expected a timeout, got {err:?}");
         };
