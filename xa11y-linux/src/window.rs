@@ -1177,8 +1177,9 @@ impl X11WindowBackend {
             .reply()
             .map_err(platform)?;
         let mut destroyed_windows = HashSet::new();
+        let mut renamed = HashSet::new();
         while let Some(event) = conn.poll_for_event().map_err(platform)? {
-            self.forget_origins(conn, &event);
+            self.forget_origins(&event, &mut renamed);
             if let Event::DestroyNotify(event) = event {
                 destroyed_windows.insert(event.window);
                 let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
@@ -1193,6 +1194,7 @@ impl X11WindowBackend {
                 }
             }
         }
+        self.forget_renamed(conn, &renamed)?;
         Ok(destroyed_windows)
     }
 
@@ -1203,66 +1205,117 @@ impl X11WindowBackend {
     ///   the client, and tells the client with a synthetic `ConfigureNotify`
     ///   (ICCCM 4.1.5), which reaches us through the same event mask;
     /// - a watched window's `_NET_WM_NAME` or `_NET_WM_PID` changed: its own
-    ///   entry goes, and so does the entry for its new (pid, title), since a
-    ///   window renamed *to* a cached title makes that match ambiguous. A
-    ///   window whose new identity cannot be read clears every entry, which
-    ///   is never wrong, only slower;
+    ///   entries go now, and the window joins `renamed` for
+    ///   [`Self::forget_renamed`], which reads each new identity once after
+    ///   the whole batch;
     /// - the set of top-levels changed (`_NET_CLIENT_LIST`, or a root child
     ///   mapped, unmapped or created without a window manager). A new window
     ///   may share a cached title, and would not be watched yet.
-    fn forget_origins(&self, conn: &RustConnection, event: &Event) {
-        if self
-            .origins
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
-        {
+    fn forget_origins(&self, event: &Event, renamed: &mut HashSet<Window>) {
+        let mut origins = self.origins.lock().unwrap_or_else(|e| e.into_inner());
+        if origins.is_empty() {
             return;
         }
-        if let Event::PropertyNotify(e) = event {
-            if e.window != self.root
-                && (e.atom == self.atoms.net_wm_name || e.atom == self.atoms.net_wm_pid)
-            {
-                // Read before locking the cache: a round trip under its lock
-                // would hold up a concurrent cache hit for nothing.
-                let renamed = self.identity(conn, e.window);
-                let mut origins = self.origins.lock().unwrap_or_else(|e| e.into_inner());
-                origins.retain(|_, (cached, _)| *cached != e.window);
-                match renamed {
-                    Ok(Some(X11Candidate {
-                        pid,
-                        title: Some(title),
-                        ..
-                    })) => {
-                        origins.remove(&(pid, title));
-                    }
-                    // No pid or no title: it cannot match any cached key.
-                    Ok(_) => {}
-                    Err(error) => {
-                        log::debug!(
-                            "X11 client origin cache cleared: window {:#x} changed its \
-                             identity and could not be read: {error}",
-                            e.window
-                        );
-                        origins.clear();
-                    }
-                }
-                return;
-            }
-        }
-        let mut origins = self.origins.lock().unwrap_or_else(|e| e.into_inner());
         match event {
-            Event::ConfigureNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
-            Event::ReparentNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
-            Event::DestroyNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
+            Event::PropertyNotify(e)
+                if e.window != self.root
+                    && (e.atom == self.atoms.net_wm_name || e.atom == self.atoms.net_wm_pid) =>
+            {
+                origins.retain(|_, (cached, _)| *cached != e.window);
+                renamed.insert(e.window);
+            }
             Event::PropertyNotify(e)
                 if e.window == self.root && e.atom == self.atoms.net_client_list =>
             {
                 origins.clear()
             }
+            Event::ConfigureNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
+            Event::ReparentNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
+            Event::DestroyNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
             Event::MapNotify(_) | Event::UnmapNotify(_) | Event::CreateNotify(_) => origins.clear(),
             _ => {}
         }
+    }
+
+    /// Drop the entry for each `renamed` window's new (pid, title): a window
+    /// renamed *to* a cached title makes that match ambiguous. The reads are
+    /// pipelined, so a batch of renames costs one round trip.
+    ///
+    /// A window that is gone by the time it is read (`BadWindow`, the
+    /// expected race with its destruction) clears every entry, which is never
+    /// wrong, only slower. Any other failure is returned.
+    fn forget_renamed(&self, conn: &RustConnection, renamed: &HashSet<Window>) -> Result<()> {
+        if renamed.is_empty()
+            || self
+                .origins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        {
+            return Ok(());
+        }
+        let mut cookies = Vec::with_capacity(renamed.len());
+        for &window in renamed {
+            let pid = conn
+                .get_property(
+                    false,
+                    window,
+                    self.atoms.net_wm_pid,
+                    AtomEnum::CARDINAL,
+                    0,
+                    1,
+                )
+                .map_err(platform)?;
+            let title = conn
+                .get_property(
+                    false,
+                    window,
+                    self.atoms.net_wm_name,
+                    self.atoms.utf8_string,
+                    0,
+                    u32::MAX,
+                )
+                .map_err(platform)?;
+            cookies.push((window, pid, title));
+        }
+        // Read every reply before taking the cache lock: a round trip under
+        // it would hold up a concurrent cache hit for nothing.
+        let mut keys = Vec::with_capacity(cookies.len());
+        let mut window_gone = None;
+        for (window, pid, title) in cookies {
+            let read = pid.reply().and_then(|pid| Ok((pid, title.reply()?)));
+            match read {
+                Ok((pid, title)) => {
+                    let pid = pid.value32().and_then(|mut values| values.next());
+                    let title = String::from_utf8(title.value)
+                        .ok()
+                        .filter(|title| !title.is_empty());
+                    // No pid or no title: it cannot match any cached key.
+                    if let (Some(pid), Some(title)) = (pid, title) {
+                        keys.push((pid, title));
+                    }
+                }
+                Err(x11rb::errors::ReplyError::X11Error(error))
+                    if error.error_kind == x11rb::protocol::ErrorKind::Window =>
+                {
+                    window_gone = Some(window);
+                }
+                Err(error) => return Err(platform(error)),
+            }
+        }
+        let mut origins = self.origins.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(window) = window_gone {
+            log::debug!(
+                "X11 client origin cache cleared: window {window:#x} changed its identity \
+                 and was gone before it could be read"
+            );
+            origins.clear();
+            return Ok(());
+        }
+        for key in keys {
+            origins.remove(&key);
+        }
+        Ok(())
     }
 
     fn client_origin(&self, pid: u32, title: &str) -> Result<Option<(i32, i32)>> {
@@ -2879,7 +2932,29 @@ mod tests {
         );
 
         let a = create(10, 20, b"Foo");
+        let client_mask = |window: u32| {
+            let conn = backend.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.get_window_attributes(window)
+                .expect("client attributes")
+                .reply()
+                .expect("client attributes reply")
+                .your_event_mask
+        };
+        // `bind` watches a window before any origin lookup: structure only.
+        {
+            let conn = backend.conn.lock().unwrap_or_else(|e| e.into_inner());
+            backend.watch_clients(&conn, &[a]).expect("watch A");
+        }
+        assert_eq!(
+            client_mask(a),
+            x11rb::protocol::xproto::EventMask::STRUCTURE_NOTIFY,
+            "before any lookup a watched client gets no property events"
+        );
         assert_eq!(backend.client_origin(pid, "Foo").unwrap(), Some((10, 20)));
+        assert!(
+            client_mask(a).contains(x11rb::protocol::xproto::EventMask::PROPERTY_CHANGE),
+            "the first lookup must upgrade an already-watched client's mask"
+        );
         assert_eq!(
             root_mask(),
             x11rb::protocol::xproto::EventMask::PROPERTY_CHANGE
@@ -2989,6 +3064,33 @@ mod tests {
             .expect("A destroyed");
         sync();
         assert_eq!(backend.client_origin(pid, "Renamed").unwrap(), None);
+
+        // A _NET_WM_PID change onto a cached (pid, title) makes it ambiguous,
+        // with no change to the cached window itself.
+        let set_pid = |window: u32, value: u32| {
+            observer
+                .change_property32(
+                    PropMode::REPLACE,
+                    window,
+                    net_wm_pid,
+                    AtomEnum::CARDINAL,
+                    &[value],
+                )
+                .expect("set PID")
+                .check()
+                .expect("PID stored");
+            sync();
+        };
+        let _c = create(30, 40, b"Pid");
+        let d = create(500, 400, b"Pid");
+        set_pid(d, pid + 1);
+        assert_eq!(backend.client_origin(pid, "Pid").unwrap(), Some((30, 40)));
+        set_pid(d, pid);
+        assert_eq!(
+            backend.client_origin(pid, "Pid").unwrap(),
+            None,
+            "a window whose pid changes onto a cached key makes it ambiguous"
+        );
     }
 
     /// The real thing: the AccessKit + winit test app on a bare X server, with
