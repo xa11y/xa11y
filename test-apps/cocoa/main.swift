@@ -35,8 +35,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var contextMenu: NSMenu!
 
     func applicationDidFinishLaunching(_: Notification) {
-        // 800 points of scrolling content above a 40-point strip that never
-        // scrolls (the drag-and-drop fixture, which a pointer must reach).
+        // A 40-point strip that never scrolls (the drag-and-drop fixture,
+        // which a pointer must reach) above 800 points of scrolling content.
+        // The strip sits at the top of the window: on a short display AppKit
+        // lets the window's bottom edge extend under the Dock, and a strip
+        // there received no mouse-down at all (issue #515).
         let dragStripHeight: CGFloat = 40
         let contentRect = NSRect(x: 0, y: 0, width: 700, height: 800 + dragStripHeight)
         window = NSWindow(
@@ -71,21 +74,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let container = NSView(frame: contentRect)
         let scroll = NSScrollView(frame: NSRect(
-            x: 0, y: dragStripHeight, width: contentRect.width, height: 800
+            x: 0, y: 0, width: contentRect.width, height: 800
         ))
         scroll.hasVerticalScroller = true
         scroll.autoresizingMask = [.width, .height]
         container.addSubview(scroll)
 
-        // ── Drag and drop (fixed strip below the scroll view) ─────────────
+        // ── Drag and drop (fixed strip above the scroll view) ─────────────
+        // Added after the scroll view so the scroll area stays the window's
+        // first accessibility child, which the context-menu test relies on.
         // A real NSDraggingSession source and a drop target that counts
         // string drops in its value. Outside the scroll view so a pointer
         // drag reaches both whatever the scroll position.
-        let dragSource = DragSourceView(frame: NSRect(x: 16, y: 6, width: 120, height: 28))
-        dragSource.autoresizingMask = [.maxYMargin]
+        let stripY = contentRect.height - dragStripHeight + 6
+        let dragSource = DragSourceView(frame: NSRect(x: 16, y: stripY, width: 120, height: 28))
+        dragSource.autoresizingMask = [.minYMargin]
         container.addSubview(dragSource)
-        let dropTarget = DropTargetView(frame: NSRect(x: 300, y: 6, width: 160, height: 28))
-        dropTarget.autoresizingMask = [.maxYMargin]
+        let dropTarget = DropTargetView(frame: NSRect(x: 300, y: stripY, width: 160, height: 28))
+        dropTarget.autoresizingMask = [.minYMargin]
         container.addSubview(dropTarget)
 
         let docView = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 1480))
