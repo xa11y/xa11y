@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
@@ -787,6 +788,11 @@ struct X11WindowBackend {
     atoms: X11Atoms,
     supported: HashSet<Atom>,
     has_window_manager: bool,
+    /// Whether [`Self::client_origin`] has run, and so selected the root
+    /// mask and property changes on top-levels. Until then this connection
+    /// watches only what `bind` needs, so a client that never reads GTK 4
+    /// bounds (the MCP server, most scripts) queues no root or title events.
+    origins_watched: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -824,22 +830,6 @@ impl X11WindowBackend {
             AtomEnum::WINDOW.into(),
         )?
         .is_empty();
-        // Watch the set of top-levels, so a window that appears after a
-        // `client_origin` lookup invalidates it (it could share the cached
-        // title). With a window manager the set is `_NET_CLIENT_LIST`, a root
-        // property; without one it is the root's mapped children.
-        let root_mask = if has_window_manager {
-            EventMask::PROPERTY_CHANGE
-        } else {
-            EventMask::PROPERTY_CHANGE | EventMask::SUBSTRUCTURE_NOTIFY
-        };
-        conn.change_window_attributes(
-            root,
-            &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().event_mask(root_mask),
-        )
-        .map_err(platform)?
-        .check()
-        .map_err(platform)?;
         Ok(Self {
             conn: Mutex::new(conn),
             origins: Mutex::new(HashMap::new()),
@@ -849,6 +839,7 @@ impl X11WindowBackend {
             atoms,
             supported,
             has_window_manager,
+            origins_watched: AtomicBool::new(false),
         })
     }
 
@@ -1137,16 +1128,41 @@ impl X11WindowBackend {
     /// replaces this connection's previous mask on that window, so every
     /// caller goes through here and none can narrow another's.
     fn watch_clients(&self, conn: &RustConnection, windows: &[Window]) -> Result<()> {
+        let mask = client_event_mask(self.origins_watched.load(Ordering::Acquire));
         for &window in windows {
             conn.change_window_attributes(
                 window,
-                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
-                    .event_mask(client_event_mask()),
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().event_mask(mask),
             )
             .map_err(platform)?
             .check()
             .map_err(platform)?;
         }
+        Ok(())
+    }
+
+    /// Start watching what invalidates a cached [`Self::client_origin`], on
+    /// its first call: the set of top-levels on the root. With a window
+    /// manager the set is `_NET_CLIENT_LIST`, a root property; without one
+    /// it is the root's mapped children. The caller holds the server grab
+    /// and enumerates after this, so no window can appear unobserved.
+    fn watch_origins(&self, conn: &RustConnection) -> Result<()> {
+        if self.origins_watched.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let root_mask = if self.has_window_manager {
+            EventMask::PROPERTY_CHANGE
+        } else {
+            EventMask::PROPERTY_CHANGE | EventMask::SUBSTRUCTURE_NOTIFY
+        };
+        conn.change_window_attributes(
+            self.root,
+            &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().event_mask(root_mask),
+        )
+        .map_err(platform)?
+        .check()
+        .map_err(platform)?;
+        self.origins_watched.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -1162,7 +1178,7 @@ impl X11WindowBackend {
             .map_err(platform)?;
         let mut destroyed_windows = HashSet::new();
         while let Some(event) = conn.poll_for_event().map_err(platform)? {
-            self.forget_origins(&event);
+            self.forget_origins(conn, &event);
             if let Event::DestroyNotify(event) = event {
                 destroyed_windows.insert(event.window);
                 let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
@@ -1186,25 +1202,61 @@ impl X11WindowBackend {
     ///   `DestroyNotify`). A reparenting window manager moves the frame, not
     ///   the client, and tells the client with a synthetic `ConfigureNotify`
     ///   (ICCCM 4.1.5), which reaches us through the same event mask;
-    /// - any watched window's `_NET_WM_NAME` or `_NET_WM_PID` changed. That
-    ///   clears every entry, not just that window's: a window renamed *to* a
-    ///   cached title makes the cached match ambiguous;
+    /// - a watched window's `_NET_WM_NAME` or `_NET_WM_PID` changed: its own
+    ///   entry goes, and so does the entry for its new (pid, title), since a
+    ///   window renamed *to* a cached title makes that match ambiguous. A
+    ///   window whose new identity cannot be read clears every entry, which
+    ///   is never wrong, only slower;
     /// - the set of top-levels changed (`_NET_CLIENT_LIST`, or a root child
     ///   mapped, unmapped or created without a window manager). A new window
     ///   may share a cached title, and would not be watched yet.
-    fn forget_origins(&self, event: &Event) {
-        let mut origins = self.origins.lock().unwrap_or_else(|e| e.into_inner());
-        if origins.is_empty() {
+    fn forget_origins(&self, conn: &RustConnection, event: &Event) {
+        if self
+            .origins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+        {
             return;
         }
+        if let Event::PropertyNotify(e) = event {
+            if e.window != self.root
+                && (e.atom == self.atoms.net_wm_name || e.atom == self.atoms.net_wm_pid)
+            {
+                // Read before locking the cache: a round trip under its lock
+                // would hold up a concurrent cache hit for nothing.
+                let renamed = self.identity(conn, e.window);
+                let mut origins = self.origins.lock().unwrap_or_else(|e| e.into_inner());
+                origins.retain(|_, (cached, _)| *cached != e.window);
+                match renamed {
+                    Ok(Some(X11Candidate {
+                        pid,
+                        title: Some(title),
+                        ..
+                    })) => {
+                        origins.remove(&(pid, title));
+                    }
+                    // No pid or no title: it cannot match any cached key.
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::debug!(
+                            "X11 client origin cache cleared: window {:#x} changed its \
+                             identity and could not be read: {error}",
+                            e.window
+                        );
+                        origins.clear();
+                    }
+                }
+                return;
+            }
+        }
+        let mut origins = self.origins.lock().unwrap_or_else(|e| e.into_inner());
         match event {
             Event::ConfigureNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
             Event::ReparentNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
             Event::DestroyNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
             Event::PropertyNotify(e)
-                if e.atom == self.atoms.net_wm_name
-                    || e.atom == self.atoms.net_wm_pid
-                    || (e.window == self.root && e.atom == self.atoms.net_client_list) =>
+                if e.window == self.root && e.atom == self.atoms.net_client_list =>
             {
                 origins.clear()
             }
@@ -1232,6 +1284,7 @@ impl X11WindowBackend {
         // A miss enumerates under the server grab, as `bind` does: no window
         // can vanish between listing the top-levels and reading them.
         self.with_server_grab(|conn| {
+            self.watch_origins(conn)?;
             self.drain_destroy_events(conn)?;
             let clients = self.top_level_windows(conn)?;
             // Watch before reading: a rename or move after the read
@@ -1742,9 +1795,14 @@ fn send_wm_protocol(
 
 /// The event mask kept on every X11 top-level xa11y inspects: structure
 /// changes (moves, reparenting, destruction) for bindings and cached origins,
-/// and property changes so a rename invalidates a cached origin.
-fn client_event_mask() -> EventMask {
-    EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE
+/// plus, once [`X11WindowBackend::client_origin`] has run, property changes
+/// so a rename invalidates a cached origin.
+fn client_event_mask(origins_watched: bool) -> EventMask {
+    if origins_watched {
+        EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE
+    } else {
+        EventMask::STRUCTURE_NOTIFY
+    }
 }
 
 /// The candidates owned by `pid` whose title is exactly `title`.
@@ -2433,6 +2491,7 @@ mod tests {
             atoms,
             supported: [atoms.net_active_window].into_iter().collect(),
             has_window_manager: true,
+            origins_watched: std::sync::atomic::AtomicBool::new(false),
         };
         let element = |handle, x| {
             let mut data = xa11y_core::ElementData::for_role(xa11y_core::Role::Window);
@@ -2803,8 +2862,30 @@ mod tests {
             sync();
         };
 
+        // The root mask is selected lazily: a backend that never looks up a
+        // client origin queues no root events.
+        let root_mask = || {
+            let conn = backend.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.get_window_attributes(root)
+                .expect("root attributes")
+                .reply()
+                .expect("root attributes reply")
+                .your_event_mask
+        };
+        assert_eq!(
+            root_mask(),
+            x11rb::protocol::xproto::EventMask::NO_EVENT,
+            "connect must not select a root mask"
+        );
+
         let a = create(10, 20, b"Foo");
         assert_eq!(backend.client_origin(pid, "Foo").unwrap(), Some((10, 20)));
+        assert_eq!(
+            root_mask(),
+            x11rb::protocol::xproto::EventMask::PROPERTY_CHANGE
+                | x11rb::protocol::xproto::EventMask::SUBSTRUCTURE_NOTIFY,
+            "the first lookup must select the root mask"
+        );
         assert_eq!(
             backend.client_origin(pid + 1, "Foo").unwrap(),
             None,
@@ -2836,6 +2917,34 @@ mod tests {
             backend.client_origin(pid, "Other").unwrap(),
             Some((400, 300))
         );
+
+        // A rename that touches neither a cached window nor a cached title
+        // leaves the other entries alone.
+        rename(b, b"Unrelated");
+        sync();
+        // Looking up B's new title drains the rename before the checks.
+        assert_eq!(
+            backend.client_origin(pid, "Unrelated").unwrap(),
+            Some((400, 300))
+        );
+        assert!(
+            backend
+                .origins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&(pid, "Foo".to_owned())),
+            "an unrelated rename must keep A's cached origin"
+        );
+        assert!(
+            !backend
+                .origins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&(pid, "Other".to_owned())),
+            "the renamed window's own entry must go"
+        );
+        rename(b, b"Other");
+        sync();
 
         // A is cached as "Foo". Renaming A away and B to "Foo" must not
         // leave A's origin answering for "Foo".
