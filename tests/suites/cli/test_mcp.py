@@ -372,6 +372,7 @@ def test_tools_list_is_complete_and_deterministic(mcp):
         "apps",
         "shell",
         "windows",
+        "enable_web_accessibility",
         "tree",
         "find",
         "action",
@@ -719,6 +720,33 @@ def test_windows_tool_reports_limit_truncation_honestly(mcp, app_pid):
         ), "the serialized result must reach the text channel"
     else:
         assert payload["truncated"] is False, payload
+
+
+def test_enable_web_accessibility_reaches_the_platform(mcp, app_pid, app_name):
+    """macOS takes the request; Linux and Windows refuse it with guidance.
+
+    The suite's Electron starts with its web tree already on, so on macOS the
+    content is there and the call succeeds. The refusal elsewhere is a tool
+    error, since a model can act on it (relaunch the app with the flag).
+    """
+    if app_name != "electron":
+        pytest.skip("enable_web_accessibility is exercised against the Electron app")
+    response = mcp.call_tool("enable_web_accessibility", {"pid": app_pid})
+    assert "error" not in response, response
+    result = response["result"]
+    structured = result["structuredContent"]
+    if sys.platform == "darwin":
+        assert result["isError"] is False, result["content"]
+        assert structured["ok"] is True, structured
+        assert structured["pid"] == app_pid, structured
+        return
+    assert result["isError"] is True, structured
+    assert structured["tool"] == "enable_web_accessibility", structured
+    assert structured["kind"] == "unsupported", structured
+    if sys.platform.startswith("linux"):
+        assert "--force-renderer-accessibility" in structured["message"], structured
+    else:
+        assert "UI Automation" in structured["message"], structured
 
 
 def _find_mcp_window_target(

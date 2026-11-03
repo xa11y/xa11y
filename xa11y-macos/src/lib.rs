@@ -120,6 +120,9 @@ mod stub {
         fn focused_app(&self) -> Result<ElementData> {
             Err(unavailable("focused_app"))
         }
+        fn enable_web_accessibility(&self, _: &ElementData) -> Result<()> {
+            Err(unavailable("enable_web_accessibility"))
+        }
         fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
             Err(unavailable("list_shell_surfaces"))
         }

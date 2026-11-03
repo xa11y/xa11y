@@ -493,6 +493,40 @@ impl Locator {
         if d.scope.is_none() {
             d.scope = Some(self.scope_summary());
         }
+        if let Some(hint) = self.web_accessibility_hint() {
+            d.last_observed = Some(match d.last_observed.take() {
+                Some(observed) => format!("{observed}; {hint}"),
+                None => hint,
+            });
+        }
+    }
+
+    /// A hint for a miss inside a web view whose content the app has not
+    /// built an accessibility tree for. Chromium and Electron do that only on
+    /// request, and the symptom is a `web_area` with no children, which
+    /// reads like a wrong selector. Bounded by [`DIAG_CANDIDATE_LIMIT`].
+    ///
+    /// Advisory only: if the scan itself fails there is no hint, and the
+    /// candidate and scope collection above already record a failing
+    /// provider.
+    fn web_accessibility_hint(&self) -> Option<String> {
+        let root = self.root.as_ref()?;
+        let selector = Selector::parse("web_area").ok()?;
+        let areas = self
+            .provider
+            .find_elements(root, &selector, Some(DIAG_CANDIDATE_LIMIT), None)
+            .ok()?;
+        let empty = areas.iter().any(|area| {
+            self.provider
+                .get_children(Some(area))
+                .is_ok_and(|children| children.is_empty())
+        });
+        empty.then(|| {
+            "the scope has a web_area with no children: a Chromium or Electron app builds \
+             its web content's accessibility tree only on request, which \
+             App.enable_web_accessibility() makes"
+                .to_string()
+        })
     }
 
     /// Near-miss candidates: elements in scope whose role matches the

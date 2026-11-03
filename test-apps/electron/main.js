@@ -16,7 +16,11 @@ const APP_NAME = getCliArg('xa11y-app-name', 'xa11y-electron-test-app');
 app.setName(APP_NAME);
 
 // Enable accessibility for web content so AT-SPI/AX APIs can read the DOM.
-app.commandLine.appendSwitch('force-renderer-accessibility');
+// `--xa11y-web-accessibility=off` leaves it off, the way a user's Electron
+// app starts, so `App.enable_web_accessibility` has something to turn on.
+if (getCliArg('xa11y-web-accessibility', 'on') !== 'off') {
+  app.commandLine.appendSwitch('force-renderer-accessibility');
+}
 
 function createWindow() {
   const win = new BrowserWindow({

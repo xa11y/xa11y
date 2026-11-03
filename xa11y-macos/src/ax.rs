@@ -1899,6 +1899,118 @@ fn activate_owning_app(el_ptr: AXUIElementRef, action: &str, role: Role) -> Resu
     set_bool_attr(app.as_ptr(), "AXFrontmost", true, action, role)
 }
 
+/// The application-element attributes that ask a Chromium-based app to build
+/// its web content's accessibility tree, in the order they are tried.
+/// Electron answers `AXManualAccessibility`, which has no side effects on the
+/// app's native UI. Chrome answers only `AXEnhancedUserInterface`, which is
+/// what VoiceOver sets, so it is tried second.
+const WEB_ACCESSIBILITY_ATTRS: [&str; 2] = ["AXManualAccessibility", "AXEnhancedUserInterface"];
+
+/// What reading a web-accessibility switch back returned.
+#[derive(Debug, PartialEq)]
+enum SwitchReadBack {
+    /// A boolean, or a number (0 is false).
+    Flag(bool),
+    /// The app has no such attribute.
+    Absent,
+    /// A value of another type.
+    Other,
+    /// The read failed with this AXError.
+    Unanswered(i32),
+}
+
+impl std::fmt::Display for SwitchReadBack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Flag(b) => write!(f, "{b}"),
+            Self::Absent => f.write_str("no such attribute"),
+            Self::Other => f.write_str("a non-boolean value"),
+            Self::Unanswered(code) => write!(f, "no answer (AXError {code})"),
+        }
+    }
+}
+
+fn read_switch(el_ptr: AXUIElementRef, attr_name: &str) -> SwitchReadBack {
+    match read_raw_attr(el_ptr, attr_name) {
+        RawAttr::Value(v) => unsafe {
+            let tid = safe_cf_get_type_id(v);
+            let read = if tid == safe_cf_boolean_get_type_id() {
+                SwitchReadBack::Flag(safe_cf_boolean_get_value(v))
+            } else if tid == safe_cf_number_get_type_id() {
+                let mut n: i64 = 0;
+                if safe_cf_number_get_value(v, CF_NUMBER_SINT64, &mut n as *mut _ as *mut c_void) {
+                    SwitchReadBack::Flag(n != 0)
+                } else {
+                    SwitchReadBack::Other
+                }
+            } else {
+                SwitchReadBack::Other
+            };
+            safe_cf_release(v);
+            read
+        },
+        RawAttr::Absent => SwitchReadBack::Absent,
+        RawAttr::Unanswered(code) => SwitchReadBack::Unanswered(code),
+    }
+}
+
+/// Ask the application `app` to build its web content's accessibility tree.
+///
+/// Each switch in [`WEB_ACCESSIBILITY_ATTRS`] is set and then read back, and
+/// the first one that reads back `true` is the success. The set call's
+/// return code is recorded but proves nothing: Chrome answers
+/// `kAXErrorNotImplemented` to a set it carried out. Both attempts are tried
+/// in a fixed order because each switch has exactly one family of apps that
+/// answers it, and when neither takes, the error names what each returned.
+fn enable_web_accessibility_for(app: &ElementData) -> Result<()> {
+    const ACTION: &str = "enable_web_accessibility";
+    if app.role != Role::Application {
+        return Err(Error::ActionNotSupported {
+            action: ACTION.to_string(),
+            role: app.role,
+        });
+    }
+    let Some(pid) = app.pid else {
+        return Err(Error::Platform {
+            code: -1,
+            message: format!("{ACTION}: the application element has no pid"),
+        });
+    };
+    let app_el = AXElement::from_owned(unsafe { safe_ax_create_application(pid as i32) });
+    if app_el.is_null() {
+        return Err(Error::Platform {
+            code: -9999,
+            message: format!("AXUIElementCreateApplication({pid}) failed while running {ACTION}"),
+        });
+    }
+    let mut attempts = Vec::with_capacity(WEB_ACCESSIBILITY_ATTRS.len());
+    for attr_name in WEB_ACCESSIBILITY_ATTRS {
+        let attr = CFString::new(attr_name);
+        let set = do_set_attribute(
+            app_el.as_ptr(),
+            &attr,
+            core_foundation::boolean::CFBoolean::true_value().as_CFTypeRef(),
+        );
+        let read = read_switch(app_el.as_ptr(), attr_name);
+        if read == SwitchReadBack::Flag(true) {
+            return Ok(());
+        }
+        attempts.push(format!(
+            "{attr_name}: set returned AXError {}, read back {read}",
+            set.code
+        ));
+    }
+    let name = app.name.clone().unwrap_or_default();
+    Err(Error::AccessibilityNotEnabled {
+        app: format!("{name} (pid={pid})"),
+        instructions: format!(
+            "the app did not take the request to build its web accessibility tree ({}). \
+             Only Chromium-based apps (Electron, Chrome) answer it.",
+            attempts.join("; ")
+        ),
+    })
+}
+
 /// Clear a boolean attribute when it currently reads `true`.
 ///
 /// The deminiaturize half of `activate` / `enter_fullscreen`: neither
@@ -4769,6 +4881,10 @@ impl Provider for MacOSProvider {
     /// Failing to enumerate the processes at all propagates as
     /// [`Error::Platform`]. A failure on one process does not: it contributes
     /// no surface, and the rest of the listing stands.
+    fn enable_web_accessibility(&self, app: &ElementData) -> Result<()> {
+        enable_web_accessibility_for(app)
+    }
+
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
         let apps = Self::list_gui_apps();
         if apps.is_empty() {
