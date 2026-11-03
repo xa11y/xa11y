@@ -2160,13 +2160,13 @@ fn build_snapshot_data(
         .filter(|s| !s.is_empty());
 
     let patterns = WindowsProvider::query_patterns(role, element)?;
-    let (value, observed_range_value) = get_value(role, &patterns);
+    let (value, observed_range_value) = get_value(role, &patterns)?;
 
     // Try FullDescription first (AccessKit's description), then HelpText
     let description = uia_cached_bstr(element, UIA_FullDescriptionPropertyId)
         .or_else(|| uia_cached_bstr(element, UIA_HelpTextPropertyId));
 
-    let states = parse_states(element, role, &patterns, hidden_by_ancestor);
+    let states = parse_states(element, role, &patterns, hidden_by_ancestor)?;
 
     let bounds = crate::coords::cached_bounding_rect(dpi, element)
         .ok()
@@ -2271,11 +2271,16 @@ fn build_snapshot_data(
         if let Some(ref pattern) = patterns.range_value {
             (
                 // Reuse the value already read for `value` so the string and
-                // numeric fields describe the same observation. If that read
-                // failed, retain the existing second attempt for this field.
-                observed_range_value.or_else(|| unsafe { pattern.CurrentValue() }.ok()),
-                unsafe { pattern.CurrentMinimum() }.ok(),
-                unsafe { pattern.CurrentMaximum() }.ok(),
+                // numeric fields describe the same observation.
+                observed_range_value,
+                Some(pattern_read(
+                    "RangeValuePattern.CurrentMinimum",
+                    || unsafe { pattern.CurrentMinimum() },
+                )?),
+                Some(pattern_read(
+                    "RangeValuePattern.CurrentMaximum",
+                    || unsafe { pattern.CurrentMaximum() },
+                )?),
             )
         } else {
             (None, None, None)
@@ -2512,6 +2517,31 @@ fn value_set_error(e: windows::core::Error, what: &str) -> Error {
             code: e.code().0 as i64,
             message: format!("{what} failed: {e}"),
         }
+    }
+}
+
+/// Read a property of a pattern the element already has, mapping a failure
+/// to `Error::Platform` with the HRESULT and what was being read.
+///
+/// The element has the pattern, so a failed read is not "unsupported": it is
+/// a dead element or a wedged provider, and substituting a default (`Off`,
+/// `false`, read-only, `None`) would report a state nobody observed
+/// (tenet 1, issue #597). Transient failures are retried first, like every
+/// other snapshot read. `UIA_E_ELEMENTNOTAVAILABLE` keeps its code, so a
+/// tree walk still prunes an element that vanished mid-snapshot
+/// (see [`live_snapshot`]).
+///
+/// A read with a documented "no value" signal matches it at the call site
+/// instead (see [`value_pattern_text`]).
+fn pattern_read<T>(what: &str, f: impl Fn() -> windows::core::Result<T>) -> Result<T> {
+    retry_transient(f).map_err(|e| pattern_read_error(what, &e))
+}
+
+/// The error [`pattern_read`] reports for a failed read of `what`.
+fn pattern_read_error(what: &str, e: &windows::core::Error) -> Error {
+    Error::Platform {
+        code: e.code().0 as i64,
+        message: format!("reading {what} while building element data failed: {e}"),
     }
 }
 
@@ -4880,32 +4910,48 @@ impl Provider for WindowsProvider {
 
 // ── Helper Functions ─────────────────────────────────────────────────────────
 
-/// Read the value through a pre-fetched pattern interface. Keep a successful
-/// range read for the numeric field of the same element snapshot.
-fn get_value(role: Role, patterns: &ElementPatterns) -> (Option<String>, Option<f64>) {
+/// Read the value through a pre-fetched pattern interface. The range read is
+/// returned for the numeric field of the same element snapshot.
+///
+/// RangeValuePattern, when present, is the element's value: a failed read
+/// propagates rather than falling through to ValuePattern, which would
+/// report a different property as the value (tenet 1, issue #597).
+fn get_value(role: Role, patterns: &ElementPatterns) -> Result<(Option<String>, Option<f64>)> {
     // For checkboxes/radios, value is handled by state — skip
     if matches!(role, Role::CheckBox | Role::RadioButton) {
-        return (None, None);
+        return Ok((None, None));
     }
 
-    // Try RangeValuePattern first (sliders, progress bars, spinners)
+    // RangeValuePattern first (sliders, progress bars, spinners)
     if let Some(ref pattern) = patterns.range_value {
-        if let Ok(v) = unsafe { pattern.CurrentValue() } {
-            return (Some(v.to_string()), Some(v));
-        }
+        let v = pattern_read("RangeValuePattern.CurrentValue", || unsafe {
+            pattern.CurrentValue()
+        })?;
+        return Ok((Some(v.to_string()), Some(v)));
     }
 
-    // Try ValuePattern (text fields, combo boxes)
+    // ValuePattern (text fields, combo boxes)
     if let Some(ref pattern) = patterns.value {
-        if let Ok(v) = unsafe { pattern.CurrentValue() } {
-            let s = v.to_string();
-            if !s.is_empty() {
-                return (Some(s), None);
-            }
-        }
+        let text = value_pattern_text(retry_transient(|| unsafe { pattern.CurrentValue() }))?;
+        return Ok((text, None));
     }
 
-    (None, None)
+    Ok((None, None))
+}
+
+/// Classify a `ValuePattern.CurrentValue` read.
+///
+/// `UIA_E_INVALIDOPERATION` is UIA's documented answer from a control that
+/// will not disclose its value, which is what a password edit is required
+/// to do (WPF's `PasswordBoxAutomationPeer` raises `InvalidOperationException`
+/// for it): there is no value to report, so `None`. An empty string is also
+/// `None`. Any other failure propagates (tenet 1).
+fn value_pattern_text(read: windows::core::Result<windows::core::BSTR>) -> Result<Option<String>> {
+    match read {
+        Ok(v) => Ok(Some(v.to_string()).filter(|s| !s.is_empty())),
+        Err(e) if e.code().0 == UIA_E_INVALIDOPERATION as i32 => Ok(None),
+        Err(e) => Err(pattern_read_error("ValuePattern.CurrentValue", &e)),
+    }
 }
 
 /// Determine available actions from pre-queried UIA patterns.
@@ -5063,7 +5109,7 @@ fn parse_states(
     role: Role,
     patterns: &ElementPatterns,
     hidden_by_ancestor: bool,
-) -> StateSet {
+) -> Result<StateSet> {
     let enabled = unsafe { element.CachedIsEnabled() }
         .unwrap_or(BOOL(1))
         .as_bool();
@@ -5090,21 +5136,23 @@ fn parse_states(
         Err(_) => false,
     };
 
-    // Checked: from TogglePattern
+    // Checked: from TogglePattern. Every pattern read below propagates its
+    // failure (`pattern_read`): a toggle whose state could not be read is
+    // not `Off`, and a test waiting for `checked == off` must not pass
+    // against an element it never read (tenet 1, issue #597).
     let checked = match role {
         Role::CheckBox | Role::RadioButton => {
             if let Some(ref pattern) = patterns.toggle {
-                match unsafe { pattern.CurrentToggleState() } {
-                    Ok(ToggleState_On) => Some(Toggled::On),
-                    Ok(ToggleState_Off) => Some(Toggled::Off),
-                    Ok(ToggleState_Indeterminate) => Some(Toggled::Mixed),
-                    _ => Some(Toggled::Off),
-                }
+                toggled_from_state(pattern_read(
+                    "TogglePattern.CurrentToggleState",
+                    || unsafe { pattern.CurrentToggleState() },
+                )?)
             } else if let Some(ref pattern) = patterns.selection_item {
                 // For radio buttons, check SelectionItemPattern
-                if unsafe { pattern.CurrentIsSelected() }
-                    .unwrap_or(BOOL(0))
-                    .as_bool()
+                if pattern_read("SelectionItemPattern.CurrentIsSelected", || unsafe {
+                    pattern.CurrentIsSelected()
+                })?
+                .as_bool()
                 {
                     Some(Toggled::On)
                 } else {
@@ -5119,9 +5167,13 @@ fn parse_states(
 
     // Expanded: from ExpandCollapsePattern
     let expanded = if let Some(ref pattern) = patterns.expand_collapse {
-        match unsafe { pattern.CurrentExpandCollapseState() } {
-            Ok(ExpandCollapseState_Expanded) => Some(true),
-            Ok(ExpandCollapseState_Collapsed) => Some(false),
+        // PartiallyExpanded and LeafNode have no boolean answer: unknown.
+        match pattern_read(
+            "ExpandCollapsePattern.CurrentExpandCollapseState",
+            || unsafe { pattern.CurrentExpandCollapseState() },
+        )? {
+            ExpandCollapseState_Expanded => Some(true),
+            ExpandCollapseState_Collapsed => Some(false),
             _ => None,
         }
     } else {
@@ -5145,9 +5197,10 @@ fn parse_states(
     // hides an error from the other (mirrors the container-selection
     // derivation xa11y-macos does for Qt's AX bridge).
     let selected = match patterns.selection_item {
-        Some(ref pattern) => unsafe { pattern.CurrentIsSelected() }
-            .unwrap_or(BOOL(0))
-            .as_bool(),
+        Some(ref pattern) => pattern_read("SelectionItemPattern.CurrentIsSelected", || unsafe {
+            pattern.CurrentIsSelected()
+        })?
+        .as_bool(),
         None => legacy_state_selected(uia_cached_i32(
             element,
             UIA_LegacyIAccessibleStatePropertyId,
@@ -5157,7 +5210,10 @@ fn parse_states(
     let editable = match role {
         Role::TextField | Role::TextArea => {
             if let Some(ref pattern) = patterns.value {
-                unsafe { pattern.CurrentIsReadOnly() }.unwrap_or(BOOL(1)) == BOOL(0)
+                !pattern_read("ValuePattern.CurrentIsReadOnly", || unsafe {
+                    pattern.CurrentIsReadOnly()
+                })?
+                .as_bool()
             } else {
                 true
             }
@@ -5182,16 +5238,19 @@ fn parse_states(
     // raise a StateChanged{fullscreen} event, because the AX API has no
     // fullscreen notification.
     let (minimized, maximized) = match patterns.window {
-        Some(ref pattern) => match unsafe { pattern.CurrentWindowVisualState() } {
-            Ok(WindowVisualState_Minimized) => (Some(true), Some(false)),
-            Ok(WindowVisualState_Maximized) => (Some(false), Some(true)),
-            // Normal is the only other defined value (there is no Restored);
-            // it clears both flags. A value outside the spec is unknown, not
-            // "definitely not minimized/maximized" — `None`, never guessed.
-            Ok(WindowVisualState_Normal) => (Some(false), Some(false)),
-            Ok(_) => (None, None),
-            Err(_) => (None, None),
-        },
+        Some(ref pattern) => {
+            match pattern_read("WindowPattern.CurrentWindowVisualState", || unsafe {
+                pattern.CurrentWindowVisualState()
+            })? {
+                WindowVisualState_Minimized => (Some(true), Some(false)),
+                WindowVisualState_Maximized => (Some(false), Some(true)),
+                // Normal is the only other defined value (there is no Restored);
+                // it clears both flags. A value outside the spec is unknown, not
+                // "definitely not minimized/maximized" — `None`, never guessed.
+                WindowVisualState_Normal => (Some(false), Some(false)),
+                _ => (None, None),
+            }
+        }
         None => (None, None),
     };
 
@@ -5199,11 +5258,14 @@ fn parse_states(
     // signal. Previously hard-coded `false`, which reported every modal
     // dialog (e.g. a WinForms modal form) as non-modal.
     let modal = match patterns.window {
-        Some(ref pattern) => unsafe { pattern.CurrentIsModal() }.unwrap_or(FALSE) == TRUE,
+        Some(ref pattern) => pattern_read("WindowPattern.CurrentIsModal", || unsafe {
+            pattern.CurrentIsModal()
+        })?
+        .as_bool(),
         None => false,
     };
 
-    StateParts {
+    Ok(StateParts {
         enabled,
         visible,
         focused,
@@ -5221,7 +5283,19 @@ fn parse_states(
         busy: false,
         password,
     }
-    .into()
+    .into())
+}
+
+/// Map a `ToggleState` to `checked`. A value outside UIA's three is unknown,
+/// not `Off`.
+#[allow(non_upper_case_globals)]
+fn toggled_from_state(state: ToggleState) -> Option<Toggled> {
+    match state {
+        ToggleState_On => Some(Toggled::On),
+        ToggleState_Off => Some(Toggled::Off),
+        ToggleState_Indeterminate => Some(Toggled::Mixed),
+        _ => None,
+    }
 }
 
 /// True when an MSAA state bitmask has `STATE_SYSTEM_SELECTED` set.
@@ -7380,6 +7454,87 @@ mod tests {
             value_set_error(failed, "SetValue"),
             Error::Platform { code, .. } if code == E_FAIL.0 as i64
         ));
+    }
+
+    // ── Pattern-value reads (issue #597) ────────────────────────────────────
+
+    #[test]
+    fn pattern_read_propagates_a_failed_read_with_its_hresult() {
+        use windows::core::{Error as CoreError, HRESULT};
+        for hr in [E_FAIL, RPC_E_DISCONNECTED, E_ACCESSDENIED] {
+            let result: Result<bool> = pattern_read("TogglePattern.CurrentToggleState", || {
+                Err(CoreError::from_hresult(HRESULT(hr.0)))
+            });
+            match result {
+                Err(Error::Platform { code, message }) => {
+                    assert_eq!(code, i64::from(hr.0));
+                    assert!(
+                        message.contains("TogglePattern.CurrentToggleState"),
+                        "the error names the read: {message}"
+                    );
+                }
+                other => panic!("expected Platform for {hr:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn pattern_read_keeps_element_not_available_prunable() {
+        use windows::core::{Error as CoreError, HRESULT};
+        // A tree walk prunes an element that vanished mid-snapshot; that
+        // only works while the read's error keeps UIA's exact HRESULT.
+        let result: Result<()> = pattern_read("ValuePattern.CurrentIsReadOnly", || {
+            Err(CoreError::from_hresult(HRESULT(
+                UIA_E_ELEMENTNOTAVAILABLE as i32,
+            )))
+        });
+        assert!(matches!(live_snapshot(result), Ok(None)));
+    }
+
+    #[test]
+    fn pattern_read_retries_a_transient_failure() {
+        let calls = std::cell::Cell::new(0);
+        let result = pattern_read("WindowPattern.CurrentIsModal", || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Err(RPC_E_SERVERCALL_RETRYLATER.ok().expect_err("busy HRESULT"))
+            } else {
+                Ok(true)
+            }
+        });
+        assert!(matches!(result, Ok(true)));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn value_pattern_text_reports_only_a_withheld_value_as_none() {
+        use windows::core::{Error as CoreError, BSTR, HRESULT};
+        assert_eq!(
+            value_pattern_text(Ok(BSTR::from("hello"))).expect("read"),
+            Some("hello".to_string())
+        );
+        assert_eq!(value_pattern_text(Ok(BSTR::new())).expect("read"), None);
+        // A password control declines to disclose its value.
+        let withheld = CoreError::from_hresult(HRESULT(UIA_E_INVALIDOPERATION as i32));
+        assert_eq!(value_pattern_text(Err(withheld)).expect("withheld"), None);
+        // Anything else is a failed read, not an empty field (tenet 1).
+        let failed = CoreError::from_hresult(HRESULT(E_FAIL.0));
+        assert!(matches!(
+            value_pattern_text(Err(failed)),
+            Err(Error::Platform { code, .. }) if code == i64::from(E_FAIL.0)
+        ));
+    }
+
+    #[test]
+    fn toggled_from_state_reports_an_unknown_state_as_unknown() {
+        assert_eq!(toggled_from_state(ToggleState_On), Some(Toggled::On));
+        assert_eq!(toggled_from_state(ToggleState_Off), Some(Toggled::Off));
+        assert_eq!(
+            toggled_from_state(ToggleState_Indeterminate),
+            Some(Toggled::Mixed)
+        );
+        // A value outside UIA's three is not `Off`.
+        assert_eq!(toggled_from_state(ToggleState(7)), None);
     }
 
     #[test]
