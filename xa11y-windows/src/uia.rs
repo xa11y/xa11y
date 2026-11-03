@@ -7840,6 +7840,66 @@ mod tests {
         );
     }
 
+    /// TEMPORARY (#603 overhead measurement, not for merge).
+    #[test]
+    fn zz_measure_603_listing_overhead() {
+        let provider = WindowsProvider::new().expect("provider");
+        let dpi = &crate::dpi::DpiScope::enter().expect("dpi");
+        let root = unsafe { provider.automation.GetRootElement() }.expect("root");
+        let window_cond = unsafe {
+            provider.automation.CreatePropertyCondition(
+                UIA_ControlTypePropertyId,
+                &VARIANT::from(UIA_WindowControlTypeId.0),
+            )
+        }
+        .expect("cond");
+        let true_cond = unsafe { provider.automation.CreateTrueCondition() }.expect("true");
+        let interactive = interactive_top_level_windows("measuring").expect("enum");
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        let mut enum_t = Vec::new();
+        let (mut old_n, mut new_n, mut new_missing) = (0, 0, 0);
+        for _ in 0..25 {
+            let t = std::time::Instant::now();
+            let found = unsafe {
+                root.FindAllBuildCache(
+                    TreeScope_Children,
+                    &window_cond,
+                    provider.batch_request.get(dpi),
+                )
+            }
+            .expect("old");
+            let l = desktop_app_windows(&DesktopArray(&found)).expect("old filter");
+            old.push(t.elapsed());
+            old_n = l.windows.len();
+
+            let t = std::time::Instant::now();
+            let found = unsafe {
+                root.FindAllBuildCache(
+                    TreeScope_Children,
+                    &true_cond,
+                    provider.batch_request.get(dpi),
+                )
+            }
+            .expect("new");
+            let l = desktop_app_windows(&DesktopArray(&found)).expect("new filter");
+            new_missing = omitted_windows(&interactive, &l.returned).len();
+            new.push(t.elapsed());
+            new_n = l.windows.len();
+
+            let t = std::time::Instant::now();
+            let _ = interactive_top_level_windows("measuring").expect("enum");
+            enum_t.push(t.elapsed());
+        }
+        old.sort();
+        new.sort();
+        enum_t.sort();
+        panic!(
+            "MEASURE603 old(Window cond) median {:?} p90 {:?} listed {old_n}; new(TrueCondition+filter+compare) median {:?} p90 {:?} listed {new_n} missing {new_missing}; EnumWindows+classify median {:?}; interactive {}",
+            old[12], old[22], new[12], new[22], enum_t[12], interactive.len()
+        );
+    }
+
     #[test]
     fn probe_of_the_live_desktop_stays_inside_its_budget() {
         let start = std::time::Instant::now();
