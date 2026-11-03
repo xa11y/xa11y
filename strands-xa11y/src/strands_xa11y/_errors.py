@@ -66,7 +66,10 @@ _GUIDANCE = {
 }
 
 # Fields carrying xa11y's structured diagnosis, in the order they read best.
-_DIAGNOSIS_FIELDS = ("condition", "selector", "last_observed", "elapsed")
+# `hidden_reason` says why a matched element read visible=False ("scrolled_out",
+# "window_minimized", ...), which is what tells the model whether to scroll or to
+# restore a window.
+_DIAGNOSIS_FIELDS = ("condition", "selector", "last_observed", "hidden_reason", "elapsed")
 
 
 class ToolError(Exception):

@@ -28,7 +28,15 @@ _EXTRA_COLLECTORS: list[tuple[str, Callable[[xa11y.App], str]]] = []
 
 # Attributes carried by xa11y's structured errors (tenet 6). Rendered as
 # their own report block rather than left inside one long message string.
-_DIAGNOSIS_FIELDS = ("condition", "selector", "elapsed", "last_observed", "candidates", "scope")
+_DIAGNOSIS_FIELDS = (
+    "condition",
+    "selector",
+    "elapsed",
+    "last_observed",
+    "hidden_reason",
+    "candidates",
+    "scope",
+)
 
 
 def register_diagnostic(name: str, collector: Callable[[xa11y.App], str]) -> None:
