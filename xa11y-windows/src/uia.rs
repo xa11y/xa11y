@@ -5546,16 +5546,11 @@ fn parse_states(
 
     // Expanded: from ExpandCollapsePattern
     let expanded = if let Some(ref pattern) = patterns.expand_collapse {
-        // PartiallyExpanded and LeafNode have no boolean answer: unknown.
-        match pattern_read(
+        expanded_from_state(pattern_read(
             site,
             "ExpandCollapsePattern.CurrentExpandCollapseState",
             || unsafe { pattern.CurrentExpandCollapseState() },
-        )? {
-            ExpandCollapseState_Expanded => Some(true),
-            ExpandCollapseState_Collapsed => Some(false),
-            _ => None,
-        }
+        )?)
     } else {
         None
     };
@@ -5671,6 +5666,33 @@ fn toggled_from_state(state: ToggleState) -> Option<Toggled> {
         ToggleState_On => Some(Toggled::On),
         ToggleState_Off => Some(Toggled::Off),
         ToggleState_Indeterminate => Some(Toggled::Mixed),
+        _ => None,
+    }
+}
+
+/// The boolean a `StateChanged { Checked }` event carries for a
+/// `ToggleState`, or `None` when the state has no boolean meaning.
+///
+/// Derived from [`toggled_from_state`] so an event and a re-read of the same
+/// element cannot disagree: `Indeterminate` reads as `Mixed` and an
+/// out-of-spec value as unknown, and neither is "became unchecked"
+/// (issue #609).
+fn checked_value_from_state(state: ToggleState) -> Option<bool> {
+    match toggled_from_state(state)? {
+        Toggled::On => Some(true),
+        Toggled::Off => Some(false),
+        Toggled::Mixed => None,
+    }
+}
+
+/// Map an `ExpandCollapseState` to `expanded`. `PartiallyExpanded` and
+/// `LeafNode` have no boolean answer, so they are unknown, not collapsed.
+/// Shared by the snapshot and the property-change event paths (issue #609).
+#[allow(non_upper_case_globals)]
+fn expanded_from_state(state: ExpandCollapseState) -> Option<bool> {
+    match state {
+        ExpandCollapseState_Expanded => Some(true),
+        ExpandCollapseState_Collapsed => Some(false),
         _ => None,
     }
 }
@@ -6826,10 +6848,16 @@ impl IUIAutomationPropertyChangedEventHandler_Impl for PropertyHandler_Impl {
                 }
             }
             UIA_ToggleToggleStatePropertyId => {
-                if let Some(v) = variant_i32(newvalue) {
+                // Only Off/On are a boolean change. An indeterminate or
+                // out-of-spec state is not "became unchecked", so it raises
+                // no StateChanged; the ValueChanged below still tells a
+                // subscriber to re-read the element (issue #609).
+                if let Some(value) =
+                    variant_i32(newvalue).and_then(|v| checked_value_from_state(ToggleState(v)))
+                {
                     kinds.push(EventKind::StateChanged {
                         flag: StateFlag::Checked,
-                        value: v == ToggleState_On.0,
+                        value,
                     });
                 }
                 kinds.push(EventKind::ValueChanged);
@@ -6838,10 +6866,14 @@ impl IUIAutomationPropertyChangedEventHandler_Impl for PropertyHandler_Impl {
                 kinds.push(EventKind::ValueChanged);
             }
             UIA_ExpandCollapseExpandCollapseStatePropertyId => {
-                if let Some(v) = variant_i32(newvalue) {
+                // PartiallyExpanded and LeafNode are neither expanded nor
+                // collapsed, so they raise no StateChanged (issue #609).
+                if let Some(value) =
+                    variant_i32(newvalue).and_then(|v| expanded_from_state(ExpandCollapseState(v)))
+                {
                     kinds.push(EventKind::StateChanged {
                         flag: StateFlag::Expanded,
-                        value: v == ExpandCollapseState_Expanded.0,
+                        value,
                     });
                 }
             }
@@ -8112,6 +8144,34 @@ mod tests {
         );
         // A value outside UIA's three is not `Off`.
         assert_eq!(toggled_from_state(ToggleState(7)), None);
+    }
+
+    #[test]
+    fn checked_value_from_state_drops_states_without_a_boolean() {
+        assert_eq!(checked_value_from_state(ToggleState_On), Some(true));
+        assert_eq!(checked_value_from_state(ToggleState_Off), Some(false));
+        // Indeterminate is `Mixed` on a re-read, not unchecked (issue #609).
+        assert_eq!(checked_value_from_state(ToggleState_Indeterminate), None);
+        assert_eq!(checked_value_from_state(ToggleState(7)), None);
+    }
+
+    #[test]
+    fn expanded_from_state_reports_only_expanded_and_collapsed() {
+        assert_eq!(
+            expanded_from_state(ExpandCollapseState_Expanded),
+            Some(true)
+        );
+        assert_eq!(
+            expanded_from_state(ExpandCollapseState_Collapsed),
+            Some(false)
+        );
+        // Neither is collapsed (issue #609).
+        assert_eq!(
+            expanded_from_state(ExpandCollapseState_PartiallyExpanded),
+            None
+        );
+        assert_eq!(expanded_from_state(ExpandCollapseState_LeafNode), None);
+        assert_eq!(expanded_from_state(ExpandCollapseState(9)), None);
     }
 
     #[test]
