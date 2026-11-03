@@ -257,6 +257,13 @@ internal sealed class TestWindow : Window
         return MakeGroup("Input", Orientation.Vertical, search, password);
     }
 
+    private static void ExpLog(string line)
+    {
+        System.IO.File.AppendAllText(
+            System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xa11y-wpf-textlog.txt"),
+            $"{Environment.TickCount64} {line}\n");
+    }
+
     private static GroupBox BuildText()
     {
         var heading = MakeText("Heading Text");
@@ -269,6 +276,14 @@ internal sealed class TestWindow : Window
             Height = 80,
         };
         AutomationProperties.SetName(notes, "Notes");
+        // EXPERIMENT (throwaway): log every key/text/text-changed event.
+        notes.PreviewKeyDown += (_, e) => ExpLog($"keydown key={e.Key} sys={e.SystemKey} ime={e.ImeProcessedKey} caret={notes.CaretIndex} sel={notes.SelectionLength}");
+        notes.PreviewTextInput += (_, e) => ExpLog($"textinput '{e.Text}' caret={notes.CaretIndex} sel={notes.SelectionLength}");
+        notes.TextChanged += (_, e) =>
+        {
+            foreach (var c in e.Changes)
+                ExpLog($"textchanged off={c.Offset} add={c.AddedLength} rem={c.RemovedLength} len={notes.Text.Length} caret={notes.CaretIndex} text='{notes.Text.Replace("\n", "|")}'");
+        };
 
         return MakeGroup("Text", Orientation.Vertical, heading, notes);
     }
