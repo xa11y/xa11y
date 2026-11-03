@@ -10,6 +10,21 @@
 //!   detection.
 //! - Screen capture (`screenshot`) — `GetImage` on X11, the Screenshot
 //!   portal on Wayland.
+//!
+//! # Delivery disposition of action failures
+//!
+//! Every error answers [`xa11y_core::Error::delivery`]. A failure is
+//! `NotDelivered` only when this backend decided it before sending anything
+//! that mutates the application, and `Unknown` for every error from a call
+//! that was sent. A dispatched `DoAction`, `SetCurrentValue`,
+//! `SetTextContents` or `Select*` that fails or answers `false` is `Unknown`.
+//! A `GrabFocus` (the `focus` and `activate` verbs) that
+//! answers `false` or D-Bus `NotSupported` is the adapter declining to take
+//! focus, kept as `ActionNotSupported` (`NotDelivered`) because focusing twice
+//! is harmless. A step that fails after an earlier step
+//! of the same verb went through (`set_value` after `DeleteText`, the second
+//! EWMH message of `minimize`) is `Unknown`. The full table is in the
+//! "Delivery disposition" section of the platform details reference.
 
 #[cfg(target_os = "linux")]
 mod atspi;

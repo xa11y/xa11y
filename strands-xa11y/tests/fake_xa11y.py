@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 class XA11yError(Exception):
-    pass
+    # The real base class sets this on every error it raises.
+    delivery = "unknown"
 
 
 class PermissionDeniedError(XA11yError):

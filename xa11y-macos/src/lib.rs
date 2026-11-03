@@ -1,4 +1,15 @@
 //! macOS accessibility backend using AXUIElement API.
+//!
+//! # Delivery disposition of action failures
+//!
+//! Every error answers [`xa11y_core::Error::delivery`]. `ActionNotSupported`
+//! (including `kAXErrorActionUnsupported`) and the checks made before any AX
+//! call are `NotDelivered`. Every other AX code from the dispatching call,
+//! including `kAXErrorCannotComplete`, is `Platform` and so `Unknown`. A step
+//! that fails after an earlier step of the same verb changed the window
+//! (`minimize`, `enter_fullscreen`, `restore`, `activate`, `resize_to`) is
+//! `Unknown`. The full table is in the "Delivery disposition" section of the
+//! platform details reference.
 
 #[cfg(target_os = "macos")]
 mod ax;

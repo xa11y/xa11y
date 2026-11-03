@@ -84,6 +84,27 @@ def test_action_missing_selector_exits_nonzero(run_cli):
     assert rc != 0, "expected non-zero exit when selector is missing"
 
 
+def test_failed_action_reports_its_delivery(run_cli, app_pid):
+    """A selector that matches nothing never reached the app (#523).
+
+    The CLI prints a ``delivery:`` line after the error so a script can tell a
+    safe retry from a double-submit without parsing the message.
+    """
+    import os
+
+    env = {**os.environ, "XA11Y_DEFAULT_TIMEOUT": "1"}
+    rc, stdout, stderr = run_cli(
+        "action",
+        "press",
+        'button[name="NoSuchButtonAnywhere523"]',
+        "--pid",
+        str(app_pid),
+        env=env,
+    )
+    assert rc == 1, f"expected an operation failure, got {rc}\nstderr: {stderr}"
+    assert "delivery: not_delivered" in stderr, stderr
+
+
 def test_action_without_app_exits_nonzero(run_cli):
     """``xa11y action press button`` without --app/--pid must exit non-zero."""
     rc, stdout, stderr = run_cli("action", "press", "button")

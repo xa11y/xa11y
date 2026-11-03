@@ -356,6 +356,22 @@ What each platform can tell apart:
 
 A timeout on an element that matched but stayed hidden carries the reason in its diagnosis. See [errors](/reference/errors/).
 
+### Delivery disposition
+
+Each failed action reports `not_delivered` or `unknown`. See [errors](/reference/errors/#delivery-disposition) for the values. A failure is `not_delivered` only when the backend decided it before it called the application. Every platform error from the dispatching call stays `unknown`.
+
+| Platform | `not_delivered` | `unknown` |
+| --- | --- | --- |
+| Linux | The element lists no matching AT-SPI action or lacks the interface the verb needs (`ActionNotSupported`). The object or its peer is gone before dispatch (`ElementStale`). `GrabFocus` (behind `focus` and `activate`) answers `false` or D-Bus `NotSupported`, because the adapter declined to take focus and focusing twice is harmless. Bad arguments or an unsupported session. | A D-Bus method timeout (`Timeout`). A failed `DoAction`, `SetCurrentValue`, `SetTextContents` or `Select*`. `DoAction` returning `false`, because a provider that acts and then returns `false` looks the same as one that declined. A window-manager request that was sent and not confirmed. |
+| macOS | `kAXErrorActionUnsupported` (`ActionNotSupported`). Role and attribute checks made by xa11y itself. Stale handles and bad arguments. | `kAXErrorCannotComplete`, which is also what an expired messaging timeout surfaces as. Every other AX code from the dispatching call, including `kAXErrorInvalidUIElement`. A window verb that did not settle in its budget (`Timeout`). |
+| Windows | Pattern acquisition answers `E_NOINTERFACE`, `UIA_E_INVALIDOPERATION` or an empty error (`ActionNotSupported`). `ValuePattern.SetValue` answers `UIA_E_INVALIDOPERATION` for a read-only control (`TextValueNotSupported`). The handle is not in the cache or no longer matches its identity (`ElementStale`). Bad arguments. | `UIA_E_TIMEOUT` from an element-level call. Every other HRESULT, including `UIA_E_NOTSUPPORTED` and `UIA_E_ELEMENTNOTAVAILABLE`, from the pattern call that performs the action. |
+
+These rules hold on every platform:
+
+- A verb that works in several steps reports `unknown` for a failure after its first step went through, even when the failing step alone would say `not_delivered`. Linux `set_value` can fail on `InsertText` after `DeleteText` emptied the field, and the X11 `minimize`, `maximize` and `enter_fullscreen` send two or three window-manager messages. On macOS the same holds for `minimize`, `enter_fullscreen`, `restore`, `activate` and `resize_to`.
+- Input simulation reports a platform failure as `unknown`. A chord can fail after a modifier was already pressed, and the input backends do not tell that apart from a failure of the first event.
+- A `Timeout` raised by xa11y's own wait or auto-wait reports `not_delivered`, because the wait expired before the action was attempted. A `Timeout` raised by a backend while it talks to the platform, such as a D-Bus `NoReply` or a stalled discovery call, reports `unknown`, because the backend cannot say whether it came before or after dispatch.
+
 ### Selected state
 
 Per-item selection (`selected` on rows, cells, list items) is read differently:

@@ -32,6 +32,11 @@ class XA11yError extends Error {
   constructor(message) {
     super(message);
     this.name = 'XA11yError';
+    // Whether the failed action may already have taken effect:
+    // 'not_delivered' is safe to retry, 'unknown' is not. Populated from the
+    // native payload in `toTypedError`; 'unknown' is the conservative
+    // default for an error that arrives without one.
+    /** @type {'not_delivered' | 'unknown'} */ this.delivery = 'unknown';
   }
 }
 
@@ -39,6 +44,8 @@ class PermissionDeniedError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'PermissionDeniedError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -46,6 +53,8 @@ class AccessibilityNotEnabledError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'AccessibilityNotEnabledError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -53,6 +62,8 @@ class SelectorNotMatchedError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'SelectorNotMatchedError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
     // Structured diagnosis (tenet 6) — populated from the native payload in
     // `toTypedError`. Defaults keep every field present so consumers never
     // need existence checks.
@@ -71,6 +82,8 @@ class ActionNotSupportedError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'ActionNotSupportedError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -96,6 +109,8 @@ class InvalidSelectorError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'InvalidSelectorError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -103,6 +118,8 @@ class InvalidActionDataError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'InvalidActionDataError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -172,6 +189,9 @@ function toTypedError(err) {
   const typed = new Cls(detail);
   typed.stack = err.stack;
   if (diagnosis && typeof diagnosis === 'object') {
+    if (diagnosis.delivery === 'not_delivered' || diagnosis.delivery === 'unknown') {
+      typed.delivery = diagnosis.delivery;
+    }
     typed.selector = diagnosis.selector ?? null;
     typed.condition = diagnosis.condition ?? null;
     typed.lastObserved = diagnosis.lastObserved ?? null;
@@ -219,6 +239,8 @@ function diagnosedError(ErrorClass, summary, diagnosis) {
   err.candidates = candidates;
   err.scope = scope;
   err.elapsedMs = elapsedMs;
+  // A JS-side poll loop only observes; it never dispatches an action.
+  err.delivery = 'not_delivered';
   return err;
 }
 

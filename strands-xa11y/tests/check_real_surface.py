@@ -65,6 +65,10 @@ DIAGNOSIS_ATTRS = (
 # The two xa11y errors documented to carry a full diagnosis.
 DIAGNOSIS_ERRORS = ("SelectorNotMatchedError", "TimeoutError")
 
+# Declared once on the base class and inherited by every error: whether a
+# failed action may already have taken effect (`not_delivered` / `unknown`).
+BASE_ERROR_ATTRS = ("delivery",)
+
 
 def load_errors_module():
     """Load `_errors.py` on its own, without importing the package.
@@ -214,6 +218,10 @@ def main() -> int:
             continue
         for attr in sorted(set(DIAGNOSIS_ATTRS) - declared[error_name]):
             failures.append(f"xa11y.{error_name} no longer carries the {attr!r} diagnosis attribute.")
+
+    for attr in BASE_ERROR_ATTRS:
+        if attr not in declared.get("XA11yError", set()):
+            failures.append(f"xa11y.XA11yError no longer carries the {attr!r} attribute.")
 
     # 3. Every method the fake claims the real module has.
     for class_name in STAND_INS:

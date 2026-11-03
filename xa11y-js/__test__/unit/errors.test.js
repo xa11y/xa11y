@@ -215,3 +215,66 @@ test('diagnosis fields default to null/[] when a path produces no context', asyn
     },
   );
 });
+
+// ── Delivery disposition ─────────────────────────────────────────────────────
+//
+// Every error says whether the failed action may already have taken effect,
+// so a caller can tell a safe retry from a double-submit.
+
+test('a selector miss is not_delivered', async () => {
+  await assert.rejects(
+    _makeTestLocator().descendant('button[name="Nope"]').element(),
+    (err) => {
+      assert.ok(err instanceof SelectorNotMatchedError);
+      assert.equal(err.delivery, 'not_delivered');
+      return true;
+    },
+  );
+});
+
+test('an invalid selector is not_delivered, even without a diagnosis payload', async () => {
+  await assert.rejects(
+    _makeTestLocator().descendant('[[[bad').elements(),
+    (err) => {
+      assert.ok(err instanceof InvalidSelectorError);
+      assert.equal(err.delivery, 'not_delivered');
+      return true;
+    },
+  );
+});
+
+test('a wait that gives up before acting is not_delivered', async () => {
+  await assert.rejects(
+    _makeTestLocator().descendant('button').waitDetached(0.05),
+    (err) => {
+      assert.ok(err instanceof TimeoutError);
+      assert.equal(err.delivery, 'not_delivered');
+      return true;
+    },
+  );
+});
+
+test('a platform failure is unknown', async () => {
+  const app = await _makeTestLocator().element();
+  await assert.rejects(
+    Promise.resolve().then(() => app.subscribe()),
+    (err) => {
+      assert.ok(err instanceof PlatformError);
+      assert.equal(err.delivery, 'unknown');
+      return true;
+    },
+  );
+});
+
+test('a hand-built error defaults to the disposition core gives its variant', () => {
+  // Raised by the JS layer itself (argument validation), with no native payload.
+  assert.equal(new InvalidActionDataError('x').delivery, 'not_delivered');
+  assert.equal(new InvalidSelectorError('x').delivery, 'not_delivered');
+  assert.equal(new SelectorNotMatchedError('x').delivery, 'not_delivered');
+  assert.equal(new PlatformError('x').delivery, 'unknown');
+});
+
+test('delivery defaults to unknown on an error built without a payload', () => {
+  assert.equal(new XA11yError('x').delivery, 'unknown');
+  assert.equal(new TimeoutError('x').delivery, 'unknown');
+});

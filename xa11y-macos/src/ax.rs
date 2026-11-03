@@ -1601,6 +1601,25 @@ fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFType
     })
 }
 
+/// Re-classify an error from a step that ran after `done` had already changed
+/// the window.
+///
+/// Verbs such as `minimize`, `enter_fullscreen` and `restore` mutate in
+/// several steps. A pre-dispatch-class error (`ActionNotSupported`,
+/// `ElementStale`, ...) from a later step describes that step only. Reporting
+/// it as `NotDelivered` would invite a retry on a window that has already
+/// changed, so it becomes a `Platform` error, which reads as `Unknown`. An
+/// error that is already `Unknown` passes through.
+fn unknown_after_step(e: Error, done: &str) -> Error {
+    if e.delivery() == xa11y_core::Delivery::Unknown {
+        return e;
+    }
+    Error::Platform {
+        code: -1,
+        message: format!("{e}, after {done} had already changed the window"),
+    }
+}
+
 /// Convert a failed AX action call into an appropriate `Error`. Returns
 /// `ActionNotSupported` for -25206 (kAXErrorActionUnsupported) so callers get
 /// a clear, structured error instead of a raw platform code, and describes a
@@ -5165,8 +5184,15 @@ impl Provider for MacOSProvider {
         // `xa11y action activate` "does nothing". Activate the app first through
         // the accessibility API (the application element's AXFrontmost), then
         // activate the window.
-        activate_owning_app(ax.as_ptr(), "activate", element.role)?;
+        // Conservative: the clear above is a no-op on a window that was not
+        // minimized, but it cannot be told apart here, so a failure from this
+        // step is `unknown`.
+        activate_owning_app(ax.as_ptr(), "activate", element.role)
+            .map_err(|e| unknown_after_step(e, "clearing AXMinimized"))?;
+        // The window or its app has changed by now, so an AXRaise refusal
+        // must not read as "not delivered".
         perform_ax_action(ax.as_ptr(), "AXRaise", "activate", element.role)
+            .map_err(|e| unknown_after_step(e, "activating the owning app"))
     }
 
     fn minimize(&self, element: &ElementData) -> Result<()> {
@@ -5187,6 +5213,7 @@ impl Provider for MacOSProvider {
             });
         }
         let mut target = ax;
+        let left_fullscreen = state.fullscreen == Some(true);
         if state.fullscreen == Some(true) {
             // Leave fullscreen first: the window server suppresses minimize
             // while the window is fullscreen, so a minimize issued now would
@@ -5202,17 +5229,29 @@ impl Provider for MacOSProvider {
             // (see `SettleRun`), so the cached handle is used only if the
             // window drops off the list again in the moment between the
             // settle's last poll and this lookup.
-            if let Some(fresh) = fresh_target_in_app(app.as_ptr(), target.as_ptr())? {
+            if let Some(fresh) = fresh_target_in_app(app.as_ptr(), target.as_ptr())
+                .map_err(|e| unknown_after_step(e, "leaving fullscreen"))?
+            {
                 target = fresh;
             }
         }
+        // After leaving fullscreen the window has already changed, so a later
+        // failure must not read as "not delivered".
+        let after_exit = |e: Error| {
+            if left_fullscreen {
+                unknown_after_step(e, "leaving fullscreen")
+            } else {
+                e
+            }
+        };
         set_bool_attr(
             target.as_ptr(),
             "AXMinimized",
             true,
             "minimize",
             element.role,
-        )?;
+        )
+        .map_err(after_exit)?;
         // The iconify is applied asynchronously on native windows (see
         // [`WINDOW_MINIMIZED_SETTLE_BUDGET`]); settle the read-back so the
         // caller never has to discover the Dock animation.
@@ -5223,6 +5262,7 @@ impl Provider for MacOSProvider {
             "minimize",
             element.role,
         )
+        .map_err(|e| unknown_after_step(e, "setting AXMinimized"))
     }
 
     fn maximize(&self, element: &ElementData) -> Result<()> {
@@ -5273,8 +5313,12 @@ impl Provider for MacOSProvider {
         // `true` read would let an enter-fullscreen that races an exit
         // transition return success on a window that ends up restored. The
         // settle loop issues the set and re-issues it until the state
-        // commits.
+        // commits. Conservative: the AXMinimized clear above is a no-op on a
+        // window that was not minimized and that cannot be told apart here,
+        // and the settle loop itself sets AXFullScreen, so any error from it
+        // is `unknown`.
         settle_window_fullscreen(ax.as_ptr(), true, "enter_fullscreen", element.role)
+            .map_err(|e| unknown_after_step(e, "clearing AXMinimized or setting AXFullScreen"))
     }
 
     fn restore(&self, element: &ElementData) -> Result<()> {
@@ -5303,7 +5347,8 @@ impl Provider for MacOSProvider {
             // [`WINDOW_MINIMIZED_SETTLE_BUDGET`]); settle before the caller
             // can read the state back. A window that was not minimized reads
             // `false` on the first poll, so this costs one AX read.
-            settle_bool_attr(ax.as_ptr(), "AXMinimized", false, "restore", element.role)?;
+            settle_bool_attr(ax.as_ptr(), "AXMinimized", false, "restore", element.role)
+                .map_err(|e| unknown_after_step(e, "setting AXMinimized"))?;
         }
         // Never press the green button here: the press toggles, so a window
         // that is not fullscreen would be *entered* fullscreen by its own
@@ -5316,7 +5361,13 @@ impl Provider for MacOSProvider {
         // predicate refuses that state otherwise — so the settability flag
         // alone says whether there is a fullscreen state to clear.
         if state.fullscreen_settable {
-            settle_window_fullscreen(ax.as_ptr(), false, "restore", element.role)?;
+            settle_window_fullscreen(ax.as_ptr(), false, "restore", element.role).map_err(|e| {
+                if state.minimized_settable {
+                    unknown_after_step(e, "clearing AXMinimized")
+                } else {
+                    e
+                }
+            })?;
         }
         Ok(())
     }
@@ -5354,6 +5405,7 @@ impl Provider for MacOSProvider {
         }
         set_window_size(ax.as_ptr(), width, height, "resize_to", element.role)?;
         settle_window_size(ax.as_ptr(), width, height, "resize_to", element.role)
+            .map_err(|e| unknown_after_step(e, "setting AXSize"))
     }
 
     // ── Typed operations ────────────────────────────────────────────
@@ -5915,6 +5967,17 @@ mod tests {
     fn objc_exception_is_caught_by_c_wrapper() {
         let result = unsafe { test_throw_and_catch_nsexception() };
         assert_eq!(result, 1, "C wrapper should have caught the NSException");
+    }
+
+    #[test]
+    fn a_failure_after_a_completed_step_is_never_not_delivered() {
+        let refused = Error::ActionNotSupported {
+            action: "minimize".to_string(),
+            role: Role::Window,
+        };
+        assert_eq!(refused.delivery(), xa11y_core::Delivery::NotDelivered);
+        let e = unknown_after_step(refused, "leaving fullscreen");
+        assert_eq!(e.delivery(), xa11y_core::Delivery::Unknown);
     }
 
     #[test]

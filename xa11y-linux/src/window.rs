@@ -1458,24 +1458,32 @@ impl X11WindowBackend {
         // preserve EWMH fullscreen/maximized atoms while iconifying, which
         // would otherwise make a later restore or screen-fill operation start
         // from two active states.
+        // Several messages go out in turn. Once one has been sent, a later
+        // failure must not read as "nothing happened" (see `Sent`).
+        let mut sent = Sent::default();
         if self.supports_state(self.atoms.net_wm_state_fullscreen) {
-            self.change_state(element, STATE_REMOVE, self.atoms.net_wm_state_fullscreen, 0)?;
+            sent.step(self.change_state(
+                element,
+                STATE_REMOVE,
+                self.atoms.net_wm_state_fullscreen,
+                0,
+            ))?;
         }
         if self.supports_state(self.atoms.net_wm_state_max_horz)
             && self.supports_state(self.atoms.net_wm_state_max_vert)
         {
-            self.change_state(
+            sent.step(self.change_state(
                 element,
                 STATE_REMOVE,
                 self.atoms.net_wm_state_max_horz,
                 self.atoms.net_wm_state_max_vert,
-            )?;
+            ))?;
         }
-        self.send_for(
+        sent.step(self.send_for(
             element,
             self.atoms.wm_change_state,
             [ICONIC_STATE, 0, 0, 0, 0],
-        )
+        ))
     }
 
     fn maximize(&self, element: &ElementData) -> Result<()> {
@@ -1489,13 +1497,14 @@ impl X11WindowBackend {
                         .to_string(),
             });
         }
-        self.change_state(element, STATE_REMOVE, self.atoms.net_wm_state_fullscreen, 0)?;
-        self.change_state(
+        let mut sent = Sent::default();
+        sent.step(self.change_state(element, STATE_REMOVE, self.atoms.net_wm_state_fullscreen, 0))?;
+        sent.step(self.change_state(
             element,
             STATE_ADD,
             self.atoms.net_wm_state_max_horz,
             self.atoms.net_wm_state_max_vert,
-        )
+        ))
     }
 
     fn enter_fullscreen(&self, element: &ElementData) -> Result<()> {
@@ -1505,13 +1514,14 @@ impl X11WindowBackend {
                     .to_string(),
             });
         }
-        self.change_state(
+        let mut sent = Sent::default();
+        sent.step(self.change_state(
             element,
             STATE_REMOVE,
             self.atoms.net_wm_state_max_horz,
             self.atoms.net_wm_state_max_vert,
-        )?;
-        self.change_state(element, STATE_ADD, self.atoms.net_wm_state_fullscreen, 0)
+        ))?;
+        sent.step(self.change_state(element, STATE_ADD, self.atoms.net_wm_state_fullscreen, 0))
     }
 
     fn restore(&self, element: &ElementData) -> Result<()> {
@@ -1796,6 +1806,33 @@ fn rect_near(actual: Rect, expected: Rect, tolerance: i32) -> bool {
         && i64::from(actual.height).abs_diff(i64::from(expected.height)) <= tolerance as u64
 }
 
+/// Tracks whether an earlier message of a multi-message window verb went out.
+///
+/// `minimize`, `maximize` and `enter_fullscreen` send two or three EWMH
+/// requests. A failure on the first leaves the window untouched, so its error
+/// keeps whatever disposition it has. A failure on a later one (the window's
+/// identity lost between sends, a rejected request) follows a request the
+/// window manager may already have carried out, so it is reported as
+/// `Unknown` even when its variant alone would say `NotDelivered`.
+#[derive(Default)]
+struct Sent(bool);
+
+impl Sent {
+    fn step(&mut self, result: Result<()>) -> Result<()> {
+        let already_sent = self.0;
+        if result.is_ok() {
+            self.0 = true;
+        }
+        if already_sent {
+            result.map_err(|e| {
+                crate::atspi::unknown_after_mutation(e, "an earlier window-manager request")
+            })
+        } else {
+            result
+        }
+    }
+}
+
 fn send_client_message(
     conn: &RustConnection,
     root: Window,
@@ -1930,7 +1967,24 @@ mod tests {
         choose_candidate, choose_sway_candidate, collect_sway_candidates,
         select_client_by_pid_title, select_close_mechanism, CloseMechanism, X11Candidate,
     };
-    use xa11y_core::Rect;
+    use xa11y_core::{Delivery, Error, Rect};
+
+    #[test]
+    fn a_failure_after_an_earlier_window_message_is_unknown() {
+        let lost = || super::lost_identity("X11", 1);
+        // The first message failed: nothing was sent, the variant decides.
+        let mut sent = super::Sent::default();
+        assert_eq!(
+            sent.step(Err(lost())).unwrap_err().delivery(),
+            Delivery::NotDelivered
+        );
+        // A later message failed after one went out: the window may have moved.
+        let mut sent = super::Sent::default();
+        sent.step(Ok(())).expect("first message");
+        let err = sent.step(Err(lost())).unwrap_err();
+        assert!(matches!(err, Error::Platform { .. }), "{err:?}");
+        assert_eq!(err.delivery(), Delivery::Unknown);
+    }
 
     #[test]
     fn close_prefers_the_window_managers_request_when_advertised() {

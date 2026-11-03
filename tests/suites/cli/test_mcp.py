@@ -1609,6 +1609,8 @@ def test_action_refuses_a_selector_that_matches_several(mcp, app_pid):
     structured = result["structuredContent"]
     assert structured["kind"] == "ambiguous_selector"
     assert structured["match_count"] == total
+    # Refused before anything was dispatched, so a retry cannot double-apply.
+    assert structured["delivery"] == "not_delivered"
     candidates = structured["diagnosis"]["candidates"]
     assert candidates, "without the candidates the caller has to go find them again"
     # Both recoveries have to be readable off the message alone: clients on the

@@ -134,6 +134,19 @@ test('descendant selector returns multiple elements', async () => {
   assert.ok(byDescendant.length <= allMax);
 });
 
+test('a selector miss reports it was not delivered (#523)', async () => {
+  const { SelectorNotMatchedError } = require('../../../xa11y-js/index.js');
+  const app = await getApp();
+  await assert.rejects(
+    app.locator('button[name="NoSuchButtonAnywhere523"]').element(),
+    (err) => {
+      assert.ok(err instanceof SelectorNotMatchedError);
+      assert.equal(err.delivery, 'not_delivered');
+      return true;
+    },
+  );
+});
+
 test('hiddenReason is set exactly when an element is not visible', async () => {
   // #590: a hidden element says why, a visible one says nothing, and the
   // reason is one of the documented names.

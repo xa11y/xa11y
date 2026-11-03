@@ -3,10 +3,10 @@
 //! The JS wrapper (in `index.js`) re-throws these as typed `XA11yError`
 //! subclasses so users can `instanceof` them.
 //!
-//! Diagnosis-carrying errors (`SelectorNotMatched`, `Timeout`) additionally
-//! append a JSON payload after a U+001F unit separator; the wrapper parses
+//! Every error appends (`delivery`, plus the diagnosis for `SelectorNotMatched`/`Timeout`)
+//! a JSON payload after a U+001F unit separator; the wrapper parses
 //! it and assigns the structured fields (`selector`, `condition`,
-//! `lastObserved`, `candidates`, `scope`, `elapsedMs`) onto the typed error
+//! `lastObserved`, `candidates`, `scope`, `elapsedMs`, `delivery`) onto the typed error
 //! (tenet 6: rich context is structured, not just message prose).
 
 use napi::{Error, Status};
@@ -45,11 +45,13 @@ pub const DIAGNOSIS_SEP: char = '\u{1f}';
 /// error's primary selector field (SelectorNotMatched) or the diagnosis
 /// selector (Timeout); `elapsed_ms` is set for timeouts only.
 fn diagnosis_json(
+    delivery: xa11y::Delivery,
     selector: Option<&str>,
     elapsed_ms: Option<f64>,
     diagnosis: Option<&xa11y::Diagnosis>,
 ) -> serde_json::Value {
     serde_json::json!({
+        "delivery": delivery.to_snake_case(),
         "selector": selector,
         "elapsedMs": elapsed_ms,
         "condition": diagnosis.and_then(|d| d.condition.as_deref()),
@@ -117,20 +119,29 @@ pub fn map_err(e: xa11y::Error) -> Error {
         other => (codes::UNKNOWN, other.to_string()),
     };
 
+    // Every error carries a payload, because every error carries a delivery
+    // disposition: whether the failed action may already have taken effect.
+    let delivery = e.delivery();
     let payload = match &e {
-        xa11y::Error::SelectorNotMatched { selector, .. } => {
-            Some(diagnosis_json(Some(selector), None, e.diagnosis()))
+        xa11y::Error::SelectorNotMatched { selector, .. } => Some(diagnosis_json(
+            delivery,
+            Some(selector),
+            None,
+            e.diagnosis(),
+        )),
+        xa11y::Error::ElementStale { selector } => {
+            Some(diagnosis_json(delivery, Some(selector), None, None))
         }
-        xa11y::Error::ElementStale { selector } => Some(diagnosis_json(Some(selector), None, None)),
         xa11y::Error::Timeout { elapsed, .. } => {
             let d = e.diagnosis();
             Some(diagnosis_json(
+                delivery,
                 d.and_then(|d| d.selector.as_deref()),
                 Some(elapsed.as_secs_f64() * 1000.0),
                 d,
             ))
         }
-        _ => None,
+        _ => Some(diagnosis_json(delivery, None, None, None)),
     };
 
     // Encode the tag at the start of the message so the JS wrapper can split

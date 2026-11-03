@@ -30,7 +30,7 @@ pub use element::{
 // the backend crates can reach it. Not public API — see its docs.
 #[doc(hidden)]
 pub use element::{ElementParts, StateParts};
-pub use error::{AutoScrollOutcome, Diagnosis, Error, Result};
+pub use error::{AutoScrollOutcome, Delivery, Diagnosis, Error, Result};
 #[doc(hidden)]
 pub use event::EventParts;
 pub use event::{ElementState, Event, EventKind, StateFlag};

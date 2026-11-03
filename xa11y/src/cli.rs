@@ -99,6 +99,28 @@ impl CliError {
     }
 }
 
+impl CliError {
+    /// Whether the failed operation may already have taken effect, so a
+    /// caller can tell a safe retry from a double-submit.
+    ///
+    /// `None` for a usage error: no operation was attempted, so there is
+    /// nothing to retry or not. Every other failure answers. The CLI-level
+    /// failures (`NotFound`, `Ambiguous`, `AmbiguousShellSurface`,
+    /// `NoSubscription`) are refused before anything is dispatched, so they
+    /// are `NotDelivered`; an underlying error answers for itself through
+    /// [`Error::delivery`].
+    pub fn delivery(&self) -> Option<crate::Delivery> {
+        match self {
+            CliError::Usage(_) => None,
+            CliError::NotFound(_)
+            | CliError::Ambiguous { .. }
+            | CliError::AmbiguousShellSurface { .. }
+            | CliError::NoSubscription { .. } => Some(crate::Delivery::NotDelivered),
+            CliError::Xa11y(e) => Some(e.delivery()),
+        }
+    }
+}
+
 impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -188,10 +210,35 @@ pub fn run_main(args: &[String]) -> i32 {
                 CliError::Usage(_) => eprintln!("{e}"),
                 _ => eprintln!("error: {e}"),
             }
+            if let Some(line) = delivery_line(args.first().map(|s| s.as_str()).unwrap_or(""), &e) {
+                eprintln!("{line}");
+            }
             offer_accessibility_settings_hint(args.first().map(|s| s.as_str()).unwrap_or(""), &e);
             e.exit_code()
         }
     }
+}
+
+/// The commands that dispatch an action, and so owe their failures a
+/// delivery disposition. Read-only commands (`tree`, `find`, `apps`, ...)
+/// dispatch nothing, so the line would be noise there.
+const ACTION_COMMANDS: [&str; 7] = ["action", "click", "move", "drag", "scroll", "key", "type"];
+
+/// The stderr line that follows a failed action command's error, e.g.
+/// `delivery: unknown (the action may have been applied; re-read the state before retrying)`.
+///
+/// `None` for a command that dispatches nothing and for a usage error.
+fn delivery_line(command: &str, error: &CliError) -> Option<String> {
+    if !ACTION_COMMANDS.contains(&command) {
+        return None;
+    }
+    let delivery = error.delivery()?;
+    let advice = if delivery.is_safe_to_retry() {
+        "the action did not reach the application, so a retry is safe"
+    } else {
+        "the action may have been applied, so re-read the state before retrying"
+    };
+    Some(format!("delivery: {delivery} ({advice})"))
 }
 
 /// Run the CLI with the given arguments (excluding the program name).
@@ -2579,6 +2626,84 @@ mod tests {
             .into_iter()
             .next()
             .expect("the mock must vend one app")
+    }
+
+    // ── Delivery disposition ────────────────────────────────────────────────
+
+    #[test]
+    fn every_dispatched_command_is_classified_as_action_or_read_only() {
+        // `ACTION_COMMANDS` is hand-kept. Read the dispatcher's own arms, so
+        // a new command that nobody classified fails here instead of
+        // silently lacking the `delivery:` line.
+        const NOT_ACTIONS: [&str; 8] = [
+            "apps",
+            "shell",
+            "windows",
+            "tree",
+            "find",
+            "events",
+            "screenshot",
+            "guide",
+        ];
+        let source = include_str!("cli.rs");
+        let body = source
+            .split("pub fn run(args: &[String]) -> CliResult<()> {")
+            .nth(1)
+            .expect("run() is in this file")
+            .split("/// The `xa11y --help` text.")
+            .next()
+            .expect("run() ends before usage_text");
+        let dispatched: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("Some(\""))
+            .filter_map(|l| l.split('"').next())
+            .collect();
+        assert!(
+            dispatched.len() >= 10,
+            "dispatcher not found: {dispatched:?}"
+        );
+        for name in dispatched {
+            if name == "mcp" {
+                continue; // a server, not a one-shot operation
+            }
+            let action = ACTION_COMMANDS.contains(&name);
+            let read_only = NOT_ACTIONS.contains(&name);
+            assert!(
+                action != read_only,
+                "`{name}` must be in exactly one of ACTION_COMMANDS and NOT_ACTIONS"
+            );
+        }
+        for name in ACTION_COMMANDS {
+            assert!(
+                body.contains(&format!("Some(\"{name}\")")),
+                "ACTION_COMMANDS lists `{name}`, which the dispatcher does not route"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_action_command_names_its_delivery() {
+        let miss = CliError::Xa11y(Error::selector_not_matched("button"));
+        let line = delivery_line("action", &miss).expect("an action failure reports delivery");
+        assert!(line.starts_with("delivery: not_delivered"), "{line}");
+
+        let platform = CliError::Xa11y(Error::Platform {
+            code: -25204,
+            message: "cannot complete".into(),
+        });
+        let line = delivery_line("click", &platform).expect("a click failure reports delivery");
+        assert!(line.starts_with("delivery: unknown"), "{line}");
+    }
+
+    #[test]
+    fn read_only_commands_and_usage_errors_print_no_delivery_line() {
+        let miss = CliError::Xa11y(Error::selector_not_matched("button"));
+        assert_eq!(delivery_line("find", &miss), None);
+        assert_eq!(delivery_line("tree", &miss), None);
+        assert_eq!(
+            delivery_line("action", &CliError::Usage("bad".into())),
+            None
+        );
     }
 
     // ── Argument parsing ────────────────────────────────────────────────────

@@ -718,6 +718,13 @@ fn tool_definition(name: &str) -> Value {
                      disabled, kept the wait going). No `auto_scroll` means no scroll was \
                      tried. Do not wrap \
                      this tool in a retry loop; the wait is the retry loop.\n\n\
+                     Every failure of every tool carries `delivery`, which says whether a \
+                     retry is safe. `not_delivered` means the action never reached the application (no \
+                     match, not supported, element gone, the wait expired), so retrying \
+                     cannot apply it twice. `unknown` means it was dispatched and the \
+                     outcome is unconfirmed (the application did not reply, the platform \
+                     call errored): re-read with `tree` or `find` before acting again, \
+                     or a second \"Send\" can be submitted twice.\n\n\
                      `ok: true` means the application accepted the call, not that \
                      anything changed: a control is free to accept an action and do \
                      nothing. Confirm the effect by re-reading with `tree` or `find`.\n\n\
@@ -2276,6 +2283,11 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
     structured.insert("tool".into(), json!(tool));
     structured.insert("message".into(), json!(text));
     structured.insert("kind".into(), json!(failure_kind(err)));
+    // Whether a retry is safe, on every failure of every tool. A usage error
+    // (`invalid_arguments`) attempted nothing, so it reads `not_delivered`:
+    // the call can be repeated once the arguments are fixed.
+    let delivery = err.delivery().unwrap_or(crate::Delivery::NotDelivered);
+    structured.insert("delivery".into(), json!(delivery.to_snake_case()));
 
     match err {
         CliError::Xa11y(inner) => {
@@ -2366,6 +2378,8 @@ fn diagnosis_json(d: &crate::Diagnosis) -> Value {
         }
     }
     insert_some(&mut out, "scope", d.scope.as_deref().map(Value::from));
+    // `delivery` is reported once, at the top level of the failure, where it
+    // is resolved from the variant and this diagnosis together.
     Value::Object(out)
 }
 
@@ -3466,6 +3480,47 @@ mod tests {
     }
 
     #[test]
+    fn every_failure_reports_its_delivery() {
+        let cases = [
+            (
+                CliError::Xa11y(crate::Error::selector_not_matched("button")),
+                Some("not_delivered"),
+            ),
+            (
+                CliError::Xa11y(crate::Error::Platform {
+                    code: -25204,
+                    message: "cannot complete".into(),
+                }),
+                Some("unknown"),
+            ),
+            (
+                // A wait that expired before acting overrides the variant.
+                CliError::Xa11y(
+                    crate::Error::timeout(std::time::Duration::from_secs(1))
+                        .diagnose(crate::Diagnosis::new().delivery(crate::Delivery::NotDelivered)),
+                ),
+                Some("not_delivered"),
+            ),
+            (
+                // A bare timeout may have been dispatched.
+                CliError::Xa11y(crate::Error::timeout(std::time::Duration::from_secs(1))),
+                Some("unknown"),
+            ),
+            (CliError::NotFound("no match".into()), Some("not_delivered")),
+            // Nothing was attempted, so repeating the call is safe.
+            (CliError::Usage("bad flag".into()), Some("not_delivered")),
+        ];
+        for (err, expected) in cases {
+            let (_, structured) = describe_failure("action", &err);
+            assert_eq!(
+                structured.get("delivery").and_then(Value::as_str),
+                expected,
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
     fn candidate_lists_are_bounded_and_say_how_many_were_dropped() {
         let many: Vec<String> = (0..MAX_DIAGNOSIS_CANDIDATES + 5)
             .map(|i| format!("button \"{i}\""))
@@ -4022,6 +4077,9 @@ mod tests {
         inner: std::sync::Arc<xa11y_core::mock::MockProvider>,
         armed: std::sync::atomic::AtomicBool,
         walks: std::sync::atomic::AtomicUsize,
+        /// When set, `press` fails the way a platform call that was sent and
+        /// not answered does.
+        press_fails: std::sync::atomic::AtomicBool,
     }
 
     const INTRUDER_HANDLE: u64 = 9_999;
@@ -4067,8 +4125,17 @@ mod tests {
         ) -> crate::Result<Vec<(crate::ShellSurfaceKind, crate::ElementData)>> {
             self.inner.list_shell_surfaces()
         }
+        fn press(&self, e: &crate::ElementData) -> crate::Result<()> {
+            if self.press_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::Error::Platform {
+                    code: -25204,
+                    message: "AXPress did not complete".into(),
+                });
+            }
+            self.inner.press(e)
+        }
         forward! {
-            press() -> (); focus() -> (); blur() -> (); toggle() -> (); select() -> ();
+            focus() -> (); blur() -> (); toggle() -> (); select() -> ();
             expand() -> (); collapse() -> (); show_menu() -> (); increment() -> ();
             decrement() -> (); scroll_into_view() -> (); set_value(v: &str) -> ();
             set_numeric_value(v: f64) -> (); type_text(t: &str) -> ();
@@ -4088,6 +4155,7 @@ mod tests {
             inner: inner.clone(),
             armed: std::sync::atomic::AtomicBool::new(false),
             walks: std::sync::atomic::AtomicUsize::new(0),
+            press_fails: std::sync::atomic::AtomicBool::new(false),
         });
         let provider: std::sync::Arc<dyn crate::Provider> = shifting.clone();
         let app = App::list_with(provider)
@@ -4111,6 +4179,36 @@ mod tests {
         );
         // The hazard was live: a later resolution sees the intruder too.
         assert_eq!(target.locator(selector).count().expect("count"), 2);
+    }
+
+    #[test]
+    fn a_dispatched_action_that_fails_reports_unknown_end_to_end() {
+        // The `unknown` side through the real tool path: the element resolves,
+        // the platform call is sent, and it errors. The wire result must tell
+        // the caller a retry may double-apply.
+        let shifting = std::sync::Arc::new(ShiftingProvider {
+            inner: xa11y_core::mock::build_provider(),
+            armed: std::sync::atomic::AtomicBool::new(false),
+            walks: std::sync::atomic::AtomicUsize::new(0),
+            press_fails: std::sync::atomic::AtomicBool::new(true),
+        });
+        let provider: std::sync::Arc<dyn crate::Provider> = shifting;
+        let app = App::list_with(provider)
+            .expect("the mock lists its app")
+            .into_iter()
+            .next()
+            .expect("one app");
+        let target = Target::App(app);
+        let err = tool_action_parsed(
+            &target,
+            "press",
+            r#"button[name="Back"]"#,
+            &cli::ActionArgs::default(),
+        )
+        .expect_err("the platform call fails");
+        let (_, structured) = describe_failure("action", &err);
+        assert_eq!(structured["kind"], "platform");
+        assert_eq!(structured["delivery"], "unknown");
     }
 
     #[test]

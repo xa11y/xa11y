@@ -71,7 +71,17 @@ _GUIDANCE = {
 # restore a window. `auto_scroll` says whether the action already tried scrolling
 # it into view ("refused", "no_effect", "revealed"), so the model does not try a
 # scroll that was just refused.
-_DIAGNOSIS_FIELDS = ("condition", "selector", "last_observed", "hidden_reason", "auto_scroll", "elapsed")
+# `delivery` says whether the failed action may already have taken effect, so
+# the model knows whether retrying is safe or could double-submit.
+_DIAGNOSIS_FIELDS = (
+    "condition",
+    "selector",
+    "last_observed",
+    "hidden_reason",
+    "auto_scroll",
+    "elapsed",
+    "delivery",
+)
 
 
 class ToolError(Exception):

@@ -28,6 +28,11 @@ OmissionReasonName = Literal["no_bounds", "zero_area", "outside_capture"]
 # parity check's variant coverage notices one going missing from it.
 HiddenReasonName = Literal["window_minimized", "scrolled_out", "not_showing", "unknown"]
 
+# Whether a failed action may already have taken effect (``XA11yError.delivery``).
+# ``"not_delivered"`` is safe to retry; ``"unknown"`` is not. Identically
+# spelled in the JS binding.
+DeliveryName = Literal["not_delivered", "unknown"]
+
 # What an auto-waiting action's scroll attempt came to (the ``auto_scroll`` of
 # a timeout). Identically spelled in the JS binding.
 #   refused    the element has no semantic scroll call; asked once per wait
@@ -54,6 +59,15 @@ ShellSurfaceKindName = Literal[
 
 class XA11yError(Exception):
     """Base exception for all xa11y errors."""
+
+    delivery: DeliveryName
+    """Whether the failed action may already have taken effect. Always set
+    on errors xa11y raises. ``'not_delivered'``: the failure happened before
+    the action was dispatched (selector not matched, action not supported,
+    element stale, an auto-wait that timed out), so a retry is safe.
+    ``'unknown'``: the action was dispatched or may have been (a D-Bus
+    ``NoReply``, an AX ``CannotComplete``, a UIA timeout, any platform
+    error), so a retry can apply it twice."""
 
 class PermissionDeniedError(XA11yError):
     """Accessibility permissions have not been granted."""

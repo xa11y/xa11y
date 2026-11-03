@@ -72,6 +72,12 @@ export type HiddenReasonName =
   | 'not_showing'
   | 'unknown';
 
+/**
+ * Whether a failed action may already have taken effect (\`XA11yError.delivery\`).
+ * \`not_delivered\` is safe to retry. Spelled as in Python.
+ */
+export type DeliveryName = 'not_delivered' | 'unknown';
+
 /** What an auto-waiting action's scroll attempt came to. Spelled as in Python. */
 export type AutoScrollOutcomeName = 'refused' | 'no_effect' | 'revealed';
 

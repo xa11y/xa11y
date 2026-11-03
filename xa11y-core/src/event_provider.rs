@@ -31,6 +31,7 @@ impl Subscription {
         self.rx.recv_timeout(timeout).ok_or_else(|| {
             Error::timeout(timeout).diagnose(Diagnosis {
                 condition: Some("any accessibility event".to_string()),
+                delivery: Some(crate::error::Delivery::NotDelivered),
                 ..Diagnosis::default()
             })
         })
@@ -59,6 +60,7 @@ impl Subscription {
                 return Err(Error::timeout(start.elapsed()).diagnose(Diagnosis {
                     condition: Some("event matching predicate".to_string()),
                     last_observed: Some(format!("{seen} event(s) received, none matched")),
+                    delivery: Some(crate::error::Delivery::NotDelivered),
                     ..Diagnosis::default()
                 }));
             }
@@ -81,6 +83,7 @@ impl Subscription {
                             "event source disconnected after {seen} non-matching event(s) — \
                              no further events will arrive"
                         )),
+                        delivery: Some(crate::error::Delivery::NotDelivered),
                         ..Diagnosis::default()
                     }));
                 }

@@ -277,3 +277,33 @@ def test_diagnosis_attributes_always_present(test_app):
         "elapsed",
     ):
         assert hasattr(e, attr), f"missing diagnosis attribute {attr!r}"
+
+
+# ── Delivery disposition ─────────────────────────────────────────────────────
+#
+# Every error xa11y raises says whether the failed action may already have
+# taken effect, so a caller can tell a safe retry from a double-submit.
+
+
+def test_selector_miss_is_not_delivered(test_app):
+    with pytest.raises(xa11y.SelectorNotMatchedError) as exc_info:
+        test_app.descendant('button[name="Nope"]').element()
+    assert exc_info.value.delivery == "not_delivered"
+
+
+def test_wait_timeout_is_not_delivered(test_app):
+    with pytest.raises(xa11y.TimeoutError) as exc_info:
+        test_app.descendant("button").wait_detached(timeout=0.05)
+    assert exc_info.value.delivery == "not_delivered"
+
+
+def test_invalid_selector_is_not_delivered(test_app):
+    with pytest.raises(xa11y.InvalidSelectorError) as exc_info:
+        test_app.descendant("[[[bad").elements()
+    assert exc_info.value.delivery == "not_delivered"
+
+
+def test_platform_error_is_unknown(test_app):
+    with pytest.raises(xa11y.PlatformError) as exc_info:
+        test_app.element().subscribe()
+    assert exc_info.value.delivery == "unknown"
