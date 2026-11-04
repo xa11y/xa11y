@@ -693,6 +693,10 @@ jobs:
           echo "::group::CLI example"    ; bash examples/cli/end_to_end.sh                ; echo "::endgroup::"
 
   # ── Lint & format ──────────────────────────────────────────────────
+  # Share one runner/toolchain for lint, licenses and cross-compilation.
+  # Keep the existing lint check name; individual steps retain their names.
+  # !cancelled() lets each check run after another fails, preserving the
+  # independent failure signals of the former jobs without hiding failures.
   lint:
     name: Lint & Format
     runs-on: ubuntu-latest
@@ -703,21 +707,26 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           components: clippy, rustfmt
+          targets: x86_64-apple-darwin,aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
           cache-key: lint
 
       - name: Check formatting
+        if: ${{ !cancelled() }}
         run: cargo fmt --all -- --check
 
       - name: Check JS bindings formatting
+        if: ${{ !cancelled() }}
         working-directory: xa11y-js
         run: cargo fmt -- --check
 
       - name: Check READMEs are in sync
+        if: ${{ !cancelled() }}
         run: cargo xtask sync-readmes --check
 
       # The agent guide is embedded in the binary and rendered into the docs
       # site; the page must not drift from what `xa11y guide` prints.
       - name: Check the agent guide page is in sync
+        if: ${{ !cancelled() }}
         run: cargo xtask sync-agent-guide --check
 
       # These three are source greps, so they run anywhere. They guard
@@ -728,27 +737,34 @@ jobs:
       # xa11y-core with an older provider in a downstream tree. They were
       # reachable only through `cargo xtask check`, which no workflow runs.
       - name: Check MCP stdout purity
+        if: ${{ !cancelled() }}
         run: cargo xtask check-mcp-stdout
 
       - name: Check macOS FFI exception safety
+        if: ${{ !cancelled() }}
         run: cargo xtask check-macos-ffi
 
       - name: Check Windows DPI scoping
+        if: ${{ !cancelled() }}
         run: cargo xtask check-windows-dpi
 
       - name: Check workspace dependency pins
+        if: ${{ !cancelled() }}
         run: cargo xtask check-workspace-pins
 
       # Every place the release version is written (workspace, bindings,
       # package.json, and each Cargo.lock's path-crate entries) must agree.
       # The publish workflow re-runs this with --expect before tagging (#463).
       - name: Check release version fields agree
+        if: ${{ !cancelled() }}
         run: cargo xtask check-versions
 
       - name: Run clippy
+        if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets
 
       - name: Run clippy on JS bindings
+        if: ${{ !cancelled() }}
         working-directory: xa11y-js
         run: cargo clippy --all-targets
 
@@ -756,22 +772,19 @@ jobs:
       # rustdoc JSON, which is still nightly-only (`--output-format json`).
       # Only rustdoc itself is needed, so the minimal profile is enough.
       - name: Install nightly toolchain (rustdoc JSON)
+        if: ${{ !cancelled() }}
         run: rustup toolchain install nightly --profile minimal
 
       - name: Check bindings parity
+        if: ${{ !cancelled() }}
         run: cargo xtask check-bindings-parity
 
       - name: Check test coverage matrix
+        if: ${{ !cancelled() }}
         run: python tests/matrix_check.py
 
-  # ── License check ─────────────────────────────────────────────────
-  license-check:
-    name: License Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
       - name: Cache cargo-deny binary
+        if: ${{ !cancelled() }}
         id: cache-cargo-deny
         uses: actions/cache@v6
         with:
@@ -779,26 +792,15 @@ jobs:
           key: cargo-deny-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install cargo-deny
-        if: steps.cache-cargo-deny.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && steps.cache-cargo-deny.outputs.cache-hit != 'true' }}
         run: cargo install cargo-deny --locked
 
       - name: Check licenses
+        if: ${{ !cancelled() }}
         run: cargo deny check licenses
 
-  # ── Cross-compilation ──────────────────────────────────────────────
-  cross-compile:
-    name: Cross-compile check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Rust
-        uses: ./.github/actions/setup-rust
-        with:
-          targets: x86_64-apple-darwin,aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
-          cache-key: cross
-
       - name: Check xa11y-core compiles for all targets
+        if: ${{ !cancelled() }}
         run: |
           for target in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
             echo "=== Checking $target ==="
@@ -901,10 +903,10 @@ jobs:
 
   # ── strands-xa11y: the Strands agent tool ───────────────────────
   #
-  # A pure-Python sibling package, like pytest-xa11y, but with its own job
-  # rather than a ride-along in `python`: it needs no bindings build (its
-  # suite swaps in a fake accessibility backend), and it holds a 100% cover
-  # gate that would be awkward to express as extra steps on another job.
+  # The fake backend needs no bindings build. Keep coverage on all four
+  # supported Python versions; formatting, types and distribution checks
+  # share the Python 3.10 runner instead of acquiring another one. Those
+  # checks still run if coverage fails, and any failed step fails the job.
   #
   # The half that *does* need the real bindings — tests/check_real_surface.py
   # — runs in the `python` job above, where they have just been built.
@@ -932,28 +934,21 @@ jobs:
         working-directory: strands-xa11y
         run: hatch run cov
 
-  strands-package:
-    name: strands-xa11y - lint and package
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.10"
-          cache: "pip"
-
       - run: pip install hatch twine
+        if: ${{ !cancelled() && matrix.python-version == '3.10' }}
 
       - name: Check formatting
+        if: ${{ !cancelled() && matrix.python-version == '3.10' }}
         working-directory: strands-xa11y
         run: hatch run format --check
 
       - name: Lint
+        if: ${{ !cancelled() && matrix.python-version == '3.10' }}
         working-directory: strands-xa11y
         run: hatch run lint
 
       - name: Typecheck
+        if: ${{ !cancelled() && matrix.python-version == '3.10' }}
         working-directory: strands-xa11y
         run: hatch run typecheck
 
@@ -965,14 +960,17 @@ jobs:
       # the whole monorepo above it, so a wrong `sdist.include` would sweep in
       # every sibling directory.
       - name: Build
+        if: ${{ !cancelled() && matrix.python-version == '3.10' }}
         working-directory: strands-xa11y
         run: hatch build
 
       - name: Check distribution metadata
+        if: ${{ !cancelled() && matrix.python-version == '3.10' }}
         working-directory: strands-xa11y
         run: twine check dist/*
 
       - name: Import from the built wheel
+        if: ${{ !cancelled() && matrix.python-version == '3.10' }}
         working-directory: strands-xa11y
         run: |
           python -m venv /tmp/wheel-check
@@ -987,6 +985,7 @@ jobs:
       # still pass every check above, just at a hundred times the size. The
       # package is a few hundred KB; a megabyte means the include list broke.
       - name: Refuse an sdist that swept in the monorepo
+        if: ${{ !cancelled() && matrix.python-version == '3.10' }}
         working-directory: strands-xa11y
         run: |
           SDIST=$(ls dist/*.tar.gz)
@@ -1234,7 +1233,7 @@ jobs:
           workspaces: xa11y/fuzz -> target
 
       # Cache the cargo-fuzz binary so we don't recompile it from source every
-      # run (mirrors the cargo-deny cache in license-check).
+      # run (mirrors the cargo-deny cache in lint).
       - name: Cache cargo-fuzz binary
         id: cache-cargo-fuzz
         uses: actions/cache@v6
