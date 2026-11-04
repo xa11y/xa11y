@@ -27,7 +27,9 @@ import sys
 import time
 
 import pytest
+
 import xa11y
+from tests.harness.windows_input import input_snapshot
 
 pytestmark = [
     pytest.mark.skipif(
@@ -503,8 +505,21 @@ def test_type_text_line_breaks_press_enter(tauri_input_app, sim):
 )
 def test_scroll_reports_wheel(tauri_input_app, sim):
     _clear_log(tauri_input_app)
-    sim.scroll(_hit_center(tauri_input_app), dx=0, dy=3)
-    log = _wait_for_log(tauri_input_app, lambda t: "wheel" in t)
+    target = _hit_center(tauri_input_app)
+    sim.scroll(target, dx=0, dy=3)
+    posted_state = input_snapshot() if sys.platform == "win32" else None
+    try:
+        log = _wait_for_log(tauri_input_app, lambda t: "wheel" in t)
+    except AssertionError as exc:
+        if posted_state is None:
+            raise
+        raise AssertionError(
+            f"{exc}\n"
+            f"  scroll target={target}, app pid={tauri_input_app.pid}\n"
+            f"  immediately after posting: {posted_state}\n"
+            f"  after log timeout: {input_snapshot()}\n"
+            f"  routing samples are observations, not proof of event delivery"
+        ) from exc
     assert "wheel" in log
 
 
