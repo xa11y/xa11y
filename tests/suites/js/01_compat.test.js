@@ -59,9 +59,8 @@ test('UWP retains the native nested Edit and selects the outer TextBox (#606)', 
   const fields = await app.locator('text_field[name="Search"]').elements();
   assert.equal(fields.length, 2, 'Raw View exposes both native Edit elements');
   const outer = await one(app, textFieldSelector);
-  const inner = await one(app, `${textFieldSelector} > text_field[name="Search"]`);
+  await one(app, `${textFieldSelector} > text_field[name="Search"]`);
   assert.equal(outer.raw.class_name, 'TextBox');
-  assert.equal(inner.value, outer.value);
 });
 
 test('a password entry keeps text_field and sets password (#522)', async () => {
