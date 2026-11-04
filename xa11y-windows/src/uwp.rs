@@ -408,7 +408,6 @@ pub fn app_display_name(aumid: &str) -> Result<Option<String>> {
 
 /// [`app_display_name`] without the cache.
 fn lookup_app_display_name(aumid: &str) -> Result<Option<String>> {
-    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
     use windows::Win32::UI::Shell::{
         FOLDERID_AppsFolder, IShellItem, SHCreateItemInKnownFolder, KF_FLAG_DEFAULT,
         SIGDN_NORMALDISPLAY,
@@ -423,12 +422,7 @@ fn lookup_app_display_name(aumid: &str) -> Result<Option<String>> {
         SHCreateItemInKnownFolder(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, PCWSTR(wide.as_ptr()))
     } {
         Ok(item) => item,
-        Err(e)
-            if e.code() == ERROR_FILE_NOT_FOUND.to_hresult()
-                || e.code() == ERROR_PATH_NOT_FOUND.to_hresult() =>
-        {
-            return Ok(None)
-        }
+        Err(e) if apps_folder_entry_absent(e.code()) => return Ok(None),
         Err(e) => return Err(fail("SHCreateItemInKnownFolder(FOLDERID_AppsFolder)", e)),
     };
     // SAFETY: plain COM call on a live shell item.
@@ -439,6 +433,16 @@ fn lookup_app_display_name(aumid: &str) -> Result<Option<String>> {
     let text = String::from_utf16_lossy(unsafe { name.as_wide() });
     unsafe { CoTaskMemFree(Some(name.0 as *const _)) };
     Ok((!text.is_empty()).then_some(text))
+}
+
+fn apps_folder_entry_absent(code: windows::core::HRESULT) -> bool {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+    // Windows 11 returns ERROR_NOT_FOUND for shell-host AUMIDs with no
+    // Apps-folder item (observed for Client.CBS's runtime broker). This is
+    // absence, like FILE/PATH_NOT_FOUND; unrelated shell failures propagate.
+    [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_NOT_FOUND]
+        .iter()
+        .any(|error| code == error.to_hresult())
 }
 
 /// The AppUserModelID of the process `process` (pid `pid`, for messages)
@@ -540,6 +544,22 @@ fn window_title(hwnd: HWND) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apps_folder_absence_preserves_other_shell_failures() {
+        use windows::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND, ERROR_PATH_NOT_FOUND,
+        };
+        for error in [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_NOT_FOUND] {
+            assert!(super::apps_folder_entry_absent(error.to_hresult()));
+        }
+        assert!(!super::apps_folder_entry_absent(
+            ERROR_ACCESS_DENIED.to_hresult()
+        ));
+        assert!(!super::apps_folder_entry_absent(windows::core::HRESULT(
+            0x80004005u32 as i32
+        )));
+    }
+
     use super::*;
 
     /// Diagnostic for a real desktop, not a check: prints, for every
