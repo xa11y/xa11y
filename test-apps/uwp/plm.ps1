@@ -16,7 +16,7 @@ using System;
 using System.Runtime.InteropServices;
 [ComImport, Guid("F27C3930-8029-4AD1-94E3-3DBA417810C1"),
  InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IPackageDebugSettings {
+interface IPackageDebugSettings {
     void EnableDebugging([MarshalAs(UnmanagedType.LPWStr)] string package,
         [MarshalAs(UnmanagedType.LPWStr)] string debugger, IntPtr environment);
     void DisableDebugging([MarshalAs(UnmanagedType.LPWStr)] string package);
@@ -33,10 +33,27 @@ public interface IPackageDebugSettings {
     void StopSessionRedirection([MarshalAs(UnmanagedType.LPWStr)] string package);
     void GetPackageExecutionState([MarshalAs(UnmanagedType.LPWStr)] string package, out int state);
 }
-public static class PackageLifecycle {
-    public static IPackageDebugSettings Create() {
-        return (IPackageDebugSettings)Activator.CreateInstance(Type.GetTypeFromCLSID(
+public sealed class PackageLifecycle : IDisposable {
+    private IPackageDebugSettings settings;
+    private PackageLifecycle() {
+        settings = (IPackageDebugSettings)Activator.CreateInstance(Type.GetTypeFromCLSID(
             new Guid("B1AEC16F-2383-4852-B0E9-8F0B1DC66B4D")));
+    }
+    public static PackageLifecycle Create() { return new PackageLifecycle(); }
+    public void EnableDebugging(string package, string debugger, IntPtr environment) {
+        settings.EnableDebugging(package, debugger, environment);
+    }
+    public void DisableDebugging(string package) { settings.DisableDebugging(package); }
+    public void Suspend(string package) { settings.Suspend(package); }
+    public void Resume(string package) { settings.Resume(package); }
+    public void GetPackageExecutionState(string package, out int state) {
+        settings.GetPackageExecutionState(package, out state);
+    }
+    public void Dispose() {
+        if (settings != null) {
+            Marshal.FinalReleaseComObject(settings);
+            settings = null;
+        }
     }
 }
 "@
@@ -74,12 +91,15 @@ try {
         }
     }
 } finally {
-    if ($enabled) {
-        try {
-            if ($Action -eq 'hold') { $settings.Resume($full) }
-        } finally {
-            $settings.DisableDebugging($full)
+    try {
+        if ($enabled) {
+            try {
+                if ($Action -eq 'hold') { $settings.Resume($full) }
+            } finally {
+                $settings.DisableDebugging($full)
+            }
         }
+    } finally {
+        $settings.Dispose()
     }
-    [Runtime.InteropServices.Marshal]::FinalReleaseComObject($settings) | Out-Null
 }

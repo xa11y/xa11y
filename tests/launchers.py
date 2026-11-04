@@ -193,9 +193,7 @@ def _uwp() -> AppLauncher:
     return AppLauncher(
         command=_UWP_LAUNCH_COMMAND,
         spawns_and_exits=True,
-        # TODO(#497): drop "ApplicationFrameHost" — see _app_command("uwp")
-        # in tests/harness/launch.py.
-        app_names=["xa11y UWP Test", "xa11y-uwp-test-app", "ApplicationFrameHost"],
+        app_names=["xa11y UWP Test", "xa11y-uwp-test-app"],
         ready='button[name="OK"]',
     )
 

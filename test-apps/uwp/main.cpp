@@ -33,6 +33,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.UI.Xaml.Automation.h>
+#include <winrt/Windows.UI.Xaml.Automation.Peers.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.h>
@@ -139,9 +140,19 @@ UIElement build_content() {
 
     auto submit = make_button(L"Submit");
     submit.Click([status](auto&&, auto&&) {
-        hstring next = status.Text() == L"Status: Submitted" ? L"Status: Ready" : L"Status: Submitted";
+        hstring previous = status.Text();
+        hstring next = previous == L"Status: Submitted" ? L"Status: Ready" : L"Status: Submitted";
         status.Text(next);
         AutomationProperties::SetName(status, next);
+        // TextBlock does not raise NameProperty when its attached accessible
+        // name changes on this XAML provider. The fixture owns the change, so
+        // publish it through the control's native AutomationPeer.
+        auto peer = Automation::Peers::FrameworkElementAutomationPeer::CreatePeerForElement(status);
+        if (!peer) {
+            throw hresult_error(E_FAIL, L"Status TextBlock has no native AutomationPeer");
+        }
+        peer.RaisePropertyChangedEvent(AutomationElementIdentifiers::NameProperty(),
+                                      box_value(previous), box_value(next));
     });
     auto add_item = make_button(L"Add Item");
     add_item.Click([items](auto&&, auto&&) {
