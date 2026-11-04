@@ -192,6 +192,8 @@ echo "Waiting for test app (pid=$APP_PID) to register with the a11y bus..."
 cd "$JS_DIR"
 export XA11Y_TEST_APP="$APP_NAME"
 export XA11Y_TEST_APP_NAME=""
+# This script launches a fresh fixture; an inherited harness PID is unrelated.
+unset XA11Y_TEST_APP_PID
 set +e
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if ! kill -0 "$APP_PID" 2>/dev/null; then
