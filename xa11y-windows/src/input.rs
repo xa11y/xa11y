@@ -82,6 +82,16 @@ impl WindowsInputProvider {
 
     fn send(&self, dpi: &crate::dpi::DpiScope, inputs: &[INPUT], target: Target) -> Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.send_locked(dpi, inputs, target)
+    }
+
+    /// Caller holds `lock` for the entire gesture, including multi-batch typing.
+    fn send_locked(
+        &self,
+        dpi: &crate::dpi::DpiScope,
+        inputs: &[INPUT],
+        target: Target,
+    ) -> Result<()> {
         self.preflight(dpi, target)?;
         let sent = crate::coords::send_input(dpi, inputs);
         if sent as usize != inputs.len() {
@@ -617,23 +627,24 @@ impl InputProvider for WindowsInputProvider {
         // the OS text-input path rather than by synthesising shift chords
         // against whatever keyboard layout happens to be active.
         let events = typed_events(text);
-        let mut inputs: Vec<INPUT> = Vec::with_capacity(events.len() * 2);
+        // Keep the whole call serialized even though each tap is submitted
+        // separately. Queuing many distinct VK_PACKET characters in one
+        // SendInput call intermittently corrupts WPF text (issue #620).
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         for event in events {
-            match event {
-                Typed::Unit(code_unit) => {
-                    inputs.push(unicode_input(code_unit, false));
-                    inputs.push(unicode_input(code_unit, true));
-                }
-                Typed::LineBreak => {
-                    inputs.push(key_input(VK_RETURN, KEYBD_EVENT_FLAGS(0)));
-                    inputs.push(key_input(VK_RETURN, KEYEVENTF_KEYUP));
-                }
-            }
+            let inputs = match event {
+                Typed::Unit(code_unit) => [
+                    unicode_input(code_unit, false),
+                    unicode_input(code_unit, true),
+                ],
+                Typed::LineBreak => [
+                    key_input(VK_RETURN, KEYBD_EVENT_FLAGS(0)),
+                    key_input(VK_RETURN, KEYEVENTF_KEYUP),
+                ],
+            };
+            self.send_locked(&dpi, &inputs, Target::Keyboard)?;
         }
-        if inputs.is_empty() {
-            return Ok(());
-        }
-        self.send(&dpi, &inputs, Target::Keyboard)
+        Ok(())
     }
 }
 

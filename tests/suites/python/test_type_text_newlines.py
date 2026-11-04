@@ -103,6 +103,37 @@ def test_type_text_line_break_is_one_break(app, typed):
 
 
 @pytest.mark.skipif(
+    sys.platform != "win32" or APP not in ("winforms", "wpf"),
+    reason="needs a native Windows multiline edit control (winforms / wpf test apps)",
+)
+@pytest.mark.parametrize("shape", ["plain", "newline", "unicode"])
+def test_type_text_preserves_each_character_repeatedly(app, shape):
+    """Queued Unicode packets used to substitute the final character (#620).
+
+    The defect appeared about once in twenty calls on WPF, including calls
+    without newlines. Check repeated full values, including characters that
+    cannot be represented as ordinary virtual keys and UTF-16 surrogate pairs.
+    """
+    notes = app.locator(WINDOWS_NOTES)
+    sim = xa11y.input_sim()
+    try:
+        _focus_windows_notes(app)
+        for attempt in range(60):
+            suffix = f"nopqrstuvwxyz0123456789-{attempt}"
+            prefix = "abcdefghijklm"
+            if shape == "newline":
+                prefix += "\r\n"
+            elif shape == "unicode":
+                prefix += "hé😀漢字"
+            typed = prefix + suffix
+            notes.set_value("")
+            sim.type_text(typed)
+            _wait_for_lines(app, WINDOWS_NOTES, _lines(typed))
+    finally:
+        notes.set_value(WINDOWS_ORIGINAL_NOTES[APP])
+
+
+@pytest.mark.skipif(
     sys.platform != "darwin" or APP != "cocoa",
     reason="needs the Cocoa test app's multiline NSTextView",
 )
