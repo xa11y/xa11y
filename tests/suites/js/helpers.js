@@ -105,10 +105,10 @@ const APP_CONFIG = {
   },
   uwp: {
     okButtonName: 'OK',
-    // The XAML TextBox reads as text_field "Search" with a nested child
-    // text_field "Search" (same name and value), so the exact-one lookup this
-    // key drives matches two. The Python suite still reads the field.
-    textFieldName: null,
+    textFieldName: 'Search',
+    // Raw View deliberately retains the non-control Edit inside the XAML
+    // TextBox (#606). The native class distinguishes the outer field.
+    textFieldSelector: 'text_field[name="Search"][class_name="TextBox"]',
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
@@ -146,6 +146,9 @@ const APP_NAMES = [
 const STARTUP_TIMEOUT_MS = 30_000;
 
 const appConfig = APP_CONFIG[appEnv] || APP_CONFIG.accesskit;
+const textFieldSelector = appConfig.textFieldSelector || (
+  appConfig.textFieldName ? `text_field[name="${appConfig.textFieldName}"]` : null
+);
 
 let cachedApp = null;
 
@@ -219,6 +222,7 @@ module.exports = {
   APP_CONFIG,
   appConfig,
   appEnv,
+  textFieldSelector,
   TimeoutError,
   SelectorNotMatchedError,
   PlatformError,
