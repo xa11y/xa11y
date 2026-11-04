@@ -24,6 +24,25 @@ use crate::map_err;
 /// coordinates, or an `Element` (anchored inside its bounds).
 type Target<'a> = Either<Vec<i32>, &'a Element>;
 
+#[derive(Clone, Copy)]
+struct ParsedPointerTarget {
+    point: xa11y::Point,
+    bounds: Option<xa11y::Rect>,
+    anchor: xa11y::Anchor,
+}
+
+impl xa11y::IntoPoint for ParsedPointerTarget {
+    fn into_point(self) -> xa11y::Result<xa11y::Point> {
+        Ok(self.point)
+    }
+    fn is_element_target(&self) -> bool {
+        self.bounds.is_some()
+    }
+    fn element_bounds(&self) -> Option<xa11y::Rect> {
+        self.bounds
+    }
+}
+
 /// Options for `InputSim.click()` — core's `ClickOptions`.
 #[napi(object)]
 #[derive(Default)]
@@ -70,6 +89,14 @@ pub struct DragOptions {
 /// the semantic action. Use `InputSim` for gestures with no a11y
 /// equivalent (drag-and-drop, scroll wheels, global shortcuts).
 ///
+/// Built-in backends reject points outside all active displays before sending
+/// input (Wayland uses the configured virtual input extent). This checks screen
+/// membership, not visibility or hit testing. `SelectorNotMatchedError.pointerTarget`
+/// contains the point, checked coordinate space, displays, and element bounds/anchor.
+/// Both drag endpoints are checked before the gesture. Captured moves while this
+/// simulator holds a button, and releases, remain possible; explicit clicks and
+/// scrolls still require an on-display target.
+///
 /// Methods return `Promise<void>` — the underlying OS input APIs are
 /// synchronous but can block briefly, so they run on the napi worker pool.
 #[napi]
@@ -77,9 +104,17 @@ pub struct InputSim {
     inner: xa11y::InputSim,
 }
 
+pub(crate) fn test_input(delay_ms: u32) -> InputSim {
+    InputSim {
+        inner: xa11y::InputSim::new(std::sync::Arc::new(xa11y::mock::MockInputProvider::new(
+            Duration::from_millis(u64::from(delay_ms)),
+        ))),
+    }
+}
+
 /// Parse a JS target into an `xa11y::Point`. Accepts either an `[x, y]`
 /// tuple (as `Vec<i32>` of length 2) or an `Element` (uses its bounds centre).
-fn parse_target(sim: &xa11y::InputSim, target: Target<'_>) -> napi::Result<xa11y::Point> {
+fn parse_target(sim: &xa11y::InputSim, target: Target<'_>) -> napi::Result<ParsedPointerTarget> {
     parse_target_anchored(sim, target, xa11y::Anchor::Center)
 }
 
@@ -96,7 +131,7 @@ fn parse_target_anchored(
     sim: &xa11y::InputSim,
     target: Target<'_>,
     anchor: xa11y::Anchor,
-) -> napi::Result<xa11y::Point> {
+) -> napi::Result<ParsedPointerTarget> {
     match target {
         Either::A(tup) => {
             if tup.len() != 2 {
@@ -105,15 +140,26 @@ fn parse_target_anchored(
                     tup.len()
                 )));
             }
-            Ok(xa11y::Point::new(tup[0], tup[1]))
+            Ok(ParsedPointerTarget {
+                point: xa11y::Point::new(tup[0], tup[1]),
+                bounds: None,
+                anchor: xa11y::Anchor::Center,
+            })
         }
         // The bounds go in as an `Option`: core checks the capability
         // first, so a Wayland refusal wins over "no bounds", and a missing
         // rect is core's own `NoElementBounds`.
-        Either::B(el) => sim
-            .mouse()
-            .point_for_bounds(el.data.bounds, anchor)
-            .map_err(map_err),
+        Either::B(el) => {
+            let point = sim
+                .mouse()
+                .point_for_bounds(el.data.bounds, anchor)
+                .map_err(map_err)?;
+            Ok(ParsedPointerTarget {
+                point,
+                bounds: el.data.bounds,
+                anchor,
+            })
+        }
     }
 }
 
@@ -423,15 +469,15 @@ impl InputSim {
 
 // ── Async tasks ─────────────────────────────────────────────────────────
 
-pub enum MouseOp {
-    Click(xa11y::Point, xa11y::ClickOptions),
-    DoubleClick(xa11y::Point),
-    RightClick(xa11y::Point),
-    MoveTo(xa11y::Point),
+enum MouseOp {
+    Click(ParsedPointerTarget, xa11y::ClickOptions),
+    DoubleClick(ParsedPointerTarget),
+    RightClick(ParsedPointerTarget),
+    MoveTo(ParsedPointerTarget),
     Down(xa11y::MouseButton),
     Up(xa11y::MouseButton),
-    Drag(xa11y::Point, xa11y::Point, xa11y::DragOptions),
-    Scroll(xa11y::Point, i32, i32),
+    Drag(ParsedPointerTarget, ParsedPointerTarget, xa11y::DragOptions),
+    Scroll(ParsedPointerTarget, i32, i32),
 }
 
 pub struct MouseTask {
@@ -445,7 +491,9 @@ impl Task for MouseTask {
     fn compute(&mut self) -> napi::Result<Self::Output> {
         let m = self.inner.mouse();
         match &self.op {
-            MouseOp::Click(p, opts) => m.click_with(xa11y::ClickTarget::Point(*p), opts.clone()),
+            MouseOp::Click(p, opts) => m
+                .click_with(xa11y::ClickTarget::Point(p.point), opts.clone())
+                .map_err(|error| xa11y::input::enrich_pointer_error(error, p.bounds, p.anchor)),
             MouseOp::DoubleClick(p) => m.double_click(*p),
             MouseOp::RightClick(p) => m.right_click(*p),
             MouseOp::MoveTo(p) => m.move_to(*p),

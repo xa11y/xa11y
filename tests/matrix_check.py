@@ -44,6 +44,7 @@ SYMBOLS = {True: "✅", False: "❌"}
 RUNNER_PLATFORMS = {
     "ubuntu-latest": "linux",
     "macos-latest": "macos",
+    "macos-15": "macos",
     "windows-latest": "windows",
 }
 

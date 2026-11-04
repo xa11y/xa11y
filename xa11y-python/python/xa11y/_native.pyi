@@ -4,7 +4,22 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from types import TracebackType
-from typing import Literal
+from typing import Literal, TypedDict
+
+class _PointerTargetDiagnosis(TypedDict):
+    """Typing-only shape of the plain pointer diagnostic dictionary.
+
+    Named anchors are strings; offsets are ``{"offset": {"dx": int, "dy": int}}``.
+    Checked point/display geometry uses the named coordinate space.
+    """
+
+    point: dict[str, int]
+    element_bounds: dict[str, int] | None
+    anchor: AnchorName | dict[str, dict[str, int]] | None
+    checked_point: dict[str, int]
+    coordinate_space: str
+    displays: list[dict[str, int]]
+    omitted_displays: int
 
 # Input-layer string values. These spellings are identical in the JS binding —
 # like key names, they are shared across bindings rather than spelled
@@ -112,6 +127,8 @@ class SelectorNotMatchedError(XA11yError):
     scope: str | None
     """Bounded rendering of the search scope: a depth-limited tree dump for
     scoped locators, or the application list for rootless ones."""
+    pointer_target: _PointerTargetDiagnosis | None
+    """Geometry of an off-display pointer target, otherwise ``None``."""
     elapsed: float | None
     """Always ``None`` for this class (present for attribute parity with
     :class:`TimeoutError`)."""
@@ -164,6 +181,7 @@ class TimeoutError(XA11yError):
     scope: str | None
     """Bounded rendering of the search scope. Collected only when the
     selector never matched during the wait."""
+    pointer_target: _PointerTargetDiagnosis | None
 
 class InvalidSelectorError(XA11yError):
     """The selector string has invalid syntax."""
@@ -896,6 +914,15 @@ class InputSim:
     ``Locator.press()`` / ``Locator.type_text()`` when the target exposes the
     semantic action. Use ``InputSim`` for gestures with no a11y equivalent
     (drag-and-drop, scroll wheels, global shortcuts).
+
+    Built-in backends reject pointer targets outside every active display
+    before sending input. On Wayland, raw points use the configured virtual
+    input extent. This checks screen membership, not visibility or hit testing.
+    ``SelectorNotMatchedError.pointer_target`` carries the requested point,
+    checked coordinate space, displays, and any element bounds and anchor.
+    Both drag endpoints are checked before the gesture. Captured moves while
+    this simulator holds a mouse button, and button releases, remain possible;
+    explicit clicks and scrolls still require an on-display target.
     """
 
     def click(
@@ -1176,6 +1203,7 @@ def _cli_main(args: list[str]) -> int:
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
 def _make_test_locator() -> Locator: ...
+def _make_test_input(delay_ms: int = 0) -> InputSim: ...
 def _make_test_shell_surfaces() -> list[ShellSurface]: ...
 def _find_test_shell_surface(
     kind: ShellSurfaceKindName, *, timeout: float | None = None

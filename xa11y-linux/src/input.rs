@@ -26,9 +26,11 @@
 //! appears in the shifted column. The Wayland backend does the same dance
 //! against an xkb keymap built from system defaults.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use x11rb::connection::Connection;
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{
     ConnectionExt as _, GetKeyboardMappingReply, Keycode, Screen, Window, BUTTON_PRESS_EVENT,
     BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT,
@@ -36,8 +38,10 @@ use x11rb::protocol::xproto::{
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
-use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
-use xa11y_core::{Error, Result};
+use xa11y_core::input::{
+    validate_pointer_regions, InputProvider, Key, MouseButton, Point, ScrollDelta,
+};
+use xa11y_core::{Error, Rect, Result};
 
 use crate::session::{select_backend, DesktopBackend};
 use crate::wayland_input::WaylandInputBackend;
@@ -231,6 +235,38 @@ pub(crate) struct X11InputBackend {
 }
 
 impl X11InputBackend {
+    fn display_regions(&self) -> Result<Vec<Rect>> {
+        self.with_conn(|conn| {
+            let version = conn
+                .randr_query_version(1, 5)
+                .map_err(platform)?
+                .reply()
+                .map_err(platform)?;
+            if version.major_version < 1
+                || (version.major_version == 1 && version.minor_version < 5)
+            {
+                return Err(Error::Unsupported {
+                    feature: "X11 pointer validation requires RandR 1.5 monitor geometry".into(),
+                });
+            }
+            let reply = conn
+                .randr_get_monitors(self.root, true)
+                .map_err(platform)?
+                .reply()
+                .map_err(platform)?;
+            Ok(reply
+                .monitors
+                .into_iter()
+                .map(|monitor| Rect {
+                    x: i32::from(monitor.x),
+                    y: i32::from(monitor.y),
+                    width: u32::from(monitor.width),
+                    height: u32::from(monitor.height),
+                })
+                .collect())
+        })
+    }
+
     fn new() -> Result<Self> {
         let (conn, screen_num) = RustConnection::connect(None).map_err(platform)?;
         let setup = conn.setup().clone();
@@ -386,6 +422,8 @@ impl X11InputBackend {
 /// chosen at construction.
 pub struct LinuxInputProvider {
     backend: InputBackend,
+    pointer_lock: Mutex<()>,
+    held_buttons: AtomicU8,
 }
 
 enum InputBackend {
@@ -408,12 +446,16 @@ impl LinuxInputProvider {
                 let x11 = X11InputBackend::new()?;
                 Ok(Self {
                     backend: InputBackend::X11(Box::new(x11)),
+                    pointer_lock: Mutex::new(()),
+                    held_buttons: AtomicU8::new(0),
                 })
             }
             DesktopBackend::Wayland => {
                 let wl = WaylandInputBackend::new()?;
                 Ok(Self {
                     backend: InputBackend::Wayland(Box::new(wl)),
+                    pointer_lock: Mutex::new(()),
+                    held_buttons: AtomicU8::new(0),
                 })
             }
         }
@@ -421,17 +463,79 @@ impl LinuxInputProvider {
 }
 
 impl LinuxInputProvider {
-    /// Convert a logical target point (the cross-platform contract, same space
-    /// as `Element::bounds`) to the physical device pixels both backends
-    /// expect: XTest warps to physical root coordinates, and the uinput
-    /// virtual range is mapped against the physical screen size. No-op at
-    /// scale 1.0. See `crate::scale`.
+    /// Convert a public logical point to the dispatch coordinate space.
+    /// X11 uses physical root pixels; Wayland's coordinate scale is 1.0 and
+    /// its uinput backend maps the configured logical extent. See `crate::scale`.
     fn to_physical(&self, p: Point) -> Point {
         p.to_physical(crate::scale::coordinate_scale())
+    }
+
+    fn validate_checked_target(&self, requested: Point, checked: Point) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => {
+                let displays = x.display_regions()?;
+                validate_pointer_regions(
+                    requested,
+                    checked,
+                    "x11 physical root pixels",
+                    &displays,
+                )?;
+                // XTest's wire coordinates are signed 16-bit. Do not silently
+                // clamp an on-display point to a different target.
+                if i16::try_from(checked.x).is_err() || i16::try_from(checked.y).is_err() {
+                    return Err(Error::Unsupported {
+                        feature:
+                            "XTest cannot address this display point with signed 16-bit coordinates"
+                                .into(),
+                    });
+                }
+                Ok(())
+            }
+            InputBackend::Wayland(w) => w.validate_pointer_target(requested, checked),
+        }
+    }
+
+    // Already converted and, unless captured, preflighted by the caller.
+    fn move_pointer(&self, checked: Point) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.pointer_move(checked),
+            InputBackend::Wayland(w) => w.pointer_move(checked),
+        }
+    }
+
+    // The caller holds pointer_lock through both native delivery and the
+    // state update, so concurrent down/up cannot reorder the capture mask.
+    fn press_pointer(&self, button: MouseButton) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.pointer_down(button),
+            InputBackend::Wayland(w) => w.pointer_down(button),
+        }?;
+        self.held_buttons
+            .fetch_or(button_mask(button), Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn release_pointer(&self, button: MouseButton) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.pointer_up(button),
+            InputBackend::Wayland(w) => w.pointer_up(button),
+        }?;
+        self.held_buttons
+            .fetch_and(!button_mask(button), Ordering::SeqCst);
+        Ok(())
     }
 }
 
 impl InputProvider for LinuxInputProvider {
+    fn validate_pointer_target(&self, point: Point) -> Result<()> {
+        let checked = self.to_physical(point);
+        self.validate_checked_target(point, checked)
+    }
+
+    fn pointer_buttons_down(&self) -> bool {
+        self.held_buttons.load(Ordering::SeqCst) != 0
+    }
+
     /// X11 shares one global coordinate space between AT-SPI extents and
     /// XTest. On Wayland, clients do not know their global position, so the
     /// bounds AT-SPI reports are not screen coordinates and an
@@ -444,41 +548,114 @@ impl InputProvider for LinuxInputProvider {
     }
 
     fn pointer_move(&self, to: Point) -> Result<()> {
-        let to = self.to_physical(to);
-        match &self.backend {
-            InputBackend::X11(x) => x.pointer_move(to),
-            InputBackend::Wayland(w) => w.pointer_move(to),
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checked = self.to_physical(to);
+        if !self.pointer_buttons_down() {
+            self.validate_checked_target(to, checked)?;
         }
+        self.move_pointer(checked)
     }
 
     fn pointer_down(&self, button: MouseButton) -> Result<()> {
-        match &self.backend {
-            InputBackend::X11(x) => x.pointer_down(button),
-            InputBackend::Wayland(w) => w.pointer_down(button),
-        }
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.press_pointer(button)
     }
 
     fn pointer_up(&self, button: MouseButton) -> Result<()> {
-        match &self.backend {
-            InputBackend::X11(x) => x.pointer_up(button),
-            InputBackend::Wayland(w) => w.pointer_up(button),
-        }
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.release_pointer(button)
     }
 
     fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()> {
-        let at = self.to_physical(at);
-        match &self.backend {
-            InputBackend::X11(x) => x.pointer_click(at, button, count),
-            InputBackend::Wayland(w) => w.pointer_click(at, button, count),
+        if count == 0 {
+            return Ok(());
+        }
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checked = self.to_physical(at);
+        self.validate_checked_target(at, checked)?;
+        let clicked = match &self.backend {
+            InputBackend::X11(x) => x.pointer_click(checked, button, count),
+            InputBackend::Wayland(w) => w.pointer_click(checked, button, count),
+        };
+        if clicked.is_err() {
+            // A native failure can follow a partial button-down. Always try
+            // release, retaining capture state if release itself fails.
+            self.held_buttons
+                .fetch_or(button_mask(button), Ordering::SeqCst);
+            let released = self.release_pointer(button);
+            clicked.and(released)
+        } else {
+            self.held_buttons
+                .fetch_and(!button_mask(button), Ordering::SeqCst);
+            clicked
         }
     }
 
     fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
-        let at = self.to_physical(at);
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checked = self.to_physical(at);
+        self.validate_checked_target(at, checked)?;
         match &self.backend {
-            InputBackend::X11(x) => x.pointer_scroll(at, delta),
-            InputBackend::Wayland(w) => w.pointer_scroll(at, delta),
+            InputBackend::X11(x) => x.pointer_scroll(checked, delta),
+            InputBackend::Wayland(w) => w.pointer_scroll(checked, delta),
         }
+    }
+
+    fn pointer_drag(
+        &self,
+        from: Point,
+        to: Point,
+        button: MouseButton,
+        duration: std::time::Duration,
+    ) -> Result<()> {
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let scale = crate::scale::coordinate_scale();
+        let checked_from = from.to_physical(scale);
+        let checked_to = to.to_physical(scale);
+        self.validate_checked_target(from, checked_from)?;
+        self.validate_checked_target(to, checked_to)?;
+        // Keep the whole gesture under pointer_lock. A concurrent button-up
+        // must not turn a later captured move into a new geometry preflight.
+        self.move_pointer(checked_from)?;
+        self.press_pointer(button)?;
+        const STEP: std::time::Duration = std::time::Duration::from_millis(16);
+        let steps = (duration.as_millis() / STEP.as_millis()).max(1) as i32;
+        let moved = (|| {
+            for i in 1..=steps {
+                let fraction = f64::from(i) / f64::from(steps);
+                let x = (f64::from(checked_from.x)
+                    + (f64::from(checked_to.x) - f64::from(checked_from.x)) * fraction)
+                    .round() as i32;
+                let y = (f64::from(checked_from.y)
+                    + (f64::from(checked_to.y) - f64::from(checked_from.y)) * fraction)
+                    .round() as i32;
+                self.move_pointer(Point::new(x, y))?;
+                if i < steps {
+                    std::thread::sleep(STEP);
+                }
+            }
+            Ok(())
+        })();
+        let released = self.release_pointer(button);
+        moved.and(released)
     }
 
     fn key_down(&self, key: &Key) -> Result<()> {
@@ -500,6 +677,14 @@ impl InputProvider for LinuxInputProvider {
             InputBackend::X11(x) => x.type_text(text),
             InputBackend::Wayland(w) => w.type_text(text),
         }
+    }
+}
+
+fn button_mask(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Right => 2,
+        MouseButton::Middle => 4,
     }
 }
 

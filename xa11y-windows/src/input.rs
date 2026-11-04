@@ -85,6 +85,102 @@ impl WindowsInputProvider {
         Ok(Self::default())
     }
 
+    fn validate_point(&self, dpi: &crate::dpi::DpiScope, point: Point) -> Result<()> {
+        let displays = crate::coords::monitor_rects(dpi)?
+            .into_iter()
+            .map(|rect| {
+                let width = i64::from(rect.right) - i64::from(rect.left);
+                let height = i64::from(rect.bottom) - i64::from(rect.top);
+                if width <= 0 || height <= 0 {
+                    return Err(Error::Platform {
+                        code: -1,
+                        message: format!(
+                            "EnumDisplayMonitors returned an invalid rectangle: {rect:?}"
+                        ),
+                    });
+                }
+                Ok(xa11y_core::Rect {
+                    x: rect.left,
+                    y: rect.top,
+                    width: width as u32,
+                    height: height as u32,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        xa11y_core::input::validate_pointer_regions(
+            point,
+            point,
+            "physical desktop pixels",
+            &displays,
+        )
+    }
+
+    // These helpers require `lock` for the entire native event/state
+    // transaction. Geometry is checked by the gesture entry point, before
+    // its first event; never reject a later packet as "not delivered".
+    fn move_locked(&self, dpi: &crate::dpi::DpiScope, to: Point) -> Result<()> {
+        let (ax, ay) = to_absolute(dpi, to.x, to.y);
+        let input = mouse_input(
+            MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
+            ax,
+            ay,
+            0,
+        );
+        let target = if self.pointer_buttons_down() {
+            Target::Unchecked
+        } else {
+            Target::PointerAt(to)
+        };
+        self.send_locked(dpi, &[input], target)
+    }
+
+    fn down_locked(&self, dpi: &crate::dpi::DpiScope, button: MouseButton) -> Result<()> {
+        let (down, _) = button_down_up(button);
+        self.send_locked(dpi, &[mouse_input(down, 0, 0, 0)], Target::PointerHere)?;
+        self.buttons_down
+            .fetch_or(button_bit(button), std::sync::atomic::Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn up_locked(&self, dpi: &crate::dpi::DpiScope, button: MouseButton) -> Result<()> {
+        let (_, up) = button_down_up(button);
+        let sent = self.send_locked(dpi, &[mouse_input(up, 0, 0, 0)], Target::Unchecked);
+        if sent.is_ok() {
+            self.buttons_down
+                .fetch_and(!button_bit(button), std::sync::atomic::Ordering::AcqRel);
+        }
+        sent
+    }
+
+    fn finish_click_batch(
+        &self,
+        button: MouseButton,
+        outcome: std::result::Result<(), (Error, u32)>,
+        release: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        match outcome {
+            Ok(()) => {
+                self.buttons_down
+                    .fetch_and(!button_bit(button), std::sync::atomic::Ordering::AcqRel);
+                Ok(())
+            }
+            Err((error, sent)) => {
+                if sent > 0 {
+                    // A short paired batch may have posted only the down.
+                    // Mark ownership before cleanup, and retain it if up
+                    // fails. Never replace the original native failure.
+                    self.buttons_down
+                        .fetch_or(button_bit(button), std::sync::atomic::Ordering::AcqRel);
+                    if release().is_ok() {
+                        self.buttons_down
+                            .fetch_and(!button_bit(button), std::sync::atomic::Ordering::AcqRel);
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
     fn send(&self, dpi: &crate::dpi::DpiScope, inputs: &[INPUT], target: Target) -> Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         self.send_locked(dpi, inputs, target)
@@ -98,19 +194,7 @@ impl WindowsInputProvider {
         target: Target,
     ) -> Result<()> {
         self.preflight(dpi, target)?;
-        let sent = crate::coords::send_input(dpi, inputs);
-        if sent as usize != inputs.len() {
-            // SAFETY: GetLastError takes no args and is always safe to call.
-            let code = unsafe { GetLastError().0 } as i64;
-            return Err(Error::Platform {
-                code,
-                message: format!(
-                    "SendInput sent {sent}/{} events (GetLastError={code})",
-                    inputs.len()
-                ),
-            });
-        }
-        Ok(())
+        send_packet(dpi, inputs).map_err(|(error, _)| error)
     }
 
     /// UIPI drops input to a higher-integrity window while SendInput still
@@ -135,6 +219,29 @@ impl WindowsInputProvider {
         };
         crate::uipi::check_target(hwnd, what)
     }
+}
+
+fn send_packet(
+    dpi: &crate::dpi::DpiScope,
+    inputs: &[INPUT],
+) -> std::result::Result<(), (Error, u32)> {
+    let sent = crate::coords::send_input(dpi, inputs);
+    if sent as usize != inputs.len() {
+        // Capture the native code before any cleanup call can overwrite it.
+        // SAFETY: GetLastError has no arguments.
+        let code = unsafe { GetLastError().0 } as i64;
+        return Err((
+            Error::Platform {
+                code,
+                message: format!(
+                    "SendInput sent {sent}/{} events (GetLastError={code})",
+                    inputs.len()
+                ),
+            },
+            sent,
+        ));
+    }
+    Ok(())
 }
 
 fn mouse_input(flags: u32, dx: i32, dy: i32, data: i32) -> INPUT {
@@ -228,10 +335,16 @@ fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
 /// range expected by `SendInput` with `MOUSEEVENTF_VIRTUALDESK`.
 fn to_absolute(dpi: &crate::dpi::DpiScope, x: i32, y: i32) -> (i32, i32) {
     let (vx, vy, vw, vh) = crate::coords::virtual_screen(dpi);
-    let (vw, vh) = (vw.max(1), vh.max(1));
-    let ax = (((x - vx) as i64 * 65535 + (vw as i64 / 2)) / vw as i64) as i32;
-    let ay = (((y - vy) as i64 * 65535 + (vh as i64 / 2)) / vh as i64) as i32;
-    (ax, ay)
+    (absolute_axis(x, vx, vw), absolute_axis(y, vy, vh))
+}
+
+fn absolute_axis(value: i32, origin: i32, extent: i32) -> i32 {
+    let extent = i64::from(extent.max(1));
+    let normalized = ((i64::from(value) - i64::from(origin)) * 65535 + extent / 2) / extent;
+    // Explicit targets have passed display preflight. Captured movement may
+    // leave that region: Win32 absolute input still addresses only this range.
+    // Clamp in i64 before narrowing so an extreme captured point cannot wrap.
+    normalized.clamp(0, 65535) as i32
 }
 
 /// Map a named [`Key`] to its Win32 virtual-key code. Returns the VK plus a
@@ -431,63 +544,126 @@ fn button_down_up(button: MouseButton) -> (u32, u32) {
     }
 }
 
+fn button_bit(button: MouseButton) -> u32 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Right => 2,
+        MouseButton::Middle => 4,
+    }
+}
+
+#[cfg(test)]
+mod partial_click_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn short_send(sent: u32) -> std::result::Result<(), (Error, u32)> {
+        Err((
+            Error::Platform {
+                code: 123,
+                message: "original short send".into(),
+            },
+            sent,
+        ))
+    }
+
+    #[test]
+    fn partial_down_attempts_release_before_returning_original_error() {
+        let provider = WindowsInputProvider::default();
+        let _guard = provider.lock.lock().unwrap();
+        let released = Cell::new(false);
+        let error = provider
+            .finish_click_batch(MouseButton::Left, short_send(1), || {
+                assert!(provider.pointer_buttons_down());
+                released.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(released.get());
+        assert!(!provider.pointer_buttons_down());
+        assert!(
+            matches!(error, Error::Platform { code: 123, ref message } if message == "original short send")
+        );
+    }
+
+    #[test]
+    fn failed_release_keeps_capture_and_first_error() {
+        let provider = WindowsInputProvider::default();
+        let _guard = provider.lock.lock().unwrap();
+        let error = provider
+            .finish_click_batch(MouseButton::Right, short_send(1), || {
+                assert!(provider.pointer_buttons_down());
+                Err(Error::Platform {
+                    code: 456,
+                    message: "release failed".into(),
+                })
+            })
+            .unwrap_err();
+        assert!(provider.pointer_buttons_down());
+        assert!(matches!(error, Error::Platform { code: 123, .. }));
+    }
+
+    #[test]
+    fn zero_inserted_events_preserve_prior_capture_without_false_ownership() {
+        let provider = WindowsInputProvider::default();
+        let _guard = provider.lock.lock().unwrap();
+        provider
+            .finish_click_batch(MouseButton::Left, short_send(0), || {
+                panic!("no down was sent")
+            })
+            .unwrap_err();
+        assert!(!provider.pointer_buttons_down());
+        provider.buttons_down.store(
+            button_bit(MouseButton::Right),
+            std::sync::atomic::Ordering::Release,
+        );
+        provider
+            .finish_click_batch(MouseButton::Left, short_send(0), || {
+                panic!("no down was sent")
+            })
+            .unwrap_err();
+        assert!(provider.pointer_buttons_down());
+    }
+}
+
 // Every method enters a `DpiScope`: they all read or produce coordinates
 // (bounds in snapshots, window geometry, input points), which Windows answers
 // in the calling thread's DPI space (issue #506).
 impl InputProvider for WindowsInputProvider {
+    fn validate_pointer_target(&self, point: Point) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
+        self.validate_point(&dpi, point)
+    }
+
+    fn pointer_buttons_down(&self) -> bool {
+        self.buttons_down.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+
     fn pointer_move(&self, to: Point) -> Result<()> {
         let dpi = crate::dpi::DpiScope::enter()?;
-        // Windows Point and Element::bounds use physical desktop pixels.
-        let (ax, ay) = to_absolute(&dpi, to.x, to.y);
-        let input = mouse_input(
-            MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
-            ax,
-            ay,
-            0,
-        );
-        // While a button is held, capture routes the move, not the window
-        // under the point, and refusing it would strand the held button.
-        let target = if self.buttons_down.load(std::sync::atomic::Ordering::Acquire) > 0 {
-            Target::Unchecked
-        } else {
-            Target::PointerAt(to)
-        };
-        self.send(&dpi, &[input], target)
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.pointer_buttons_down() {
+            self.validate_point(&dpi, to)?;
+        }
+        self.move_locked(&dpi, to)
     }
 
     fn pointer_down(&self, button: MouseButton) -> Result<()> {
         let dpi = crate::dpi::DpiScope::enter()?;
-        let (down, _) = button_down_up(button);
-        self.send(&dpi, &[mouse_input(down, 0, 0, 0)], Target::PointerHere)?;
-        self.buttons_down
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        Ok(())
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let point = crate::coords::cursor_pos(&dpi).map_err(|error| Error::Platform {
+            code: error.code().0 as i64,
+            message: format!("GetCursorPos failed while validating the mouse target: {error}"),
+        })?;
+        self.validate_point(&dpi, Point::new(point.x, point.y))?;
+        self.down_locked(&dpi, button)
     }
 
     fn pointer_up(&self, button: MouseButton) -> Result<()> {
-        // Entering the scope can fail before anything is sent, leaving the
-        // button or key held. That is acceptable: the result is deterministic
-        // per thread (the thread's awareness and whether it may switch do not
-        // change between calls, unless the host changes this thread's
-        // awareness in between), so the matching down on this thread would
-        // already have failed the same way and pressed nothing.
         let dpi = crate::dpi::DpiScope::enter()?;
-        let (_, up) = button_down_up(button);
-        // Never refused: a release must always reach the wire.
-        let sent = self.send(&dpi, &[mouse_input(up, 0, 0, 0)], Target::Unchecked);
-        // Saturating, for an up with no matching down through this provider.
-        // A compare-exchange loop rather than `fetch_update`, which newer
-        // toolchains deprecate and the MSRV has no replacement for.
-        let mut n = self.buttons_down.load(std::sync::atomic::Ordering::Acquire);
-        while let Err(current) = self.buttons_down.compare_exchange_weak(
-            n,
-            n.saturating_sub(1),
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        ) {
-            n = current;
-        }
-        sent
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Releases must not depend on geometry, capture ownership, or UIPI.
+        self.up_locked(&dpi, button)
     }
 
     fn pointer_drag(
@@ -497,81 +673,89 @@ impl InputProvider for WindowsInputProvider {
         button: MouseButton,
         duration: std::time::Duration,
     ) -> Result<()> {
-        // Mirrors core's default `InputProvider::pointer_drag` (same step
-        // interval and interpolation); keep the two in step. The only
-        // addition is the pre-flight below.
-        // Pre-flight both ends before anything is pressed, so a refusal can
-        // never strand a held button mid-drag. The moves in between run
-        // unchecked once the button is down (see `pointer_move`).
-        {
-            let dpi = crate::dpi::DpiScope::enter()?;
-            self.preflight(&dpi, Target::PointerAt(from))?;
-            self.preflight(&dpi, Target::PointerAt(to))?;
-        }
+        let dpi = crate::dpi::DpiScope::enter()?;
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.validate_point(&dpi, from)?;
+        self.validate_point(&dpi, to)?;
+        self.preflight(&dpi, Target::PointerAt(from))?;
+        self.preflight(&dpi, Target::PointerAt(to))?;
+        self.move_locked(&dpi, from)?;
+        self.down_locked(&dpi, button)?;
         const STEP: std::time::Duration = std::time::Duration::from_millis(16);
-        self.pointer_move(from)?;
-        self.pointer_down(button)?;
         let steps = (duration.as_millis() / STEP.as_millis().max(1)).max(1) as i32;
         let moved = (|| {
             for i in 1..=steps {
                 let t = f64::from(i) / f64::from(steps);
-                let x = from.x + (f64::from(to.x - from.x) * t).round() as i32;
-                let y = from.y + (f64::from(to.y - from.y) * t).round() as i32;
-                self.pointer_move(Point::new(x, y))?;
+                let x =
+                    (f64::from(from.x) + (f64::from(to.x) - f64::from(from.x)) * t).round() as i32;
+                let y =
+                    (f64::from(from.y) + (f64::from(to.y) - f64::from(from.y)) * t).round() as i32;
+                // Capture routes intermediate moves, including monitor gaps.
+                self.move_locked(&dpi, Point::new(x, y))?;
                 if i < steps {
                     std::thread::sleep(STEP);
                 }
             }
             Ok(())
         })();
-        // Release whatever happened to the moves, then report the first error.
-        let released = self.pointer_up(button);
+        let released = self.up_locked(&dpi, button);
         moved.and(released)
     }
 
     fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()> {
-        let dpi = crate::dpi::DpiScope::enter()?;
         if count == 0 {
             return Ok(());
         }
-        self.pointer_move(at)?;
+        let dpi = crate::dpi::DpiScope::enter()?;
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.validate_point(&dpi, at)?;
+        self.move_locked(&dpi, at)?;
         let (down, up) = button_down_up(button);
-        // Batch each press/release into one SendInput call so the system
-        // bookkeeps the click-count (double/triple click) for us when the
-        // calls arrive within the OS double-click time.
         for _ in 0..count {
-            self.send(
+            // A preflight refusal posts nothing and must not alter held state.
+            self.preflight(&dpi, Target::PointerAt(at))?;
+            let outcome = send_packet(
                 &dpi,
                 &[mouse_input(down, 0, 0, 0), mouse_input(up, 0, 0, 0)],
-                Target::PointerAt(at),
-            )?;
+            );
+            self.finish_click_batch(button, outcome, || {
+                self.send_locked(&dpi, &[mouse_input(up, 0, 0, 0)], Target::Unchecked)
+            })?;
         }
         Ok(())
     }
 
     fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
         let dpi = crate::dpi::DpiScope::enter()?;
-        self.pointer_move(at)?;
-        let step = WHEEL_DELTA;
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.validate_point(&dpi, at)?;
+        self.move_locked(&dpi, at)?;
         if delta.dy != 0 {
-            // `Input.dy > 0` means scroll content down per module docs, which
-            // maps to a *positive* wheel delta on Win32 (wheel rolled forward).
-            self.send(
+            self.send_locked(
                 &dpi,
-                &[mouse_input(MOUSEEVENTF_WHEEL.0, 0, 0, delta.dy * step)],
+                &[mouse_input(
+                    MOUSEEVENTF_WHEEL.0,
+                    0,
+                    0,
+                    delta.dy * WHEEL_DELTA,
+                )],
                 Target::PointerAt(at),
             )?;
         }
         if delta.dx != 0 {
-            self.send(
+            self.send_locked(
                 &dpi,
-                &[mouse_input(MOUSEEVENTF_HWHEEL.0, 0, 0, delta.dx * step)],
+                &[mouse_input(
+                    MOUSEEVENTF_HWHEEL.0,
+                    0,
+                    0,
+                    delta.dx * WHEEL_DELTA,
+                )],
                 Target::PointerAt(at),
             )?;
         }
         Ok(())
     }
-
     fn key_down(&self, key: &Key) -> Result<()> {
         let dpi = crate::dpi::DpiScope::enter()?;
         let (vk, extended) = vk_for(key)?;
@@ -704,7 +888,17 @@ mod keymap_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{typed_events, Typed};
+    use super::{absolute_axis, typed_events, Typed};
+
+    #[test]
+    fn absolute_coordinates_widen_before_subtraction_and_clamp_before_narrowing() {
+        assert_eq!(absolute_axis(0, 0, 100), 0);
+        assert_eq!(absolute_axis(50, 0, 100), 32768);
+        assert_eq!(absolute_axis(-50, -100, 100), 32768);
+        assert_eq!(absolute_axis(i32::MAX, i32::MIN, 1), 65535);
+        assert_eq!(absolute_axis(i32::MIN, i32::MAX, 1), 0);
+        assert_eq!(absolute_axis(100, 0, 100), 65535);
+    }
 
     /// Render the events as text, with `⏎` for each Enter tap.
     fn typed(text: &str) -> String {

@@ -151,7 +151,7 @@ def _extract_classes_and_functions(
     classes = []
     functions = []
     for node in tree.body:
-        if isinstance(node, ast.ClassDef):
+        if isinstance(node, ast.ClassDef) and _should_include(node.name):
             classes.append(node)
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             if _should_include(node.name):

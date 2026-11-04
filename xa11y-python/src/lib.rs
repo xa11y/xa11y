@@ -89,6 +89,9 @@ fn attach_diagnosis_attrs(
             diagnosis.map(|d| d.candidates.clone()).unwrap_or_default(),
         );
         let _ = value.setattr("scope", diagnosis.and_then(|d| d.scope.clone()));
+        let geometry = serde_json::json!(diagnosis.and_then(|d| d.pointer_target.as_ref()));
+        let _ = json_to_py(py, &geometry)
+            .and_then(|geometry| value.setattr("pointer_target", geometry));
     });
     err
 }
@@ -1982,6 +1985,14 @@ impl ShellSurface {
 /// (`"a"`, `"7"`, `";"`), named keys use their Pascal name (`"Enter"`,
 /// `"ArrowUp"`, `"F5"`), modifiers are `"Shift"`, `"Ctrl"`, `"Alt"`, `"Meta"`.
 /// Mouse buttons are `"left"`, `"right"`, `"middle"`.
+///
+/// Built-in backends reject points outside all active displays before sending
+/// input (Wayland uses the configured virtual input extent). This checks screen
+/// membership, not visibility or hit testing. `SelectorNotMatchedError.pointer_target`
+/// contains the point, checked coordinate space, displays, and element bounds/anchor.
+/// Both drag endpoints are checked before the gesture. Captured moves while this
+/// simulator holds a button, and releases, remain possible; explicit clicks and
+/// scrolls still require an on-display target.
 #[pyclass]
 struct InputSim {
     inner: xa11y::InputSim,
@@ -2020,7 +2031,8 @@ impl InputSim {
         py.detach(move || {
             self.inner
                 .mouse()
-                .click_with(xa11y::ClickTarget::Point(pt), opts)
+                .click_with(xa11y::ClickTarget::Point(pt.point), opts)
+                .map_err(|error| xa11y::input::enrich_pointer_error(error, pt.bounds, pt.anchor))
         })
         .map_err(to_py_err)
     }
@@ -2153,7 +2165,28 @@ impl InputSim {
 /// Convert a Python target (`(int, int)` tuple or `Element`) to an
 /// [`xa11y::Point`]. Keeps the target-resolution cost explicit at the call
 /// site, matching the Rust [`IntoPoint`] contract.
-fn parse_target(sim: &xa11y::InputSim, target: &Bound<'_, PyAny>) -> PyResult<xa11y::Point> {
+#[derive(Clone, Copy)]
+struct ParsedPointerTarget {
+    point: xa11y::Point,
+    bounds: Option<xa11y::Rect>,
+    anchor: xa11y::Anchor,
+}
+
+impl xa11y::IntoPoint for ParsedPointerTarget {
+    fn into_point(self) -> xa11y::Result<xa11y::Point> {
+        Ok(self.point)
+    }
+
+    fn is_element_target(&self) -> bool {
+        self.bounds.is_some()
+    }
+
+    fn element_bounds(&self) -> Option<xa11y::Rect> {
+        self.bounds
+    }
+}
+
+fn parse_target(sim: &xa11y::InputSim, target: &Bound<'_, PyAny>) -> PyResult<ParsedPointerTarget> {
     parse_target_anchored(sim, target, xa11y::Anchor::Center)
 }
 
@@ -2171,7 +2204,7 @@ fn parse_target_anchored(
     sim: &xa11y::InputSim,
     target: &Bound<'_, PyAny>,
     anchor: xa11y::Anchor,
-) -> PyResult<xa11y::Point> {
+) -> PyResult<ParsedPointerTarget> {
     if let Ok(el) = target.cast::<Element>() {
         let element = el.borrow();
         // The bounds go in as an `Option`: core checks the capability
@@ -2185,15 +2218,24 @@ fn parse_target_anchored(
                 width,
                 height,
             });
-        return sim
+        let point = sim
             .mouse()
             .point_for_bounds(bounds, anchor)
-            .map_err(to_py_err);
+            .map_err(to_py_err)?;
+        return Ok(ParsedPointerTarget {
+            point,
+            bounds,
+            anchor,
+        });
     }
     let tup: (i32, i32) = target
         .extract()
         .map_err(|_| PyTypeError::new_err("expected (int, int) tuple or Element for target"))?;
-    Ok(xa11y::Point::new(tup.0, tup.1))
+    Ok(ParsedPointerTarget {
+        point: xa11y::Point::new(tup.0, tup.1),
+        bounds: None,
+        anchor: xa11y::Anchor::Center,
+    })
 }
 
 /// Parse an anchor: one of the named corners/centre as a string, or a
@@ -2792,6 +2834,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_input, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_app, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_shell_surfaces, m)?)?;
     m.add_function(wrap_pyfunction!(_find_test_shell_surface, m)?)?;
@@ -2835,6 +2878,16 @@ fn _make_test_locator() -> PyResult<Locator> {
     Ok(Locator {
         inner: xa11y::Locator::new(provider as Arc<dyn xa11y::Provider>, None, "application"),
     })
+}
+
+#[pyfunction]
+#[pyo3(signature = (delay_ms=0))]
+fn _make_test_input(delay_ms: u32) -> InputSim {
+    InputSim {
+        inner: xa11y::InputSim::new(Arc::new(xa11y::mock::MockInputProvider::new(
+            std::time::Duration::from_millis(u64::from(delay_ms)),
+        ))),
+    }
 }
 
 /// Create a test App backed by the shared mock provider (resolves "TestApp").

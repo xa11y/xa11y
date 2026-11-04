@@ -72,6 +72,7 @@ class SelectorNotMatchedError extends XA11yError {
     /** @type {string | null} */ this.lastObserved = null;
     /** @type {string | null} */ this.hiddenReason = null;
     /** @type {string | null} */ this.autoScroll = null;
+    /** @type {import('./index').PointerTargetDiagnosis | null} */ this.pointerTarget = null;
     /** @type {string[]} */ this.candidates = [];
     /** @type {string | null} */ this.scope = null;
     /** @type {number | null} */ this.elapsedMs = null;
@@ -99,6 +100,7 @@ class TimeoutError extends XA11yError {
     /** @type {string | null} */ this.lastObserved = null;
     /** @type {string | null} */ this.hiddenReason = null;
     /** @type {string | null} */ this.autoScroll = null;
+    /** @type {import('./index').PointerTargetDiagnosis | null} */ this.pointerTarget = null;
     /** @type {string[]} */ this.candidates = [];
     /** @type {string | null} */ this.scope = null;
     /** @type {number | null} */ this.elapsedMs = null;
@@ -197,6 +199,7 @@ function toTypedError(err) {
     typed.lastObserved = diagnosis.lastObserved ?? null;
     typed.hiddenReason = diagnosis.hiddenReason ?? null;
     typed.autoScroll = diagnosis.autoScroll ?? null;
+    typed.pointerTarget = diagnosis.pointerTarget ?? null;
     typed.candidates = Array.isArray(diagnosis.candidates) ? diagnosis.candidates : [];
     typed.scope = diagnosis.scope ?? null;
     typed.elapsedMs = diagnosis.elapsedMs ?? null;
@@ -863,6 +866,7 @@ const {
   InputSim,
   Locator,
   Screenshot,
+  _makeTestInput,
   _makeTestLocator,
   _makeTestApp,
   _makeTestActionProbe,
@@ -903,6 +907,7 @@ module.exports = {
   PlatformError,
 
   // @internal -- used by unit tests
+  _makeTestInput,
   _makeTestLocator,
   _makeTestApp,
   _makeTestActionProbe,

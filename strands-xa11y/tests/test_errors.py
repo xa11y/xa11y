@@ -63,6 +63,28 @@ def test_delivery_tells_the_model_whether_a_retry_is_safe():
     assert "delivery: unknown" in describe(fake_xa11y.TimeoutError("timed out"))
 
 
+def test_pointer_geometry_is_forwarded_without_mutating_the_error():
+    error = fake_xa11y.SelectorNotMatchedError("point matches no display")
+    geometry = {
+        "point": {"x": 1000, "y": 1000},
+        "element_bounds": {"x": 900, "y": 900, "width": 50, "height": 50},
+        "anchor": {"offset": {"dx": 100, "dy": 100}},
+        "checked_point": {"x": 2000, "y": 2000},
+        "coordinate_space": "x11 physical root pixels",
+        "displays": [{"x": -100, "y": 0, "width": 800, "height": 600}],
+        "omitted_displays": 2,
+    }
+    error.pointer_target = geometry
+    error.delivery = "not_delivered"
+    message = describe(error)
+    assert f"pointer target: {geometry}" in message
+    assert "delivery: not_delivered" in message
+    assert message.startswith("SelectorNotMatchedError: point matches no display")
+    assert error.pointer_target is geometry
+    assert str(error) == "point matches no display"
+    assert "pointer target" not in describe(fake_xa11y.SelectorNotMatchedError("no match"))
+
+
 def test_auto_scroll_says_whether_scrolling_was_already_tried():
     """A model told the scroll was refused should not ask for one."""
     message = describe(

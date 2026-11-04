@@ -2380,6 +2380,9 @@ fn diagnosis_json(d: &crate::Diagnosis) -> Value {
         }
     }
     insert_some(&mut out, "scope", d.scope.as_deref().map(Value::from));
+    if let Some(target) = &d.pointer_target {
+        out.insert("pointer_target".into(), json!(target));
+    }
     // `delivery` is reported once, at the top level of the failure, where it
     // is resolved from the variant and this diagnosis together.
     Value::Object(out)
@@ -3459,6 +3462,31 @@ mod tests {
         assert_eq!(structured["diagnosis"]["candidates"][0], "button \"OK\"");
         assert!(structured["diagnosis"].get("hidden_reason").is_none());
         assert!(structured["diagnosis"].get("auto_scroll").is_none());
+    }
+
+    #[test]
+    fn off_display_pointer_geometry_reaches_the_failure_payload() {
+        let point = crate::Point::new(500, 500);
+        let input = crate::InputSim::new(std::sync::Arc::new(
+            xa11y_core::mock::MockInputProvider::new(std::time::Duration::ZERO),
+        ));
+        let err = CliError::Xa11y(input.mouse().click(point).unwrap_err());
+        let (text, structured) = describe_failure("click", &err);
+        assert_eq!(structured["kind"], "no_match");
+        assert_eq!(structured["delivery"], "not_delivered");
+        let geometry = &structured["diagnosis"]["pointer_target"];
+        assert_eq!(geometry["point"], json!({"x": 500, "y": 500}));
+        assert_eq!(geometry["checked_point"], geometry["point"]);
+        assert_eq!(geometry["coordinate_space"], "mock desktop pixels");
+        assert_eq!(geometry["element_bounds"], Value::Null);
+        assert_eq!(geometry["anchor"], Value::Null);
+        assert_eq!(geometry["omitted_displays"], 0);
+        assert_eq!(
+            geometry["displays"][0],
+            json!({"x": 0, "y": 0, "width": 100, "height": 100})
+        );
+        assert!(text.contains("pointer target:"), "{text}");
+        assert!(text.contains("mock desktop pixels"), "{text}");
     }
 
     #[test]

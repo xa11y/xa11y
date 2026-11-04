@@ -52,6 +52,12 @@ inputs:
     description: "Set to 'false' to install the toolchain without restoring a cache."
     required: false
     default: "true"
+  cache-namespace:
+    description: >-
+      Optional image/architecture namespace for both compiled caches. Empty
+      preserves existing keys; callers changing runner images must opt in.
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -62,6 +68,13 @@ runs:
         toolchain: ${{ inputs.toolchain }}
         components: ${{ inputs.components }}
         targets: ${{ inputs.targets }}
+
+    - name: Isolate compiled caches for the requested runner image
+      if: ${{ inputs.cache-namespace != '' }}
+      shell: bash
+      env:
+        CACHE_NAMESPACE: ${{ inputs.cache-namespace }}
+      run: echo "SCCACHE_GHA_VERSION=$CACHE_NAMESPACE" >> "$GITHUB_ENV"
 
     - name: Set up sccache
       uses: mozilla-actions/sccache-action@v0.0.10
@@ -79,6 +92,7 @@ runs:
       if: ${{ inputs.cache == 'true' }}
       uses: Swatinem/rust-cache@v2
       with:
+        prefix-key: ${{ inputs.cache-namespace != '' && format('v0-rust-{0}', inputs.cache-namespace) || 'v0-rust' }}
         # Folded into rust-cache's auto key (job id + os + rustc + lockfiles),
         # mirroring the old per-job ${{ runner.os }}-cargo-<key> scheme.
         key: ${{ inputs.cache-key }}

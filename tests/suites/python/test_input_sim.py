@@ -128,7 +128,7 @@ def _field(line: str, key: str) -> str:
     return ""
 
 
-def _command_chord_seen(log: str) -> bool:
+def _command_chord_seen(log: str, expected_key: str) -> bool:
     """Whether the command-key chord's own events are in `log`.
 
     Require the chord's tapped key plus the command modifier. A predicate
@@ -139,9 +139,15 @@ def _command_chord_seen(log: str) -> bool:
     `Super` key name where WebKit-GTK does not.
     """
     lines = log.split("\n")
-    return any("key=;" in line for line in lines) and (
-        any("mods=meta" in line for line in lines)
-        or any("key=Super" in line for line in lines)
+    tapped = [
+        line
+        for line in lines
+        if line.startswith(("keydown ", "keyup "))
+        and _field(line, "key") == expected_key
+    ]
+    return bool(tapped) and (
+        any("meta" in _field(line, "mods").split(",") for line in tapped)
+        or any(_field(line, "key") == "Super" for line in lines)
     )
 
 
@@ -429,19 +435,19 @@ def test_platform_meta_chord(tauri_input_app, sim):
         route Super into the metaKey flag, so we check for the key name
         on the keydown/keyup events instead).
 
-    The tap is `;`, not a letter: Windows reserves Win+<letter> (Win+A is
-    Quick Settings, Win+E Explorer, and so on) and the shell consumes the
-    letter, so the page never sees the tap. Semicolon is unbound and still
-    proves the modifier is held.
+    Windows uses F13: Win+semicolon opens the system emoji panel, which can
+    interfere with this test and subsequent pointer tests. macOS and Linux
+    retain semicolon. Each platform must report the chosen tap and modifier.
     """
     _clear_log(tauri_input_app)
     _focus_typed_field(tauri_input_app)
     sim.type_text("hello")
-    # No second clear: the predicate requires the chord's own `;` events, so
+    tap = "F13" if sys.platform == "win32" else ";"
+    # No second clear: the predicate requires the chord's own tap events, so
     # the type_text lines still in flight cannot satisfy the wait, and the
     # Clear press would move focus off the field right before the chord.
-    sim.chord(";", ["Meta"])
-    log = _wait_for_log(tauri_input_app, _command_chord_seen)
+    sim.chord(tap, ["Meta"])
+    log = _wait_for_log(tauri_input_app, lambda text: _command_chord_seen(text, tap))
     assert "meta" in log or "Super" in log or "Meta" in log, (
         f"expected platform command modifier in log, got:\n{log}"
     )

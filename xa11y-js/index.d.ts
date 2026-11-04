@@ -30,6 +30,7 @@ export {
   inputSim,
   locator,
   _makeTestApp,
+  _makeTestInput,
   _makeTestLocator,
 } from './native.js';
 
@@ -51,6 +52,7 @@ export type {
   ShellSurfaceKindName,
 } from './native.js';
 import type {
+  AnchorName,
   AutoScrollOutcomeName,
   Element,
   Event,
@@ -552,6 +554,20 @@ export class PermissionDeniedError extends XA11yError {}
  */
 export class AccessibilityNotEnabledError extends XA11yError {}
 
+/** Geometry checked before refusing an off-display pointer target. */
+export interface PointerTargetDiagnosis {
+  /** Requested point in the public desktop coordinate space. */
+  point: { x: number; y: number };
+  elementBounds: Rect | null;
+  anchor: AnchorName | { offset: { dx: number; dy: number } } | null;
+  /** Point after the backend's coordinate conversion. */
+  checkedPoint: { x: number; y: number };
+  coordinateSpace: string;
+  /** At most 32 regions; validation checks every region before truncating. */
+  displays: Rect[];
+  omittedDisplays: number;
+}
+
 /**
  * No element matched the selector (also used for stale elements).
  *
@@ -571,6 +587,8 @@ export class SelectorNotMatchedError extends XA11yError {
   hiddenReason: HiddenReasonName | null;
   /** Always `null` for this class (parity with {@link TimeoutError}). */
   autoScroll: AutoScrollOutcomeName | null;
+  /** Geometry of an off-display pointer target, otherwise `null`. */
+  pointerTarget: PointerTargetDiagnosis | null;
   /** Bounded near-miss candidates (e.g. same-role elements). */
   candidates: string[];
   /** Bounded rendering of the search scope (tree dump or app list). */
@@ -620,6 +638,7 @@ export class TimeoutError extends XA11yError {
    * when the wait never tried to scroll.
    */
   autoScroll: AutoScrollOutcomeName | null;
+  pointerTarget: PointerTargetDiagnosis | null;
   /** Bounded near-miss candidates; collected only when the selector never matched. */
   candidates: string[];
   /** Bounded rendering of the search scope; collected only when the selector never matched. */
