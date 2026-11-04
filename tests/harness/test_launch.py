@@ -106,7 +106,7 @@ def test_missing_cli_binary_fails_the_run(tmp_path, monkeypatch, capsys):
     """
     monkeypatch.setattr(launch, "find_cli_binary", lambda: None)
 
-    rc = launch._run_suites("qt", ["cli"], _FakeProc(), "xa11y-qt-test-app")
+    rc = launch._run_suites("qt", ["cli"], _FakeProc(), "xa11y-qt-test-app", 4242)
 
     assert rc != 0, "a requested suite that could not run must fail the harness"
     out = capsys.readouterr().out
@@ -118,7 +118,7 @@ def test_declared_skip_is_not_an_error(monkeypatch, capsys):
     """Declared per-app skips stay green — they are documented exclusions."""
     assert "cli" in launch.declared_suite_skips("accesskit")
 
-    rc = launch._run_suites("accesskit", ["cli"], _FakeProc(), "xa11y-test-app")
+    rc = launch._run_suites("accesskit", ["cli"], _FakeProc(), "xa11y-test-app", 4242)
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -145,7 +145,7 @@ def test_ledger_reports_every_requested_suite(monkeypatch, capsys):
         lambda *a, **kw: subprocess.CompletedProcess(a[0] if a else [], 1),
     )
 
-    launch._run_suites("qt", ["python", "js", "cli"], _FakeProc(), "app")
+    launch._run_suites("qt", ["python", "js", "cli"], _FakeProc(), "app", 4242)
 
     out = capsys.readouterr().out
     assert "=== suite ledger for qt ===" in out
@@ -168,7 +168,7 @@ def test_suite_timeout_kills_the_app_and_aborts_remaining_suites(monkeypatch, ca
     monkeypatch.setattr(launch, "find_cli_binary", lambda: None)
     monkeypatch.setattr(launch, "_kill_app", lambda proc: killed.append(proc.pid))
 
-    rc = launch._run_suites("qt", ["python", "js", "cli"], _FakeProc(), "app")
+    rc = launch._run_suites("qt", ["python", "js", "cli"], _FakeProc(), "app", 4242)
 
     assert rc == 1
     assert killed == [4242], "the wedged app must be stopped before the run ends"
@@ -400,6 +400,44 @@ def _fake_xa11y(find_error_name: str, listed: list[tuple[str, int]]):
     return mod
 
 
+def test_discovered_app_pid_is_distinct_from_its_launcher(monkeypatch):
+    """Electron's launcher PID is not the accessible application's identity."""
+    fake = _fake_xa11y("SelectorNotMatchedError", [])
+    app = fake.App("accessible-child", 9876)
+    monkeypatch.setattr(fake.App, "find", lambda predicate, timeout: app)
+    monkeypatch.setitem(sys.modules, "xa11y", fake)
+    monkeypatch.setattr(launch, "_app_command", lambda _: (["launcher"], {}, [app.name], None))
+    proc = _FakeProc()
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda *args, **kwargs: proc)
+
+    cleanup_proc, name, pid = launch._launch_app("electron")
+
+    assert cleanup_proc is proc
+    assert name == app.name
+    assert pid == app.pid != proc.pid
+
+
+@pytest.mark.parametrize("app_pid", [9876, None])
+def test_suites_receive_discovered_pid_without_replacing_cleanup_process(monkeypatch, app_pid):
+    """A name-only discovery must also clear an inherited, unrelated PID."""
+    monkeypatch.setenv("XA11Y_TEST_APP_PID", "1111")
+    environments = []
+    samples = []
+
+    def run(cmd, **kwargs):
+        environments.append(kwargs["env"])
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(launch.subprocess, "run", run)
+    monkeypatch.setattr(launch, "_check_suite_ran_tests", lambda *_: 0)
+    monkeypatch.setattr(launch, "_sample_content_state", lambda pid, *_: samples.append(pid))
+    launch._run_suites("electron", ["js"], _FakeProc(), "accessible-child", app_pid)
+
+    assert environments[0].get("XA11Y_TEST_APP_PID") == (str(app_pid) if app_pid else None)
+    assert environments[0]["XA11Y_TEST_APP_NAME"] == "accessible-child"
+    assert samples == [app_pid, app_pid]
+
+
 @pytest.mark.parametrize(
     "error_name", ["TimeoutError", "PlatformError", "SelectorNotMatchedError"]
 )
@@ -435,3 +473,36 @@ def test_a_discovery_failure_keeps_the_harness_context(monkeypatch, error_name):
     assert "not found after" not in message
     # The spawned app is reaped, not left running.
     assert holder["proc"].poll() is not None
+
+
+def test_standalone_script_clears_inherited_pid_before_discovery():
+    """A freshly launched standalone fixture must not inherit harness identity."""
+    import os
+    import shutil
+
+    if sys.platform == "win32":
+        git = shutil.which("git")
+        git_bash = Path(git).parent.parent / "bin" / "bash.exe" if git else None
+        bash = str(git_bash) if git_bash is not None and git_bash.is_file() else None
+    else:
+        bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("standalone script requires Bash")
+    script = (launch.PROJECT_ROOT / "scripts" / "run_js_tests.sh").read_text()
+    start = script.index('export XA11Y_TEST_APP="$APP_NAME"')
+    setup = script[start:].split("set +e", 1)[0]
+    command = (
+        "APP_NAME=winforms\n"
+        + setup
+        + '\nXA11Y_TEST_APP_NAME="fresh fixture"\n'
+        + 'printf "%s|%s" "${XA11Y_TEST_APP_PID-unset}" "$XA11Y_TEST_APP_NAME"'
+    )
+    result = subprocess.run(
+        [bash, "-c", command],
+        env={**os.environ, "XA11Y_TEST_APP_PID": "1111", "XA11Y_TEST_APP_NAME": "old"},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    assert result.stdout == "unset|fresh fixture"

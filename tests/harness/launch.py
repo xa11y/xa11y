@@ -407,10 +407,10 @@ def _print_content_state(app: "xa11y.App", selector: str, label: str) -> None:
 
 def _launch_app(
     app: str,
-) -> tuple[subprocess.Popen[bytes], str]:
+) -> tuple[subprocess.Popen[bytes], str, int | None]:
     """Start the test app subprocess and wait for it to become visible.
 
-    Returns (proc, discovered_app_name).
+    Returns (cleanup_proc, discovered_app_name, discovered_app_pid).
 
     Raises RuntimeError if the app does not appear within STARTUP_TIMEOUT.
     """
@@ -486,7 +486,7 @@ def _launch_app(
         ) from exc
 
     discovered_name = app.name or app_names[0]
-    print(f"Test app visible: {discovered_name!r} (pid={proc.pid})")
+    print(f"Test app visible: {discovered_name!r} (app pid={app.pid}, launcher pid={proc.pid})")
 
     # Wait for content to be ready if a selector was specified — again one
     # library call (`wait_attached`) rather than a manual poll loop.
@@ -541,7 +541,7 @@ def _launch_app(
             raise RuntimeError(detail)
         print("Test app is frontmost.")
 
-    return proc, discovered_name
+    return proc, discovered_name, app.pid
 
 
 def _kill_app(proc: subprocess.Popen[bytes]) -> None:
@@ -831,7 +831,7 @@ def _print_ledger(app: str, ledger: list[tuple[str, str, str]]) -> None:
         print(line)
 
 
-def _sample_content_state(pid: int, selector: str | None, label: str) -> None:
+def _sample_content_state(pid: int | None, selector: str | None, label: str) -> None:
     """Print the content element's state between suites, if there is one.
 
     Re-resolves the app rather than holding a handle across the suite runs:
@@ -839,6 +839,9 @@ def _sample_content_state(pid: int, selector: str | None, label: str) -> None:
     would report what we last saw rather than what is true now.
     """
     if selector is None:
+        return
+    if pid is None:
+        print(f"Content state ({label}): <discovered app has no PID>")
         return
     import xa11y
 
@@ -850,22 +853,23 @@ def _sample_content_state(pid: int, selector: str | None, label: str) -> None:
     _print_content_state(app, selector, label)
 
 
-def _suite_app_pid(proc: "subprocess.Popen[bytes] | ActivatedProcess") -> int:
-    """The activated process owns its accessible windows, including UWP frames."""
-    return proc.pid
-
-
 def _run_suites(
     app: str,
     suites: list[str],
     proc: subprocess.Popen[bytes],
     discovered_name: str,
+    discovered_pid: int | None,
     content_ready_selector: str | None = None,
 ) -> int:
     """Run each requested suite serially and return the worst exit code."""
     env = os.environ.copy()
     env["XA11Y_TEST_APP"] = app
-    env["XA11Y_TEST_APP_PID"] = str(_suite_app_pid(proc))
+    # The accessible app may be a child of the launcher (notably Electron).
+    # Keep proc for cleanup, but attach suites to the app discovery proved.
+    if discovered_pid is None:
+        env.pop("XA11Y_TEST_APP_PID", None)
+    else:
+        env["XA11Y_TEST_APP_PID"] = str(discovered_pid)
     if isinstance(proc, ActivatedProcess):
         # The UWP app's own process, for the tests that check xa11y attributes
         # the frame to it (tests/suites/python/test_uwp.py).
@@ -908,7 +912,7 @@ def _run_suites(
         report_path = Path(report_name)
         cmd = _suite_command(suite, report_path)
 
-        _sample_content_state(_suite_app_pid(proc), content_ready_selector, f"before {suite}")
+        _sample_content_state(discovered_pid, content_ready_selector, f"before {suite}")
         print(f"\n=== Running {suite} suite against {app} ===\n")
         try:
             result = subprocess.run(cmd, env=suite_env, cwd=str(PROJECT_ROOT), timeout=SUITE_TIMEOUT_S)
@@ -931,7 +935,7 @@ def _run_suites(
                 ledger.append((rest, _DID_NOT_RUN, "aborted: earlier suite timed out (app wedged)"))
             worst_rc = max(worst_rc, 1)
             break
-        _sample_content_state(_suite_app_pid(proc), content_ready_selector, f"after {suite}")
+        _sample_content_state(discovered_pid, content_ready_selector, f"after {suite}")
         rc = result.returncode
         if rc == 0:
             rc = _check_suite_ran_tests(suite, report_path)
@@ -1008,10 +1012,10 @@ def run(app_name: str, suites: Sequence[str] | None = None) -> int:
 
     proc: subprocess.Popen[bytes] | None = None
     try:
-        proc, discovered_name = _launch_app(app_name)
+        proc, discovered_name, discovered_pid = _launch_app(app_name)
         _, _, _, content_ready_selector = _app_command(app_name)
         return _run_suites(
-            app_name, suite_list, proc, discovered_name, content_ready_selector
+            app_name, suite_list, proc, discovered_name, discovered_pid, content_ready_selector
         )
     except KeyboardInterrupt:
         print("\nInterrupted by user.")

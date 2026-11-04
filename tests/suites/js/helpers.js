@@ -115,12 +115,7 @@ const APP_CONFIG = {
   },
 };
 
-// Candidate app names. `scripts/run_js_tests.sh` can pre-resolve the actual
-// name of a running test app and pass it via `XA11Y_TEST_APP_NAME`, in which
-// case we try it first and skip the startup polling loop entirely.
-//
-// `XA11Y_TEST_APP` selects a named fixture (accesskit, electron, …) whose
-// known process names are added to the candidate list automatically.
+// Names used only when no authoritative harness PID or resolved name is supplied.
 const APP_NAMES_BY_APP = {
   accesskit: ['xa11y-test-app', 'xa11y Test App'],
   qt: ['xa11y-qt-test-app', 'xa11y', 'python3', 'python', 'Python'],
@@ -148,36 +143,16 @@ const textFieldSelector = appConfig.textFieldSelector || (
   appConfig.textFieldName ? `text_field[name="${appConfig.textFieldName}"]` : null
 );
 
-let cachedApp = null;
-
-/**
- * Return the xa11y App handle for the running test app. Races all candidate
- * names in parallel so the first one to register (up to `STARTUP_TIMEOUT_MS`)
- * wins — handles cross-platform name differences without interleaved polling.
- */
-async function getApp() {
-  if (cachedApp !== null) return cachedApp;
-  const attempts = APP_NAMES.map((name) =>
-    App.byName(name, { timeout: STARTUP_TIMEOUT_MS }),
-  );
-  try {
-    cachedApp = await Promise.any(attempts);
-    return cachedApp;
-  } catch (err) {
-    let listed = '<failed to list>';
-    try {
-      const apps = await App.list();
-      listed = JSON.stringify(apps.map((a) => ({ name: a.name, pid: a.pid })));
-    } catch {
-      /* ignore */
-    }
-    throw new Error(
-      `Test app not found after ${STARTUP_TIMEOUT_MS}ms (tried ${APP_NAMES.join(', ')}). ` +
-        `Errors: ${err.errors?.map((e) => e.message).join(' | ') ?? err}. Running apps: ${listed}`,
-    );
-  }
-}
-
+const { createAppDiscovery } = require('./app-discovery');
+const discovery = createAppDiscovery({
+  App,
+  SelectorNotMatchedError,
+  names: APP_NAMES,
+  pid: process.env.XA11Y_TEST_APP_PID,
+  name: process.env.XA11Y_TEST_APP_NAME,
+  timeout: STARTUP_TIMEOUT_MS,
+});
+const getApp = () => discovery.getApp();
 /**
  * Find exactly one element by selector scoped to the test app. Throws with a
  * helpful message if the count is wrong.
@@ -211,7 +186,7 @@ function sleep(ms) {
 async function act(locator, action, ...args) {
   await locator[action](...args);
   await sleep(150);
-  cachedApp = null; // force a fresh App lookup so we re-read the tree
+  discovery.reset(); // force a fresh App lookup so we re-read the tree
   return getApp();
 }
 
