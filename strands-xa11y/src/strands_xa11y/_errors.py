@@ -81,6 +81,7 @@ _DIAGNOSIS_FIELDS = (
     "auto_scroll",
     "elapsed",
     "delivery",
+    "pointer_target",
 )
 
 

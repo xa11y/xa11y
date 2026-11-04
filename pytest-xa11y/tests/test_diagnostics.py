@@ -139,6 +139,27 @@ def test_render_diagnosis_reports_the_delivery_disposition():
     assert "delivery: not_delivered" in render_diagnosis(Undelivered("Timeout after 5.0s"))
 
 
+def test_render_diagnosis_preserves_plain_pointer_geometry():
+    error = xa11y.SelectorNotMatchedError("point matches no display")
+    geometry = {
+        "point": {"x": 1000, "y": 1000},
+        "element_bounds": {"x": 900, "y": 900, "width": 50, "height": 50},
+        "anchor": {"offset": {"dx": 100, "dy": 100}},
+        "checked_point": {"x": 2000, "y": 2000},
+        "coordinate_space": "x11 physical root pixels",
+        "displays": [{"x": -100, "y": 0, "width": 800, "height": 600}],
+        "omitted_displays": 2,
+    }
+    error.pointer_target = geometry
+    error.delivery = "not_delivered"
+    rendered = render_diagnosis(error)
+    assert f"pointer_target: {geometry}" in rendered
+    assert "delivery: not_delivered" in rendered
+    assert error.pointer_target is geometry
+    assert str(error) == "point matches no display"
+    assert "pointer_target" not in render_diagnosis(FakeTimeout("Timeout after 5.0s"))
+
+
 def test_render_diagnosis_says_how_an_auto_scroll_ended():
     class RefusedTimeout(FakeTimeout):
         hidden_reason = "scrolled_out"
