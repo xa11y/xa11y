@@ -259,6 +259,55 @@ def test_every_suite_writes_a_junit_report(suite, tmp_path):
     )
 
 
+def test_js_files_take_turns_with_the_shared_app(tmp_path, monkeypatch):
+    """Two test files must never hold the same fixture concurrently.
+
+    Exercise the real Node command against tiny files whose exclusive lock
+    stands in for the app. A concurrent file fails immediately instead of
+    mutating a fixture another file is inspecting.
+    """
+    import json
+    import shutil
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("requires Node to exercise JS integration scheduling")
+    test_dir = tmp_path / "tests" / "suites" / "js"
+    test_dir.mkdir(parents=True)
+    lock = json.dumps(str(tmp_path / "fixture.lock"))
+    trace = tmp_path / "trace.txt"
+    trace_js = json.dumps(str(trace))
+    for name in ("a", "b"):
+        (test_dir / f"{name}.test.js").write_text(
+            f"""
+const fs = require('node:fs');
+const {{ test }} = require('node:test');
+test('shared fixture {name}', async () => {{
+  const fd = fs.openSync({lock}, 'wx');
+  fs.appendFileSync({trace_js}, '{name}:start\\n');
+  try {{
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }} finally {{
+    fs.appendFileSync({trace_js}, '{name}:end\\n');
+    fs.closeSync(fd);
+    fs.unlinkSync({lock});
+  }}
+}});
+""",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(launch, "PROJECT_ROOT", tmp_path)
+    command = launch._suite_command("js", tmp_path / "junit.xml")
+    command[0] = node
+    result = subprocess.run(
+        command, cwd=tmp_path, capture_output=True, text=True, timeout=15, check=False
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert trace.read_text(encoding="utf-8").splitlines() == [
+        "a:start", "a:end", "b:start", "b:end"
+    ]
+
+
 # ── Startup and content-readiness budgets ────────────────────────────────────
 
 

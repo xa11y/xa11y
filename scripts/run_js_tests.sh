@@ -276,16 +276,16 @@ fi
 echo "Running JS integration tests (XA11Y_TEST_APP=$APP_NAME)..."
 set +e
 # Per-file timeout of 60s gives getApp() up to 30s of retry budget plus
-# actual test work; overall 180s bounds the whole suite so CI never hangs.
+# actual test work. Match the shared harness's overall suite budget now
+# that the files run sequentially.
 # Capture the output so we can also surface it in the GitHub step summary
 # when the raw logs aren't easily reachable.
 NODE_TEST_LOG="$JS_DIR/.node-test-output.log"
-# The mutating window suite churns the UIA/AX cache and must never run
-# concurrently with the ordinary action tests: `node --test` runs files in
-# parallel within one process, so a single glob over every file would
-# recreate the flakiness the js-window split exists to prevent. Mirror the
-# harness ordering in tests/harness/launch.py: every non-mutating file in
-# the broad run, then the mutating file(s) afterwards, serially. Collect the
+# Every file drives the same app, so serialize file execution to keep action
+# tests from changing focus, values or structure during another file's reads.
+# The mutating window suite also churns the UIA/AX cache. Mirror the harness
+# ordering in tests/harness/launch.py: run the broad suite, then the mutating
+# file(s) afterwards. Collect the
 # lists into arrays rather than newline-joined strings so each path expands
 # as one quoted argument (`"${arr[@]}"`): a checkout path containing spaces
 # would otherwise be word-split into several Node arguments. bash 3.2 (stock
@@ -303,24 +303,26 @@ while IFS= read -r file; do
 done < <(
     find "$PROJECT_ROOT/tests/suites/js" -name '*mutating*.test.js' -print | sort
 )
+NODE_TEST_ARGS=(--test --test-concurrency=1 --test-timeout=60000 --test-reporter=spec)
+NODE_SUITE_TIMEOUT="${XA11Y_TEST_SUITE_TIMEOUT:-900}"
 # GNU `timeout` is present on Linux and Git-Bash-on-Windows but not on
 # stock macOS. Fall back to an un-bounded run there; --test-timeout still
 # caps each individual file.
 if command -v timeout >/dev/null 2>&1; then
-    timeout 180 node --test --test-timeout=60000 --test-reporter=spec \
+    timeout "$NODE_SUITE_TIMEOUT" node "${NODE_TEST_ARGS[@]}" \
         "${JS_TEST_FILES[@]}" 2>&1 | tee "$NODE_TEST_LOG"
 else
-    node --test --test-timeout=60000 --test-reporter=spec \
+    node "${NODE_TEST_ARGS[@]}" \
         "${JS_TEST_FILES[@]}" 2>&1 | tee "$NODE_TEST_LOG"
 fi
 TEST_EXIT=${PIPESTATUS[0]}
 if [ ${#JS_MUTATING_FILES[@]} -gt 0 ]; then
     MUTATING_LOG="$JS_DIR/.node-test-mutating-output.log"
     if command -v timeout >/dev/null 2>&1; then
-        timeout 180 node --test --test-timeout=60000 --test-reporter=spec \
+        timeout "$NODE_SUITE_TIMEOUT" node "${NODE_TEST_ARGS[@]}" \
             "${JS_MUTATING_FILES[@]}" 2>&1 | tee "$MUTATING_LOG"
     else
-        node --test --test-timeout=60000 --test-reporter=spec \
+        node "${NODE_TEST_ARGS[@]}" \
             "${JS_MUTATING_FILES[@]}" 2>&1 | tee "$MUTATING_LOG"
     fi
     MUTATING_EXIT=${PIPESTATUS[0]}

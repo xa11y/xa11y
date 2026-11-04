@@ -51,6 +51,68 @@ try {
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($fields.Count -eq 0) { throw 'Raw View contains no Search nodes' }
     $fields | ConvertTo-Json -Depth 4
+
+    # Record native button identities across controlled focus changes. A
+    # TextBox template can expose a transient clear button; these observations
+    # distinguish that change from duplicate results in a descendant query.
+    function Read-ButtonIdentities($element, [int] $depth, [ref] $visited) {
+        $visited.Value = $visited.Value + 1
+        if ($depth -gt 30 -or $visited.Value -gt 256) {
+            throw 'UWP button inspection exceeded depth 30 or 256 nodes'
+        }
+        $current = $element.Current
+        if ($current.ControlType -eq [System.Windows.Automation.ControlType]::Button) {
+            $bounds = $current.BoundingRectangle
+            $name = [string] $current.Name
+            $className = [string] $current.ClassName
+            $runtimeId = @($element.GetRuntimeId())
+            [pscustomobject]@{
+                name = $name.Substring(0, [Math]::Min(120, $name.Length))
+                class_name = $className.Substring(0, [Math]::Min(80, $className.Length))
+                pid = $current.ProcessId
+                runtime_id = @($runtimeId | Select-Object -First 16)
+                runtime_id_truncated = $runtimeId.Count -gt 16
+                bounds = @($bounds.X, $bounds.Y, $bounds.Width, $bounds.Height)
+            }
+        }
+        $child = $walker.GetFirstChild($element)
+        while ($child) {
+            Read-ButtonIdentities $child ($depth + 1) $visited
+            $child = $walker.GetNextSibling($child)
+        }
+    }
+    $searchCondition = [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::NameProperty, 'Search'),
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ClassNameProperty, 'TextBox'))
+    $buttonCondition = [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::NameProperty, 'OK'),
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button))
+    $scope = [System.Windows.Automation.TreeScope]::Descendants
+    $search = $frame.FindFirst($scope, $searchCondition)
+    $ok = $frame.FindFirst($scope, $buttonCondition)
+    if (-not $search -or -not $ok) { throw 'The focus probe requires Search and OK' }
+    foreach ($stage in @(
+        @{ name = 'button_focused'; target = $ok },
+        @{ name = 'search_focused'; target = $search },
+        @{ name = 'search_blurred'; target = $ok }
+    )) {
+        $stage.target.SetFocus()
+        Start-Sleep -Milliseconds 200
+        $visited = 0
+        $buttons = @(Read-ButtonIdentities $frame 0 ([ref] $visited))
+        $report = [pscustomobject]@{
+            stage = $stage.name
+            count = $buttons.Count
+            truncated = $buttons.Count -gt 24
+            buttons = @($buttons | Select-Object -First 24)
+        }
+        Write-Output ('UWP_BUTTON_IDENTITIES ' + ($report | ConvertTo-Json -Depth 6 -Compress))
+    }
 }
 finally {
     Stop-Process -Id ([int] $appPid) -ErrorAction Stop

@@ -707,8 +707,10 @@ def _suite_command(suite: str, report_path: Path) -> list[str]:
         # Two reporters: `spec` keeps the human-readable log on stdout (the
         # default reporter is replaced as soon as --test-reporter is passed),
         # `junit` gives us the machine-readable copy to audit.
+        # The files drive one app: serialize them so action tests cannot
+        # change focus, values or tree structure during another file's reads.
         return [
-            "node", "--test",
+            "node", "--test", "--test-concurrency=1",
             "--test-reporter=spec", "--test-reporter-destination=stdout",
             "--test-reporter=junit", f"--test-reporter-destination={report_path}",
             *js_files,
@@ -723,7 +725,7 @@ def _suite_command(suite: str, report_path: Path) -> list[str]:
             )
         ]
         return [
-            "node", "--test",
+            "node", "--test", "--test-concurrency=1",
             "--test-reporter=spec", "--test-reporter-destination=stdout",
             "--test-reporter=junit", f"--test-reporter-destination={report_path}",
             *js_files,
