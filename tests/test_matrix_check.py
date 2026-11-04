@@ -61,13 +61,14 @@ def _matrix(apps: dict) -> dict:
 # ── Reading the workflow ─────────────────────────────────────────────────────
 
 
-def test_integ_cells_maps_runner_labels_to_platform_names(workflow):
+@pytest.mark.parametrize("macos_runner", ["macos-latest", "macos-15"])
+def test_integ_cells_maps_runner_labels_to_platform_names(workflow, macos_runner):
     workflow(
         """\
         - { os: ubuntu-latest,  app: tauri }
-        - { os: macos-latest,   app: tauri }
+        - { os: MACOS_RUNNER,   app: tauri }
         - { os: windows-latest, app: qt }
-        """
+        """.replace("MACOS_RUNNER", macos_runner)
     )
     assert matrix_check.integ_cells() == {
         "tauri": {"linux", "macos"},

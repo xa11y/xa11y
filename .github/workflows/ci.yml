@@ -309,7 +309,10 @@ jobs:
           - { os: ubuntu-latest,  app: gtk }
           - { os: ubuntu-latest,  app: tauri }
           - { os: ubuntu-latest,  app: electron }
-          - { os: macos-latest,   app: cocoa }
+          # Temporary Cocoa-only capacity contingency; the other five macOS
+          # jobs retain the live macOS 26 gate. Restore Cocoa after capacity
+          # recovers: https://github.com/xa11y/xa11y/issues/639
+          - { os: macos-15,       app: cocoa }
           - { os: macos-latest,   app: tauri }
           - { os: macos-latest,   app: qt }
           # Tauri on Windows is the only cell that reaches WebView2, and the
@@ -347,6 +350,7 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           cache-key: integ
+          cache-namespace: ${{ matrix.os == 'macos-15' && 'macos15-arm64' || '' }}
 
       - uses: actions/setup-python@v7
         with:
@@ -386,9 +390,9 @@ jobs:
           path: test-apps/tauri/target
           # icons/ is in the hash because tauri-build bakes icons/icon.ico into
           # a Windows resource, so it is a build input on that OS.
-          key: ${{ runner.os }}-tauri-app-${{ hashFiles('test-apps/tauri/Cargo.lock', 'test-apps/tauri/Cargo.toml', 'test-apps/tauri/build.rs', 'test-apps/tauri/tauri.conf.json', 'test-apps/tauri/src/**', 'test-apps/tauri/frontend/**', 'test-apps/tauri/icons/**') }}
+          key: ${{ runner.os }}${{ matrix.os == 'macos-15' && '-macos15-arm64' || '' }}-tauri-app-${{ hashFiles('test-apps/tauri/Cargo.lock', 'test-apps/tauri/Cargo.toml', 'test-apps/tauri/build.rs', 'test-apps/tauri/tauri.conf.json', 'test-apps/tauri/src/**', 'test-apps/tauri/frontend/**', 'test-apps/tauri/icons/**') }}
           restore-keys: |
-            ${{ runner.os }}-tauri-app-
+            ${{ runner.os }}${{ matrix.os == 'macos-15' && '-macos15-arm64' || '' }}-tauri-app-
 
       - name: Build Tauri test app
         if: matrix.app == 'tauri'
@@ -400,9 +404,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: test-apps/egui/target
-          key: ${{ runner.os }}-egui-app-${{ hashFiles('test-apps/egui/Cargo.toml', 'test-apps/egui/Cargo.lock', 'test-apps/egui/src/**') }}
+          key: ${{ runner.os }}${{ matrix.os == 'macos-15' && '-macos15-arm64' || '' }}-egui-app-${{ hashFiles('test-apps/egui/Cargo.toml', 'test-apps/egui/Cargo.lock', 'test-apps/egui/src/**') }}
           restore-keys: |
-            ${{ runner.os }}-egui-app-
+            ${{ runner.os }}${{ matrix.os == 'macos-15' && '-macos15-arm64' || '' }}-egui-app-
 
       - name: Build egui test app
         if: matrix.app == 'egui'
@@ -500,9 +504,9 @@ jobs:
           path: |
             xa11y-js/node_modules
             xa11y-js/target
-          key: ${{ runner.os }}-xa11y-js-${{ hashFiles('xa11y-js/package-lock.json', 'xa11y-js/Cargo.lock') }}
+          key: ${{ runner.os }}${{ matrix.os == 'macos-15' && '-macos15-arm64' || '' }}-xa11y-js-${{ hashFiles('xa11y-js/package-lock.json', 'xa11y-js/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-xa11y-js-
+            ${{ runner.os }}${{ matrix.os == 'macos-15' && '-macos15-arm64' || '' }}-xa11y-js-
 
       - name: Install xa11y-js dependencies and build
         working-directory: xa11y-js
@@ -554,7 +558,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: test-apps/cocoa/xa11y-cocoa-test-app
-          key: ${{ runner.os }}-cocoa-app-${{ hashFiles('test-apps/cocoa/main.swift', 'test-apps/cocoa/Makefile') }}
+          key: ${{ runner.os }}${{ matrix.os == 'macos-15' && '-macos15-arm64' || '' }}-cocoa-app-${{ hashFiles('test-apps/cocoa/main.swift', 'test-apps/cocoa/Makefile') }}
 
       # ── Build Cocoa test app (Swift, macOS-only) ───────────────────
       # The Cocoa app is NOT part of the Cargo workspace, so the "Build Rust
