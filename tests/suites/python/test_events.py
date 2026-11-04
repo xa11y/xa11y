@@ -275,10 +275,10 @@ def test_state_changed_event_checkbox(app, app_name, app_config, xa11y_events):
     ),
 )
 @pytest.mark.xfail(
-    condition=not UWP,
+    condition=not UWP and APP != "winforms",
     reason=(
-        "NameChanged delivery has no documented known-good app/platform "
-        "combo in this suite (Tauri-on-macOS rides the AppKit pathway, and "
+        "NameChanged delivery is unverified for this app/platform "
+        "combo (Tauri-on-macOS rides the AppKit pathway, and "
         "the AccessKit-backed apps are unverified); non-strict for the "
         "remaining combos until one is verified."
     ),
@@ -293,6 +293,34 @@ def test_name_changed_event_status_label(app, app_config, xa11y_events):
         app.locator(f'button[name="{submit_name}"]').press()
         event = events.expect(xa11y.EventType.NAME_CHANGED, timeout=5.0)
         assert event.event_type == xa11y.EventType.NAME_CHANGED
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or APP != "winforms",
+    reason="requires native WinForms string property-change events",
+)
+def test_repeated_name_events_keep_their_cached_properties(app, app_config):
+    """Borrowed string payloads survive callbacks and repeated subscriptions (#589)."""
+    submit = app.locator(f'button[name="{app_config["submit_button_name"]}"]')
+    status = app.locator('[name*="Status:"]')
+    framework = status.element().raw.get("uia_framework_id")
+    assert framework, "fixture must expose its UIA framework on ordinary reads"
+    for _cycle in range(3):
+        with app.subscribe() as sub:
+            for _press in range(10):
+                before = status.element().name
+                expected = "Status: Ready" if before == "Status: Submitted" else "Status: Submitted"
+                submit.press()
+                event = sub.wait_for(
+                    lambda e: (
+                        e.event_type == xa11y.EventType.NAME_CHANGED
+                        and e.target is not None
+                        and e.target.name == expected
+                    ),
+                    timeout=5.0,
+                )
+                assert event.app_pid == app.pid
+                assert event.target.raw.get("uia_framework_id") == framework
 
 
 # ---------------------------------------------------------------------------

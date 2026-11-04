@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use windows::core::{implement, BOOL};
+use windows::core::{implement, Interface, BOOL};
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
@@ -3140,36 +3140,10 @@ fn create_event_cache_request(
     create_cache_request(automation, &event_cache_properties())
 }
 
-/// The batch properties minus [`EVENT_EXCLUDED_PROPERTIES`]: what event
-/// handlers pre-fetch for an event's sender.
+/// Event senders expose the same snapshot properties as bulk reads.
 fn event_cache_properties() -> Vec<UIA_PROPERTY_ID> {
-    BATCH_PROPERTIES
-        .iter()
-        .copied()
-        .filter(|p| !EVENT_EXCLUDED_PROPERTIES.contains(p))
-        .collect()
+    BATCH_PROPERTIES.to_vec()
 }
-
-/// Batch properties that event handlers do not pre-fetch.
-///
-/// With these in the event request, the subscribing process's heap was
-/// corrupted (0xC0000374) while the WinForms test app delivered events: in
-/// three CI runs out of three. The one run so far with both left out of this
-/// request was clean. The root cause is not known; issue #589 tracks it.
-///
-/// Leaving them out costs one thing: an event target never advertises the
-/// MSAA default action as `press` (see `legacy_default_action_is_activation`,
-/// which needs a non-empty default action), and its raw map lacks
-/// `uia_framework_id`. Re-reading the element through a query restores both.
-///
-/// The two come back together or not at all. `is_msaa_framework(None)` is
-/// true, so caching the default action without the framework id would make
-/// a native UIA event target (Chromium, WPF, ...) advertise `press` for its
-/// MSAA default action.
-const EVENT_EXCLUDED_PROPERTIES: &[UIA_PROPERTY_ID] = &[
-    UIA_LegacyIAccessibleDefaultActionPropertyId,
-    UIA_FrameworkIdPropertyId,
-];
 
 fn create_cache_request(
     automation: &IUIAutomation,
@@ -7400,7 +7374,22 @@ impl IUIAutomationEventHandler_Impl for AutomationHandler_Impl {
     }
 }
 
-#[implement(IUIAutomationPropertyChangedEventHandler)]
+/// Same native IID and ABI as IUIAutomationPropertyChangedEventHandler.
+/// windows 0.62's generated trampoline takes an owned VARIANT and drops the
+/// caller's borrowed payload after dispatch. ManuallyDrop preserves the
+/// by-value ABI while keeping VariantClear exclusively with the native caller
+/// (issue #589). The normal windows-core COM refcount/marshaling stays intact.
+#[windows::core::interface("40cd37d4-c756-4b0c-8c6f-bddfeeb13b50")]
+unsafe trait BorrowedPropertyChangedEventHandler: windows::core::IUnknown {
+    fn property_changed(
+        &self,
+        sender: *mut core::ffi::c_void,
+        propertyid: UIA_PROPERTY_ID,
+        newvalue: std::mem::ManuallyDrop<VARIANT>,
+    ) -> windows::core::HRESULT;
+}
+
+#[implement(BorrowedPropertyChangedEventHandler)]
 struct PropertyHandler {
     ctx: Arc<EventContext>,
     cache: crate::coords::BoundsCacheRequest,
@@ -7415,9 +7404,24 @@ struct PropertyHandler {
     visual_state_by_hwnd: Arc<Mutex<HashMap<usize, i32>>>,
 }
 
-impl IUIAutomationPropertyChangedEventHandler_Impl for PropertyHandler_Impl {
+impl BorrowedPropertyChangedEventHandler_Impl for PropertyHandler_Impl {
+    unsafe fn property_changed(
+        &self,
+        sender: *mut core::ffi::c_void,
+        propertyid: UIA_PROPERTY_ID,
+        newvalue: std::mem::ManuallyDrop<VARIANT>,
+    ) -> windows::core::HRESULT {
+        // UIA keeps sender and newvalue alive for the duration of this call;
+        // neither borrowed parameter transfers a COM reference or allocation.
+        let sender = unsafe { IUIAutomationElement::from_raw_borrowed(&sender) };
+        self.handle_property_changed_event(sender.into(), propertyid, &newvalue)
+            .into()
+    }
+}
+
+impl PropertyHandler_Impl {
     #[allow(non_upper_case_globals)] // UIA constants use CamelCase in the windows crate
-    fn HandlePropertyChangedEvent(
+    fn handle_property_changed_event(
         &self,
         sender: windows::core::Ref<IUIAutomationElement>,
         propertyid: UIA_PROPERTY_ID,
@@ -7796,10 +7800,8 @@ impl WindowsProvider {
         });
 
         // Dedicated cache request: ensures event handlers receive elements
-        // with our standard batch of properties pre-fetched, minus the ones
-        // that are unsafe to fetch on the event thread (see
-        // `EVENT_EXCLUDED_PROPERTIES`). A fresh request, so we don't rely on
-        // a mutable handle held elsewhere.
+        // with the standard snapshot properties pre-fetched. A fresh request
+        // avoids relying on a mutable handle held elsewhere.
         let cache = create_event_cache_request(&self.automation)?;
 
         let focus: IUIAutomationFocusChangedEventHandler = FocusHandler {
@@ -7813,12 +7815,14 @@ impl WindowsProvider {
         }
         .into();
         let visual_states = Arc::new(Mutex::new(HashMap::<usize, i32>::new()));
-        let property: IUIAutomationPropertyChangedEventHandler = PropertyHandler {
+        let borrowed_property: BorrowedPropertyChangedEventHandler = PropertyHandler {
             ctx: ctx.clone(),
             cache: cache.clone(),
             visual_state_by_hwnd: Arc::clone(&visual_states),
         }
         .into();
+        let property: IUIAutomationPropertyChangedEventHandler =
+            uia_call(|| borrowed_property.cast())?;
         let structure: IUIAutomationStructureChangedEventHandler = StructureHandler {
             ctx: ctx.clone(),
             cache: cache.clone(),
@@ -7986,6 +7990,68 @@ mod tests {
             super::process_app_name(r"C:\Windows\System32\notepad.exe", None),
             ("notepad".to_string(), "process")
         );
+    }
+
+    #[implement(IUIAutomationEventHandler)]
+    struct BorrowedPayloadProbe(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for BorrowedPayloadProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl IUIAutomationEventHandler_Impl for BorrowedPayloadProbe_Impl {
+        fn HandleAutomationEvent(
+            &self,
+            _: windows::core::Ref<IUIAutomationElement>,
+            _: UIA_EVENT_ID,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+    }
+    #[implement(BorrowedPropertyChangedEventHandler)]
+    struct NoopPropertyProbe;
+    impl BorrowedPropertyChangedEventHandler_Impl for NoopPropertyProbe_Impl {
+        unsafe fn property_changed(
+            &self,
+            _: *mut core::ffi::c_void,
+            _: UIA_PROPERTY_ID,
+            _: std::mem::ManuallyDrop<VARIANT>,
+        ) -> windows::core::HRESULT {
+            windows::core::HRESULT(0)
+        }
+    }
+    #[test]
+    fn property_callback_keeps_borrowed_variant_payload_alive() {
+        use windows::core::Interface;
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let payload: IUIAutomationEventHandler = BorrowedPayloadProbe(Arc::clone(&drops)).into();
+        let unknown: windows::core::IUnknown = payload.cast().expect("IUnknown");
+        drop(payload);
+        let value = VARIANT::from(unknown);
+        let handler: BorrowedPropertyChangedEventHandler = NoopPropertyProbe.into();
+        let handler: IUIAutomationPropertyChangedEventHandler =
+            handler.cast().expect("same native IID");
+        unsafe {
+            handler.HandlePropertyChangedEvent(
+                None::<&IUIAutomationElement>,
+                UIA_NamePropertyId,
+                &value,
+            )
+        }
+        .expect("no-op callback");
+        let prematurely_dropped = drops.load(Ordering::SeqCst);
+        if prematurely_dropped != 0 {
+            // The upstream trampoline already cleared our borrowed value;
+            // clearing its dangling interface pointer a second time is unsafe.
+            std::mem::forget(value);
+        } else {
+            drop(value);
+        }
+        assert_eq!(
+            prematurely_dropped, 0,
+            "callback must not release its borrowed payload"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     use super::*;
@@ -8908,29 +8974,10 @@ mod tests {
     }
 
     #[test]
-    fn event_cache_properties_are_the_batch_minus_the_two_exclusions() {
+    fn event_cache_keeps_default_action_and_framework_id() {
         let props = event_cache_properties();
-        assert!(
-            !props.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId),
-            "DefaultAction must stay out of the event request (#589)"
-        );
-        assert!(
-            !props.contains(&UIA_FrameworkIdPropertyId),
-            "FrameworkId must stay out of the event request (#589)"
-        );
-        for prop in BATCH_PROPERTIES {
-            if !EVENT_EXCLUDED_PROPERTIES.contains(prop) {
-                assert!(props.contains(prop), "{prop:?} dropped from events");
-            }
-        }
-        // An exclusion that is not in the batch excludes nothing while still
-        // reading as a live workaround.
-        for prop in EVENT_EXCLUDED_PROPERTIES {
-            assert!(
-                BATCH_PROPERTIES.contains(prop),
-                "{prop:?} is excluded from the event request but not batched"
-            );
-        }
+        assert!(props.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId));
+        assert!(props.contains(&UIA_FrameworkIdPropertyId));
     }
 
     #[test]
