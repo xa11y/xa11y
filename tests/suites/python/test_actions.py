@@ -627,7 +627,14 @@ def test_action_on_a_destroyed_widget_is_stale(app):
     before = old.description
     old.press()
     deadline = time.monotonic() + 5.0
-    while locator.element().description == before:
+    while True:
+        try:
+            replaced = locator.element().description != before
+        except xa11y.SelectorNotMatchedError:
+            # The replacement can be absent from AT-SPI while GTK publishes it.
+            replaced = False
+        if replaced:
+            break
         assert time.monotonic() < deadline, "the Rebuild button never swapped"
         time.sleep(0.1)
     with pytest.raises(xa11y.SelectorNotMatchedError, match="stale"):
