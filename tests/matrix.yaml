@@ -551,13 +551,17 @@ gaps:
 
   - id: uwp_textbox_nested_text_field
     description: >
-      The XAML TextBox reads as text_field "Search" with a nested child
-      text_field "Search" of the same value, so the JS compat check that
-      requires exactly one named text field is turned off for uwp
-      (textFieldName: null in tests/suites/js/helpers.js). Whether the inner
-      element should be surfaced at all is open.
+      The XAML TextBox has two native Edit nodes in UIA Raw View (#606).
+      The outer node has ClassName=TextBox and IsControlElement=true;
+      its unnamed-class child has IsControlElement=false and
+      IsContentElement=false. Both AutomationIds are empty. Keep the inner
+      node because xa11y deliberately exposes Raw View, including non-control
+      fragments used by Qt and AccessKit; a nested Edit is not sufficient
+      evidence to discard a native node across frameworks. The UWP CI probe
+      records these native facts, and JS compat coverage selects the outer
+      TextBox explicitly.
     severity: low
-    workaround: "The Python compat suite reads the field and its value on the uwp cell."
+    workaround: 'Select the outer field with text_field[name="Search"][class_name="TextBox"].'
     affects:
       apps: [uwp]
       language: js
