@@ -2696,6 +2696,27 @@ mod tests {
     }
 
     #[test]
+    fn off_display_pointer_failure_prints_geometry_and_delivery() {
+        let input = crate::InputSim::new(std::sync::Arc::new(
+            xa11y_core::mock::MockInputProvider::new(std::time::Duration::ZERO),
+        ));
+        let error = CliError::Xa11y(input.mouse().click((500, 500)).unwrap_err());
+        let text = error.to_string();
+        assert!(
+            text.contains("pointer target: Point { x: 500, y: 500 }"),
+            "{text}"
+        );
+        assert!(text.contains("mock desktop pixels"), "{text}");
+        assert!(text.contains("displays:"), "{text}");
+        assert_eq!(error.exit_code(), 1);
+        let disposition = delivery_line("click", &error).expect("click reports delivery");
+        assert!(
+            disposition.starts_with("delivery: not_delivered"),
+            "{disposition}"
+        );
+    }
+
+    #[test]
     fn read_only_commands_and_usage_errors_print_no_delivery_line() {
         let miss = CliError::Xa11y(Error::selector_not_matched("button"));
         assert_eq!(delivery_line("find", &miss), None);

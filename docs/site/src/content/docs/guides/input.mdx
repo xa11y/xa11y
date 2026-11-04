@@ -130,6 +130,41 @@ Every pointer method accepts either a screen-space point or an `Element`:
 - **Point** is an absolute desktop coordinate. Windows uses physical pixels. macOS uses points. Linux uses logical pixels, or physical pixels where the HiDPI scale can't be read reliably (see [platform details](/reference/platform-details/#coordinates-and-hidpi)). Origin is the top-left of the primary display, and negative values are valid on multi-monitor setups.
 - **Element** uses the centre of the element's `bounds` at the time of the call. Rectangles are half-open. Right and bottom anchors use the last coordinate inside the bounds rather than the exclusive far edge. `InputSim` does not re-read the accessibility tree for you, so re-fetch via a locator first if the UI may have moved.
 
+### Check a refused pointer target
+
+If a pointer action returns `SelectorNotMatched` (`SelectorNotMatchedError` in
+Python and JS), inspect its geometry diagnosis. The built-in Windows, macOS,
+and X11 backends check that the requested point lies inside an active display.
+This applies to raw points and element anchors; gaps between monitors are
+outside every display. For Wayland and headless uinput, raw points are checked
+against the configured virtual screen extent. Element targets remain
+unsupported there.
+
+The initial check happens before input is posted, including held modifiers,
+so its failure reports `delivery: not_delivered`. Both drag endpoints are
+checked before the gesture starts. Display query failures retain their
+original error kind instead of becoming a target miss.
+
+Read `error.pointer_target` in Python or `error.pointerTarget` in JS for the
+requested point, original element bounds and anchor, and the point and display
+rectangles in the checked native coordinate space. The display snapshot is
+limited to 32 rectangles and reports how many were omitted; validation uses
+the complete set. In Rust, read `pointer_target` from the `Diagnosis` returned
+by `Error::diagnosis`; MCP includes it under
+`diagnosis.pointer_target`. The CLI prints the geometry with the failure.
+
+For raw points, choose a coordinate on a display. For element targets, move
+the window onto a display and fetch a fresh element before retrying.
+Display membership alone does not establish that a target is visible in its
+viewport or still at those coordinates when input arrives. Another window
+can cover it.
+
+Moves while a button is held through the same input provider can cross
+display gaps. Releases also remain available, so a geometry check cannot
+strand a captured gesture. A click count of zero remains a no-op. Custom Rust
+input providers retain their existing behavior unless they override
+`InputProvider::validate_pointer_target`.
+
 ### Clicking something that is still moving
 
 An element sliding in, or a dialog still settling after a layout change, has
