@@ -118,7 +118,7 @@ apps:
       makeappx, signed with a throwaway self-signed certificate, sideloaded
       with Add-AppxPackage and activated by AppUserModelID
       (test-apps/uwp/launch.ps1). tests/suites/python/test_uwp.py holds the
-      frame-attribution checks, strict-xfailed until #497 is fixed.
+      frame-attribution checks against the activated app process.
 
 features:
   compat:
@@ -529,25 +529,6 @@ gaps:
       apps: [uwp]
       language: cli
       features: [windows]
-
-  - id: uwp_events_attributed_to_frame_host
-    description: >
-      Until #497 is fixed (#567), xa11y resolves the UWP test app to
-      ApplicationFrameHost, so the Python events suite subscribes on the
-      frame host's pid while the XAML events come from the UWP process.
-      FocusChanged, ValueChanged (slider), StateChanged (check box),
-      NameChanged, event app metadata, event target and wait_for all time
-      out there, though the same tests XPASS on the wpf cell. They are
-      strict xfails with `raises=` on the uwp cell
-      (uwp_frame_host_xfail in tests/suites/python/test_events.py), so the
-      #567 fix has to flip them. Subscription lifecycle, try_recv, and
-      StructureChanged (non-strict, XPASS) do run there.
-    severity: medium
-    workaround: "The wpf cell covers UIA event delivery from a XAML framework; #567 is the fix."
-    affects:
-      apps: [uwp]
-      language: python
-      features: [events]
 
   - id: uwp_textbox_nested_text_field
     description: >

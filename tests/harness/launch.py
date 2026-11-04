@@ -228,16 +228,10 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
         # AppUserModelID, so the command is the activation helper, which
         # prints the app's PID and exits. _launch_app special-cases it.
         #
-        # TODO(#497): drop "ApplicationFrameHost". Today xa11y attributes a
-        # UWP app's only top-level window — the ApplicationFrameHost frame —
-        # to ApplicationFrameHost.exe, so neither the app's PID nor its own
-        # name ("xa11y-uwp-test-app") matches anything in App.list(). Matching
-        # the frame host's name is what works until #497 attributes the frame
-        # to the process that owns its CoreWindow.
         return (
             _UWP_LAUNCH_COMMAND,
             {},
-            ["xa11y UWP Test", "xa11y-uwp-test-app", "ApplicationFrameHost"],
+            ["xa11y UWP Test"],
             'button[name="OK"]',
         )
 
@@ -308,10 +302,6 @@ class ActivatedProcess:
         self._handle = handle
         self.pid = pid
         self.returncode: int | None = None
-        # The pid xa11y reports for the app, set by _launch_app once the app
-        # is discovered. Until #497 is fixed that is ApplicationFrameHost's,
-        # not this process's; see _suite_app_pid.
-        self.accessible_pid: int = pid
 
     def poll(self) -> int | None:
         if self.returncode is None:
@@ -496,8 +486,6 @@ def _launch_app(
         ) from exc
 
     discovered_name = app.name or app_names[0]
-    if isinstance(proc, ActivatedProcess) and app.pid is not None:
-        proc.accessible_pid = app.pid
     print(f"Test app visible: {discovered_name!r} (pid={proc.pid})")
 
     # Wait for content to be ready if a selector was specified — again one
@@ -863,20 +851,7 @@ def _sample_content_state(pid: int, selector: str | None, label: str) -> None:
 
 
 def _suite_app_pid(proc: "subprocess.Popen[bytes] | ActivatedProcess") -> int:
-    """The pid the suites address the app by (``XA11Y_TEST_APP_PID``).
-
-    The launched process's pid for every app but UWP. For UWP it is the pid
-    xa11y reported when it discovered the app: the CLI and MCP suites pass
-    ``--pid`` / ``pid`` and the window suites resolve the app by pid, and
-    until #497 is fixed the only top-level window is attributed to
-    ApplicationFrameHost.exe, so the UWP process's own pid matches nothing.
-
-    TODO(#497): once the frame is attributed to the UWP process the two pids
-    are equal and this indirection can go. test_uwp.py's strict xfails are
-    what says when.
-    """
-    if isinstance(proc, ActivatedProcess):
-        return proc.accessible_pid
+    """The activated process owns its accessible windows, including UWP frames."""
     return proc.pid
 
 

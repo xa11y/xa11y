@@ -837,6 +837,9 @@ def test_state_changed_minimized_on_minimize_restore(app: xa11y.App) -> None:
             )
             assert event.state_flag == "minimized"
             assert event.state_value is True
+            if APP == "uwp":
+                assert event.app_pid == app.pid
+                assert event.target is not None and event.target.pid == app.pid
 
             win.restore()
             event = sub.wait_for(
@@ -848,6 +851,9 @@ def test_state_changed_minimized_on_minimize_restore(app: xa11y.App) -> None:
                 timeout=5.0,
             )
             assert event.state_value is False
+            if APP == "uwp":
+                assert event.app_pid == app.pid
+                assert event.target is not None and event.target.pid == app.pid
     except Exception:
         # Never leave the shared app minimized for the suite after this one;
         # the original failure wins over any cleanup failure.
@@ -1518,3 +1524,85 @@ def test_gtk4_element_bounds_follow_the_window(app: xa11y.App) -> None:
         assert_viewport_inside_window()
     finally:
         _x11_move_client_window(app.pid, title, 0, 0)
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or APP != "uwp",
+    reason="requires the UWP fixture and native package lifecycle management",
+)
+def test_uwp_suspended_frame_keeps_app_identity(app, tmp_path):
+    """A detached, suspended frame stays attributed to its packaged process (#497)."""
+    import ctypes
+    import subprocess
+    from ctypes import wintypes
+    from pathlib import Path
+
+    title = "xa11y UWP Test"
+    pid = int(os.environ["XA11Y_UWP_APP_PID"])
+    win = app.locator(f'window[name*="{title}"]').element()
+    assert "minimize" in win.actions and "restore" in win.actions
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.FindWindowExW.argtypes = [
+        wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR
+    ]
+    user32.FindWindowExW.restype = wintypes.HWND
+    frame = user32.FindWindowW("ApplicationFrameWindow", win.name)
+    assert frame, f"native ApplicationFrameWindow not found for {win.name!r}"
+    helper = Path(__file__).resolve().parents[3] / "test-apps" / "uwp" / "plm.ps1"
+    marker = tmp_path / "suspended"
+    proc = None
+    try:
+        win.minimize()
+        proc = subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(helper), "hold", "-ReadyFile", str(marker)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+        def suspended():
+            if proc.poll() is not None:
+                out, err = proc.communicate(timeout=5)
+                pytest.fail(f"lifecycle helper exited {proc.returncode}: {out}\n{err}")
+            return marker.exists()
+
+        _wait_until(suspended, 30.0, "native package state PES_SUSPENDED")
+        # Assert the fixture exercises AUMID attribution rather than passing
+        # via the normal CoreWindow-child lookup.
+        _wait_until(
+            lambda: not user32.FindWindowExW(frame, None, "Windows.UI.Core.CoreWindow", None),
+            10.0, "the suspended CoreWindow to detach from its frame",
+        )
+        by_pid = xa11y.App.by_pid(pid, timeout=5.0)
+        assert by_pid.name == title
+        assert by_pid.locator(f'window[name*="{title}"]').element()
+        listed = [candidate for candidate in xa11y.App.list() if candidate.pid == pid]
+        assert len(listed) == 1, (
+            f"suspended app not listed once: {[(a.name, a.pid) for a in listed]}"
+        )
+        assert listed[0].name == title
+        assert listed[0].locator(f'window[name*="{title}"]').element()
+    finally:
+        try:
+            if proc is not None and proc.poll() is None:
+                try:
+                    out, err = proc.communicate("resume\n", timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    out, err = proc.communicate(timeout=5)
+                    recovery = subprocess.run(
+                        ["powershell.exe", "-NoProfile", "-NonInteractive",
+                         "-ExecutionPolicy", "Bypass", "-File", str(helper), "resume"],
+                        capture_output=True, text=True, timeout=30, check=False,
+                    )
+                    pytest.fail(
+                        f"package cleanup timed out: {out}\n{err}; recovery "
+                        f"exit={recovery.returncode}: {recovery.stdout}\n{recovery.stderr}"
+                    )
+                assert proc.returncode == 0, f"package cleanup failed: {out}\n{err}"
+        finally:
+            _wait_for_window(app, "restore", "the resumed UWP frame").restore()
+    resumed = xa11y.App.by_pid(pid, timeout=5.0)
+    assert resumed.name == title
+    resumed.locator('button[name="OK"]').wait_attached(timeout=10.0)

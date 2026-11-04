@@ -292,10 +292,15 @@ The node's `raw` map records how it was built:
 | raw key | Value |
 |---|---|
 | `uia_synthesized` | `true`. The marker for a node that was synthesized and backs no live UIA element. |
-| `uia_name_source` | `"process"` (executable stem from `OpenProcess` + `QueryFullProcessImageNameW`), or `"window_title"` (the representative window's title, used when the process cannot be opened) |
+| `uia_name_source` | `"package"` (a packaged app's display name, as the Start menu shows it), `"process"` (executable stem from `OpenProcess` + `QueryFullProcessImageNameW`), or `"window_title"` (the representative window's title, used when the process cannot be opened) |
 | `uia_process_name` | full executable path, when the process could be queried |
+| `uia_app_user_model_id` | the AppUserModelID of a packaged app's process |
 
 The representative window is the process's first top-level window in z-order.
+
+A packaged app (UWP, or a packaged desktop app) takes the display name the Start menu and taskbar show, so Calculator is `Calculator` rather than `CalculatorApp`. xa11y reads the process's AppUserModelID and asks the shell for that app's entry in `shell:AppsFolder`, which resolves the manifest's localized `DisplayName`. This also applies to desktop apps installed as packages. On Windows 11 the Notepad node is `Notepad` and the Windows Terminal node is `Terminal`, where earlier versions of xa11y used the executable names `notepad` and `WindowsTerminal`. A packaged app with no Start-menu entry keeps its executable name, and `uia_name_source` says which one the node got. Apps that aren't packaged keep the executable name.
+
+UWP and other packaged apps draw inside a frame window that `ApplicationFrameHost.exe` owns. xa11y attributes that frame to the app it shows, so each app has its own name and process ID. A running app's frame is matched through the app's own `Windows.UI.Core.CoreWindow` inside it. A minimized or suspended app's frame is matched by its AppUserModelID to the process that has the same one. A frame whose app has exited belongs to no app: it is left out of the list, and an app lookup that fails names it in its diagnosis.
 
 xa11y sets the UIA connection timeout to 2 s and the transaction timeout to 20 s, so one hung provider cannot stall a call for longer than that. A window Windows already reports as not responding (`IsHungAppWindow`) fails fast instead. Listing apps, looking an app up by process ID, reading an app's windows, and finding the foreground app all return `Timeout`, and the diagnosis names each hung window with its title, process ID and executable. The elapsed time on that `Timeout` reports the 5 s threshold Windows uses to call a window hung. xa11y itself does not wait. A window that is only briefly busy is read normally.
 

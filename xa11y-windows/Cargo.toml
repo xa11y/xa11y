@@ -27,6 +27,9 @@ windows = { version = "0.62", features = [
     "Win32_System_ProcessStatus",
     "Win32_Security",
     "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Storage_Packaging_Appx",
 ] }
 # Needed by the `#[implement]` macro, whose generated code references
 # `::windows_core::*` paths directly rather than going through the `windows`

@@ -1,48 +1,107 @@
-# Suspend, resume or query the installed xa11y UWP test app's lifecycle.
-#
-#   powershell -File test-apps/uwp/plm.ps1 suspend
-#   powershell -File test-apps/uwp/plm.ps1 resume
-#   powershell -File test-apps/uwp/plm.ps1 query
-#
-# Drives PLMDebug.exe, the Process Lifetime Management debugging tool that
-# ships with the Debugging Tools for Windows in the Windows SDK
-# (Windows Kits\10\Debuggers\<arch>\plmdebug.exe). A suspended UWP app keeps
-# its process but loses the CoreWindow child of its ApplicationFrameHost
-# frame, which is the state #497's AppUserModelID fallback exists for.
-#
-# `/enableDebug` is applied first so the app's lifecycle stays where PLMDebug
-# puts it instead of the shell resuming or terminating it on its own; it
-# persists until `/disableDebug` or the package is reinstalled. Suspending a
-# package that is not running is an error from PLMDebug, reported as-is.
-
+# Control the fixture's package lifecycle through the same native COM API as
+# PLMDebug, without requiring the optional Windows SDK debugger installation.
+# `hold` suspends until stdin receives a line (or closes), then always resumes
+# and disables debugging. The marker is written only after PES_SUSPENDED.
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('suspend', 'resume', 'query')]
-    [string]$Action
+    [ValidateSet('suspend', 'resume', 'query', 'hold')]
+    [string]$Action,
+    [string]$ReadyFile
 )
-
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+[ComImport, Guid("F27C3930-8029-4AD1-94E3-3DBA417810C1"),
+ InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IPackageDebugSettings {
+    void EnableDebugging([MarshalAs(UnmanagedType.LPWStr)] string package,
+        [MarshalAs(UnmanagedType.LPWStr)] string debugger, IntPtr environment);
+    void DisableDebugging([MarshalAs(UnmanagedType.LPWStr)] string package);
+    void Suspend([MarshalAs(UnmanagedType.LPWStr)] string package);
+    void Resume([MarshalAs(UnmanagedType.LPWStr)] string package);
+    void TerminateAllProcesses([MarshalAs(UnmanagedType.LPWStr)] string package);
+    void SetTargetSessionId(uint session);
+    void EnumerateBackgroundTasks([MarshalAs(UnmanagedType.LPWStr)] string package,
+        out uint count, out IntPtr ids, out IntPtr names);
+    void ActivateBackgroundTask(IntPtr taskId);
+    void StartServicing([MarshalAs(UnmanagedType.LPWStr)] string package);
+    void StopServicing([MarshalAs(UnmanagedType.LPWStr)] string package);
+    void StartSessionRedirection([MarshalAs(UnmanagedType.LPWStr)] string package, uint session);
+    void StopSessionRedirection([MarshalAs(UnmanagedType.LPWStr)] string package);
+    void GetPackageExecutionState([MarshalAs(UnmanagedType.LPWStr)] string package, out int state);
+}
+public sealed class PackageLifecycle : IDisposable {
+    private IPackageDebugSettings settings;
+    private PackageLifecycle() {
+        settings = (IPackageDebugSettings)Activator.CreateInstance(Type.GetTypeFromCLSID(
+            new Guid("B1AEC16F-2383-4852-B0E9-8F0B1DC66B4D")));
+    }
+    public static PackageLifecycle Create() { return new PackageLifecycle(); }
+    public void EnableDebugging(string package) {
+        // PowerShell converts null managed string arguments to empty strings.
+        // Keep the optional native debugger/environment arguments truly null.
+        settings.EnableDebugging(package, null, IntPtr.Zero);
+    }
+    public void DisableDebugging(string package) { settings.DisableDebugging(package); }
+    public void Suspend(string package) { settings.Suspend(package); }
+    public void Resume(string package) { settings.Resume(package); }
+    public void GetPackageExecutionState(string package, out int state) {
+        settings.GetPackageExecutionState(package, out state);
+    }
+    public void Dispose() {
+        if (settings != null) {
+            Marshal.FinalReleaseComObject(settings);
+            settings = null;
+        }
+    }
+}
+"@
+
 $pkg = Get-AppxPackage -Name 'xa11y.UwpTestApp'
 if (-not $pkg) { throw 'xa11y.UwpTestApp is not installed; run build.ps1 and install.ps1 first' }
-
-$kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Debuggers'
-$plm = Get-ChildItem -Path $kits -Recurse -Filter plmdebug.exe -ErrorAction SilentlyContinue |
-    Where-Object { $_.Directory.Name -eq 'x64' } |
-    Select-Object -First 1 -ExpandProperty FullName
-if (-not $plm) {
-    throw "plmdebug.exe not found under $kits; install the Debugging Tools for Windows from the Windows SDK"
-}
-
-function Invoke-Plm([string[]]$PlmArgs) {
-    & $plm @PlmArgs
-    if ($LASTEXITCODE -ne 0) { throw "plmdebug $($PlmArgs -join ' ') failed with exit code $LASTEXITCODE" }
-}
-
 $full = $pkg.PackageFullName
-switch ($Action) {
-    'suspend' { Invoke-Plm '/enableDebug', $full; Invoke-Plm '/suspend', $full }
-    'resume' { Invoke-Plm '/resume', $full }
-    'query' { Invoke-Plm '/query', $full }
+$settings = [PackageLifecycle]::Create()
+$enabled = $false
+try {
+    if ($Action -eq 'query') {
+        $state = 0
+        $settings.GetPackageExecutionState($full, [ref]$state)
+        Write-Output $state
+    } else {
+        if ($Action -eq 'hold' -and -not $ReadyFile) { throw 'hold requires -ReadyFile' }
+        $settings.EnableDebugging($full)
+        $enabled = $true
+        if ($Action -eq 'resume') {
+            $settings.Resume($full)
+            return
+        }
+        $settings.Suspend($full)
+        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        do {
+            $state = 0
+            $settings.GetPackageExecutionState($full, [ref]$state)
+            if ($state -eq 3) { break } # PACKAGE_EXECUTION_STATE.PES_SUSPENDED
+            if ([DateTime]::UtcNow -ge $deadline) { throw "Package did not suspend: state=$state" }
+            Start-Sleep -Milliseconds 100
+        } while ($true)
+        if ($Action -eq 'hold') {
+            [IO.File]::WriteAllText($ReadyFile, 'PES_SUSPENDED')
+            [Console]::In.ReadLine() | Out-Null
+        }
+    }
+} finally {
+    try {
+        if ($enabled) {
+            try {
+                if ($Action -eq 'hold') { $settings.Resume($full) }
+            } finally {
+                $settings.DisableDebugging($full)
+            }
+        }
+    } finally {
+        $settings.Dispose()
+    }
 }

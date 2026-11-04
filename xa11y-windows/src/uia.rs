@@ -205,6 +205,38 @@ static UIA_FIRST_TOUCH: Mutex<()> = Mutex::new(());
 /// no longer needs [`UIA_FIRST_TOUCH`].
 static UIA_WARMED: AtomicBool = AtomicBool::new(false);
 
+/// The desktop's top-level windows with their app pids, and notes for the
+/// UWP frames that belong to no app (see `WindowsProvider::desktop_app_windows`).
+type DesktopAppWindows = (Vec<(IUIAutomationElement, u32)>, Vec<String>);
+
+/// Keep the process MTA alive for xa11y's lifetime (`CoIncrementMTAUsage`,
+/// once per process).
+///
+/// Provider methods run on whatever thread the caller uses, and most of
+/// those threads never initialized COM. UIA's client objects are agile, so
+/// they work there anyway, but the shell calls UWP attribution makes
+/// (`SHGetPropertyStoreForWindow`, `SHCreateItemInKnownFolder`) need COM on
+/// the calling thread, and fail with `CO_E_NOTINITIALIZED` without it. With
+/// the MTA usage held, every thread that has not chosen an apartment is
+/// implicitly in the MTA (issue #497; an STA host thread keeps its STA, which
+/// those calls also accept). The cookie is never released: the usage lasts
+/// as long as the process.
+fn ensure_mta_usage() -> Result<()> {
+    // Set only on success, so a failed attempt is retried by the next
+    // provider (#533). Two threads racing here both increment; a second
+    // usage count is harmless.
+    static HELD: AtomicBool = AtomicBool::new(false);
+    if HELD.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() }.map_err(|e| Error::Platform {
+        code: e.code().0 as i64,
+        message: format!("CoIncrementMTAUsage failed: {e}"),
+    })?;
+    HELD.store(true, Ordering::Release);
+    Ok(())
+}
+
 /// Windows accessibility provider using UI Automation.
 pub struct WindowsProvider {
     automation: IUIAutomation,
@@ -261,6 +293,7 @@ impl WindowsProvider {
             code: e.code().0 as i64,
             message: format!("COM initialization failed: {}", e),
         })?;
+        ensure_mta_usage()?;
         let automation: IUIAutomation = {
             let _first_touch = if UIA_WARMED.load(Ordering::Acquire) {
                 None
@@ -976,9 +1009,10 @@ impl WindowsProvider {
     /// `get_children` answer.
     ///
     /// `representative` is the process's first top-level window in z-order;
-    /// it is the *fallback* name source only. Name resolution: process
-    /// executable stem (`OpenProcess` + `QueryFullProcessImageNameW`) first;
-    /// the representative window's title when the process cannot be opened.
+    /// it is the *fallback* name source only. Name resolution: a packaged
+    /// app's shell display name (issue #497), else the process executable
+    /// stem (`OpenProcess` + `QueryFullProcessImageNameW`); the
+    /// representative window's title when the process cannot be opened.
     /// `raw` records which one was used (`uia_name_source`), plus the
     /// synthesized marker and the full executable path when known — the
     /// fallback is explicit, not silent (tenet 1).
@@ -993,13 +1027,21 @@ impl WindowsProvider {
         pid: u32,
         representative: &IUIAutomationElement,
     ) -> Result<ElementData> {
+        let mut aumid = None;
         let (name, name_source, executable) = match process_image_name(pid) {
-            Some(path) => {
-                let stem = std::path::Path::new(&path)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.clone());
-                (stem, "process", Some(path))
+            Some((path, process_aumid)) => {
+                // A packaged app is named as the shell names it ("Calculator",
+                // not "CalculatorApp"); everything else by its executable
+                // (issue #497). The AUMID was read through the handle the
+                // image name came from, so a failure there is a real error,
+                // not "unpackaged".
+                aumid = process_aumid?;
+                let display = match aumid.as_deref() {
+                    Some(a) => crate::uwp::app_display_name(a)?,
+                    None => None,
+                };
+                let (name, source) = process_app_name(&path, display);
+                (name, source, Some(path))
             }
             None => {
                 // The fallback name source is explicit, so a failing read must
@@ -1036,6 +1078,12 @@ impl WindowsProvider {
         if let Some(path) = executable {
             raw.insert("uia_process_name".into(), serde_json::Value::String(path));
         }
+        if let Some(aumid) = aumid {
+            raw.insert(
+                "uia_app_user_model_id".into(),
+                serde_json::Value::String(aumid),
+            );
+        }
         Ok(ElementParts {
             role: Role::Application,
             name: if name.is_empty() { None } else { Some(name) },
@@ -1053,6 +1101,63 @@ impl WindowsProvider {
             handle,
         }
         .into())
+    }
+
+    /// The desktop's named top-level windows with the app (pid) each belongs
+    /// to, plus notes for the UWP frames that belong to no app. `list_apps`
+    /// and `unlisted_apps` share it, so the frames one leaves out are exactly
+    /// the ones the other reports (issue #497).
+    fn desktop_app_windows(&self, dpi: &crate::dpi::DpiScope) -> Result<DesktopAppWindows> {
+        let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
+        // A desktop-wide UIA query that reaches a hung app stalls
+        // for the transaction timeout. Check first and fail the
+        // listing with every hung window named, as the Linux backend
+        // does, rather than stall or drop the app (issue #507).
+        let interactive = interactive_top_level_windows("checking for hung windows")?;
+        let hung = hung_among(&interactive);
+        if !hung.is_empty() {
+            return Err(hung_windows_error(
+                "every top-level window on the desktop to respond".to_string(),
+                &hung,
+            ));
+        }
+        // Every desktop child, not only `Window`-type ones: the
+        // listing keeps the `Window`s below, from the cached control
+        // type, and the rest (the taskbar and desktop are `Pane`s)
+        // are what tells a window UIA dropped from one it merely
+        // does not list (issue #603).
+        let condition = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
+        let (found, elapsed) = timed(|| {
+            uia_call(|| unsafe {
+                root.FindAllBuildCache(TreeScope_Children, &condition, self.batch_request.get(dpi))
+            })
+        });
+        let found = found.map_err(|e| desktop_listing_timeout(e, elapsed))?;
+        let listing = desktop_app_windows(&DesktopArray(&found))?;
+        check_desktop_omissions(&interactive, &listing.returned, elapsed)?;
+
+        let mut attribution = crate::uwp::Attribution::new();
+        let mut windows = Vec::new();
+        let mut unlisted = Vec::new();
+        for (el, native_pid) in listing.windows {
+            let hwnd = uia_call(|| unsafe { el.CachedNativeWindowHandle() })?;
+            let pid = if hwnd.0.is_null() {
+                native_pid
+            } else {
+                match attribution.owner(hwnd) {
+                    Ok(crate::uwp::WindowOwner::Process(pid)) => pid,
+                    Ok(crate::uwp::WindowOwner::Unresolved { note }) => {
+                        unlisted.push(note);
+                        continue;
+                    }
+                    // The window closed while it was being attributed.
+                    Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => continue,
+                    Err(error) => return Err(error),
+                }
+            };
+            windows.push((el, pid));
+        }
+        Ok((windows, unlisted))
     }
 
     /// Enumerate the interactive top-level windows owned by `pid` on the
@@ -1685,7 +1790,7 @@ const DIAG_HUNG_WINDOW_LIMIT: usize = 10;
 /// One hung window, described for a diagnosis: HWND, title, pid, executable.
 fn describe_hung_window(window: HungWindow) -> String {
     let exe = process_image_name(window.pid)
-        .and_then(|path| {
+        .and_then(|(path, _aumid)| {
             std::path::Path::new(&path)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -2360,24 +2465,35 @@ fn native_windows_of_pid_with(
     cache: &IUIAutomationCacheRequest,
 ) -> Result<Vec<IUIAutomationElement>> {
     unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
-        let (pid, handles) = unsafe { &mut *(param.0 as *mut (u32, Vec<HWND>)) };
-        let mut window_pid = 0;
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
-        if window_pid == *pid {
-            handles.push(hwnd);
-        }
+        let handles = unsafe { &mut *(param.0 as *mut Vec<HWND>) };
+        handles.push(hwnd);
         true.into()
     }
 
-    let mut state = (pid, Vec::new());
-    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut state) as isize)) }.map_err(|e| {
+    let mut all: Vec<HWND> = Vec::new();
+    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut all) as isize)) }.map_err(|e| {
         Error::Platform {
             code: e.code().0 as i64,
             message: format!("EnumWindows failed: {e}"),
         }
     })?;
-    let mut out = Vec::with_capacity(state.1.len());
-    for hwnd in state.1 {
+    // App attribution, not raw Win32 ownership: a UWP frame belongs to the
+    // app it shows, not to ApplicationFrameHost (issue #497). Non-frames are
+    // decided by their native pid; frames are only examined in depth for a
+    // packaged target.
+    let mut filter = crate::uwp::PidFilter::for_pid(pid);
+    let mut mine: Vec<HWND> = Vec::new();
+    for hwnd in all {
+        match filter.owns(hwnd) {
+            Ok(true) => mine.push(hwnd),
+            Ok(false) => {}
+            // The window closed while it was being attributed.
+            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let mut out = Vec::with_capacity(mine.len());
+    for hwnd in mine {
         if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
             continue; // The window closed after EnumWindows visited it.
         }
@@ -2580,6 +2696,22 @@ fn windows_of_saved_app_with(
     Ok(windows)
 }
 
+/// The name and `uia_name_source` of a process's Application node: the
+/// packaged app's shell display name when it has one, else the executable's
+/// file stem (issue #497).
+fn process_app_name(path: &str, display: Option<String>) -> (String, &'static str) {
+    match display {
+        Some(display) => (display, "package"),
+        None => {
+            let stem = std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_owned());
+            (stem, "process")
+        }
+    }
+}
+
 /// Resolve the executable image path of `pid` via
 /// `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
 /// `QueryFullProcessImageNameW`.
@@ -2593,7 +2725,11 @@ fn windows_of_saved_app_with(
 /// inspectable, and the caller records which source produced the name in
 /// `raw["uia_name_source"]` so the fallback is explicit, not silent
 /// (tenet 1).
-fn process_image_name(pid: u32) -> Option<String> {
+///
+/// The process's AppUserModelID is read through the same handle (see
+/// [`crate::uwp::handle_aumid`]), so a process that exits between the two
+/// reads cannot turn into an error for one and a name for the other.
+fn process_image_name(pid: u32) -> Option<(String, Result<Option<String>>)> {
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
@@ -2614,6 +2750,11 @@ fn process_image_name(pid: u32) -> Option<String> {
         )
     }
     .is_ok();
+    let aumid = if ok {
+        crate::uwp::handle_aumid(handle, pid)
+    } else {
+        Ok(None)
+    };
     // Releasing the OpenProcess handle is best-effort only: a failure here
     // leaks a single process handle we only queried for a name — the leak is
     // unrecoverable at this layer, and the name lookup's outcome was already
@@ -2624,7 +2765,7 @@ fn process_image_name(pid: u32) -> Option<String> {
         return None;
     }
     let path = String::from_utf16_lossy(&buf[..size as usize]);
-    Some(path)
+    Some((path, aumid))
 }
 
 /// Resolve the creation time of `pid` (FILETIME, 100ns since 1601-01-01) via
@@ -3788,7 +3929,18 @@ impl WindowsProvider {
                 "reading the process id of a re-acquired top-level window failed: {e}"
             ),
         })? as u32;
-        if reacquired_pid != identity.pid {
+        let belongs_to_app = if reacquired_pid == identity.pid {
+            true
+        } else {
+            let hwnd = uia_call(|| unsafe { el.CurrentNativeWindowHandle() })?;
+            // A valid UWP frame still reports ApplicationFrameHost's UIA
+            // process id. Revalidate its current app attribution instead of
+            // mistaking that expected host/app split for HWND reuse.
+            !hwnd.0.is_null()
+                && crate::uwp::is_frame(hwnd)
+                && crate::uwp::PidFilter::for_pid(identity.pid).owns(hwnd)?
+        };
+        if !belongs_to_app {
             return Err(Error::ElementStale {
                 selector: format!(
                     "handle:{} (pid {}); top-level window HWND was reused by pid {reacquired_pid}",
@@ -3800,11 +3952,7 @@ impl WindowsProvider {
         // numeric HWND. HWNDs are reusable too; together these
         // checks ensure ElementFromHandle cannot redirect this
         // saved App to another process or process generation.
-        validate_synthetic_app_identity(
-            app.handle,
-            identity,
-            process_creation_time(reacquired_pid),
-        )?;
+        validate_synthetic_app_identity(app.handle, identity, process_creation_time(identity.pid))?;
         let el = self.populate_cache(dpi, &el).map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("populating the re-acquired top-level window cache failed: {e}"),
@@ -3869,41 +4017,11 @@ impl Provider for WindowsProvider {
                 // code returned one entry per window (issue #304's shape);
                 // grouping now reports one Application node per process on
                 // every platform, and the windows are the node's children.
-                let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
-                // A desktop-wide UIA query that reaches a hung app stalls
-                // for the transaction timeout. Check first and fail the
-                // listing with every hung window named, as the Linux backend
-                // does, rather than stall or drop the app (issue #507).
-                let interactive = interactive_top_level_windows("checking for hung windows")?;
-                let hung = hung_among(&interactive);
-                if !hung.is_empty() {
-                    return Err(hung_windows_error(
-                        "every top-level window on the desktop to respond".to_string(),
-                        &hung,
-                    ));
-                }
-                // Every desktop child, not only `Window`-type ones: the
-                // listing keeps the `Window`s below, from the cached control
-                // type, and the rest (the taskbar and desktop are `Pane`s)
-                // are what tells a window UIA dropped from one it merely
-                // does not list (issue #603).
-                let condition = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
-                let (found, elapsed) = timed(|| {
-                    uia_call(|| unsafe {
-                        root.FindAllBuildCache(
-                            TreeScope_Children,
-                            &condition,
-                            self.batch_request.get(dpi),
-                        )
-                    })
-                });
-                let found = found.map_err(|e| desktop_listing_timeout(e, elapsed))?;
-                let listing = desktop_app_windows(&DesktopArray(&found))?;
-                check_desktop_omissions(&interactive, &listing.returned, elapsed)?;
+                let (windows, _unlisted) = self.desktop_app_windows(dpi)?;
 
                 let mut seen = HashSet::new();
                 let mut results = Vec::new();
-                for (el, pid) in listing.windows {
+                for (el, pid) in windows {
                     if !seen.insert(pid) {
                         continue;
                     }
@@ -4218,6 +4336,14 @@ impl Provider for WindowsProvider {
         self.get_children(None)
     }
 
+    /// UWP frames whose app could not be found: `list_apps` leaves them out
+    /// because they belong to no running process (issue #497). The same
+    /// enumeration as `list_apps`, so the two sets match.
+    fn unlisted_apps(&self) -> Result<Vec<String>> {
+        let dpi = &crate::dpi::DpiScope::enter()?;
+        Ok(self.desktop_app_windows(dpi)?.1)
+    }
+
     /// Attach to an application directly by pid via a UIA `ProcessId`
     /// property search over the desktop root's children.
     ///
@@ -4282,16 +4408,49 @@ impl Provider for WindowsProvider {
         let el = match found {
             Ok(el) => el,
             Err(e) if e.code().is_ok() => {
-                // Stays the retry signal, cheap to build. A window that
-                // stopped pumping under `OS_HUNG_THRESHOLD` ago also lands
-                // here (issue #615); `app_by_pid_failure` tells that apart
-                // once the poll loop gives up.
-                return Err(
-                    Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
-                        xa11y_core::Diagnosis::new()
-                            .last_observed("no top-level UIA element owned by the process yet"),
-                    ),
-                );
+                // A UWP app owns no top-level window of its own: its frame
+                // belongs to ApplicationFrameHost and only the hosted core
+                // window is the app's (issue #497). That frame is the app's
+                // window, found by attribution rather than by ProcessId.
+                let mut frame = None;
+                // An exited pid falls through to "not matched" with the
+                // unpackaged ones; only a packaged one can have a frame.
+                if matches!(
+                    crate::uwp::PidFilter::for_pid(pid).packaging()?,
+                    crate::uwp::Packaging::Packaged(_)
+                ) {
+                    for el in native_windows_of_pid_with(
+                        &self.automation,
+                        pid,
+                        self.batch_request.get(dpi),
+                    )? {
+                        let hwnd = unsafe { el.CachedNativeWindowHandle() }.map_err(|e| {
+                            Error::Platform {
+                                code: e.code().0 as i64,
+                                message: format!(
+                                    "reading the window handle of a window attributed to \
+                                         pid {pid} failed: {e}"
+                                ),
+                            }
+                        })?;
+                        if !hwnd.0.is_null() && crate::uwp::is_frame(hwnd) {
+                            frame = Some(el);
+                            break;
+                        }
+                    }
+                }
+                match frame {
+                    Some(frame) => frame,
+                    None => {
+                        return Err(
+                            Error::selector_not_matched(format!("application[pid={pid}]"))
+                                .diagnose(xa11y_core::Diagnosis::new().last_observed(
+                                "no top-level UIA element owned by the process yet, and no UWP \
+                             frame hosting it",
+                            )),
+                        );
+                    }
+                }
             }
             Err(e) => {
                 return Err(uia_timeout_as_timeout(
@@ -4384,6 +4543,17 @@ impl Provider for WindowsProvider {
                 )
             })
         })?;
+        let pid = match crate::uwp::Attribution::new().owner(hwnd) {
+            Ok(crate::uwp::WindowOwner::Process(pid)) => pid,
+            Ok(crate::uwp::WindowOwner::Unresolved { note }) => {
+                return Err(Error::selector_not_matched("focused application")
+                    .diagnose(xa11y_core::Diagnosis::new().last_observed(note)));
+            }
+            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => {
+                return Err(Error::selector_not_matched("focused application"));
+            }
+            Err(error) => return Err(error),
+        };
         // The foreground window is the representative; only its title can
         // fall back as the name source of the synthesized node.
         self.build_synthetic_app_data(pid, &el)
@@ -6357,6 +6527,9 @@ struct SubscriptionState {
     /// Current `WindowVisualState` per top-level window; shared with
     /// [`PropertyHandler`] so the delta map and the add/remove paths agree.
     visual_states: Arc<Mutex<HashMap<usize, i32>>>,
+    /// Proven frame identities shared with callbacks; populated only by the
+    /// registration worker, where shell attribution is safe.
+    frame_runtime_ids: Arc<Mutex<HashMap<usize, HashSet<Vec<i32>>>>>,
     /// Process-generation guard retained for the entire subscription. A
     /// desktop-scoped watch must never attach to a later process that reuses
     /// the subscribed app's pid.
@@ -6421,6 +6594,71 @@ fn plan_window_registration_diff(
     (to_add, to_remove)
 }
 
+/// Called only on the registration worker. Native frame decorations belong
+/// to ApplicationFrameHost too; cache their exact UIA identities while never
+/// entering the app-owned CoreWindow subtree. Callbacks then need no walk or
+/// shell lookup to distinguish two apps sharing one frame-host process.
+fn frame_event_runtime_ids(
+    autom: &IUIAutomation,
+    frame: &IUIAutomationElement,
+) -> Result<HashSet<Vec<i32>>> {
+    fn neighbor(
+        result: windows::core::Result<IUIAutomationElement>,
+    ) -> Result<Option<IUIAutomationElement>> {
+        match result {
+            Ok(element) => Ok(Some(element)),
+            Err(error) if error.code().is_ok() => Ok(None),
+            Err(error) => Err(Error::Platform {
+                code: i64::from(error.code().0),
+                message: format!("reading UWP frame event-source children failed: {error}"),
+            }),
+        }
+    }
+    fn visit(
+        walker: &IUIAutomationTreeWalker,
+        element: &IUIAutomationElement,
+        host_pid: i32,
+        depth: usize,
+        visited: &mut usize,
+        ids: &mut HashSet<Vec<i32>>,
+    ) -> Result<()> {
+        *visited += 1;
+        if *visited > 128 || depth > 8 {
+            return Err(Error::Platform {
+                code: -1,
+                message: "UWP frame event-source inspection exceeded 128 nodes or depth 8".into(),
+            }
+            .diagnose(
+                xa11y_core::Diagnosis::new()
+                    .condition("bounded inspection of frame-host event sources")
+                    .last_observed(format!("visited {visited} nodes; depth {depth}")),
+            ));
+        }
+        if uia_call(|| unsafe { element.CurrentProcessId() })? != host_pid {
+            return Ok(());
+        }
+        let id = WindowsProvider::runtime_id(element, 0)?;
+        if id.is_empty() {
+            return Err(Error::Platform {
+                code: -1,
+                message: "a UWP frame event source has no RuntimeId".into(),
+            });
+        }
+        ids.insert(id);
+        let mut child = neighbor(unsafe { walker.GetFirstChildElement(element) })?;
+        while let Some(element) = child {
+            visit(walker, &element, host_pid, depth + 1, visited, ids)?;
+            child = neighbor(unsafe { walker.GetNextSiblingElement(&element) })?;
+        }
+        Ok(())
+    }
+    let host_pid = uia_call(|| unsafe { frame.CurrentProcessId() })?;
+    let walker = uia_call(|| unsafe { autom.RawViewWalker() })?;
+    let mut ids = HashSet::new();
+    visit(&walker, frame, host_pid, 0, &mut 0, &mut ids)?;
+    Ok(ids)
+}
+
 /// Register the automation / property-changed / structure-changed handlers on
 /// one top-level window and seed its `WindowVisualState` baseline.
 ///
@@ -6453,6 +6691,11 @@ fn register_window_handlers(
 ) -> Result<RegisteredWindow> {
     let dpi = &crate::dpi::DpiScope::enter()?;
     let cache = cache_request.get(dpi);
+    let frame_identity = if hwnd != 0 && crate::uwp::is_frame(HWND(hwnd as *mut _)) {
+        Some(frame_event_runtime_ids(autom, window)?)
+    } else {
+        None
+    };
     // Acquire the window pattern once: the baseline seed below and the
     // post-attach reconciliation both read `CurrentWindowVisualState` from
     // it, and a second acquisition could fail transiently between two reads
@@ -6579,6 +6822,15 @@ fn register_window_handlers(
         return Err(err);
     }
 
+    // Publish identity before the post-attach state read: callbacks arriving
+    // after that read must already recognize frame-host event senders.
+    if let Some(ids) = frame_identity {
+        ctx.frame_runtime_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(hwnd, ids);
+    }
+
     // Close the seed→attach gap. The baseline is seeded before the property
     // handler is registered, so a visual-state transition that lands in
     // between raises its `PropertyChanged` to nobody — and the stale seed then
@@ -6626,6 +6878,10 @@ fn register_window_handlers(
                     structure,
                 );
                 remove_visual_state(visual_states, hwnd);
+                ctx.frame_runtime_ids
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&hwnd);
                 return Err(Error::Platform {
                     code: e.code().0 as i64,
                     message: format!(
@@ -6729,6 +6985,10 @@ fn sync_registrations(
     // Tear down closed windows first: any subsequent open keeps the remaining
     // registrations intact, and a closed window cannot accept new handlers.
     for hwnd in to_remove {
+        ctx.frame_runtime_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&hwnd);
         let reg = {
             let mut m = state.registered.lock().unwrap_or_else(|e| e.into_inner());
             m.remove(&hwnd)
@@ -6815,6 +7075,11 @@ fn cleanup_registrations(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    state
+        .frame_runtime_ids
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 /// Shared context passed to every UIA event handler.
@@ -6826,6 +7091,7 @@ struct EventContext {
     sender: Mutex<Option<std::sync::mpsc::Sender<Event>>>,
     app_name: String,
     app_pid: u32,
+    frame_runtime_ids: Arc<Mutex<HashMap<usize, HashSet<Vec<i32>>>>>,
     /// The saved generation for a synthetic App subscription. Global focus
     /// and desktop watch handlers re-check it for every event; plain element
     /// subscriptions have no saved-app identity and retain PID-only behavior.
@@ -6842,6 +7108,10 @@ struct EventContext {
 // behind `unsafe impl Send for WindowsProvider` covers it.
 unsafe impl Send for EventContext {}
 unsafe impl Sync for EventContext {}
+
+fn known_frame_sender(runtime_id: &[i32], frames: &HashMap<usize, HashSet<Vec<i32>>>) -> bool {
+    !runtime_id.is_empty() && frames.values().any(|known| known.contains(runtime_id))
+}
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
@@ -6875,19 +7145,35 @@ impl EventContext {
     /// Best-effort PID filter. `AddFocusChangedEventHandler` is process-wide,
     /// and scoped handlers occasionally leak events for sibling processes —
     /// checking the sender's PID keeps each subscription clean.
+    /// Frame senders report ApplicationFrameHost's PID, so their exact UIA
+    /// RuntimeId is matched against frames attributed on the worker. This
+    /// also works while minimized/suspended, without shell calls in callbacks.
     fn matches_pid(&self, sender: &IUIAutomationElement) -> bool {
         let sender_matches = unsafe { sender.CurrentProcessId() }
             .map(|p| p as u32 == self.app_pid)
             .unwrap_or(false);
-        sender_matches
-            && self.saved_app.is_none_or(|saved| {
-                validate_synthetic_app_identity(
-                    saved.handle,
-                    saved.identity,
-                    process_creation_time(saved.identity.pid),
+        let frame_matches = !sender_matches
+            && WindowsProvider::runtime_id(sender, 0).is_ok_and(|id| {
+                known_frame_sender(
+                    &id,
+                    &self
+                        .frame_runtime_ids
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()),
                 )
-                .is_ok()
-            })
+            });
+        (sender_matches || frame_matches) && self.matches_generation()
+    }
+
+    fn matches_generation(&self) -> bool {
+        self.saved_app.is_none_or(|saved| {
+            validate_synthetic_app_identity(
+                saved.handle,
+                saved.identity,
+                process_creation_time(saved.identity.pid),
+            )
+            .is_ok()
+        })
     }
 
     /// Build a full ElementData snapshot from a UIA sender element.
@@ -7316,7 +7602,19 @@ impl IUIAutomationEventHandler_Impl for WatchHandler_Impl {
                 // emit only for ours (the per-window registrations already
                 // scoped child-window events by subtree; ours are the pid
                 // filter).
-                if !self.ctx.matches_pid(el) {
+                let matched = self.ctx.matches_pid(el);
+                // A newly opened frame is not registered yet. Only classify
+                // its native class here; shell/AUMID attribution belongs on
+                // the registration worker, never a UIA callback thread.
+                let deferred_frame = if !matched && eventid == UIA_Window_WindowOpenedEventId {
+                    unsafe { el.CurrentNativeWindowHandle() }
+                        .ok()
+                        .filter(|hwnd| !hwnd.0.is_null() && crate::uwp::is_frame(*hwnd))
+                        .map(|hwnd| hwnd.0 as usize)
+                } else {
+                    None
+                };
+                if !matched && deferred_frame.is_none() {
                     return Ok(());
                 }
                 let kind = if eventid == UIA_Window_WindowOpenedEventId {
@@ -7324,7 +7622,12 @@ impl IUIAutomationEventHandler_Impl for WatchHandler_Impl {
                 } else {
                     EventKind::WindowClosed
                 };
-                let target = self.ctx.snapshot_or_log(el, &self.cache);
+                let target = if matched {
+                    self.ctx.snapshot_or_log(el, &self.cache)
+                } else {
+                    None
+                };
+                let sender = ComSend::new(el.clone());
                 let state = Arc::clone(&self.state);
                 let ctx = Arc::clone(&self.ctx);
                 let failure_ctx = Arc::clone(&self.ctx);
@@ -7340,6 +7643,34 @@ impl IUIAutomationEventHandler_Impl for WatchHandler_Impl {
                 // racing attachment. A newly created provider can be briefly
                 // unavailable, so retry the complete idempotent reconcile.
                 if let Err(e) = queue_registration_job(move || {
+                    let target = if let Some(hwnd) = deferred_frame {
+                        if !ctx.matches_generation() {
+                            return;
+                        }
+                        let hwnd = HWND(hwnd as *mut _);
+                        // Open/close churn can destroy an unrelated frame
+                        // before this worker sees its open notification.
+                        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+                            return;
+                        }
+                        let attributed = window_handle(sender.get()).and_then(|hwnd| {
+                            crate::uwp::PidFilter::for_pid(pid).owns(HWND(hwnd as *mut _))
+                        });
+                        match attributed {
+                            Ok(true) => ctx.snapshot_or_log(sender.get(), cache.get()),
+                            Ok(false) => return,
+                            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => return,
+                            Err(error) => {
+                                eprintln!(
+                                    "frame event attribution failed for pid {pid}: {error:?}"
+                                );
+                                ctx.disconnect();
+                                return;
+                            }
+                        }
+                    } else {
+                        target
+                    };
                     const READY_ATTEMPTS: usize = 4;
                     let mut last_error = None;
                     for attempt in 0..READY_ATTEMPTS {
@@ -7458,10 +7789,12 @@ impl WindowsProvider {
             });
         }
 
+        let frame_runtime_ids = Arc::new(Mutex::new(HashMap::new()));
         let ctx = Arc::new(EventContext {
             sender: Mutex::new(Some(tx)),
             app_name,
             app_pid: pid,
+            frame_runtime_ids: Arc::clone(&frame_runtime_ids),
             saved_app,
             walker: self.raw_walker.clone(),
         });
@@ -7511,6 +7844,7 @@ impl WindowsProvider {
             structure_handler: ComSend::new(structure.clone()),
             registered: Mutex::new(HashMap::new()),
             visual_states,
+            frame_runtime_ids,
             saved_app,
             reconciliation: Mutex::new(()),
             cancelled: AtomicBool::new(false),
@@ -7626,6 +7960,38 @@ impl WindowsProvider {
 #[cfg(test)]
 #[allow(non_upper_case_globals)]
 mod tests {
+    #[test]
+    fn only_registered_frame_runtime_ids_match_host_process_events() {
+        let mut frames =
+            HashMap::from([(100usize, HashSet::from([vec![42, 100], vec![42, 100, 1]]))]);
+        assert!(known_frame_sender(&[42, 100], &frames));
+        assert!(known_frame_sender(&[42, 100, 1], &frames));
+        // A different frame of the same ApplicationFrameHost is unrelated.
+        assert!(!known_frame_sender(&[42, 200], &frames));
+        assert!(!known_frame_sender(&[], &frames));
+        frames.remove(&100);
+        assert!(!known_frame_sender(&[42, 100], &frames));
+    }
+
+    #[test]
+    fn a_packaged_app_is_named_by_its_display_name() {
+        assert_eq!(
+            super::process_app_name(
+                r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator_11.0_x64__8wekyb3d8bbwe\CalculatorApp.exe",
+                Some("Calculator".into()),
+            ),
+            ("Calculator".to_string(), "package")
+        );
+    }
+
+    #[test]
+    fn an_unpackaged_app_is_named_by_its_executable() {
+        assert_eq!(
+            super::process_app_name(r"C:\Windows\System32\notepad.exe", None),
+            ("notepad".to_string(), "process")
+        );
+    }
+
     #[implement(IUIAutomationEventHandler)]
     struct BorrowedPayloadProbe(Arc<std::sync::atomic::AtomicUsize>);
     impl Drop for BorrowedPayloadProbe {

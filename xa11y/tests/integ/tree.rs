@@ -1583,7 +1583,7 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .expect("Expected uia_name_source in raw data");
             assert!(
-                name_source == "process" || name_source == "window_title",
+                matches!(name_source, "package" | "process" | "window_title"),
                 "uia_name_source must record the name source, got {name_source:?}"
             );
         }

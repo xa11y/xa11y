@@ -66,6 +66,18 @@ pub trait Provider: Send + Sync {
     /// would hide the difference from implementors.
     fn list_apps(&self) -> Result<Vec<ElementData>>;
 
+    /// Applications the platform shows but [`list_apps`](Self::list_apps)
+    /// could not attribute to a process, described for a diagnosis.
+    ///
+    /// An app-lookup failure appends these to its candidate list, so a lookup
+    /// that missed an app because its window could not be resolved says so
+    /// instead of only listing the apps that were found. Windows reports a
+    /// UWP frame whose app has exited here. Collected on the failure path
+    /// only. The default is none.
+    fn unlisted_apps(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// Whether [`list_apps`](Self::list_apps) can expose more than one
     /// `Application` entry for a single process id.
     ///
@@ -498,6 +510,9 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn list_apps(&self) -> Result<Vec<ElementData>> {
         (**self).list_apps()
+    }
+    fn unlisted_apps(&self) -> Result<Vec<String>> {
+        (**self).unlisted_apps()
     }
     // Delegated explicitly (despite having a default impl) so a concrete
     // provider's override isn't bypassed when it's used through a shared

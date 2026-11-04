@@ -26,6 +26,8 @@ mod input;
 mod uia;
 #[cfg(target_os = "windows")]
 mod uipi;
+#[cfg(target_os = "windows")]
+mod uwp;
 
 mod screenshot;
 

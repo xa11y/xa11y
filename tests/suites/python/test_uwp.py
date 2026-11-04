@@ -1,15 +1,7 @@
-"""UWP smoke tests: the ApplicationFrameHost-hosted app is found and readable.
+"""UWP frame attribution and XAML content against the activated app process.
 
-Runs on the ``uwp`` cell only (``XA11Y_TEST_APP=uwp``). A UWP app's only
-top-level window is an ``ApplicationFrameWindow`` owned by
-ApplicationFrameHost.exe; the app's own process owns just the
-``Windows.UI.Core.CoreWindow`` parented inside it. Issue #497 is that xa11y
-attributes the frame — and so the whole app — to ApplicationFrameHost.
-
-``XA11Y_UWP_APP_PID`` is the app's own process (the PID activation returned,
-see test-apps/uwp/launch.ps1). ``XA11Y_TEST_APP_PID`` is the pid xa11y
-reported when the harness found the app, which until #497 is fixed is
-ApplicationFrameHost's (see ``_suite_app_pid`` in tests/harness/launch.py).
+The native ApplicationFrameHost frame belongs to the hosted UWP app in xa11y.
+Both harness PID variables identify the app process returned by activation.
 """
 
 from __future__ import annotations
@@ -39,8 +31,7 @@ def _app_pid() -> int:
 def test_frame_window_and_xaml_content_are_readable(app):
     """The session app has the frame window and the XAML tree inside it.
 
-    Asserts what holds today, before #497: whichever process the frame is
-    attributed to, its tree crosses into the CoreWindow's XAML content.
+    The app tree crosses from its attributed frame into CoreWindow content.
     """
     window = app.locator(f'window[name*="{TITLE}"]').element()
     assert window.name and TITLE in window.name
@@ -52,19 +43,6 @@ def test_frame_window_and_xaml_content_are_readable(app):
     assert search.value == "hello world"
 
 
-# Both #497 tests are strict: the fix makes them pass, which fails the run
-# until the markers come off, so the fix cannot land without them.
-# `raises=` keeps the xfails from absorbing an unrelated failure (a crashed
-# app, a platform error): only the lookup miss or the wrong-pid assertion that
-# #497 causes counts as the expected failure.
-@pytest.mark.xfail(
-    strict=True,
-    raises=xa11y.SelectorNotMatchedError,
-    reason=(
-        "#497: the frame is attributed to ApplicationFrameHost.exe, so the UWP "
-        "process owns no top-level window xa11y reports"
-    ),
-)
 def test_app_is_found_by_its_own_pid():
     """App.by_pid on the UWP process resolves to the frame and its content."""
     pid = _app_pid()
@@ -73,20 +51,11 @@ def test_app_is_found_by_its_own_pid():
     found.locator('button[name="OK"]').element()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=(AssertionError, xa11y.SelectorNotMatchedError),
-    reason=(
-        "#497: xa11y reports the UWP app as 'ApplicationFrameHost' rather than "
-        "by its package display name"
-    ),
-)
 def test_app_is_found_by_its_package_display_name():
     """App.by_name with the package DisplayName resolves to the UWP process.
 
-    Before #497 the frame is reported as "ApplicationFrameHost", so the
-    lookup misses; the pid check guards against it resolving to the frame
-    host by any other route.
+    The pid check guards against resolving to the frame host instead of
+    the activated UWP process.
     """
     pid = _app_pid()
     found = xa11y.App.by_name(TITLE, timeout=5.0)
