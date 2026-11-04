@@ -301,7 +301,7 @@ def test_name_changed_event_status_label(app, app_config, xa11y_events):
 )
 def test_repeated_name_events_keep_their_cached_properties(app, app_config):
     """Borrowed string payloads survive callbacks and repeated subscriptions (#589)."""
-    submit = app.locator(f'button[name="{app_config["submit_button_name"]}"]')
+    submit = app.locator(f'button[name="{app_config["submit_button_name"]}"]').element()
     status = app.locator('[name*="Status:"]')
     framework = status.element().raw.get("uia_framework_id")
     assert framework, "fixture must expose its UIA framework on ordinary reads"
@@ -310,12 +310,14 @@ def test_repeated_name_events_keep_their_cached_properties(app, app_config):
             for _press in range(10):
                 before = status.element().name
                 expected = "Status: Ready" if before == "Status: Submitted" else "Status: Submitted"
-                submit.press()
+                # Invoke the native semantic action directly: the callback
+                # regression also runs when Submit is below a small viewport.
+                submit.perform_action("press")
                 event = sub.wait_for(
-                    lambda e: (
+                    lambda e, expected_name=expected: (
                         e.event_type == xa11y.EventType.NAME_CHANGED
                         and e.target is not None
-                        and e.target.name == expected
+                        and e.target.name == expected_name
                     ),
                     timeout=5.0,
                 )
