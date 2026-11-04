@@ -106,39 +106,41 @@ def test_type_text_line_break_is_one_break(app, typed):
     sys.platform != "win32" or APP not in ("winforms", "wpf"),
     reason="needs a native Windows multiline edit control (winforms / wpf test apps)",
 )
-@pytest.mark.parametrize("shape", ["plain", "newline", "unicode", "composed"])
-def test_type_text_preserves_each_character_repeatedly(app, shape):
-    """Queued Unicode packets used to substitute the final character (#620).
+def test_type_text_clean_client_comparison(app, capsys):
+    """Measure unpaced packets and the API without prior event callbacks (#620).
 
-    The defect appeared about once in twenty calls on WPF, including calls
-    without newlines. Check repeated full values, including characters that
-    cannot be represented as ordinary virtual keys and UTF-16 surrogate pairs.
+    The control posts native Unicode packets without pacing. Its mismatches
+    are reported separately; only paced production-API mismatches fail.
     """
+    import json
+    import subprocess
+    from pathlib import Path
+
+    probe = Path(__file__).resolve().parents[2] / "harness" / "windows_typing_probe.py"
     notes = app.locator(WINDOWS_NOTES)
-    sim = xa11y.input_sim()
+    original = notes.element().value or ""
     try:
-        _focus_windows_notes(app)
-        for attempt in range(60):
-            suffix = f"nopqrstuvwxyz0123456789-{attempt}"
-            prefix = "abcdefghijklm"
-            if shape == "newline":
-                prefix += "\r\n"
-            elif shape in ("unicode", "composed"):
-                prefix += "hé😀漢字"
-                if shape == "composed":
-                    prefix += "\n"
-            typed = prefix + suffix
-            notes.set_value("")
-            if shape == "composed":
-                # Consecutive one-scalar calls must preserve the same text,
-                # including the emoji and the real Enter between lines.
-                for character in typed:
-                    sim.type_text(character)
-            else:
-                sim.type_text(typed)
-            _wait_for_lines(app, WINDOWS_NOTES, _lines(typed))
+        result = subprocess.run(
+            [sys.executable, str(probe), "--pid", str(app.pid), "--repeats", "60"],
+            capture_output=True,
+            text=True,
+            timeout=720,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            check=False,
+        )
     finally:
-        notes.set_value(WINDOWS_ORIGINAL_NOTES[APP])
+        notes.set_value(original)
+    assert result.stdout, f"typing probe produced no report: {result.stderr[:4000]}"
+    report = json.loads(result.stdout)
+    with capsys.disabled():
+        print("WINDOWS_TYPING_COMPARISON " + json.dumps(report), flush=True)
+    assert result.returncode == 0, (
+        f"paced typing failed in the clean client: {report}; stderr={result.stderr[:4000]}"
+    )
+    assert report["control"]["plain"]["attempts"] == 120
+    assert set(report["paced"]) == {"plain", "newline", "unicode", "composed"}
+    assert all(item["attempts"] == 60 for item in report["paced"].values())
+    assert all(item["bad"] == 0 for item in report["paced"].values())
 
 
 @pytest.mark.skipif(
