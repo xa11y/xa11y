@@ -16,13 +16,15 @@
 //! synthesised against the active keyboard layout.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use core_foundation::base::{CFRelease, CFTypeRef};
 
-use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
-use xa11y_core::{Error, Result};
+use xa11y_core::input::{
+    validate_pointer_regions, InputProvider, Key, MouseButton, Point, ScrollDelta,
+};
+use xa11y_core::{Error, Rect, Result};
 
 // ── Quartz / CoreGraphics FFI ───────────────────────────────────────
 
@@ -31,6 +33,20 @@ use xa11y_core::{Error, Result};
 struct CGPoint {
     x: f64,
     y: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
 }
 
 type CGEventRef = *mut c_void;
@@ -70,6 +86,11 @@ const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
+    fn CGGetActiveDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
+    fn CGDisplayBounds(display: u32) -> CGRect;
+    fn CGEventCreate(source: CGEventSourceRef) -> CGEventRef;
+    fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
+
     fn CGEventCreateMouseEvent(
         source: CGEventSourceRef,
         mouse_type: u32,
@@ -113,6 +134,8 @@ unsafe extern "C" {
 #[derive(Default)]
 pub struct MacOSInputProvider {
     lock: Mutex<()>,
+    pointer_lock: Mutex<()>,
+    held_buttons: AtomicU8,
     /// CGEventFlags for the modifier keys currently held via `key_down`.
     ///
     /// macOS stamps an event with modifier state **at creation time**, read
@@ -129,7 +152,153 @@ pub struct MacOSInputProvider {
     held_flags: AtomicU64,
 }
 
+/// Quartz display bounds and CGEvent positions share the global logical
+/// coordinate space, whose origin is the main display's upper-left corner.
+fn display_regions() -> Result<Vec<Rect>> {
+    let mut count = 0;
+    // SAFETY: a null display buffer with capacity zero queries the count.
+    let status = unsafe { CGGetActiveDisplayList(0, std::ptr::null_mut(), &mut count) };
+    if status != 0 {
+        return Err(Error::Platform {
+            code: i64::from(status),
+            message: "CGGetActiveDisplayList(count) failed".into(),
+        });
+    }
+    // One spare slot detects a growing list rather than accepting a truncated
+    // geometry set. Do not bound the native set by the diagnosis's size limit.
+    let capacity = count.checked_add(1).ok_or_else(|| Error::Platform {
+        code: -1,
+        message: "CGGetActiveDisplayList count overflow".into(),
+    })?;
+    let mut displays = Vec::new();
+    displays
+        .try_reserve_exact(capacity as usize)
+        .map_err(|error| Error::Platform {
+            code: -1,
+            message: format!("allocating CGGetActiveDisplayList buffer: {error}"),
+        })?;
+    displays.resize(capacity as usize, 0);
+    let mut written = 0;
+    // SAFETY: the vector contains capacity writable display IDs.
+    let status = unsafe { CGGetActiveDisplayList(capacity, displays.as_mut_ptr(), &mut written) };
+    if status != 0 {
+        return Err(Error::Platform {
+            code: i64::from(status),
+            message: "CGGetActiveDisplayList(list) failed".into(),
+        });
+    }
+    if written >= capacity {
+        return Err(Error::Platform {
+            code: -1,
+            message: "active display list changed while enumerating; geometry may be incomplete"
+                .into(),
+        });
+    }
+    displays.truncate(written as usize);
+    displays
+        .into_iter()
+        .map(|display| {
+            // SAFETY: each ID came from the active-display list.
+            quartz_display_rect(unsafe { CGDisplayBounds(display) })
+        })
+        .collect()
+}
+
+fn quartz_display_rect(bounds: CGRect) -> Result<Rect> {
+    // Point coordinates are integral. Ceil both half-open edges to preserve
+    // exactly the integer points inside even a fractional native rectangle.
+    let left = bounds.origin.x.ceil();
+    let top = bounds.origin.y.ceil();
+    let right = (bounds.origin.x + bounds.size.width).ceil();
+    let bottom = (bounds.origin.y + bounds.size.height).ceil();
+    if ![left, top, right, bottom]
+        .iter()
+        .all(|edge| edge.is_finite())
+        || bounds.size.width < 0.0
+        || bounds.size.height < 0.0
+        || left < f64::from(i32::MIN)
+        || top < f64::from(i32::MIN)
+        || left > f64::from(i32::MAX)
+        || top > f64::from(i32::MAX)
+        || right > f64::from(i32::MAX) + 1.0
+        || bottom > f64::from(i32::MAX) + 1.0
+        || right - left > f64::from(i32::MAX)
+        || bottom - top > f64::from(i32::MAX)
+    {
+        return Err(Error::Platform {
+            code: -1,
+            message: format!(
+                "CGDisplayBounds returned invalid or unrepresentable geometry: {bounds:?}"
+            ),
+        });
+    }
+    Ok(Rect {
+        x: left as i32,
+        y: top as i32,
+        width: (right - left) as i32,
+        height: (bottom - top) as i32,
+    })
+}
+
+fn button_mask(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Right => 2,
+        MouseButton::Middle => 4,
+    }
+}
+
 impl MacOSInputProvider {
+    // Callers hold pointer_lock through native events and capture-state updates.
+    fn move_pointer(&self, to: Point) -> Result<()> {
+        let held = self.held_buttons.load(Ordering::SeqCst);
+        // Captured moves need the native dragged event, just like pointer_drag.
+        // For an ordinary mouse-moved event the button argument is ignored.
+        let (kind, button) = if held & button_mask(MouseButton::Left) != 0 {
+            (K_CG_EVENT_LEFT_MOUSE_DRAGGED, K_CG_MOUSE_BUTTON_LEFT)
+        } else if held & button_mask(MouseButton::Right) != 0 {
+            (K_CG_EVENT_RIGHT_MOUSE_DRAGGED, K_CG_MOUSE_BUTTON_RIGHT)
+        } else if held & button_mask(MouseButton::Middle) != 0 {
+            (K_CG_EVENT_OTHER_MOUSE_DRAGGED, K_CG_MOUSE_BUTTON_CENTER)
+        } else {
+            (K_CG_EVENT_MOUSE_MOVED, K_CG_MOUSE_BUTTON_LEFT)
+        };
+        let ev = self.mouse_event(kind, to, button)?;
+        self.post(ev)
+    }
+
+    fn press_pointer(&self, button: MouseButton) -> Result<()> {
+        let ev = self.button_event(button, true)?;
+        self.post(ev)?;
+        self.held_buttons
+            .fetch_or(button_mask(button), Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn release_pointer(&self, button: MouseButton) -> Result<()> {
+        let ev = self.button_event(button, false)?;
+        self.post(ev)?;
+        self.held_buttons
+            .fetch_and(!button_mask(button), Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn press_pointer_at(&self, button: MouseButton, at: Point) -> Result<()> {
+        let event = self.mouse_event(cg_button_down(button), at, cg_button(button))?;
+        self.post(event)?;
+        self.held_buttons
+            .fetch_or(button_mask(button), Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn release_pointer_at(&self, button: MouseButton, at: Point) -> Result<()> {
+        let event = self.mouse_event(cg_button_up(button), at, cg_button(button))?;
+        self.post(event)?;
+        self.held_buttons
+            .fetch_and(!button_mask(button), Ordering::SeqCst);
+        Ok(())
+    }
+
     pub fn new() -> Result<Self> {
         Ok(Self::default())
     }
@@ -175,6 +344,38 @@ impl MacOSInputProvider {
             });
         }
         Ok(ev)
+    }
+
+    fn button_event(&self, button: MouseButton, down: bool) -> Result<CGEventRef> {
+        // Button-only primitives act at the current native pointer position.
+        // In particular a captured release must not teleport to (0, 0), nor
+        // depend on a display-geometry preflight succeeding.
+        // SAFETY: a null source samples the combined native event state.
+        let current = unsafe { CGEventCreate(std::ptr::null_mut()) };
+        if current.is_null() {
+            return Err(Error::Platform {
+                code: -1,
+                message: "CGEventCreate failed while reading the current pointer position".into(),
+            });
+        }
+        // SAFETY: current is a live event; the location is copied before release.
+        let at = unsafe { CGEventGetLocation(current) };
+        unsafe { CFRelease(current as CFTypeRef) };
+        let kind = if down {
+            cg_button_down(button)
+        } else {
+            cg_button_up(button)
+        };
+        // SAFETY: at is in Quartz global coordinates, exactly as CGEvent expects.
+        let event =
+            unsafe { CGEventCreateMouseEvent(std::ptr::null_mut(), kind, at, cg_button(button)) };
+        if event.is_null() {
+            return Err(Error::Platform {
+                code: -1,
+                message: "CGEventCreateMouseEvent failed for a button-only event".into(),
+            });
+        }
+        Ok(event)
     }
 
     /// Post one key-down/key-up pair carrying `text` (at most
@@ -371,52 +572,95 @@ fn vk_for_char(c: char) -> Result<u16> {
 // ── InputProvider impl ──────────────────────────────────────────────
 
 impl InputProvider for MacOSInputProvider {
+    fn validate_pointer_target(&self, point: Point) -> Result<()> {
+        validate_pointer_regions(
+            point,
+            point,
+            "quartz global logical coordinates",
+            &display_regions()?,
+        )
+    }
+
+    fn pointer_buttons_down(&self) -> bool {
+        self.held_buttons.load(Ordering::SeqCst) != 0
+    }
+
     fn pointer_move(&self, to: Point) -> Result<()> {
-        // For mouse-moved the button argument is ignored.
-        let ev = self.mouse_event(K_CG_EVENT_MOUSE_MOVED, to, K_CG_MOUSE_BUTTON_LEFT)?;
-        self.post(ev)
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.pointer_buttons_down() {
+            self.validate_pointer_target(to)?;
+        }
+        self.move_pointer(to)
     }
 
     fn pointer_down(&self, button: MouseButton) -> Result<()> {
-        // CGEvent needs a position; pass (0,0) — the system uses the current
-        // cursor location for button-only events anyway, but supplying a point
-        // keeps the struct well-formed.
-        let ev = self.mouse_event(cg_button_down(button), Point::new(0, 0), cg_button(button))?;
-        self.post(ev)
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.press_pointer(button)
     }
 
     fn pointer_up(&self, button: MouseButton) -> Result<()> {
-        let ev = self.mouse_event(cg_button_up(button), Point::new(0, 0), cg_button(button))?;
-        self.post(ev)
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.release_pointer(button)
     }
 
     fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()> {
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if count == 0 {
             return Ok(());
         }
-        self.pointer_move(at)?;
-        // `kCGMouseEventClickState` tells the OS which click in a sequence this
-        // is (1 = single, 2 = double, …). We emit N paired down/up events
-        // with increasing click-state so AppKit/Cocoa recognises multi-clicks
-        // regardless of the OS double-click timing window.
-        for i in 1..=count {
-            let down = self.mouse_event(cg_button_down(button), at, cg_button(button))?;
-            // SAFETY: down is a valid CGEventRef.
-            unsafe {
-                CGEventSetIntegerValueField(down, K_CG_MOUSE_EVENT_CLICK_STATE, i as i64);
+        self.validate_pointer_target(at)?;
+        let clicked = (|| {
+            self.move_pointer(at)?;
+            // `kCGMouseEventClickState` tells the OS which click in a sequence this
+            // is (1 = single, 2 = double, …). We emit N paired down/up events
+            // with increasing click-state so AppKit/Cocoa recognises multi-clicks
+            // regardless of the OS double-click timing window.
+            for i in 1..=count {
+                let down = self.mouse_event(cg_button_down(button), at, cg_button(button))?;
+                // SAFETY: down is a valid CGEventRef.
+                unsafe {
+                    CGEventSetIntegerValueField(down, K_CG_MOUSE_EVENT_CLICK_STATE, i as i64);
+                }
+                self.post(down)?;
+                self.held_buttons
+                    .fetch_or(button_mask(button), Ordering::SeqCst);
+                let up = self.mouse_event(cg_button_up(button), at, cg_button(button))?;
+                unsafe {
+                    CGEventSetIntegerValueField(up, K_CG_MOUSE_EVENT_CLICK_STATE, i as i64);
+                }
+                self.post(up)?;
+                self.held_buttons
+                    .fetch_and(!button_mask(button), Ordering::SeqCst);
             }
-            self.post(down)?;
-            let up = self.mouse_event(cg_button_up(button), at, cg_button(button))?;
-            unsafe {
-                CGEventSetIntegerValueField(up, K_CG_MOUSE_EVENT_CLICK_STATE, i as i64);
-            }
-            self.post(up)?;
+            Ok(())
+        })();
+        if clicked.is_err() && self.held_buttons.load(Ordering::SeqCst) & button_mask(button) != 0 {
+            let released = self.release_pointer_at(button, at);
+            clicked.and(released)
+        } else {
+            clicked
         }
-        Ok(())
     }
 
     fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
-        self.pointer_move(at)?;
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.validate_pointer_target(at)?;
+        self.move_pointer(at)?;
         // Quartz scroll convention: positive wheel1 = scroll up (content down),
         // which matches the xa11y ScrollDelta doc invariant ("positive dy
         // scrolls content down").
@@ -491,6 +735,12 @@ impl InputProvider for MacOSInputProvider {
         button: MouseButton,
         duration: std::time::Duration,
     ) -> Result<()> {
+        let _guard = self
+            .pointer_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.validate_pointer_target(from)?;
+        self.validate_pointer_target(to)?;
         // Drag-and-drop source views on macOS filter for
         // kCGEventLeftMouseDragged / …RightMouseDragged / …OtherMouseDragged
         // specifically — ordinary kCGEventMouseMoved between the down and up
@@ -498,23 +748,33 @@ impl InputProvider for MacOSInputProvider {
         // right dragged-event type instead of relying on the core trait's
         // default (which emits mouse-moved).
         const STEP: std::time::Duration = std::time::Duration::from_millis(16);
-        self.pointer_move(from)?;
-        self.pointer_down(button)?;
+        self.move_pointer(from)?;
+        // Use the gesture's explicit coordinates, rather than querying cursor
+        // state that may not yet reflect the just-posted move.
+        self.press_pointer_at(button, from)?;
         let step_ms = STEP.as_millis().max(1);
         let steps = (duration.as_millis() / step_ms).max(1) as i32;
         let dragged_ty = cg_button_dragged(button);
         let cg_btn = cg_button(button);
-        for i in 1..=steps {
-            let t = i as f64 / steps as f64;
-            let x = from.x + ((to.x - from.x) as f64 * t).round() as i32;
-            let y = from.y + ((to.y - from.y) as f64 * t).round() as i32;
-            let ev = self.mouse_event(dragged_ty, Point::new(x, y), cg_btn)?;
-            self.post(ev)?;
-            if i < steps {
-                std::thread::sleep(STEP);
+        let mut last_posted = from;
+        let moved = (|| {
+            for i in 1..=steps {
+                let t = i as f64 / steps as f64;
+                let x =
+                    (f64::from(from.x) + (f64::from(to.x) - f64::from(from.x)) * t).round() as i32;
+                let y =
+                    (f64::from(from.y) + (f64::from(to.y) - f64::from(from.y)) * t).round() as i32;
+                let ev = self.mouse_event(dragged_ty, Point::new(x, y), cg_btn)?;
+                self.post(ev)?;
+                last_posted = Point::new(x, y);
+                if i < steps {
+                    std::thread::sleep(STEP);
+                }
             }
-        }
-        self.pointer_up(button)
+            Ok(())
+        })();
+        let released = self.release_pointer_at(button, last_posted);
+        moved.and(released)
     }
 }
 
@@ -572,6 +832,107 @@ fn modifier_flag_for(key: &Key) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_regions_keep_negative_logical_origins() {
+        let rect = quartz_display_rect(CGRect {
+            origin: CGPoint {
+                x: -1440.0,
+                y: -900.0,
+            },
+            size: CGSize {
+                width: 1440.0,
+                height: 900.0,
+            },
+        })
+        .expect("native logical display");
+        assert_eq!(
+            rect,
+            Rect {
+                x: -1440,
+                y: -900,
+                width: 1440,
+                height: 900
+            }
+        );
+    }
+
+    #[test]
+    fn fractional_display_edges_preserve_integer_point_membership() {
+        let rect = quartz_display_rect(CGRect {
+            origin: CGPoint { x: -9.5, y: -2.4 },
+            size: CGSize {
+                width: 9.75,
+                height: 1.5,
+            },
+        })
+        .expect("fractional logical display");
+        assert_eq!(
+            rect,
+            Rect {
+                x: -9,
+                y: -2,
+                width: 10,
+                height: 2
+            }
+        );
+        assert!(
+            validate_pointer_regions(Point::new(0, -1), Point::new(0, -1), "test", &[rect]).is_ok()
+        );
+        assert!(
+            validate_pointer_regions(Point::new(1, -1), Point::new(1, -1), "test", &[rect])
+                .is_err()
+        );
+        assert!(validate_pointer_regions(
+            Point::new(-10, -1),
+            Point::new(-10, -1),
+            "test",
+            &[rect]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn malformed_native_display_geometry_is_an_error() {
+        for bounds in [
+            CGRect {
+                origin: CGPoint {
+                    x: f64::INFINITY,
+                    y: 0.0,
+                },
+                size: CGSize {
+                    width: 100.0,
+                    height: 100.0,
+                },
+            },
+            CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize {
+                    width: f64::NAN,
+                    height: 100.0,
+                },
+            },
+            CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize {
+                    width: -1.0,
+                    height: 100.0,
+                },
+            },
+            CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize {
+                    width: f64::from(i32::MAX) + 1.0,
+                    height: 100.0,
+                },
+            },
+        ] {
+            assert!(matches!(
+                quartz_display_rect(bounds),
+                Err(Error::Platform { .. })
+            ));
+        }
+    }
 
     fn text(s: &str) -> TypeStep {
         TypeStep::Text(s.to_string())

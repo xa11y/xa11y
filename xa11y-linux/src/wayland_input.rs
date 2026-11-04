@@ -32,10 +32,10 @@
 //!
 //! The virtual pointer is configured with absolute axes in a virtual
 //! 0..=`COORD_MAX` range. xa11y's `pointer_move((x, y))` expects screen
-//! pixels, so we translate via a screen size queried opportunistically
-//! from `wl_output` at construction time, falling back to a 1920x1080
-//! default. Compositors map our 0..=`COORD_MAX` range onto the active
-//! virtual screen.
+//! coordinates, so we translate via the configured `XA11Y_SCREEN_WIDTH` /
+//! `XA11Y_SCREEN_HEIGHT` extent (1920x1080 by default). Validation uses that
+//! same extent; it does not pretend to discover live compositor geometry.
+//! Compositors map our 0..=`COORD_MAX` range onto the active virtual screen.
 
 use std::sync::Mutex;
 
@@ -46,8 +46,8 @@ use evdev::{
 };
 use xkbcommon::xkb;
 
-use xa11y_core::input::{Key as XaKey, MouseButton, Point, ScrollDelta};
-use xa11y_core::{Error, Result};
+use xa11y_core::input::{validate_pointer_regions, Key as XaKey, MouseButton, Point, ScrollDelta};
+use xa11y_core::{Error, Rect, Result};
 
 use crate::input::{key_to_keysym, plan_keystrokes};
 
@@ -112,6 +112,10 @@ impl ReverseKeymap {
 }
 
 impl WaylandInputBackend {
+    pub(crate) fn validate_pointer_target(&self, requested: Point, checked: Point) -> Result<()> {
+        validate_configured_extent(requested, checked, self.screen_w, self.screen_h)
+    }
+
     pub(crate) fn new() -> Result<Self> {
         let (screen_w, screen_h) = detect_screen_size();
 
@@ -380,6 +384,25 @@ fn map_io(e: std::io::Error) -> Error {
     }
 }
 
+fn validate_configured_extent(
+    requested: Point,
+    checked: Point,
+    width: i32,
+    height: i32,
+) -> Result<()> {
+    validate_pointer_regions(
+        requested,
+        checked,
+        "wayland configured uinput extent",
+        &[Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }],
+    )
+}
+
 /// Best-effort screen-size detection. Tries `XA11Y_SCREEN_WIDTH` /
 /// `XA11Y_SCREEN_HEIGHT` env vars first (CI / explicit override), then
 /// falls back to a 1920x1080 default. A future improvement: speak
@@ -404,6 +427,40 @@ mod tests {
     use super::*;
     use crate::input::{char_keysym, XK_SHIFT_L};
     use xa11y_core::input::Key as XaKey;
+
+    #[test]
+    fn configured_extent_accepts_the_last_pixel_without_clamping() {
+        let point = Point::new(9, 4);
+        assert!(validate_configured_extent(point, point, 10, 5).is_ok());
+    }
+
+    #[test]
+    fn configured_extent_rejects_negative_and_exclusive_edges_with_geometry() {
+        for point in [Point::new(-1, 4), Point::new(10, 4), Point::new(9, 5)] {
+            let error =
+                validate_configured_extent(point, point, 10, 5).expect_err("outside extent");
+            assert!(matches!(error, Error::SelectorNotMatched { .. }));
+            assert_eq!(error.delivery(), xa11y_core::Delivery::NotDelivered);
+            let target = error
+                .diagnosis()
+                .expect("diagnosis")
+                .pointer_target
+                .as_ref()
+                .expect("geometry");
+            assert_eq!(target.point, point);
+            assert_eq!(target.checked_point, point);
+            assert_eq!(target.coordinate_space, "wayland configured uinput extent");
+            assert_eq!(
+                target.displays,
+                [Rect {
+                    x: 0,
+                    y: 0,
+                    width: 10,
+                    height: 5
+                }]
+            );
+        }
+    }
 
     fn default_keymap() -> xkb::Keymap {
         let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
