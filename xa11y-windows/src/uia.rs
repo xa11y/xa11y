@@ -4438,9 +4438,11 @@ impl Provider for WindowsProvider {
                     crate::uwp::PidFilter::for_pid(pid).packaging()?,
                     crate::uwp::Packaging::Packaged(_)
                 ) {
-                    for el in
-                        native_windows_of_pid_with(&self.automation, pid, self.batch_request.get(dpi))?
-                    {
+                    for el in native_windows_of_pid_with(
+                        &self.automation,
+                        pid,
+                        self.batch_request.get(dpi),
+                    )? {
                         let hwnd = unsafe { el.CachedNativeWindowHandle() }.map_err(|e| {
                             Error::Platform {
                                 code: e.code().0 as i64,

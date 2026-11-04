@@ -628,10 +628,12 @@ mod tests {
             filter.index = Some(index(&[(CALC, &[100, 200])], &[100, 200], 0));
             assert!(!filter.owns_detached_frame(CALC).expect("cached index"));
             filter.index = Some(index(&[(CALC, &[100, 200])], &[100], 0));
-            assert_eq!(filter.owns_detached_frame(CALC).expect("cached index"), pid == 100);
+            assert_eq!(
+                filter.owns_detached_frame(CALC).expect("cached index"),
+                pid == 100
+            );
         }
     }
-
 
     #[test]
     fn a_single_process_with_the_aumid_is_the_app() {
