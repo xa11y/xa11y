@@ -40,8 +40,10 @@ public sealed class PackageLifecycle : IDisposable {
             new Guid("B1AEC16F-2383-4852-B0E9-8F0B1DC66B4D")));
     }
     public static PackageLifecycle Create() { return new PackageLifecycle(); }
-    public void EnableDebugging(string package, string debugger, IntPtr environment) {
-        settings.EnableDebugging(package, debugger, environment);
+    public void EnableDebugging(string package) {
+        // PowerShell converts null managed string arguments to empty strings.
+        // Keep the optional native debugger/environment arguments truly null.
+        settings.EnableDebugging(package, null, IntPtr.Zero);
     }
     public void DisableDebugging(string package) { settings.DisableDebugging(package); }
     public void Suspend(string package) { settings.Suspend(package); }
@@ -70,7 +72,7 @@ try {
         Write-Output $state
     } else {
         if ($Action -eq 'hold' -and -not $ReadyFile) { throw 'hold requires -ReadyFile' }
-        $settings.EnableDebugging($full, $null, [IntPtr]::Zero)
+        $settings.EnableDebugging($full)
         $enabled = $true
         if ($Action -eq 'resume') {
             $settings.Resume($full)
