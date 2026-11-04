@@ -584,7 +584,7 @@ fn tool_definition(name: &str) -> Value {
                 json!({
                     "type": "boolean",
                     "description": "Wait until the one match is visible and its bounds \
-                                    are unchanged across two consecutive polls before \
+                                    are observed unchanged for at least 750 ms before \
                                     reporting it. Default false.",
                 }),
             );
@@ -604,8 +604,10 @@ fn tool_definition(name: &str) -> Value {
                      change): the call then waits up to the default timeout, \
                      currently {timeout} (set {timeout_env}, in seconds, where the \
                      server is launched to change it), until the match is visible and \
-                     its bounds are unchanged across two consecutive polls, and \
-                     reports those settled coordinates. With `stable` the selector \
+                     its bounds are observed unchanged for at least 750 ms, and \
+                     reports those observed coordinates. Changes, missing matches, hidden \
+                     elements, or absent bounds restart the 750 ms window. Native \
+                     snapshots can lag motion. With `stable` the selector \
                      must match exactly one element: one that matches several is \
                      refused with an `ambiguous_selector` failure listing what it \
                      matched. A match that never settles returns a `timeout` failure \

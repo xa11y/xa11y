@@ -23,7 +23,7 @@ test('waitStable resolves with the element once its bounds hold still', async ()
 test('waitStable rejects with a diagnosis when the match is not visible', async () => {
   await assert.rejects(root().descendant('static_text').waitStable(0.3), (err) => {
     assert.ok(err instanceof TimeoutError);
-    assert.ok(err.condition.startsWith('stable (bounds unchanged across two'), err.condition);
+    assert.ok(err.condition.startsWith('stable (visible bounds observed unchanged for at least 750 ms'), err.condition);
     assert.ok(err.lastObserved.includes('matched but not visible'), err.lastObserved);
     return true;
   });

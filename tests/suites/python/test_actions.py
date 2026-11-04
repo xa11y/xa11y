@@ -694,7 +694,7 @@ def test_wait_stable_timeout_names_the_moving_bounds(app, app_config):
             # (UIA), and still ends inside the 3 s slide.
             target.wait_stable(timeout=1.5)
         err = info.value
-        assert "two consecutive polls" in err.condition, err.condition
+        assert "750 ms" in err.condition, err.condition
         assert err.last_observed.startswith("bounds still changing:"), (
             err.last_observed
         )

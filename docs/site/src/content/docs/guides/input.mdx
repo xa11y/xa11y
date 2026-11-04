@@ -170,8 +170,9 @@ input providers retain their existing behavior unless they override
 An element sliding in, or a dialog still settling after a layout change, has
 bounds that are already stale by the time the click is sent. Fetch it with the
 locator's `wait_stable()` (`waitStable()` in JS) instead of `element()`. It
-returns once the bounds are unchanged across two consecutive polls, so the
-`Element` you hand to `InputSim` holds where the element comes to rest:
+returns once visible bounds are observed unchanged for at least 750 ms, so
+`InputSim` uses the last observed stable position. Native snapshots can lag
+the screen, and a pause does not guarantee that motion will not resume:
 
 ```python
 panel_button = app.locator('button[name="Save"]').wait_stable(timeout=5)

@@ -84,15 +84,24 @@ Each polls until the condition holds or the timeout expires, then raises
 element, which is `None` when the selector did not match.
 
 `wait_stable(timeout)` (`waitStable` in JS) returns the element once its
-bounds are unchanged across two consecutive polls and it is visible. It is
+bounds are observed unchanged for at least 750 ms while visible. It is
 about geometry and unrelated to an element's `stable_id`. Call it before
-clicking at an element's coordinates while it may still be animating into
-place. Each poll is a full resolve, so even an element that never moved costs
-two resolves and one 100 ms poll interval. Only bounds are compared: a
-different element with identical bounds on the second poll is returned, which
-leaves the clicked point the same. On timeout the diagnosis names what
-it saw last: `bounds still changing: {..} → {..}`, `matched but not visible`,
-`reports no bounds`, or `selector never matched`.
+pointing at an element that may still move. Each poll performs a fresh resolve
+roughly every 100 ms. Even a still element needs at least 750 ms after the
+first observation.
+
+A change in bounds restarts the observation window. A missing or hidden match
+also restarts it. An element with absent bounds cannot count as stable.
+The window exceeds Chromium's 500 ms publication interval for location changes
+in elements without focus. Equal native reads can otherwise be the same
+cached position during motion. This measures observed geometry. Native
+snapshots can lag the screen. Motion can resume after a pause.
+
+Only bounds are compared. Replacing an element with another at identical
+bounds continues the window. On timeout the diagnosis names the last differing
+rectangles and how long the latest bounds were observed unchanged. Other
+observations are `matched but not visible`, `reports no bounds`, or
+`selector never matched`.
 
 Rust adds `wait_for_state()`, a generic wait over the `ElementState` enum. The
 bindings expose the specific `wait_*` helpers above and `wait_until()` in its

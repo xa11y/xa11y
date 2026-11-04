@@ -872,8 +872,10 @@ class Locator:
     def wait_unfocused(self, timeout: float | None = None) -> Element:
         """Wait until the element does not have keyboard focus."""
     def wait_stable(self, timeout: float | None = None) -> Element:
-        """Wait until the element's bounds are unchanged across two consecutive
-        polls and it is visible, then return it.
+        """Wait until visible bounds are observed unchanged for at least 750 ms
+        across repeated fresh polls, then return the element.
+        Changes, missing matches, hidden elements, or absent bounds reset the
+        window. This measures observed geometry; native snapshots can lag motion.
 
         Use before an ``InputSim`` pointer action on an element that may still
         be animating, so the click lands where it settles:

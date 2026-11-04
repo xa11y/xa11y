@@ -527,8 +527,10 @@ impl Locator {
         ))
     }
 
-    /// Wait until the element's bounds are unchanged across two consecutive
-    /// polls and it is visible, then resolve with it.
+    /// Wait until visible bounds are observed unchanged for at least 750 ms
+    /// across repeated fresh polls, then resolve with the element.
+    /// Changes, missing matches, hidden elements, or absent bounds reset the
+    /// window. This measures observed geometry; native snapshots can lag motion.
     ///
     /// Use before an `InputSim` pointer action on an element that may still
     /// be animating, so the click lands where it settles:

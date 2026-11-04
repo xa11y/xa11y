@@ -160,13 +160,15 @@ xa11y find "list > list_item" --app Finder
 `-o` selects the output format: `pretty` (the default, shown above), `bounds`,
 or `center`.
 
-`--stable` waits until the match is visible and its bounds are unchanged
-across two consecutive polls, then prints it. It waits up to the default
+`--stable` waits until visible bounds are observed unchanged for at least
+750 ms across repeated fresh polls, then prints the match. It waits up to the default
 timeout (5 s, or `XA11Y_DEFAULT_TIMEOUT` seconds). With `--stable` the selector
 must match exactly one element: several matches is an operation failure that
 lists the candidates, and a selector still matching nothing once the wait is
 over fails the same way as without the flag. A match that never holds still
-fails with a timeout naming the last two bounds it saw.
+fails with a timeout naming the last differing bounds and the latest unchanged
+duration. Changed, missing, hidden, or bounds-less observations restart the
+window. This measures observed geometry; native snapshots can lag motion.
 
 ### `xa11y action`
 

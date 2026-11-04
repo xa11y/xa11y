@@ -2165,6 +2165,7 @@ def test_the_find_description_states_what_stable_costs_and_requires(mcp):
     assert find["inputSchema"]["properties"]["stable"]["type"] == "boolean"
     description = find["description"]
     assert "XA11Y_DEFAULT_TIMEOUT" in description
+    assert "750 ms" in description
     assert "exactly one" in description
     assert "ambiguous_selector" in description
 

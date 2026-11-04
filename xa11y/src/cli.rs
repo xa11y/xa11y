@@ -294,7 +294,7 @@ Accessibility tree:
                                             --stable waits (up to the default
                                             timeout) until the one match is
                                             visible and its bounds hold still
-                                            across two polls; the selector must
+                                            for at least 750 ms; the selector must
                                             then match exactly one element
   xa11y action ACTION SELECTOR [TARGET] [--value V]
                                             [--at X,Y] [--size W,H]
@@ -1489,7 +1489,7 @@ fn cmd_find(args: &[String]) -> CliResult<()> {
 }
 
 /// Resolve `selector` under `target` to its single match once that match is
-/// visible and its bounds are unchanged across two consecutive polls
+/// visible and its bounds are observed unchanged for at least 750 ms
 /// ([`Locator::wait_stable`]), waiting up to the default timeout.
 ///
 /// The value-producing half of `find --stable`, shared by the CLI and the
