@@ -436,6 +436,11 @@ jobs:
           test-apps/uwp/build.ps1
           test-apps/uwp/install.ps1
 
+      - name: Inspect native UWP TextBox Raw View (#606)
+        if: matrix.app == 'uwp'
+        shell: powershell
+        run: test-apps/uwp/inspect-textbox.ps1
+
       # ── Electron node_modules ──────────────────────────────────────
       - name: Cache Electron node_modules
         if: matrix.app == 'electron'
