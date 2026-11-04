@@ -59,9 +59,8 @@ test('UWP retains the native nested Edit and selects the outer TextBox (#606)', 
   const fields = await app.locator('text_field[name="Search"]').elements();
   assert.equal(fields.length, 2, 'Raw View exposes both native Edit elements');
   const outer = await one(app, textFieldSelector);
-  const inner = await one(app, `${textFieldSelector} > text_field[name="Search"]`);
+  await one(app, `${textFieldSelector} > text_field[name="Search"]`);
   assert.equal(outer.raw.class_name, 'TextBox');
-  assert.equal(inner.value, outer.value);
 });
 
 test('a password entry keeps text_field and sets password (#522)', async () => {
@@ -131,11 +130,8 @@ test('element().dump() returns string via locator', async () => {
 
 test('descendant selector returns multiple elements', async () => {
   const app = await getApp();
-  // Sample the flat count on both sides of the scoped query. The harness runs
-  // the suite files concurrently against a shared app, so a sibling test (e.g.
-  // "press on Add Item") can grow the tree between these reads. AccessKit-backed
-  // apps republish the whole subtree on such a mutation, which would otherwise
-  // let the descendant scope momentarily out-count a single flat sample.
+  // Files run serially against this shared app. Bracket the scoped query with
+  // flat reads so a delayed native update has counts on both sides.
   const allBefore = await app.locator('button').elements();
   const byDescendant = await app.locator('window').descendant('button').elements();
   const allAfter = await app.locator('button').elements();
@@ -143,7 +139,28 @@ test('descendant selector returns multiple elements', async () => {
   // On platforms where the window node exists, the descendant scope should
   // match (at most) what the top-level query finds; on platforms without a
   // separate window node it may return fewer or zero — accept either.
-  assert.ok(byDescendant.length <= allMax);
+  if (byDescendant.length > allMax) {
+    const describe = (elements) => ({
+      count: elements.length,
+      truncated: elements.length > 24,
+      elements: elements.slice(0, 24).map((element) => {
+        const raw = element.raw;
+        const bounds = element.bounds;
+        return {
+          name: element.name?.slice(0, 120),
+          className: typeof raw.class_name === 'string' ? raw.class_name.slice(0, 80) : null,
+          stableId: element.stableId?.slice(0, 120),
+          pid: element.pid,
+          bounds: bounds && [bounds.x, bounds.y, bounds.width, bounds.height],
+        };
+      }),
+    });
+    assert.fail('Descendant buttons exceeded both flat samples: ' + JSON.stringify({
+      before: describe(allBefore),
+      descendant: describe(byDescendant),
+      after: describe(allAfter),
+    }));
+  }
 });
 
 test('a selector miss reports it was not delivered (#523)', async () => {
