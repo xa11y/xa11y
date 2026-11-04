@@ -254,7 +254,7 @@ does not reach them.
 | What it is | pytest fixtures, markers, failure diagnostics | a `use_desktop` tool for [Strands](https://strandsagents.com) agents |
 | xa11y dependency | a floor (`>=0.13.0`) | a bounded minor range (`>=0.13.0,<0.14.0`) |
 | Tests need a desktop? | no — `App.find` is faked | no — the whole `xa11y` module is faked |
-| CI | rides along in the `python` job | its own `strands` / `strands-package` jobs |
+| CI | rides along in the `python` job | `strands` matrix; lint and packaging share Python 3.10 |
 | Release notes | `RELEASING.md` in the package | `RELEASING.md` in the package |
 
 **The faked-backend trap.** Neither suite would notice xa11y renaming an

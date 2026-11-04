@@ -274,7 +274,7 @@ fn do_lint() -> bool {
     //
     // Its mypy pass is not here: mypy is not otherwise needed to work on this
     // repository, and requiring it would make `cargo xtask lint` fail for
-    // anyone who has not installed it. It runs in the `strands-package` CI
+    // anyone who has not installed it. It runs in the Strands Python 3.10 CI
     // job and in `hatch run prepare` from the package directory.
     heading("strands-xa11y: ruff check");
     let strands_dir = project_root().join("strands-xa11y");
