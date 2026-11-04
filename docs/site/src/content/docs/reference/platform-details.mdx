@@ -83,7 +83,7 @@ place of the text, and xa11y passes that placeholder through.
 | `ShowMenu` | AXShowMenu | menu, showmenu, popup | ExpandCollapsePattern |
 | `ScrollIntoView` | AXScrollToVisible *(when advertised)* | Component.ScrollTo | ScrollItemPattern |
 
-On Windows, the MSAA default action stands in for `Press` only on an element served through MSAA, where the UIA `FrameworkId` is `Win32`, `WinForm`, or empty. Native UIA providers such as Chromium keep their own choice. Each Windows element's `raw` map lists the UIA activation patterns it has under `uia_activation_patterns`, and its provider under `uia_framework_id`. The `target` of an event is the exception: it has no `uia_framework_id` and never offers this `Press`, because the event handlers don't fetch the two properties that decide it. Query the element again to get both.
+On Windows, the MSAA default action stands in for `Press` only on an element served through MSAA, where the UIA `FrameworkId` is `Win32`, `WinForm`, or empty. Native UIA providers such as Chromium keep their own choice. Each Windows element's `raw` map lists the UIA activation patterns it has under `uia_activation_patterns`, and its provider under `uia_framework_id`. Event targets include these properties too.
 
 Window verbs map differently again, because each platform's window control
 API is separate from its element-action interface:
