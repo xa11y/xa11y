@@ -43,6 +43,7 @@ opaque = [
     { type = "ShellSurfaceKind", reason = "Shell-surface kinds cross the boundary as strings (`taskbar`, `status_items`) — identically spelled in both bindings, like Role, and converted mechanically via to_snake_case; the enum's variants are not mirrored as binding members." },
     { type = "Error", reason = "Mapped to a hierarchy of native exception classes (XA11yError, TimeoutError, ...) rather than a single mirrored type." },
     { type = "Diagnosis", reason = "Surfaced as structured attributes on the raised exception (selector, condition, candidates, ...), not as its own class." },
+    { type = "PointerTargetDiagnosis", reason = "Surfaced as the typed pointer_target exception dictionary / pointerTarget plain object, not a native binding class; geometry fields are covered by per-binding diagnostic tests." },
     { type = "EventKind", reason = "Exposed as string constants (Python `EventType.FOCUS_CHANGED`, JS `EventTypeName` union) rather than a mirrored enum." },
     { type = "StateFlag", reason = "Exposed as the string `state_flag` attribute on Event." },
     { type = "Toggled", reason = "Exposed as the string union 'on' | 'off' | 'mixed'." },

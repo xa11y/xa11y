@@ -24,6 +24,12 @@ mod types;
 
 pub(crate) use errors::map_err;
 
+/// Display-free input test fixture, shared with the Python binding tests.
+#[napi(js_name = "_makeTestInput")]
+pub fn make_test_input(delay_ms: Option<u32>) -> input::InputSim {
+    input::test_input(delay_ms.unwrap_or(0))
+}
+
 fn provider() -> napi::Result<Arc<dyn xa11y::Provider>> {
     xa11y::provider().map_err(map_err)
 }

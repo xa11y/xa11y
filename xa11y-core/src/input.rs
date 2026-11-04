@@ -61,7 +61,7 @@ use crate::error::{Error, Result};
     reason = "Closed domain: a 2D screen point is an x and a y. Literal \
               construction is the point of the type."
 )]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
@@ -102,7 +102,8 @@ impl Point {
 /// `#[non_exhaustive]`: the named anchors are the four corners and the centre,
 /// which is five of the standard nine-point grid — `TopCenter`, `BottomCenter`,
 /// `LeftCenter`, and `RightCenter` are the obvious next additions.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Anchor {
     #[default]
@@ -169,6 +170,12 @@ pub fn point_for(element: &Element, anchor: Anchor) -> Result<Point> {
 pub trait IntoPoint {
     fn into_point(self) -> Result<Point>;
 
+    /// Original element geometry, retained for pointer failure diagnosis.
+    #[doc(hidden)]
+    fn element_bounds(&self) -> Option<Rect> {
+        None
+    }
+
     /// Whether this target's point comes from an element's accessibility
     /// bounds rather than being a literal screen point. [`Mouse`] refuses
     /// such targets on backends whose bounds are not screen coordinates
@@ -198,6 +205,10 @@ impl IntoPoint for &Element {
 
     fn is_element_target(&self) -> bool {
         true
+    }
+
+    fn element_bounds(&self) -> Option<Rect> {
+        self.bounds
     }
 }
 
@@ -519,6 +530,23 @@ pub trait InputProvider: Send + Sync {
         true
     }
 
+    /// Preflight an explicit pointer target before any part of its gesture.
+    ///
+    /// Built-in providers reject targets outside their displays (or configured
+    /// uinput extent). The default preserves the behavior of existing custom
+    /// and virtual providers; those providers may override it to validate their
+    /// own coordinate domain. Native query errors must propagate unchanged.
+    fn validate_pointer_target(&self, _point: Point) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether a mouse button is held through this provider. Such moves may
+    /// belong to a captured drag, so display preflight must not interrupt them.
+    /// This is tracked provider state, not a query of physical input devices.
+    fn pointer_buttons_down(&self) -> bool {
+        false
+    }
+
     // ── Pointer (required) ──────────────────────────────────────────
 
     /// Move the pointer to `to` without pressing any buttons.
@@ -577,24 +605,511 @@ pub trait InputProvider: Send + Sync {
         button: MouseButton,
         duration: Duration,
     ) -> Result<()> {
+        self.validate_pointer_target(from)?;
+        self.validate_pointer_target(to)?;
         const STEP: Duration = Duration::from_millis(16);
         self.pointer_move(from)?;
         self.pointer_down(button)?;
         let steps = (duration.as_millis() / STEP.as_millis().max(1)).max(1) as i32;
-        for i in 1..=steps {
-            let t = i as f64 / steps as f64;
-            let x = from.x + ((to.x - from.x) as f64 * t).round() as i32;
-            let y = from.y + ((to.y - from.y) as f64 * t).round() as i32;
-            self.pointer_move(Point::new(x, y))?;
-            if i < steps {
-                std::thread::sleep(STEP);
+        let moved = (|| {
+            for i in 1..=steps {
+                let t = f64::from(i) / f64::from(steps);
+                // Widen before subtraction: distant desktop coordinates can
+                // span the full signed range even though each endpoint fits.
+                let x =
+                    (f64::from(from.x) + (f64::from(to.x) - f64::from(from.x)) * t).round() as i32;
+                let y =
+                    (f64::from(from.y) + (f64::from(to.y) - f64::from(from.y)) * t).round() as i32;
+                self.pointer_move(Point::new(x, y))?;
+                if i < steps {
+                    std::thread::sleep(STEP);
+                }
             }
-        }
-        self.pointer_up(button)
+            Ok(())
+        })();
+        // Always release after a failed move; preserve the first failure if
+        // release also fails, matching held-key and Windows drag cleanup.
+        let released = self.pointer_up(button);
+        moved.and(released)
     }
 }
 
 // ── Public façade ───────────────────────────────────────────────────
+
+/// Validate against the complete native region set before bounding the error
+/// snapshot. Backends supply points in the same space as their native regions.
+#[doc(hidden)]
+pub fn validate_pointer_regions(
+    point: Point,
+    checked_point: Point,
+    coordinate_space: &str,
+    displays: &[Rect],
+) -> Result<()> {
+    if displays.iter().any(|rect| {
+        let x = i64::from(checked_point.x);
+        let y = i64::from(checked_point.y);
+        x >= i64::from(rect.x)
+            && y >= i64::from(rect.y)
+            && x < i64::from(rect.x) + i64::from(rect.width)
+            && y < i64::from(rect.y) + i64::from(rect.height)
+    }) {
+        return Ok(());
+    }
+    Err(Error::selector_not_matched(format!(
+        "pointer[x={}][y={}] on a display",
+        point.x, point.y
+    ))
+    .diagnose(
+        crate::Diagnosis::new()
+            .condition("pointer target lies on a display")
+            .pointer_target(crate::PointerTargetDiagnosis::new(
+                point,
+                checked_point,
+                coordinate_space,
+                displays,
+            )),
+    ))
+}
+
+/// Preserve an element's original geometry after a binding lowers it to a
+/// point. This is pure error enrichment; native failures keep their identity.
+#[doc(hidden)]
+pub fn enrich_pointer_error(error: Error, bounds: Option<Rect>, anchor: Anchor) -> Error {
+    let Some(mut diagnosis) = error.diagnosis().cloned() else {
+        return error;
+    };
+    let Some(target) = diagnosis.pointer_target.as_mut() else {
+        return error;
+    };
+    target.element_bounds = bounds;
+    target.anchor = bounds.map(|_| anchor);
+    error.diagnose(diagnosis)
+}
+
+fn after_pointer_prefix(error: Error, held: &[Key]) -> Error {
+    // A native gesture can recheck geometry after the façade's preflight.
+    // If modifiers were already posted, a late refusal cannot promise that
+    // the whole action had no effect, even though cleanup releases them.
+    if held.is_empty() {
+        return error;
+    }
+    let Some(mut diagnosis) = error.diagnosis().cloned() else {
+        return error;
+    };
+    if diagnosis.pointer_target.is_none() {
+        return error;
+    }
+    diagnosis.delivery = Some(crate::Delivery::Unknown);
+    error.diagnose(diagnosis)
+}
+
+fn enrich_drag_error(
+    error: Error,
+    from: Point,
+    from_bounds: Option<Rect>,
+    to: Point,
+    to_bounds: Option<Rect>,
+) -> Error {
+    let requested = error
+        .diagnosis()
+        .and_then(|d| d.pointer_target.as_ref())
+        .map(|d| d.point);
+    if requested == Some(from) {
+        enrich_pointer_error(error, from_bounds, Anchor::Center)
+    } else if requested == Some(to) {
+        enrich_pointer_error(error, to_bounds, Anchor::Center)
+    } else {
+        error
+    }
+}
+
+#[cfg(test)]
+mod pointer_validation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    struct Checked {
+        events: Mutex<Vec<String>>,
+        held: AtomicBool,
+        query_failure: AtomicBool,
+        queries: AtomicUsize,
+        fail_drag_move: bool,
+        late_click_refusal: bool,
+    }
+
+    impl Checked {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                events: Mutex::new(Vec::new()),
+                held: AtomicBool::new(false),
+                query_failure: AtomicBool::new(false),
+                queries: AtomicUsize::new(0),
+                fail_drag_move: false,
+                late_click_refusal: false,
+            })
+        }
+        fn record(&self, event: impl Into<String>) {
+            self.events.lock().unwrap().push(event.into());
+        }
+    }
+
+    fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    impl InputProvider for Checked {
+        fn validate_pointer_target(&self, point: Point) -> Result<()> {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            if self.query_failure.load(Ordering::Relaxed) {
+                return Err(Error::Platform {
+                    code: 42,
+                    message: "native display query failed".into(),
+                });
+            }
+            validate_pointer_regions(point, point, "test pixels", &[rect(0, 0, 100, 100)])
+        }
+        fn pointer_buttons_down(&self) -> bool {
+            self.held.load(Ordering::Relaxed)
+        }
+        fn pointer_move(&self, _: Point) -> Result<()> {
+            if self.fail_drag_move && self.pointer_buttons_down() {
+                self.record("move failed");
+                return Err(Error::Platform {
+                    code: 99,
+                    message: "move failed".into(),
+                });
+            }
+            self.record("move");
+            Ok(())
+        }
+        fn pointer_down(&self, _: MouseButton) -> Result<()> {
+            self.record("down");
+            self.held.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+        fn pointer_up(&self, _: MouseButton) -> Result<()> {
+            self.record("up");
+            self.held.store(false, Ordering::Relaxed);
+            Ok(())
+        }
+        fn pointer_click(&self, point: Point, _: MouseButton, _: u32) -> Result<()> {
+            if self.late_click_refusal {
+                return validate_pointer_regions(point, point, "test pixels", &[]);
+            }
+            self.record("click");
+            Ok(())
+        }
+        fn pointer_scroll(&self, _: Point, _: ScrollDelta) -> Result<()> {
+            self.record("scroll");
+            Ok(())
+        }
+        fn key_down(&self, key: &Key) -> Result<()> {
+            self.record(format!("key down {key:?}"));
+            Ok(())
+        }
+        fn key_up(&self, key: &Key) -> Result<()> {
+            self.record(format!("key up {key:?}"));
+            Ok(())
+        }
+        fn type_text(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn element(bounds: Rect) -> Element {
+        Element::new(
+            crate::ElementData {
+                bounds: Some(bounds),
+                ..Default::default()
+            },
+            crate::mock::build_provider(),
+        )
+    }
+
+    #[test]
+    fn regions_preserve_negative_origins_gaps_and_half_open_edges() {
+        let regions = [rect(-100, -100, 100, 100), rect(10, 0, 100, 100)];
+        for point in [
+            Point::new(-100, -100),
+            Point::new(-1, -1),
+            Point::new(109, 99),
+        ] {
+            validate_pointer_regions(point, point, "pixels", &regions).expect("on a display");
+        }
+        for point in [Point::new(0, 0), Point::new(110, 0), Point::new(-101, 0)] {
+            let error = validate_pointer_regions(point, point, "pixels", &regions)
+                .expect_err("off display");
+            assert_eq!(error.delivery(), crate::Delivery::NotDelivered);
+            assert_eq!(
+                error
+                    .diagnosis()
+                    .unwrap()
+                    .pointer_target
+                    .as_ref()
+                    .unwrap()
+                    .point,
+                point
+            );
+        }
+    }
+
+    #[test]
+    fn validation_checks_every_display_before_bounding_the_diagnosis() {
+        let regions: Vec<_> = (0..40).map(|i| rect(i * 10, 0, 5, 5)).collect();
+        validate_pointer_regions(Point::new(391, 1), Point::new(391, 1), "pixels", &regions)
+            .unwrap();
+        let error =
+            validate_pointer_regions(Point::new(999, 1), Point::new(999, 1), "pixels", &regions)
+                .unwrap_err();
+        let geometry = error.diagnosis().unwrap().pointer_target.as_ref().unwrap();
+        assert_eq!(geometry.displays.len(), 32);
+        assert_eq!(geometry.omitted_displays, 8);
+    }
+
+    #[test]
+    fn extreme_edges_do_not_overflow_and_empty_sets_refuse() {
+        let point = Point::new(i32::MAX, i32::MIN);
+        validate_pointer_regions(
+            point,
+            point,
+            "pixels",
+            &[rect(i32::MAX - 2, i32::MIN, 10, 5)],
+        )
+        .unwrap();
+        let error = validate_pointer_regions(point, point, "pixels", &[]).unwrap_err();
+        assert!(error
+            .diagnosis()
+            .unwrap()
+            .pointer_target
+            .as_ref()
+            .unwrap()
+            .displays
+            .is_empty());
+    }
+
+    #[test]
+    fn bad_element_anchor_refuses_before_pointer_or_modifier_events() {
+        let backend = Checked::new();
+        let sim = InputSim::new(backend.clone());
+        let bounds = rect(90, 10, 5, 5);
+        let error = sim
+            .mouse()
+            .click_with(
+                ClickTarget::Element(&element(bounds)),
+                ClickOptions::new()
+                    .anchor(Anchor::Offset { dx: 20, dy: 2 })
+                    .held(vec![Key::Ctrl]),
+            )
+            .unwrap_err();
+        let geometry = error.diagnosis().unwrap().pointer_target.as_ref().unwrap();
+        assert_eq!(geometry.point, Point::new(110, 12));
+        assert_eq!(geometry.element_bounds, Some(bounds));
+        assert_eq!(geometry.anchor, Some(Anchor::Offset { dx: 20, dy: 2 }));
+        assert!(backend.events.lock().unwrap().is_empty());
+        assert_eq!(error.delivery(), crate::Delivery::NotDelivered);
+    }
+
+    #[test]
+    fn invalid_drag_end_keeps_end_geometry_and_posts_nothing() {
+        let backend = Checked::new();
+        let sim = InputSim::new(backend.clone());
+        let from = element(rect(5, 5, 10, 10));
+        let end_bounds = rect(200, 200, 10, 10);
+        let to = element(end_bounds);
+        let error = sim
+            .mouse()
+            .drag_with(&from, &to, DragOptions::new().held(vec![Key::Shift]))
+            .unwrap_err();
+        let geometry = error.diagnosis().unwrap().pointer_target.as_ref().unwrap();
+        assert_eq!(geometry.element_bounds, Some(end_bounds));
+        assert_eq!(geometry.point, Point::new(205, 205));
+        assert_eq!(geometry.anchor, Some(Anchor::Center));
+        assert!(backend.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn native_query_error_is_not_rewritten_as_a_coordinate_miss() {
+        let backend = Checked::new();
+        backend.query_failure.store(true, Ordering::Relaxed);
+        let sim = InputSim::new(backend.clone());
+        let error = sim.mouse().click((5, 5)).unwrap_err();
+        assert!(
+            matches!(error, Error::Platform { code: 42, ref message } if message == "native display query failed")
+        );
+        assert!(error.diagnosis().is_none());
+        assert!(backend.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn zero_count_does_not_query_geometry_or_post_modifiers() {
+        let backend = Checked::new();
+        backend.query_failure.store(true, Ordering::Relaxed);
+        let sim = InputSim::new(backend.clone());
+        sim.mouse()
+            .click_with(
+                ClickTarget::Point(Point::new(i32::MAX, i32::MIN)),
+                ClickOptions::new().count(0).held(vec![Key::Ctrl]),
+            )
+            .unwrap();
+        assert_eq!(backend.queries.load(Ordering::Relaxed), 0);
+        assert!(backend.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn captured_moves_and_releases_bypass_geometry_but_clicks_do_not() {
+        let backend = Checked::new();
+        let sim = InputSim::new(backend.clone());
+        sim.mouse().down(MouseButton::Left).unwrap();
+        sim.mouse().move_to((500, 500)).unwrap();
+        sim.mouse().click((500, 500)).unwrap_err();
+        backend.query_failure.store(true, Ordering::Relaxed);
+        sim.mouse().up(MouseButton::Left).unwrap();
+        assert_eq!(*backend.events.lock().unwrap(), ["down", "move", "up"]);
+    }
+
+    #[test]
+    fn failed_drag_move_still_releases_button_and_modifiers() {
+        let mut backend = Checked::new();
+        Arc::get_mut(&mut backend).unwrap().fail_drag_move = true;
+        let sim = InputSim::new(backend.clone());
+        let error = sim
+            .mouse()
+            .drag_with(
+                (5, 5),
+                (10, 10),
+                DragOptions::new().held(vec![Key::Ctrl, Key::Shift]),
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::Platform { code: 99, .. }));
+        assert_eq!(
+            *backend.events.lock().unwrap(),
+            [
+                "key down Ctrl",
+                "key down Shift",
+                "move",
+                "down",
+                "move failed",
+                "up",
+                "key up Shift",
+                "key up Ctrl"
+            ]
+        );
+    }
+
+    #[test]
+    fn late_refusal_after_modifier_prefix_is_unknown_and_modifiers_release() {
+        let mut backend = Checked::new();
+        Arc::get_mut(&mut backend).unwrap().late_click_refusal = true;
+        let sim = InputSim::new(backend.clone());
+        let error = sim
+            .mouse()
+            .click_with(
+                ClickTarget::Point(Point::new(5, 5)),
+                ClickOptions::new().held(vec![Key::Ctrl]),
+            )
+            .unwrap_err();
+        assert_eq!(error.delivery(), crate::Delivery::Unknown);
+        assert_eq!(
+            *backend.events.lock().unwrap(),
+            ["key down Ctrl", "key up Ctrl"]
+        );
+    }
+
+    #[test]
+    fn every_literal_pointer_path_checks_before_dispatch() {
+        let backend = Checked::new();
+        let sim = InputSim::new(backend.clone());
+        let bad = Point::new(100, 100);
+        for error in [
+            sim.mouse().click(bad).unwrap_err(),
+            sim.mouse().double_click(bad).unwrap_err(),
+            sim.mouse().right_click(bad).unwrap_err(),
+            sim.mouse().move_to(bad).unwrap_err(),
+            sim.mouse().scroll(bad, ScrollDelta::default()).unwrap_err(),
+            sim.mouse().drag(bad, (10, 10)).unwrap_err(),
+        ] {
+            assert_eq!(error.delivery(), crate::Delivery::NotDelivered);
+            assert_eq!(
+                error
+                    .diagnosis()
+                    .unwrap()
+                    .pointer_target
+                    .as_ref()
+                    .unwrap()
+                    .point,
+                bad
+            );
+        }
+        assert!(backend.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pointer_payload_serializes_as_plain_geometry() {
+        let bounds = rect(100, 100, 10, 10);
+        let point = Point::new(105, 105);
+        let error =
+            validate_pointer_regions(point, point, "physical pixels", &[rect(0, 0, 10, 10)])
+                .unwrap_err();
+        let error = enrich_pointer_error(error, Some(bounds), Anchor::Offset { dx: 5, dy: 5 });
+        let payload =
+            serde_json::to_value(error.diagnosis().unwrap().pointer_target.as_ref().unwrap())
+                .unwrap();
+        assert_eq!(payload["point"], serde_json::json!({"x":105,"y":105}));
+        assert_eq!(
+            payload["element_bounds"],
+            serde_json::json!({"x":100,"y":100,"width":10,"height":10})
+        );
+        assert_eq!(
+            payload["anchor"],
+            serde_json::json!({"offset":{"dx":5,"dy":5}})
+        );
+        assert_eq!(payload["displays"][0]["width"], 10);
+        assert!(error.to_string().contains("physical pixels"));
+    }
+
+    struct Legacy;
+    // An existing external/virtual provider need not add either new hook.
+    impl InputProvider for Legacy {
+        fn pointer_move(&self, _: Point) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_down(&self, _: MouseButton) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_up(&self, _: MouseButton) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_click(&self, _: Point, _: MouseButton, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_scroll(&self, _: Point, _: ScrollDelta) -> Result<()> {
+            Ok(())
+        }
+        fn key_down(&self, _: &Key) -> Result<()> {
+            Ok(())
+        }
+        fn key_up(&self, _: &Key) -> Result<()> {
+            Ok(())
+        }
+        fn type_text(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn legacy_virtual_provider_keeps_its_own_coordinate_domain() {
+        InputSim::new(Arc::new(Legacy))
+            .mouse()
+            .click((i32::MAX, i32::MIN))
+            .unwrap();
+    }
+}
 
 /// Synthesises OS-level pointer and keyboard events.
 ///
@@ -610,6 +1125,13 @@ pub trait InputProvider: Send + Sync {
 /// interaction you need — see the [module docs](self) for the rationale.
 ///
 /// `InputSim` is cheap to clone (it shares the backend via `Arc`).
+///
+/// Built-in backends check pointer targets against every active display before
+/// sending input; Wayland uses its configured virtual input extent. This proves
+/// screen membership, not visibility or hit testing. Both drag endpoints are
+/// checked before the gesture. Captured moves while this provider holds a button,
+/// and releases, remain possible. Custom providers retain their coordinate domain
+/// unless they implement [`InputProvider::validate_pointer_target`].
 ///
 /// # Example
 ///
@@ -685,6 +1207,12 @@ pub struct Mouse<'a> {
 }
 
 impl Mouse<'_> {
+    fn validate_target(&self, point: Point, bounds: Option<Rect>, anchor: Anchor) -> Result<()> {
+        self.backend
+            .validate_pointer_target(point)
+            .map_err(|error| enrich_pointer_error(error, bounds, anchor))
+    }
+
     /// Turn an element's accessibility `bounds` into the screen point for a
     /// pointer action, refusing when the backend's bounds are not screen
     /// coordinates.
@@ -714,8 +1242,12 @@ impl Mouse<'_> {
     /// Left-click `target` once at its [`Anchor::Center`] (for elements) or
     /// at the literal point.
     pub fn click(&self, target: impl IntoPoint) -> Result<()> {
+        let bounds = target.element_bounds();
         let pt = self.resolve(target)?;
-        self.backend.pointer_click(pt, MouseButton::Left, 1)
+        self.validate_target(pt, bounds, Anchor::Center)?;
+        self.backend
+            .pointer_click(pt, MouseButton::Left, 1)
+            .map_err(|error| enrich_pointer_error(error, bounds, Anchor::Center))
     }
 
     /// Click with explicit options (button, count, held keys, anchor).
@@ -726,25 +1258,40 @@ impl Mouse<'_> {
         for k in &opts.held {
             k.validate()?;
         }
-        let pt = match target {
-            ClickTarget::Point(p) => p,
-            ClickTarget::Element(el) => self.point_for_bounds(el.bounds, opts.anchor)?,
+        let (pt, bounds) = match target {
+            ClickTarget::Point(p) => (p, None),
+            ClickTarget::Element(el) => (self.point_for_bounds(el.bounds, opts.anchor)?, el.bounds),
         };
+        if opts.count == 0 {
+            return Ok(());
+        }
+        self.validate_target(pt, bounds, opts.anchor)?;
         with_keys_held(self.backend.as_ref(), &opts.held, || {
             self.backend.pointer_click(pt, opts.button, opts.count)
+        })
+        .map_err(|error| {
+            enrich_pointer_error(after_pointer_prefix(error, &opts.held), bounds, opts.anchor)
         })
     }
 
     /// Convenience for a left double-click at `target`.
     pub fn double_click(&self, target: impl IntoPoint) -> Result<()> {
+        let bounds = target.element_bounds();
         let pt = self.resolve(target)?;
-        self.backend.pointer_click(pt, MouseButton::Left, 2)
+        self.validate_target(pt, bounds, Anchor::Center)?;
+        self.backend
+            .pointer_click(pt, MouseButton::Left, 2)
+            .map_err(|error| enrich_pointer_error(error, bounds, Anchor::Center))
     }
 
     /// Convenience for a right-click at `target`.
     pub fn right_click(&self, target: impl IntoPoint) -> Result<()> {
+        let bounds = target.element_bounds();
         let pt = self.resolve(target)?;
-        self.backend.pointer_click(pt, MouseButton::Right, 1)
+        self.validate_target(pt, bounds, Anchor::Center)?;
+        self.backend
+            .pointer_click(pt, MouseButton::Right, 1)
+            .map_err(|error| enrich_pointer_error(error, bounds, Anchor::Center))
     }
 
     /// Press `button` at the current pointer location (no release).
@@ -759,17 +1306,28 @@ impl Mouse<'_> {
 
     /// Move the pointer to `target` without pressing any buttons.
     pub fn move_to(&self, target: impl IntoPoint) -> Result<()> {
+        let bounds = target.element_bounds();
         let pt = self.resolve(target)?;
-        self.backend.pointer_move(pt)
+        if !self.backend.pointer_buttons_down() {
+            self.validate_target(pt, bounds, Anchor::Center)?;
+        }
+        self.backend
+            .pointer_move(pt)
+            .map_err(|error| enrich_pointer_error(error, bounds, Anchor::Center))
     }
 
     /// Press the left button at `from`, move to `to`, release. Default
     /// duration: 150 ms. Use [`drag_with`](Self::drag_with) to customise.
     pub fn drag(&self, from: impl IntoPoint, to: impl IntoPoint) -> Result<()> {
+        let from_bounds = from.element_bounds();
+        let to_bounds = to.element_bounds();
         let from = self.resolve(from)?;
         let to = self.resolve(to)?;
+        self.validate_target(from, from_bounds, Anchor::Center)?;
+        self.validate_target(to, to_bounds, Anchor::Center)?;
         self.backend
             .pointer_drag(from, to, MouseButton::Left, Duration::from_millis(150))
+            .map_err(|error| enrich_drag_error(error, from, from_bounds, to, to_bounds))
     }
 
     /// Drag with explicit options.
@@ -782,18 +1340,35 @@ impl Mouse<'_> {
         for k in &opts.held {
             k.validate()?;
         }
+        let from_bounds = from.element_bounds();
+        let to_bounds = to.element_bounds();
         let from = self.resolve(from)?;
         let to = self.resolve(to)?;
+        self.validate_target(from, from_bounds, Anchor::Center)?;
+        self.validate_target(to, to_bounds, Anchor::Center)?;
         with_keys_held(self.backend.as_ref(), &opts.held, || {
             self.backend
                 .pointer_drag(from, to, opts.button, opts.duration)
+        })
+        .map_err(|error| {
+            enrich_drag_error(
+                after_pointer_prefix(error, &opts.held),
+                from,
+                from_bounds,
+                to,
+                to_bounds,
+            )
         })
     }
 
     /// Scroll at `target` by `delta` ticks.
     pub fn scroll(&self, target: impl IntoPoint, delta: ScrollDelta) -> Result<()> {
+        let bounds = target.element_bounds();
         let pt = self.resolve(target)?;
-        self.backend.pointer_scroll(pt, delta)
+        self.validate_target(pt, bounds, Anchor::Center)?;
+        self.backend
+            .pointer_scroll(pt, delta)
+            .map_err(|error| enrich_pointer_error(error, bounds, Anchor::Center))
     }
 }
 

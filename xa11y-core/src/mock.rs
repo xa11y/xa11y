@@ -1026,3 +1026,88 @@ pub fn disconnected_subscription() -> Subscription {
     drop(tx); // immediate disconnect
     Subscription::new(EventReceiver::new(rx), CancelHandle::noop())
 }
+
+/// Display-free input backend for binding geometry and host-thread tests.
+#[doc(hidden)]
+pub struct MockInputProvider {
+    delay: std::time::Duration,
+    held: std::sync::atomic::AtomicU32,
+}
+
+impl MockInputProvider {
+    pub fn new(delay: std::time::Duration) -> Self {
+        Self {
+            delay,
+            held: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn bit(button: crate::input::MouseButton) -> u32 {
+        match button {
+            crate::input::MouseButton::Left => 1,
+            crate::input::MouseButton::Right => 2,
+            crate::input::MouseButton::Middle => 4,
+        }
+    }
+}
+
+impl crate::input::InputProvider for MockInputProvider {
+    fn validate_pointer_target(&self, point: crate::input::Point) -> Result<()> {
+        std::thread::sleep(self.delay);
+        crate::input::validate_pointer_regions(
+            point,
+            point,
+            "mock desktop pixels",
+            &[
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
+                Rect {
+                    x: -100,
+                    y: -100,
+                    width: 100,
+                    height: 100,
+                },
+            ],
+        )
+    }
+    fn pointer_buttons_down(&self) -> bool {
+        self.held.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+    fn pointer_move(&self, _: crate::input::Point) -> Result<()> {
+        Ok(())
+    }
+    fn pointer_down(&self, button: crate::input::MouseButton) -> Result<()> {
+        self.held
+            .fetch_or(Self::bit(button), std::sync::atomic::Ordering::AcqRel);
+        Ok(())
+    }
+    fn pointer_up(&self, button: crate::input::MouseButton) -> Result<()> {
+        self.held
+            .fetch_and(!Self::bit(button), std::sync::atomic::Ordering::AcqRel);
+        Ok(())
+    }
+    fn pointer_click(
+        &self,
+        _: crate::input::Point,
+        _: crate::input::MouseButton,
+        _: u32,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn pointer_scroll(&self, _: crate::input::Point, _: crate::input::ScrollDelta) -> Result<()> {
+        Ok(())
+    }
+    fn key_down(&self, _: &crate::input::Key) -> Result<()> {
+        Ok(())
+    }
+    fn key_up(&self, _: &crate::input::Key) -> Result<()> {
+        Ok(())
+    }
+    fn type_text(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+}

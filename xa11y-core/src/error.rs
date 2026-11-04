@@ -31,8 +31,55 @@
 //!    JS) in addition to rendering it into the message. New fields belong on
 //!    [`Diagnosis`], not interpolated into ad-hoc message strings.
 
-use crate::element::HiddenReason;
+use crate::element::{HiddenReason, Rect};
+use crate::input::{Anchor, Point};
 use crate::role::Role;
+
+/// Geometry checked before a pointer action was refused as off-display.
+///
+/// `point` and `element_bounds` use the public desktop coordinate space.
+/// `checked_point` and `displays` use `coordinate_space`: on Linux these may
+/// be physical pixels after the same scaling used to dispatch input.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct PointerTargetDiagnosis {
+    /// Requested point in the public desktop coordinate space.
+    pub point: Point,
+    /// Original element bounds, absent for a literal point target.
+    pub element_bounds: Option<Rect>,
+    /// Anchor used for an element target; literal points have no anchor.
+    pub anchor: Option<Anchor>,
+    /// Point after the backend's dispatch-coordinate conversion.
+    pub checked_point: Point,
+    /// Units used by the checked point and display rectangles.
+    pub coordinate_space: String,
+    /// Bounded snapshot of display regions actually checked.
+    pub displays: Vec<Rect>,
+    /// Number of checked regions omitted from the diagnostic snapshot.
+    pub omitted_displays: usize,
+}
+
+impl PointerTargetDiagnosis {
+    /// A bounded diagnostic snapshot. Validation must check the complete
+    /// display set before constructing this failure-only payload.
+    pub fn new(
+        point: Point,
+        checked_point: Point,
+        coordinate_space: impl Into<String>,
+        displays: &[Rect],
+    ) -> Self {
+        const LIMIT: usize = 32;
+        Self {
+            point,
+            element_bounds: None,
+            anchor: None,
+            checked_point,
+            coordinate_space: coordinate_space.into(),
+            displays: displays.iter().take(LIMIT).copied().collect(),
+            omitted_displays: displays.len().saturating_sub(LIMIT),
+        }
+    }
+}
 
 /// Whether an action that failed may already have taken effect.
 ///
@@ -160,12 +207,21 @@ pub struct Diagnosis {
     /// wait timeouts happen before any dispatch (`NotDelivered`), while a
     /// bare [`Error::Timeout`] from a backend is `Unknown`.
     pub delivery: Option<Delivery>,
+    /// Requested and checked geometry when no display contains a pointer target.
+    pub pointer_target: Option<PointerTargetDiagnosis>,
 }
 
 impl Diagnosis {
     /// An empty diagnosis. Fill it in with the chained setters.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach the geometry of a refused off-display pointer target.
+    #[must_use]
+    pub fn pointer_target(mut self, target: PointerTargetDiagnosis) -> Self {
+        self.pointer_target = Some(target);
+        self
     }
 
     /// Set what the operation was waiting for or trying to find.
@@ -234,6 +290,7 @@ impl Diagnosis {
             && self.candidates.is_empty()
             && self.scope.is_none()
             && self.delivery.is_none()
+            && self.pointer_target.is_none()
     }
 }
 
@@ -278,6 +335,22 @@ impl std::fmt::Display for Diagnosis {
         }
         if !self.candidates.is_empty() {
             write!(f, "; candidates: {}", self.candidates.join(", "))?;
+        }
+        if let Some(target) = &self.pointer_target {
+            write!(
+                f,
+                "; pointer target: {:?}, element bounds: {:?}, anchor: {:?}; \
+                 checked point: {:?} ({}), displays: {:?}",
+                target.point,
+                target.element_bounds,
+                target.anchor,
+                target.checked_point,
+                target.coordinate_space,
+                target.displays,
+            )?;
+            if target.omitted_displays > 0 {
+                write!(f, " ({} more displays omitted)", target.omitted_displays)?;
+            }
         }
         if let Some(scope) = &self.scope {
             write!(f, "\nsearch scope (bounded):\n{scope}")?;

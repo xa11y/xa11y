@@ -31,7 +31,7 @@ import time
 
 import pytest
 import xa11y
-from xa11y._native import _find_test_shell_surface
+from xa11y._native import _find_test_shell_surface, _make_test_input
 
 # A 1-second native wait. With the GIL released the 1 ms spin loop gets
 # hundreds of iterations; with the GIL held it gets approximately zero
@@ -64,6 +64,16 @@ def _ticks_during(blocked_call):
         stop.set()
         t.join(timeout=5)
     return ticks["n"]
+
+
+def test_pointer_geometry_query_releases_gil():
+    simulator = _make_test_input(delay_ms=1000)
+
+    def blocked():
+        with pytest.raises(xa11y.SelectorNotMatchedError):
+            simulator.click((500, 500))
+
+    assert _ticks_during(blocked) >= _MIN_TICKS
 
 
 def test_wait_visible_releases_gil(test_app):

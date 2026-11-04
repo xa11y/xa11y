@@ -58,6 +58,17 @@ fn diagnosis_json(
         "lastObserved": diagnosis.and_then(|d| d.last_observed.as_deref()),
         "hiddenReason": diagnosis.and_then(|d| d.hidden_reason.map(|r| r.to_snake_case())),
         "autoScroll": diagnosis.and_then(|d| d.auto_scroll.map(|o| o.to_snake_case())),
+        "pointerTarget": diagnosis.and_then(|d| d.pointer_target.as_ref()).map(|target| {
+            serde_json::json!({
+                "point": target.point,
+                "elementBounds": target.element_bounds,
+                "anchor": target.anchor,
+                "checkedPoint": target.checked_point,
+                "coordinateSpace": target.coordinate_space,
+                "displays": target.displays,
+                "omittedDisplays": target.omitted_displays,
+            })
+        }),
         "candidates": diagnosis.map(|d| d.candidates.clone()).unwrap_or_default(),
         "scope": diagnosis.and_then(|d| d.scope.as_deref()),
     })

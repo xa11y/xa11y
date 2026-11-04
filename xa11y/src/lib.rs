@@ -23,8 +23,9 @@ use std::sync::{Arc, Mutex};
 // Re-export public types.
 pub use xa11y_core::{
     App, AutoScrollOutcome, Delivery, Diagnosis, Element, ElementData, ElementState, Error, Event,
-    EventKind, HiddenReason, Locator, RawPlatformData, Rect, Result, Role, ShellSurface,
-    ShellSurfaceKind, StateFlag, StateSet, Subscription, SubscriptionIter, Toggled, TreeNode,
+    EventKind, HiddenReason, Locator, PointerTargetDiagnosis, RawPlatformData, Rect, Result, Role,
+    ShellSurface, ShellSurfaceKind, StateFlag, StateSet, Subscription, SubscriptionIter, Toggled,
+    TreeNode,
 };
 
 // `#[doc(hidden)]`: the provider-side construction contracts. Re-exported so
