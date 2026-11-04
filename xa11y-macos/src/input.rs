@@ -211,6 +211,12 @@ fn quartz_display_rect(bounds: CGRect) -> Result<Rect> {
     let top = bounds.origin.y.ceil();
     let right = (bounds.origin.x + bounds.size.width).ceil();
     let bottom = (bounds.origin.y + bounds.size.height).ceil();
+    let invalid_geometry = || Error::Platform {
+        code: -1,
+        message: format!(
+            "CGDisplayBounds returned invalid or unrepresentable geometry: {bounds:?}"
+        ),
+    };
     if ![left, top, right, bottom]
         .iter()
         .all(|edge| edge.is_finite())
@@ -220,23 +226,21 @@ fn quartz_display_rect(bounds: CGRect) -> Result<Rect> {
         || top < f64::from(i32::MIN)
         || left > f64::from(i32::MAX)
         || top > f64::from(i32::MAX)
-        || right > f64::from(i32::MAX) + 1.0
-        || bottom > f64::from(i32::MAX) + 1.0
-        || right - left > f64::from(i32::MAX)
-        || bottom - top > f64::from(i32::MAX)
+        || right - left < 0.0
+        || bottom - top < 0.0
+        || right - left > f64::from(u32::MAX)
+        || bottom - top > f64::from(u32::MAX)
     {
-        return Err(Error::Platform {
-            code: -1,
-            message: format!(
-                "CGDisplayBounds returned invalid or unrepresentable geometry: {bounds:?}"
-            ),
-        });
+        return Err(invalid_geometry());
     }
+    // The finite, integral edges/spans above are exactly representable as
+    // i64. Check the final signed origin and unsigned dimensions separately;
+    // a valid Rect's far edge may exceed the range of an individual Point.
     Ok(Rect {
-        x: left as i32,
-        y: top as i32,
-        width: (right - left) as i32,
-        height: (bottom - top) as i32,
+        x: i32::try_from(left as i64).map_err(|_| invalid_geometry())?,
+        y: i32::try_from(top as i64).map_err(|_| invalid_geometry())?,
+        width: u32::try_from((right - left) as i64).map_err(|_| invalid_geometry())?,
+        height: u32::try_from((bottom - top) as i64).map_err(|_| invalid_geometry())?,
     })
 }
 
@@ -893,6 +897,34 @@ mod tests {
     }
 
     #[test]
+    fn native_display_dimensions_keep_the_full_unsigned_range() {
+        for origin in [i32::MIN, i32::MAX] {
+            let rect = quartz_display_rect(CGRect {
+                origin: CGPoint {
+                    x: f64::from(origin),
+                    y: f64::from(origin),
+                },
+                size: CGSize {
+                    width: f64::from(u32::MAX),
+                    height: f64::from(u32::MAX),
+                },
+            })
+            .expect("a signed origin with unsigned dimensions is representable");
+            assert_eq!(
+                rect,
+                Rect {
+                    x: origin,
+                    y: origin,
+                    width: u32::MAX,
+                    height: u32::MAX
+                }
+            );
+            let point = Point::new(origin, origin);
+            assert!(validate_pointer_regions(point, point, "test", &[rect]).is_ok());
+        }
+    }
+
+    #[test]
     fn malformed_native_display_geometry_is_an_error() {
         for bounds in [
             CGRect {
@@ -922,7 +954,7 @@ mod tests {
             CGRect {
                 origin: CGPoint { x: 0.0, y: 0.0 },
                 size: CGSize {
-                    width: f64::from(i32::MAX) + 1.0,
+                    width: f64::from(u32::MAX) + 1.0,
                     height: 100.0,
                 },
             },

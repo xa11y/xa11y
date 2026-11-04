@@ -260,8 +260,8 @@ impl X11InputBackend {
                 .map(|monitor| Rect {
                     x: i32::from(monitor.x),
                     y: i32::from(monitor.y),
-                    width: i32::from(monitor.width),
-                    height: i32::from(monitor.height),
+                    width: u32::from(monitor.width),
+                    height: u32::from(monitor.height),
                 })
                 .collect())
         })

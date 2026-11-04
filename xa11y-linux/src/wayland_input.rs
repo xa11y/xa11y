@@ -390,6 +390,15 @@ fn validate_configured_extent(
     width: i32,
     height: i32,
 ) -> Result<()> {
+    let positive_dimension = |value: i32, name: &str| match u32::try_from(value) {
+        Ok(0) | Err(_) => Err(Error::Platform {
+            code: -1,
+            message: format!("uinput configured {name} must be positive, got {value}"),
+        }),
+        Ok(size) => Ok(size),
+    };
+    let width = positive_dimension(width, "width")?;
+    let height = positive_dimension(height, "height")?;
     validate_pointer_regions(
         requested,
         checked,
@@ -432,6 +441,17 @@ mod tests {
     fn configured_extent_accepts_the_last_pixel_without_clamping() {
         let point = Point::new(9, 4);
         assert!(validate_configured_extent(point, point, 10, 5).is_ok());
+    }
+
+    #[test]
+    fn configured_extent_rejects_nonpositive_dimensions_without_wrapping() {
+        for (width, height) in [(0, 5), (-1, 5), (10, 0), (10, -1)] {
+            let point = Point::new(0, 0);
+            assert!(matches!(
+                validate_configured_extent(point, point, width, height),
+                Err(Error::Platform { .. })
+            ));
+        }
     }
 
     #[test]
