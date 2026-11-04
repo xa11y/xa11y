@@ -837,6 +837,9 @@ def test_state_changed_minimized_on_minimize_restore(app: xa11y.App) -> None:
             )
             assert event.state_flag == "minimized"
             assert event.state_value is True
+            if APP == "uwp":
+                assert event.app_pid == app.pid
+                assert event.target is not None and event.target.pid == app.pid
 
             win.restore()
             event = sub.wait_for(
@@ -848,6 +851,9 @@ def test_state_changed_minimized_on_minimize_restore(app: xa11y.App) -> None:
                 timeout=5.0,
             )
             assert event.state_value is False
+            if APP == "uwp":
+                assert event.app_pid == app.pid
+                assert event.target is not None and event.target.pid == app.pid
     except Exception:
         # Never leave the shared app minimized for the suite after this one;
         # the original failure wins over any cleanup failure.

@@ -3955,7 +3955,18 @@ impl WindowsProvider {
                 "reading the process id of a re-acquired top-level window failed: {e}"
             ),
         })? as u32;
-        if reacquired_pid != identity.pid {
+        let belongs_to_app = if reacquired_pid == identity.pid {
+            true
+        } else {
+            let hwnd = uia_call(|| unsafe { el.CurrentNativeWindowHandle() })?;
+            // A valid UWP frame still reports ApplicationFrameHost's UIA
+            // process id. Revalidate its current app attribution instead of
+            // mistaking that expected host/app split for HWND reuse.
+            !hwnd.0.is_null()
+                && crate::uwp::is_frame(hwnd)
+                && crate::uwp::PidFilter::for_pid(identity.pid).owns(hwnd)?
+        };
+        if !belongs_to_app {
             return Err(Error::ElementStale {
                 selector: format!(
                     "handle:{} (pid {}); top-level window HWND was reused by pid {reacquired_pid}",
@@ -3967,11 +3978,7 @@ impl WindowsProvider {
         // numeric HWND. HWNDs are reusable too; together these
         // checks ensure ElementFromHandle cannot redirect this
         // saved App to another process or process generation.
-        validate_synthetic_app_identity(
-            app.handle,
-            identity,
-            process_creation_time(reacquired_pid),
-        )?;
+        validate_synthetic_app_identity(app.handle, identity, process_creation_time(identity.pid))?;
         let el = self.populate_cache(dpi, &el).map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("populating the re-acquired top-level window cache failed: {e}"),
@@ -6546,6 +6553,9 @@ struct SubscriptionState {
     /// Current `WindowVisualState` per top-level window; shared with
     /// [`PropertyHandler`] so the delta map and the add/remove paths agree.
     visual_states: Arc<Mutex<HashMap<usize, i32>>>,
+    /// Proven frame identities shared with callbacks; populated only by the
+    /// registration worker, where shell attribution is safe.
+    frame_runtime_ids: Arc<Mutex<HashMap<usize, HashSet<Vec<i32>>>>>,
     /// Process-generation guard retained for the entire subscription. A
     /// desktop-scoped watch must never attach to a later process that reuses
     /// the subscribed app's pid.
@@ -6610,6 +6620,71 @@ fn plan_window_registration_diff(
     (to_add, to_remove)
 }
 
+/// Called only on the registration worker. Native frame decorations belong
+/// to ApplicationFrameHost too; cache their exact UIA identities while never
+/// entering the app-owned CoreWindow subtree. Callbacks then need no walk or
+/// shell lookup to distinguish two apps sharing one frame-host process.
+fn frame_event_runtime_ids(
+    autom: &IUIAutomation,
+    frame: &IUIAutomationElement,
+) -> Result<HashSet<Vec<i32>>> {
+    fn neighbor(
+        result: windows::core::Result<IUIAutomationElement>,
+    ) -> Result<Option<IUIAutomationElement>> {
+        match result {
+            Ok(element) => Ok(Some(element)),
+            Err(error) if error.code().is_ok() => Ok(None),
+            Err(error) => Err(Error::Platform {
+                code: i64::from(error.code().0),
+                message: format!("reading UWP frame event-source children failed: {error}"),
+            }),
+        }
+    }
+    fn visit(
+        walker: &IUIAutomationTreeWalker,
+        element: &IUIAutomationElement,
+        host_pid: i32,
+        depth: usize,
+        visited: &mut usize,
+        ids: &mut HashSet<Vec<i32>>,
+    ) -> Result<()> {
+        *visited += 1;
+        if *visited > 128 || depth > 8 {
+            return Err(Error::Platform {
+                code: -1,
+                message: "UWP frame event-source inspection exceeded 128 nodes or depth 8".into(),
+            }
+            .diagnose(
+                xa11y_core::Diagnosis::new()
+                    .condition("bounded inspection of frame-host event sources")
+                    .last_observed(format!("visited {visited} nodes; depth {depth}")),
+            ));
+        }
+        if uia_call(|| unsafe { element.CurrentProcessId() })? != host_pid {
+            return Ok(());
+        }
+        let id = WindowsProvider::runtime_id(element, 0)?;
+        if id.is_empty() {
+            return Err(Error::Platform {
+                code: -1,
+                message: "a UWP frame event source has no RuntimeId".into(),
+            });
+        }
+        ids.insert(id);
+        let mut child = neighbor(unsafe { walker.GetFirstChildElement(element) })?;
+        while let Some(element) = child {
+            visit(walker, &element, host_pid, depth + 1, visited, ids)?;
+            child = neighbor(unsafe { walker.GetNextSiblingElement(&element) })?;
+        }
+        Ok(())
+    }
+    let host_pid = uia_call(|| unsafe { frame.CurrentProcessId() })?;
+    let walker = uia_call(|| unsafe { autom.RawViewWalker() })?;
+    let mut ids = HashSet::new();
+    visit(&walker, frame, host_pid, 0, &mut 0, &mut ids)?;
+    Ok(ids)
+}
+
 /// Register the automation / property-changed / structure-changed handlers on
 /// one top-level window and seed its `WindowVisualState` baseline.
 ///
@@ -6642,6 +6717,11 @@ fn register_window_handlers(
 ) -> Result<RegisteredWindow> {
     let dpi = &crate::dpi::DpiScope::enter()?;
     let cache = cache_request.get(dpi);
+    let frame_identity = if hwnd != 0 && crate::uwp::is_frame(HWND(hwnd as *mut _)) {
+        Some(frame_event_runtime_ids(autom, window)?)
+    } else {
+        None
+    };
     // Acquire the window pattern once: the baseline seed below and the
     // post-attach reconciliation both read `CurrentWindowVisualState` from
     // it, and a second acquisition could fail transiently between two reads
@@ -6768,6 +6848,15 @@ fn register_window_handlers(
         return Err(err);
     }
 
+    // Publish identity before the post-attach state read: callbacks arriving
+    // after that read must already recognize frame-host event senders.
+    if let Some(ids) = frame_identity {
+        ctx.frame_runtime_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(hwnd, ids);
+    }
+
     // Close the seed→attach gap. The baseline is seeded before the property
     // handler is registered, so a visual-state transition that lands in
     // between raises its `PropertyChanged` to nobody — and the stale seed then
@@ -6815,6 +6904,10 @@ fn register_window_handlers(
                     structure,
                 );
                 remove_visual_state(visual_states, hwnd);
+                ctx.frame_runtime_ids
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&hwnd);
                 return Err(Error::Platform {
                     code: e.code().0 as i64,
                     message: format!(
@@ -6918,6 +7011,10 @@ fn sync_registrations(
     // Tear down closed windows first: any subsequent open keeps the remaining
     // registrations intact, and a closed window cannot accept new handlers.
     for hwnd in to_remove {
+        ctx.frame_runtime_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&hwnd);
         let reg = {
             let mut m = state.registered.lock().unwrap_or_else(|e| e.into_inner());
             m.remove(&hwnd)
@@ -7004,6 +7101,11 @@ fn cleanup_registrations(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    state
+        .frame_runtime_ids
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 /// Shared context passed to every UIA event handler.
@@ -7015,6 +7117,7 @@ struct EventContext {
     sender: Mutex<Option<std::sync::mpsc::Sender<Event>>>,
     app_name: String,
     app_pid: u32,
+    frame_runtime_ids: Arc<Mutex<HashMap<usize, HashSet<Vec<i32>>>>>,
     /// The saved generation for a synthetic App subscription. Global focus
     /// and desktop watch handlers re-check it for every event; plain element
     /// subscriptions have no saved-app identity and retain PID-only behavior.
@@ -7031,6 +7134,10 @@ struct EventContext {
 // behind `unsafe impl Send for WindowsProvider` covers it.
 unsafe impl Send for EventContext {}
 unsafe impl Sync for EventContext {}
+
+fn known_frame_sender(runtime_id: &[i32], frames: &HashMap<usize, HashSet<Vec<i32>>>) -> bool {
+    !runtime_id.is_empty() && frames.values().any(|known| known.contains(runtime_id))
+}
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
@@ -7064,19 +7171,35 @@ impl EventContext {
     /// Best-effort PID filter. `AddFocusChangedEventHandler` is process-wide,
     /// and scoped handlers occasionally leak events for sibling processes —
     /// checking the sender's PID keeps each subscription clean.
+    /// Frame senders report ApplicationFrameHost's PID, so their exact UIA
+    /// RuntimeId is matched against frames attributed on the worker. This
+    /// also works while minimized/suspended, without shell calls in callbacks.
     fn matches_pid(&self, sender: &IUIAutomationElement) -> bool {
         let sender_matches = unsafe { sender.CurrentProcessId() }
             .map(|p| p as u32 == self.app_pid)
             .unwrap_or(false);
-        sender_matches
-            && self.saved_app.is_none_or(|saved| {
-                validate_synthetic_app_identity(
-                    saved.handle,
-                    saved.identity,
-                    process_creation_time(saved.identity.pid),
+        let frame_matches = !sender_matches
+            && WindowsProvider::runtime_id(sender, 0).is_ok_and(|id| {
+                known_frame_sender(
+                    &id,
+                    &self
+                        .frame_runtime_ids
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()),
                 )
-                .is_ok()
-            })
+            });
+        (sender_matches || frame_matches) && self.matches_generation()
+    }
+
+    fn matches_generation(&self) -> bool {
+        self.saved_app.is_none_or(|saved| {
+            validate_synthetic_app_identity(
+                saved.handle,
+                saved.identity,
+                process_creation_time(saved.identity.pid),
+            )
+            .is_ok()
+        })
     }
 
     /// Build a full ElementData snapshot from a UIA sender element.
@@ -7475,7 +7598,19 @@ impl IUIAutomationEventHandler_Impl for WatchHandler_Impl {
                 // emit only for ours (the per-window registrations already
                 // scoped child-window events by subtree; ours are the pid
                 // filter).
-                if !self.ctx.matches_pid(el) {
+                let matched = self.ctx.matches_pid(el);
+                // A newly opened frame is not registered yet. Only classify
+                // its native class here; shell/AUMID attribution belongs on
+                // the registration worker, never a UIA callback thread.
+                let deferred_frame = if !matched && eventid == UIA_Window_WindowOpenedEventId {
+                    unsafe { el.CurrentNativeWindowHandle() }
+                        .ok()
+                        .filter(|hwnd| !hwnd.0.is_null() && crate::uwp::is_frame(*hwnd))
+                        .map(|hwnd| hwnd.0 as usize)
+                } else {
+                    None
+                };
+                if !matched && deferred_frame.is_none() {
                     return Ok(());
                 }
                 let kind = if eventid == UIA_Window_WindowOpenedEventId {
@@ -7483,7 +7618,12 @@ impl IUIAutomationEventHandler_Impl for WatchHandler_Impl {
                 } else {
                     EventKind::WindowClosed
                 };
-                let target = self.ctx.snapshot_or_log(el, &self.cache);
+                let target = if matched {
+                    self.ctx.snapshot_or_log(el, &self.cache)
+                } else {
+                    None
+                };
+                let sender = ComSend::new(el.clone());
                 let state = Arc::clone(&self.state);
                 let ctx = Arc::clone(&self.ctx);
                 let failure_ctx = Arc::clone(&self.ctx);
@@ -7499,6 +7639,34 @@ impl IUIAutomationEventHandler_Impl for WatchHandler_Impl {
                 // racing attachment. A newly created provider can be briefly
                 // unavailable, so retry the complete idempotent reconcile.
                 if let Err(e) = queue_registration_job(move || {
+                    let target = if let Some(hwnd) = deferred_frame {
+                        if !ctx.matches_generation() {
+                            return;
+                        }
+                        let hwnd = HWND(hwnd as *mut _);
+                        // Open/close churn can destroy an unrelated frame
+                        // before this worker sees its open notification.
+                        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+                            return;
+                        }
+                        let attributed = window_handle(sender.get()).and_then(|hwnd| {
+                            crate::uwp::PidFilter::for_pid(pid).owns(HWND(hwnd as *mut _))
+                        });
+                        match attributed {
+                            Ok(true) => ctx.snapshot_or_log(sender.get(), cache.get()),
+                            Ok(false) => return,
+                            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => return,
+                            Err(error) => {
+                                eprintln!(
+                                    "frame event attribution failed for pid {pid}: {error:?}"
+                                );
+                                ctx.disconnect();
+                                return;
+                            }
+                        }
+                    } else {
+                        target
+                    };
                     const READY_ATTEMPTS: usize = 4;
                     let mut last_error = None;
                     for attempt in 0..READY_ATTEMPTS {
@@ -7617,10 +7785,12 @@ impl WindowsProvider {
             });
         }
 
+        let frame_runtime_ids = Arc::new(Mutex::new(HashMap::new()));
         let ctx = Arc::new(EventContext {
             sender: Mutex::new(Some(tx)),
             app_name,
             app_pid: pid,
+            frame_runtime_ids: Arc::clone(&frame_runtime_ids),
             saved_app,
             walker: self.raw_walker.clone(),
         });
@@ -7670,6 +7840,7 @@ impl WindowsProvider {
             structure_handler: ComSend::new(structure.clone()),
             registered: Mutex::new(HashMap::new()),
             visual_states,
+            frame_runtime_ids,
             saved_app,
             reconciliation: Mutex::new(()),
             cancelled: AtomicBool::new(false),
@@ -7785,6 +7956,19 @@ impl WindowsProvider {
 #[cfg(test)]
 #[allow(non_upper_case_globals)]
 mod tests {
+    #[test]
+    fn only_registered_frame_runtime_ids_match_host_process_events() {
+        let mut frames =
+            HashMap::from([(100usize, HashSet::from([vec![42, 100], vec![42, 100, 1]]))]);
+        assert!(known_frame_sender(&[42, 100], &frames));
+        assert!(known_frame_sender(&[42, 100, 1], &frames));
+        // A different frame of the same ApplicationFrameHost is unrelated.
+        assert!(!known_frame_sender(&[42, 200], &frames));
+        assert!(!known_frame_sender(&[], &frames));
+        frames.remove(&100);
+        assert!(!known_frame_sender(&[42, 100], &frames));
+    }
+
     #[test]
     fn a_packaged_app_is_named_by_its_display_name() {
         assert_eq!(
