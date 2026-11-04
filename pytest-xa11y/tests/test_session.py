@@ -78,6 +78,23 @@ def never_finds(monkeypatch):
 
 
 @pytest.fixture
+def times_out_after_exit(monkeypatch, request):
+    """Make a terminal lookup miss observe an exited child, without a timing race."""
+
+    def bind(session):
+        def find(predicate, timeout=None):
+            assert session.process is not None
+            assert timeout is not None and timeout > 0
+            session.process.wait(timeout=timeout)
+            raise xa11y.TimeoutError("Timeout; waiting for: app")
+
+        monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+        request.addfinalizer(session.stop)
+
+    return bind
+
+
+@pytest.fixture
 def finds_immediately(monkeypatch):
     app = FakeApp()
 
@@ -101,8 +118,9 @@ def test_missing_binary_names_the_command():
         session.start()
 
 
-def test_early_exit_reports_code_and_stderr(never_finds):
+def test_early_exit_reports_code_and_stderr(times_out_after_exit):
     session = AppSession(AppLauncher(command=DIES), startup_timeout=5.0)
+    times_out_after_exit(session)
     with pytest.raises(AppLaunchError) as excinfo:
         session.start()
     message = str(excinfo.value)
@@ -111,10 +129,11 @@ def test_early_exit_reports_code_and_stderr(never_finds):
     session.stop()
 
 
-def test_large_output_does_not_deadlock_the_child(never_finds):
+def test_large_output_does_not_deadlock_the_child(times_out_after_exit):
     # Captured to a temp file, not a pipe: 200 KB overflows a pipe buffer and
     # would block the child forever with nobody draining it.
     session = AppSession(AppLauncher(command=CHATTY_THEN_DIES), startup_timeout=10.0)
+    times_out_after_exit(session)
     with pytest.raises(AppLaunchError) as excinfo:
         session.start()
     assert "exited during startup (code 1)" in str(excinfo.value)
@@ -468,7 +487,7 @@ def test_spawns_and_exits_tolerates_the_launched_process_exiting(monkeypatch):
         session.stop()
 
 
-def test_app_names_alone_does_not_switch_off_death_detection(never_finds):
+def test_app_names_alone_does_not_switch_off_death_detection(times_out_after_exit):
     # `app_names` widens the accessibility-tree match; the predicate still
     # tries the spawned PID first. An app that needs it (Electron, a Qt app
     # whose AT-SPI name lags its PID) is still an app we launched, and a crash
@@ -477,6 +496,7 @@ def test_app_names_alone_does_not_switch_off_death_detection(never_finds):
     session = AppSession(
         AppLauncher(command=DIES, app_names=["xa11y-qt-test-app"]), startup_timeout=5.0
     )
+    times_out_after_exit(session)
     with pytest.raises(AppLaunchError) as excinfo:
         session.start()
     message = str(excinfo.value)
@@ -518,19 +538,15 @@ def test_attach_mode_detects_a_dead_pid_even_with_app_names(finds_immediately):
         session.check_alive()
 
 
-def test_not_found_reports_the_real_process_state(monkeypatch):
+def test_not_found_reports_the_real_process_state(times_out_after_exit):
     # A `spawns_and_exits` launcher is the one case with no death detection,
     # so this report is where its exit has to show up. Claiming "alive" for a
     # process that is gone points the reader away from the actual failure.
-    def find(predicate, timeout=None):
-        time.sleep(0.05)
-        raise xa11y.TimeoutError("Timeout")
-
-    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
     session = AppSession(
         AppLauncher(command=DIES, app_names=["MyApp"], spawns_and_exits=True),
         startup_timeout=0.5,
     )
+    times_out_after_exit(session)
     with pytest.raises(AppLaunchError) as excinfo:
         session.start()
     message = str(excinfo.value)
@@ -551,7 +567,7 @@ def test_reading_the_output_tail_does_not_disturb_the_app_writing_it(never_finds
                 sys.executable,
                 "-u",
                 "-c",
-                "import sys\nfor i in range(500): sys.stdout.write('L%04d\\n' % i)\n",
+                "import sys\nfor i in range(500): sys.stdout.buffer.write(b'L%04d\\n' % i)\n",
             ]
         ),
         startup_timeout=2.0,
