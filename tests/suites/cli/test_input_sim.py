@@ -21,7 +21,6 @@ import os
 
 import pytest
 
-
 pytestmark = pytest.mark.skipif(
     os.environ.get("XA11Y_SKIP_INPUT_SIM") == "1",
     reason="Input simulation disabled (XA11Y_SKIP_INPUT_SIM=1)",
@@ -35,15 +34,35 @@ def _skip_if_unsupported(rc: int, stderr: str) -> None:
     """Skip when the backend reports the operation is unavailable."""
     if rc != 0:
         lower = stderr.lower()
-        if any(kw in lower for kw in ("unsupported", "permission", "access denied",
-                                      "not supported", "axisundefined")):
-            pytest.skip(f"input simulation not available in this session: {stderr.strip()}")
+        if any(
+            kw in lower
+            for kw in (
+                "unsupported",
+                "permission",
+                "access denied",
+                "not supported",
+                "axisundefined",
+            )
+        ):
+            pytest.skip(
+                f"input simulation not available in this session: {stderr.strip()}"
+            )
 
 
-def _button_center(app) -> tuple[int, int]:
-    """Return the screen-coordinate centre of the OK button."""
-    el = app.locator('button[name="OK"]').element()
+def _pointer_center(app) -> tuple[int, int]:
+    """Choose a fresh fixture point for transport-only CLI checks.
+
+    Cocoa's OK button belongs to a tall scrolling document, so its native
+    bounds can legitimately be off-display. The fixture centres its main
+    window; use that frame's centre independently of document scroll state.
+    Widget hit-testing belongs to the Tauri input-events suite.
+    """
+    cocoa = os.environ.get("XA11Y_TEST_APP") == "cocoa"
+    selector = "window, dialog" if cocoa else 'button[name="OK"]'
+    el = app.locator(selector).element()
     r = el.bounds
+    if cocoa:
+        assert r is not None, "Cocoa main window has no bounds for the CLI input target"
     if r is None:
         pytest.skip("OK button has no on-screen bounds — cannot derive click target")
     return (r.x + r.width // 2, r.y + r.height // 2)
@@ -54,16 +73,29 @@ def _button_center(app) -> tuple[int, int]:
 
 def test_cli_click_left_button(run_cli, app):
     """``xa11y click --at X,Y`` should exit 0."""
-    cx, cy = _button_center(app)
+    cx, cy = _pointer_center(app)
     rc, stdout, stderr = run_cli("click", "--at", f"{cx},{cy}")
     _skip_if_unsupported(rc, stderr)
     assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
     assert "ok" in stdout
 
 
+def test_cli_rejects_an_off_display_point(run_cli):
+    """A valid integer point outside every display is refused before input."""
+    rc, stdout, stderr = run_cli("click", "--at", "1000000,1000000")
+    _skip_if_unsupported(rc, stderr)
+    assert rc == 1, (
+        f"expected rejected target, got {rc}\nstdout: {stdout}\nstderr: {stderr}"
+    )
+    assert "delivery: not_delivered" in stderr
+    assert "pointer target: Point { x: 1000000, y: 1000000 }" in stderr
+    assert "checked point:" in stderr
+    assert "displays:" in stderr
+
+
 def test_cli_click_right_button(run_cli, app):
     """``xa11y click --at X,Y --button right`` should exit 0."""
-    cx, cy = _button_center(app)
+    cx, cy = _pointer_center(app)
     rc, stdout, stderr = run_cli("click", "--at", f"{cx},{cy}", "--button", "right")
     _skip_if_unsupported(rc, stderr)
     assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
@@ -75,7 +107,7 @@ def test_cli_click_right_button(run_cli, app):
 
 def test_cli_move(run_cli, app):
     """``xa11y move --at X,Y`` should exit 0."""
-    cx, cy = _button_center(app)
+    cx, cy = _pointer_center(app)
     rc, stdout, stderr = run_cli("move", "--at", f"{cx},{cy}")
     _skip_if_unsupported(rc, stderr)
     assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
@@ -87,7 +119,7 @@ def test_cli_move(run_cli, app):
 
 def test_cli_drag(run_cli, app):
     """``xa11y drag --from X,Y --to X,Y`` should exit 0."""
-    cx, cy = _button_center(app)
+    cx, cy = _pointer_center(app)
     rc, stdout, stderr = run_cli(
         "drag", "--from", f"{cx},{cy}", "--to", f"{cx + 5},{cy + 5}"
     )
@@ -101,7 +133,7 @@ def test_cli_drag(run_cli, app):
 
 def test_cli_scroll(run_cli, app):
     """``xa11y scroll --at X,Y --dy 3`` should exit 0."""
-    cx, cy = _button_center(app)
+    cx, cy = _pointer_center(app)
     rc, stdout, stderr = run_cli("scroll", "--at", f"{cx},{cy}", "--dy", "3")
     _skip_if_unsupported(rc, stderr)
     assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
