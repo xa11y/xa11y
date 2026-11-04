@@ -463,20 +463,43 @@ impl LinuxInputProvider {
 }
 
 impl LinuxInputProvider {
-    /// Convert a logical target point (the cross-platform contract, same space
-    /// as `Element::bounds`) to the physical device pixels both backends
-    /// expect: XTest warps to physical root coordinates, and the uinput
-    /// virtual range is mapped against the physical screen size. No-op at
-    /// scale 1.0. See `crate::scale`.
+    /// Convert a public logical point to the dispatch coordinate space.
+    /// X11 uses physical root pixels; Wayland's coordinate scale is 1.0 and
+    /// its uinput backend maps the configured logical extent. See `crate::scale`.
     fn to_physical(&self, p: Point) -> Point {
         p.to_physical(crate::scale::coordinate_scale())
     }
 
-    fn move_pointer(&self, point: Point) -> Result<()> {
-        let point = self.to_physical(point);
+    fn validate_checked_target(&self, requested: Point, checked: Point) -> Result<()> {
         match &self.backend {
-            InputBackend::X11(x) => x.pointer_move(point),
-            InputBackend::Wayland(w) => w.pointer_move(point),
+            InputBackend::X11(x) => {
+                let displays = x.display_regions()?;
+                validate_pointer_regions(
+                    requested,
+                    checked,
+                    "x11 physical root pixels",
+                    &displays,
+                )?;
+                // XTest's wire coordinates are signed 16-bit. Do not silently
+                // clamp an on-display point to a different target.
+                if i16::try_from(checked.x).is_err() || i16::try_from(checked.y).is_err() {
+                    return Err(Error::Unsupported {
+                        feature:
+                            "XTest cannot address this display point with signed 16-bit coordinates"
+                                .into(),
+                    });
+                }
+                Ok(())
+            }
+            InputBackend::Wayland(w) => w.validate_pointer_target(requested, checked),
+        }
+    }
+
+    // Already converted and, unless captured, preflighted by the caller.
+    fn move_pointer(&self, checked: Point) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.pointer_move(checked),
+            InputBackend::Wayland(w) => w.pointer_move(checked),
         }
     }
 
@@ -506,23 +529,7 @@ impl LinuxInputProvider {
 impl InputProvider for LinuxInputProvider {
     fn validate_pointer_target(&self, point: Point) -> Result<()> {
         let checked = self.to_physical(point);
-        match &self.backend {
-            InputBackend::X11(x) => {
-                let displays = x.display_regions()?;
-                validate_pointer_regions(point, checked, "x11 physical root pixels", &displays)?;
-                // XTest's wire coordinates are signed 16-bit. Do not silently
-                // clamp an on-display point to a different target.
-                if i16::try_from(checked.x).is_err() || i16::try_from(checked.y).is_err() {
-                    return Err(Error::Unsupported {
-                        feature:
-                            "XTest cannot address this display point with signed 16-bit coordinates"
-                                .into(),
-                    });
-                }
-                Ok(())
-            }
-            InputBackend::Wayland(w) => w.validate_pointer_target(point, checked),
-        }
+        self.validate_checked_target(point, checked)
     }
 
     fn pointer_buttons_down(&self) -> bool {
@@ -545,10 +552,11 @@ impl InputProvider for LinuxInputProvider {
             .pointer_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let checked = self.to_physical(to);
         if !self.pointer_buttons_down() {
-            self.validate_pointer_target(to)?;
+            self.validate_checked_target(to, checked)?;
         }
-        self.move_pointer(to)
+        self.move_pointer(checked)
     }
 
     fn pointer_down(&self, button: MouseButton) -> Result<()> {
@@ -575,11 +583,11 @@ impl InputProvider for LinuxInputProvider {
             .pointer_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        self.validate_pointer_target(at)?;
-        let at = self.to_physical(at);
+        let checked = self.to_physical(at);
+        self.validate_checked_target(at, checked)?;
         let clicked = match &self.backend {
-            InputBackend::X11(x) => x.pointer_click(at, button, count),
-            InputBackend::Wayland(w) => w.pointer_click(at, button, count),
+            InputBackend::X11(x) => x.pointer_click(checked, button, count),
+            InputBackend::Wayland(w) => w.pointer_click(checked, button, count),
         };
         if clicked.is_err() {
             // A native failure can follow a partial button-down. Always try
@@ -600,11 +608,11 @@ impl InputProvider for LinuxInputProvider {
             .pointer_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        self.validate_pointer_target(at)?;
-        let at = self.to_physical(at);
+        let checked = self.to_physical(at);
+        self.validate_checked_target(at, checked)?;
         match &self.backend {
-            InputBackend::X11(x) => x.pointer_scroll(at, delta),
-            InputBackend::Wayland(w) => w.pointer_scroll(at, delta),
+            InputBackend::X11(x) => x.pointer_scroll(checked, delta),
+            InputBackend::Wayland(w) => w.pointer_scroll(checked, delta),
         }
     }
 
@@ -619,20 +627,25 @@ impl InputProvider for LinuxInputProvider {
             .pointer_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        self.validate_pointer_target(from)?;
-        self.validate_pointer_target(to)?;
+        let scale = crate::scale::coordinate_scale();
+        let checked_from = from.to_physical(scale);
+        let checked_to = to.to_physical(scale);
+        self.validate_checked_target(from, checked_from)?;
+        self.validate_checked_target(to, checked_to)?;
         // Keep the whole gesture under pointer_lock. A concurrent button-up
         // must not turn a later captured move into a new geometry preflight.
-        self.move_pointer(from)?;
+        self.move_pointer(checked_from)?;
         self.press_pointer(button)?;
         const STEP: std::time::Duration = std::time::Duration::from_millis(16);
         let steps = (duration.as_millis() / STEP.as_millis()).max(1) as i32;
         let moved = (|| {
             for i in 1..=steps {
                 let fraction = f64::from(i) / f64::from(steps);
-                let x = (f64::from(from.x) + (f64::from(to.x) - f64::from(from.x)) * fraction)
+                let x = (f64::from(checked_from.x)
+                    + (f64::from(checked_to.x) - f64::from(checked_from.x)) * fraction)
                     .round() as i32;
-                let y = (f64::from(from.y) + (f64::from(to.y) - f64::from(from.y)) * fraction)
+                let y = (f64::from(checked_from.y)
+                    + (f64::from(checked_to.y) - f64::from(checked_from.y)) * fraction)
                     .round() as i32;
                 self.move_pointer(Point::new(x, y))?;
                 if i < steps {
