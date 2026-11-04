@@ -11,7 +11,7 @@ const assert = require('node:assert/strict');
 
 const xa11y = require('../../../xa11y-js/index.js');
 const { ActionNotSupportedError, PlatformError, SelectorNotMatchedError, TimeoutError } = xa11y;
-const { getApp, act, sleep, appConfig } = require('./helpers.js');
+const { getApp, act, sleep, appConfig, textFieldSelector } = require('./helpers.js');
 
 test('press on primary button succeeds', async () => {
   if (!appConfig.okButtonName) return; // skip if app has no named primary button
@@ -58,9 +58,7 @@ test('setValue on text field is exercised (AT-SPI may reject)', async () => {
   // `action_set_value_text` test, which treats TextValueNotSupported as an
   // acceptable outcome.
   const app = await getApp();
-  const selector = appConfig.textFieldName
-    ? `text_field[name="${appConfig.textFieldName}"]`
-    : 'text_field';
+  const selector = textFieldSelector || 'text_field';
   const fieldLocator = app.locator(selector);
   if (!(await fieldLocator.exists())) return; // skip if no text field is present
   try {
@@ -134,11 +132,9 @@ test('auto-wait focus() resolves before returning', async () => {
   // name. A bare `button` selector resolves to the first button in document
   // order, which on Windows is a non-client window caption control
   // (Minimize/Maximize/Close) that UIA refuses to focus.
-  const selector = appConfig.textFieldName
-    ? `text_field[name="${appConfig.textFieldName}"]`
-    : appConfig.okButtonName
+  const selector = textFieldSelector || (appConfig.okButtonName
       ? `button[name="${appConfig.okButtonName}"]`
-      : 'button';
+      : 'button');
   const locator = app.locator(selector);
   if (!(await locator.exists())) return;
   try {
@@ -204,9 +200,7 @@ test('Element.press() flips checkbox checked state', async () => {
 
 test('Element.setValue on text field is exercised (AT-SPI may reject)', async () => {
   const app = await getApp();
-  const selector = appConfig.textFieldName
-    ? `text_field[name="${appConfig.textFieldName}"]`
-    : 'text_field';
+  const selector = textFieldSelector || 'text_field';
   const fieldLocator = app.locator(selector);
   if (!(await fieldLocator.exists())) return;
   const el = await fieldLocator.element();
@@ -229,11 +223,9 @@ test('Element.focus() resolves on text field or button', async () => {
   // name. A bare `button` selector resolves to the first button in document
   // order, which on Windows is a non-client window caption control
   // (Minimize/Maximize/Close) that UIA refuses to focus.
-  const selector = appConfig.textFieldName
-    ? `text_field[name="${appConfig.textFieldName}"]`
-    : appConfig.okButtonName
+  const selector = textFieldSelector || (appConfig.okButtonName
       ? `button[name="${appConfig.okButtonName}"]`
-      : 'button';
+      : 'button');
   const locator = app.locator(selector);
   if (!(await locator.exists())) return;
   const el = await locator.element();

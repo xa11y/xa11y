@@ -5,7 +5,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { getApp, one, appConfig } = require('./helpers.js');
+const { getApp, one, appConfig, appEnv, textFieldSelector } = require('./helpers.js');
 
 test('app is reachable', async () => {
   const app = await getApp();
@@ -45,11 +45,23 @@ test('tree has the primary button', async () => {
 });
 
 test('tree has the named text field', async () => {
-  if (!appConfig.textFieldName) return; // skip if app has no reliably-labelled text field
+  if (!textFieldSelector) return; // skip if app has no reliably-labelled text field
   const app = await getApp();
-  const field = await one(app, `text_field[name="${appConfig.textFieldName}"]`);
+  const field = await one(app, textFieldSelector);
   assert.equal(field.role, 'text_field');
   assert.equal(field.editable, true);
+});
+
+test('UWP retains the native nested Edit and selects the outer TextBox (#606)', {
+  skip: appEnv !== 'uwp',
+}, async () => {
+  const app = await getApp();
+  const fields = await app.locator('text_field[name="Search"]').elements();
+  assert.equal(fields.length, 2, 'Raw View exposes both native Edit elements');
+  const outer = await one(app, textFieldSelector);
+  const inner = await one(app, `${textFieldSelector} > text_field[name="Search"]`);
+  assert.equal(outer.raw.class_name, 'TextBox');
+  assert.equal(inner.value, outer.value);
 });
 
 test('a password entry keeps text_field and sets password (#522)', async () => {
@@ -60,8 +72,8 @@ test('a password entry keeps text_field and sets password (#522)', async () => {
   assert.equal(field.password, true);
   const flagged = await app.locator('text_field[password="true"]').elements();
   assert.deepEqual(flagged.map((e) => e.name), [appConfig.passwordFieldName]);
-  if (appConfig.textFieldName) {
-    const plain = await one(app, `text_field[name="${appConfig.textFieldName}"]`);
+  if (textFieldSelector) {
+    const plain = await one(app, textFieldSelector);
     assert.equal(plain.password, false);
   }
 });
