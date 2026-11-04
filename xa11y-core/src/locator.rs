@@ -50,9 +50,46 @@ fn describe_observed(data: &ElementData) -> String {
 /// Interval between polls of the `wait_*` methods.
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Exceeds Chromium's 500 ms publication interval for nonfocused bounds.
+/// Equal samples one poll apart can otherwise be the same native snapshot
+/// while the element is still moving (issue #633).
+const STABLE_OBSERVATION_WINDOW: Duration = Duration::from_millis(750);
+
 /// The condition named in a [`Locator::wait_stable`] timeout diagnosis.
-const STABLE_CONDITION: &str =
-    "stable (bounds unchanged across two consecutive polls, and visible)";
+const STABLE_CONDITION: &str = "stable (visible bounds observed unchanged for at least 750 ms)";
+
+#[derive(Default)]
+struct StableBounds {
+    candidate: Option<(Rect, Duration)>,
+    last_change: Option<(Rect, Rect)>,
+}
+
+impl StableBounds {
+    /// `elapsed` is sampled after each fresh resolve, so time spent in the
+    /// initial resolve cannot count toward the observation window.
+    fn observe(&mut self, bounds: Option<Rect>, elapsed: Duration) -> bool {
+        match (self.candidate, bounds) {
+            (Some((before, since)), Some(after)) if before == after => {
+                elapsed.saturating_sub(since) >= STABLE_OBSERVATION_WINDOW
+            }
+            (previous, Some(after)) => {
+                self.last_change = previous.map(|(before, _)| (before, after));
+                self.candidate = Some((after, elapsed));
+                false
+            }
+            (_, None) => {
+                self.candidate = None;
+                self.last_change = None;
+                false
+            }
+        }
+    }
+
+    fn unchanged_for(&self, elapsed: Duration) -> Option<Duration> {
+        self.candidate
+            .map(|(_, since)| elapsed.saturating_sub(since))
+    }
+}
 
 /// The bounds a poll contributes to [`Locator::wait_stable`]: present only
 /// when the element is visible and reports bounds. Anything else resets the
@@ -1286,8 +1323,8 @@ impl Locator {
         self.poll_until(&predicate, timeout, "custom predicate")
     }
 
-    /// Wait until the element's bounds are unchanged across two consecutive
-    /// polls and it is visible, then return it.
+    /// Wait until visible bounds have been observed unchanged for at least
+    /// 750 ms across repeated fresh polls, then return the element.
     ///
     /// "Stable" is geometric: it has nothing to do with
     /// [`ElementData::stable_id`]. Use it before a pointer action
@@ -1300,29 +1337,28 @@ impl Locator {
     /// ```
     ///
     /// Each poll re-resolves the selector (~100 ms apart, like the other
-    /// `wait_*` methods), so the success path costs at least two resolves
-    /// and one poll interval. An element that reports no bounds never counts
-    /// as stable. Semantic actions (`press`, `toggle`, …) do not need this:
+    /// `wait_*` methods). Even a still element needs at least 750 ms after
+    /// the first observation. A changed, missing, hidden, or bounds-less
+    /// observation resets that window. This is observed geometric stability:
+    /// native accessibility snapshots can lag the screen, and a pause does
+    /// not guarantee that an animation will never resume. Semantic actions
+    /// (`press`, `toggle`, …) do not need this:
     /// they do not depend on position.
     ///
     /// Only bounds are compared, not identity: if the selector resolves to a
-    /// different element on the second poll whose bounds equal the first
-    /// one's, that element is returned. For pointer targeting this is
+    /// different element whose bounds equal the previous one's, that element
+    /// continues the observation window. For pointer targeting this is
     /// harmless — the point clicked is the same either way.
     ///
     /// On timeout the error's [`Diagnosis`] says what blocked stability: the
-    /// last two differing rectangles, a match that is not visible, a match
-    /// that reports no bounds, or a selector that never matched.
+    /// last two differing rectangles and the observed unchanged duration,
+    /// a match that is not visible, absent bounds, or no match.
     pub fn wait_stable(&self, timeout: Duration) -> Result<Element> {
         let start = std::time::Instant::now();
         let mut ever_matched = false;
-        // Bounds from the previous poll, when that poll saw the element
-        // visible with bounds. Two equal in a row is stability.
-        let mut prev: Option<Rect> = None;
-        let mut polls: u32 = 0;
+        let mut stability = StableBounds::default();
 
         loop {
-            polls = polls.saturating_add(1);
             let matched = match self.resolve_data() {
                 Ok(data) => Some(data),
                 Err(Error::SelectorNotMatched { .. }) => None,
@@ -1332,27 +1368,20 @@ impl Locator {
                 ever_matched = true;
             }
 
-            // This poll's change against the previous one, for the diagnosis.
-            let last_change = match matched.as_ref().and_then(stable_candidate) {
-                Some(bounds) if prev == Some(bounds) => {
-                    let data = matched.expect("a stable candidate comes from a match");
-                    return Ok(Element::new(data, Arc::clone(&self.provider)));
-                }
-                Some(bounds) => prev.replace(bounds).map(|before| (before, bounds)),
-                None => {
-                    prev = None;
-                    None
-                }
-            };
-
             let elapsed = start.elapsed();
+            if stability.observe(matched.as_ref().and_then(stable_candidate), elapsed) {
+                let data = matched.expect("stable bounds come from a visible match");
+                return Ok(Element::new(data, Arc::clone(&self.provider)));
+            }
+            // Preserve the other wait methods' convention: evaluate the
+            // observation before checking the overall timeout.
             if elapsed >= timeout {
                 return Err(self.diagnose_unstable(
                     elapsed,
                     matched.as_ref(),
                     ever_matched,
-                    last_change,
-                    polls == 1,
+                    stability.last_change,
+                    stability.unchanged_for(elapsed),
                 ));
             }
             std::thread::sleep(WAIT_POLL_INTERVAL);
@@ -1368,7 +1397,7 @@ impl Locator {
         last: Option<&ElementData>,
         ever_matched: bool,
         last_change: Option<(Rect, Rect)>,
-        first_poll: bool,
+        unchanged_for: Option<Duration>,
     ) -> Error {
         let condition = STABLE_CONDITION.to_string();
         let Some(data) = last else {
@@ -1380,26 +1409,19 @@ impl Locator {
             match (data.bounds, last_change) {
                 (None, _) => format!("{} reports no bounds", describe_observed(data)),
                 (Some(_), Some((before, after))) => format!(
-                    "bounds still changing: {} \u{2192} {} on {}",
+                    "bounds still changing: {} \u{2192} {} on {}; latest bounds observed \
+                     unchanged for {} ms (750 ms required)",
                     describe_rect(&before),
                     describe_rect(&after),
-                    short_describe(data)
+                    short_describe(data),
+                    unchanged_for.unwrap_or_default().as_millis()
                 ),
-                // The timeout expired after a single poll, so there was never
-                // a second one to compare against.
-                (Some(b), None) if first_poll => format!(
-                    "bounds {} seen on only one poll of {}; stability needs two \
-                     (timeout shorter than the poll interval?)",
-                    describe_rect(&b),
-                    short_describe(data)
-                ),
-                // Earlier polls ran, but the one just before this saw the
-                // element missing, hidden, or without bounds.
                 (Some(b), None) => format!(
-                    "bounds {} on {}, but the poll before saw it missing, hidden, \
-                     or without bounds; stability needs two such polls in a row",
+                    "bounds {} on {} observed unchanged for {} ms; stability needs \
+                     at least 750 ms of unchanged visible bounds",
                     describe_rect(&b),
-                    short_describe(data)
+                    short_describe(data),
+                    unchanged_for.unwrap_or_default().as_millis()
                 ),
             }
         };
@@ -2876,7 +2898,7 @@ mod wait_stable_tests {
     }
 
     #[test]
-    fn a_still_element_is_stable_after_two_polls() {
+    fn a_still_element_needs_the_observation_window() {
         let (_p, loc) = animated(vec![]);
         let start = Instant::now();
         let el = loc
@@ -2884,8 +2906,8 @@ mod wait_stable_tests {
             .expect("unmoving element");
         assert_eq!(el.bounds, Some(rect(110)));
         assert!(
-            start.elapsed() >= WAIT_POLL_INTERVAL,
-            "stability needs a second poll"
+            start.elapsed() >= STABLE_OBSERVATION_WINDOW,
+            "stability needs the full observation window"
         );
     }
 
@@ -2902,8 +2924,7 @@ mod wait_stable_tests {
 
     #[test]
     fn a_hidden_poll_resets_the_comparison() {
-        // Equal bounds either side of a hidden poll are not two consecutive
-        // stable observations: it takes four polls (three intervals).
+        // The observation window starts again after the hidden poll.
         let (_p, loc) = animated(vec![
             (Some(rect(5)), true),
             (Some(rect(5)), false),
@@ -2911,7 +2932,7 @@ mod wait_stable_tests {
         ]);
         let start = Instant::now();
         loc.wait_stable(Duration::from_secs(2)).expect("settles");
-        assert!(start.elapsed() >= WAIT_POLL_INTERVAL * 3);
+        assert!(start.elapsed() >= STABLE_OBSERVATION_WINDOW + WAIT_POLL_INTERVAL * 2);
     }
 
     #[test]
@@ -2924,7 +2945,8 @@ mod wait_stable_tests {
         let obs = observed(&err);
         assert!(obs.starts_with("bounds still changing: {x="), "{obs}");
         assert!(obs.contains('\u{2192}'), "{obs}");
-        assert!(obs.ends_with(r#"on button "Back""#), "{obs}");
+        assert!(obs.contains(r#"on button "Back""#), "{obs}");
+        assert!(obs.contains("750 ms required"), "{obs}");
     }
 
     #[test]
@@ -2956,26 +2978,118 @@ mod wait_stable_tests {
     }
 
     #[test]
-    fn a_zero_timeout_explains_that_one_poll_cannot_prove_stability() {
+    fn a_zero_timeout_explains_the_unobserved_stability_window() {
         let (_p, loc) = animated(vec![]);
         let err = loc.wait_stable(Duration::ZERO).expect_err("one poll only");
-        assert!(observed(&err).contains("seen on only one poll"));
+        assert!(observed(&err).contains("observed unchanged for 0 ms"));
+        assert!(observed(&err).contains("at least 750 ms"));
     }
 
     #[test]
-    fn a_timeout_after_a_hidden_poll_does_not_blame_the_timeout_length() {
+    fn a_timeout_after_a_hidden_poll_reports_the_restarted_window() {
         // Poll 1 sees it hidden; poll 2 (after the 50 ms timeout) sees it
-        // visible with nothing to compare against. That is not the
-        // "timeout shorter than the poll interval" case.
+        // visible. Earlier hidden time cannot count as unchanged bounds.
         let (_p, loc) = animated(vec![(Some(rect(110)), false), (Some(rect(110)), true)]);
         let err = loc
             .wait_stable(Duration::from_millis(50))
             .expect_err("a hidden poll resets the comparison");
         let observed = observed(&err);
         assert!(
-            observed.contains("the poll before saw it missing, hidden"),
+            observed.contains("observed unchanged for 0 ms"),
             "{observed}"
         );
-        assert!(!observed.contains("timeout shorter"), "{observed}");
+        assert!(observed.contains("at least 750 ms"), "{observed}");
+    }
+
+    #[test]
+    fn browser_publication_plateaus_do_not_finish_a_moving_wait() {
+        // Chromium publishes nonfocused location changes at 500 ms intervals.
+        // Several equal fresh queries in each interval must not return early.
+        let mut frames = vec![(Some(rect(0)), true); 5];
+        frames.extend(vec![(Some(rect(40)), true); 5]);
+        frames.push((Some(rect(80)), true));
+        let (_p, loc) = animated(frames);
+        let el = loc.wait_stable(Duration::from_secs(5)).expect("settles");
+        assert_eq!(el.bounds, Some(rect(80)), "never return a cached plateau");
+    }
+
+    #[test]
+    fn the_window_is_measured_from_the_first_completed_observation() {
+        let mut stability = StableBounds::default();
+        let sample = Some(rect(5));
+        assert!(!stability.observe(sample, Duration::from_secs(3)));
+        assert!(!stability.observe(sample, Duration::from_millis(3749)));
+        assert!(stability.observe(sample, Duration::from_millis(3750)));
+    }
+
+    #[test]
+    fn timeout_on_a_still_match_explains_the_short_observation_window() {
+        let (_p, loc) = animated(vec![]);
+        let err = loc
+            .wait_stable(Duration::from_millis(200))
+            .expect_err("too short");
+        let observation = observed(&err);
+        assert!(
+            observation.contains("observed unchanged for"),
+            "{observation}"
+        );
+        assert!(observation.contains("at least 750 ms"), "{observation}");
+        assert!(
+            !observation.contains("bounds still changing"),
+            "{observation}"
+        );
+    }
+
+    #[test]
+    fn plateau_timeout_keeps_the_last_change_and_current_window() {
+        let (_p, loc) = animated(vec![(Some(rect(0)), true), (Some(rect(40)), true)]);
+        let err = loc
+            .wait_stable(Duration::from_millis(350))
+            .expect_err("too short");
+        let observation = observed(&err);
+        assert!(
+            observation.starts_with("bounds still changing: {x=0"),
+            "{observation}"
+        );
+        assert!(
+            observation.contains("latest bounds observed unchanged for"),
+            "{observation}"
+        );
+        assert!(observation.contains("750 ms required"), "{observation}");
+    }
+
+    #[test]
+    fn changes_and_invalid_candidates_reset_the_whole_window() {
+        for invalid in [
+            None,
+            stable_candidate(&ElementData {
+                states: crate::element::StateSet {
+                    visible: false,
+                    ..Default::default()
+                },
+                bounds: Some(rect(5)),
+                ..Default::default()
+            }),
+            stable_candidate(&ElementData {
+                states: crate::element::StateSet {
+                    visible: true,
+                    ..Default::default()
+                },
+                bounds: None,
+                ..Default::default()
+            }),
+        ] {
+            let mut stability = StableBounds::default();
+            assert!(!stability.observe(Some(rect(5)), Duration::ZERO));
+            assert!(!stability.observe(invalid, Duration::from_millis(700)));
+            assert!(!stability.observe(Some(rect(5)), Duration::from_millis(800)));
+            assert!(!stability.observe(Some(rect(5)), Duration::from_millis(1549)));
+            assert!(stability.observe(Some(rect(5)), Duration::from_millis(1550)));
+        }
+        let mut stability = StableBounds::default();
+        assert!(!stability.observe(Some(rect(5)), Duration::ZERO));
+        assert!(!stability.observe(Some(rect(9)), Duration::from_millis(700)));
+        assert!(!stability.observe(Some(rect(9)), Duration::from_millis(1449)));
+        assert!(stability.observe(Some(rect(9)), Duration::from_millis(1450)));
     }
 }

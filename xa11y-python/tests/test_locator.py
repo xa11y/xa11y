@@ -194,7 +194,7 @@ def test_wait_stable_timeout_diagnoses_hidden_match(test_app):
     with pytest.raises(xa11y.TimeoutError) as exc_info:
         test_app.descendant("static_text").wait_stable(timeout=0.3)
     err = exc_info.value
-    assert err.condition.startswith("stable (bounds unchanged across two")
+    assert err.condition.startswith("stable (visible bounds observed unchanged for at least 750 ms")
     assert "matched but not visible" in err.last_observed
 
 
