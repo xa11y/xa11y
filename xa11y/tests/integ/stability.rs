@@ -1,8 +1,8 @@
 //! `Locator::wait_stable` against a widget that really moves (issue #530).
 //!
 //! The test app's "Start slide" button restarts a three-second slide of the
-//! "Slide target" button, pushing a tree update every 30 ms, so every
-//! `wait_*` poll (100 ms apart) sees a different position until it stops.
+//! "Slide target" button, pushing a tree update every 30 ms. Stability needs
+//! a 750 ms observation window rather than two equal native snapshots.
 
 #[cfg(test)]
 mod tests {
@@ -73,9 +73,7 @@ mod tests {
             "diagnosis should name the moving bounds: {observed}"
         );
         assert!(
-            d.condition
-                .as_deref()
-                .is_some_and(|c| c.contains("two consecutive polls")),
+            d.condition.as_deref().is_some_and(|c| c.contains("750 ms")),
             "{d:?}"
         );
 
@@ -95,7 +93,7 @@ mod tests {
         assert!(el.bounds.is_some());
         assert!(
             started.elapsed() < Duration::from_secs(2),
-            "two polls of a still element took {:?}",
+            "observing stable bounds of a still element took {:?}",
             started.elapsed()
         );
     }

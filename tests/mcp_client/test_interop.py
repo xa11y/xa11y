@@ -712,7 +712,7 @@ def test_the_find_tool_states_what_stable_waits_for_and_requires(run_client):
     assert "ambiguous_selector" in description, "and says what the refusal is called"
     stable = find.input_schema["properties"]["stable"]
     assert stable["type"] == "boolean"
-    assert "two consecutive polls" in stable["description"]
+    assert "750 ms" in stable["description"]
 
 
 def test_a_validating_client_can_send_stable(run_client):
