@@ -6,9 +6,8 @@ the negative argument case; this is the first real exercise of provider
 enumeration, the filtered/unfiltered paths, output formatting, and the
 geometry-argument dispatch for ``move-to`` / ``resize-to``.
 
-Not every matrix app exposes a window-like element (the GTK app's AT-SPI tree
-starts at a plain group, with no frame node), so a ``No windows found``
-listing skips rather than fails; and a window-like element may be Role::Dialog
+Not every matrix app exposes a window-like element, so a ``No windows
+found`` listing skips rather than fails; and a window-like element may be Role::Dialog
 (the Cocoa app's top level), which the ``window, dialog`` selector and the
 line-format check both accept.
 """
@@ -96,7 +95,7 @@ def _assert_windows_listing(rc: int, stdout: str, stderr: str) -> None:
 def _require_windows(run_cli, app_pid) -> None:
     """Skip the geometry tests on apps that expose no window-like element.
 
-    A selector that never matches (the GTK app's tree has no window node at
+    A selector that never matches (an app whose tree has no window node at
     all) times out with a *timeout*, not `Unsupported` — which would
     otherwise read as a dispatch regression when it is really the honest
     absence of a window. The `windows` listing is the unambiguous gate.
@@ -287,11 +286,13 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
     _, _, width, height = _window_bounds(run_cli, app_pid)
     resized = False
     try:
+        # Shrink rather than grow: a window already filling a small display's
+        # visible frame cannot grow (see the MCP resize test in test_mcp.py).
         rc, stdout, stderr = run_cli(
             "action",
             "resize-to",
             "--size",
-            f"{width + 50},{height + 50}",
+            f"{width - 50},{height - 50}",
             "window, dialog",
             "--pid",
             str(app_pid),
@@ -315,22 +316,18 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
                     "Qt/UIA applies client size to decorated outer bounds; "
                     "tracked as qt_windows_geometry_offsets"
                 )
-            resize_noop = app_name in {"cocoa", "egui", "winforms", "wpf"} or (
-                app_name == "tauri" and not sys.platform.startswith("linux")
-            )
-            if resize_noop:
+            # Windows-only gap; on macOS resize_to verifies its own write and
+            # a refused resize already failed the dispatch above.
+            if sys.platform == "win32" and app_name in {
+                "egui",
+                "tauri",
+                "winforms",
+                "wpf",
+            }:
                 gap = (
-                    "cocoa_resize_noop"
-                    if app_name == "cocoa"
-                    else (
-                        "egui_transform_resize_noop"
-                        if app_name == "egui"
-                        else (
-                            f"{app_name}_transform_resize_noop"
-                            if app_name in {"winforms", "wpf"}
-                            else "tauri_desktop_resize_noop"
-                        )
-                    )
+                    "tauri_desktop_resize_noop"
+                    if app_name == "tauri"
+                    else f"{app_name}_transform_resize_noop"
                 )
                 pytest.skip(
                     f"{app_name} accepts Resize without changing bounds; "
@@ -339,8 +336,8 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
             _wait_for_bounds(
                 run_cli,
                 app_pid,
-                lambda b: abs(b[2] - (width + 50)) <= 2
-                and abs(b[3] - (height + 50)) <= 2,
+                lambda b: abs(b[2] - (width - 50)) <= 2
+                and abs(b[3] - (height - 50)) <= 2,
                 "resize-to to change the reported size",
             )
             rc, _, stderr = run_cli(

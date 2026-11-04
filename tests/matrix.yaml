@@ -107,6 +107,19 @@ apps:
       Built with `dotnet build` (the .NET SDK is preinstalled on
       windows-latest runners).
 
+  uwp:
+    platforms: [windows]
+    notes: >
+      The only app in the matrix whose top-level window belongs to another
+      process: a UWP app's CoreWindow is parented into an
+      ApplicationFrameWindow owned by ApplicationFrameHost.exe (issue #497).
+      C++/WinRT with Windows.UI.Xaml built in code, compiled with the MSVC
+      tools and Windows SDK preinstalled on windows-latest, packed with
+      makeappx, signed with a throwaway self-signed certificate, sideloaded
+      with Add-AppxPackage and activated by AppUserModelID
+      (test-apps/uwp/launch.ps1). tests/suites/python/test_uwp.py holds the
+      frame-attribution checks against the activated app process.
+
 features:
   compat:
     description: "a11y API compatibility: tree structure, find, roles, widget discovery"
@@ -205,7 +218,7 @@ features:
   mcp:
     description: "MCP stdio server: framing, dual-era handshake, tool schemas, tool contracts, event subscriptions, and identical behaviour from all three CLI launchers"
     per_app: false
-    tested_on: [qt, gtk, cocoa, tauri, electron, egui, winforms, wpf]
+    tested_on: [qt, gtk, cocoa, tauri, electron, egui, winforms, wpf, uwp]
     notes: >
       Runs inside the cli suite (tests/suites/cli/test_mcp.py), so it covers
       every app whose cell runs that suite; the accesskit cells skip it along
@@ -339,6 +352,11 @@ coverage:
     js: [compat, actions, windows]
     cli: [compat, actions, mcp, windows]
 
+  uwp:
+    python: [compat, actions, events, errors, windows]
+    js: [compat, actions, windows]
+    cli: [compat, actions, mcp, windows]
+
 gaps:
   - id: accesskit_python_suite_non_linux
     description: >
@@ -459,32 +477,6 @@ gaps:
       language: rust
       features: [windows]
 
-  - id: windows_dpi_awareness_embedding
-    description: >
-      xa11y-windows assumes the process is Per-Monitor-V2 aware
-      (ensure_process_dpi_aware sets it, and the dpi.rs transforms treat UIA
-      bounds/BitBlt/SendInput coordinates as physical). A host that pinned a
-      lower awareness (SYSTEM_DPI_AWARE / DPI_UNAWARE) before xa11y loads
-      gets ERROR_ACCESS_DENIED from SetProcessDpiAwarenessContext, which is
-      currently ignored — the monitor-lookup and physical/logical transforms
-      then run against virtualized coordinates, so move_to / click /
-      screenshot can land on the wrong monitor. Accepted for now (copilot
-      review round on PR #3): the exposure is confined to embedding hosts
-      that pinned a lower awareness, while standalone binaries and the
-      language bindings set Per-Monitor-V2 themselves. A hard constructor
-      failure would also break embedded hosts that work today on uniform-DPI
-      desktops, so the fix is deferred. When picked up: make
-      ensure_process_dpi_aware fallible, query the effective awareness on
-      ERROR_ACCESS_DENIED, fail only when it is below per-monitor, and
-      decide fail-at-init vs fail-at-transform-boundary after verifying
-      SYSTEM_DPI_AWARE coordinate semantics on uniform and mixed-DPI
-      desktops.
-    severity: low
-    workaround: "Not covered by any cell: reproducing requires a host process that pinned lower DPI awareness before loading xa11y. Standalone CLI/binding cells run the common path where the set succeeds."
-    affects:
-      language: rust
-      features: [windows]
-
   - id: winforms_transform_resize_noop
     description: >
       The WinForms UIA provider answers TransformPattern.Resize with success
@@ -517,10 +509,45 @@ gaps:
       apps: [wpf]
       features: [windows]
 
+  - id: uwp_frame_window_name_shared
+    description: >
+      A UWP app's ApplicationFrameWindow shares its name with the title-bar
+      window and the CoreWindow beneath it, so `window[name="xa11y UWP Test"]`
+      matches three elements. The MCP window-mutation tests address their
+      target by that selector, and `action` refuses an ambiguous one. On the
+      uwp cell they skip with a reason that starts with this gap's id, and
+      only when `find` returns exactly that shape: three matches, one of them
+      the title bar reporting the title as its value. Any other ambiguity, on
+      any cell, fails (_no_mcp_window_target in tests/suites/cli/test_mcp.py).
+      A selector's first segment never matches the app root, so
+      `application > window[...]` cannot single out the frame either.
+      The Python, JS and CLI window suites act on the window element itself
+      and run in full there.
+    severity: low
+    workaround: "Python, JS and CLI window suites enforce the verbs on the uwp cell; the MCP window-mutation tests run on qt/winforms/wpf/egui."
+    affects:
+      apps: [uwp]
+      language: cli
+      features: [windows]
+
+  - id: uwp_textbox_nested_text_field
+    description: >
+      The XAML TextBox reads as text_field "Search" with a nested child
+      text_field "Search" of the same value, so the JS compat check that
+      requires exactly one named text field is turned off for uwp
+      (textFieldName: null in tests/suites/js/helpers.js). Whether the inner
+      element should be surfaced at all is open.
+    severity: low
+    workaround: "The Python compat suite reads the field and its value on the uwp cell."
+    affects:
+      apps: [uwp]
+      language: js
+      features: [compat]
+
   - id: egui_transform_resize_noop
     description: >
       egui windows advertise the native resize action and accept its dispatch,
-      but their reported bounds remain unchanged on Windows and macOS. The CLI,
+      but their reported bounds remain unchanged on Windows. The CLI,
       MCP, and JS mutation suites dispatch the action and record an explicit
       skip rather than passing a no-op as mutation coverage.
     severity: low
@@ -557,7 +584,7 @@ gaps:
 
   - id: tauri_desktop_resize_noop
     description: >
-      Tauri on macOS and Windows advertises resize_to and accepts the native
+      Tauri on Windows advertises resize_to and accepts the native
       action, but the reported bounds remain unchanged. MCP, CLI, and JS
       dispatch the action and explicitly skip the bounds mutation assertion.
     severity: low
@@ -577,18 +604,6 @@ gaps:
       fixture's native Toggle Fullscreen action.
     severity: low
     workaround: "Fullscreen state is enforced through the Cocoa fixture's native Toggle Fullscreen action."
-    affects:
-      apps: [cocoa]
-      features: [windows]
-
-  - id: cocoa_resize_noop
-    description: >
-      The native Cocoa fixture advertises AX resize and accepts dispatch, but
-      fresh app-wide enumeration continues to report unchanged bounds in the
-      CLI, MCP, and JS suites. Those surfaces dispatch then explicitly skip;
-      move_to remains an enforced observable geometry mutation.
-    severity: low
-    workaround: "Exact resize bounds are enforced by the Qt macOS fixture."
     affects:
       apps: [cocoa]
       features: [windows]

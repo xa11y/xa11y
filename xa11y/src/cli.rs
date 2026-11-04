@@ -99,6 +99,28 @@ impl CliError {
     }
 }
 
+impl CliError {
+    /// Whether the failed operation may already have taken effect, so a
+    /// caller can tell a safe retry from a double-submit.
+    ///
+    /// `None` for a usage error: no operation was attempted, so there is
+    /// nothing to retry or not. Every other failure answers. The CLI-level
+    /// failures (`NotFound`, `Ambiguous`, `AmbiguousShellSurface`,
+    /// `NoSubscription`) are refused before anything is dispatched, so they
+    /// are `NotDelivered`; an underlying error answers for itself through
+    /// [`Error::delivery`].
+    pub fn delivery(&self) -> Option<crate::Delivery> {
+        match self {
+            CliError::Usage(_) => None,
+            CliError::NotFound(_)
+            | CliError::Ambiguous { .. }
+            | CliError::AmbiguousShellSurface { .. }
+            | CliError::NoSubscription { .. } => Some(crate::Delivery::NotDelivered),
+            CliError::Xa11y(e) => Some(e.delivery()),
+        }
+    }
+}
+
 impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -188,10 +210,35 @@ pub fn run_main(args: &[String]) -> i32 {
                 CliError::Usage(_) => eprintln!("{e}"),
                 _ => eprintln!("error: {e}"),
             }
+            if let Some(line) = delivery_line(args.first().map(|s| s.as_str()).unwrap_or(""), &e) {
+                eprintln!("{line}");
+            }
             offer_accessibility_settings_hint(args.first().map(|s| s.as_str()).unwrap_or(""), &e);
             e.exit_code()
         }
     }
+}
+
+/// The commands that dispatch an action, and so owe their failures a
+/// delivery disposition. Read-only commands (`tree`, `find`, `apps`, ...)
+/// dispatch nothing, so the line would be noise there.
+const ACTION_COMMANDS: [&str; 7] = ["action", "click", "move", "drag", "scroll", "key", "type"];
+
+/// The stderr line that follows a failed action command's error, e.g.
+/// `delivery: unknown (the action may have been applied; re-read the state before retrying)`.
+///
+/// `None` for a command that dispatches nothing and for a usage error.
+fn delivery_line(command: &str, error: &CliError) -> Option<String> {
+    if !ACTION_COMMANDS.contains(&command) {
+        return None;
+    }
+    let delivery = error.delivery()?;
+    let advice = if delivery.is_safe_to_retry() {
+        "the action did not reach the application, so a retry is safe"
+    } else {
+        "the action may have been applied, so re-read the state before retrying"
+    };
+    Some(format!("delivery: {delivery} ({advice})"))
 }
 
 /// Run the CLI with the given arguments (excluding the program name).
@@ -216,6 +263,7 @@ pub fn run(args: &[String]) -> CliResult<()> {
         Some("type") => cmd_type(&args[1..]),
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("mcp") => crate::mcp::serve(&args[1..]),
+        Some("guide") => cmd_guide(&args[1..]),
         _ => {
             print_usage();
             Ok(())
@@ -241,8 +289,13 @@ Accessibility tree:
   xa11y shell                               List OS shell surfaces: KIND PID NAME
   xa11y windows [--app NAME | --pid PID]    List top-level windows
   xa11y tree   [TARGET]                     Print the accessibility tree
-  xa11y find   SELECTOR [TARGET] [-o pretty|bounds|center]
-                                            Find elements matching a selector
+  xa11y find   SELECTOR [TARGET] [-o pretty|bounds|center] [--stable]
+                                            Find elements matching a selector.
+                                            --stable waits (up to the default
+                                            timeout) until the one match is
+                                            visible and its bounds hold still
+                                            across two polls; the selector must
+                                            then match exactly one element
   xa11y action ACTION SELECTOR [TARGET] [--value V]
                                             [--at X,Y] [--size W,H]
                                             Perform an action on an element
@@ -290,10 +343,17 @@ Model Context Protocol:
   xa11y mcp                                 Serve the above as MCP tools over
                                             stdio (for MCP clients, not humans)
 
+Agent guide:
+  xa11y guide                               Print the guide for agents driving
+                                            xa11y: selectors, auto-wait, result
+                                            bounds, failure kinds. `xa11y mcp`
+                                            serves the same text.
+
 Compose a11y + input/screenshot via `find -o bounds|center`:
   region=$(xa11y find 'button[name=\"OK\"]' --app Safari -o bounds)
   xa11y screenshot --region \"$region\" --out button.png
   xa11y click --at \"$(xa11y find 'button[name=\"OK\"]' --app Safari -o center)\"
+  Add --stable to that find when the target may still be animating into place.
 
 Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
   scroll-into-view, increment, decrement,
@@ -417,6 +477,8 @@ pub(crate) struct Opts {
     pub legend: Option<String>,
     // Output format for `find`
     pub output_format: Option<String>,
+    /// `find --stable`: wait for the single match's bounds to settle.
+    pub stable: bool,
 }
 
 /// Fetch the value for a flag at `args[i]`, erroring if the flag is trailing
@@ -546,6 +608,8 @@ pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
                 i += 1;
                 opts.output_format = Some(flag_value(args, i, "-o")?.to_string());
             }
+            // A switch: takes no value.
+            "--stable" => opts.stable = true,
             other => positional.push(other.to_string()),
         }
         i += 1;
@@ -997,7 +1061,12 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
         parts.push(format!("description=\"{}\"", desc));
     }
 
-    // States
+    // States. A hidden element says why (`hidden=scrolled_out`), which is
+    // what decides how to make it visible (issue #590).
+    let hidden = match el.states.hidden_reason {
+        Some(reason) => format!("hidden={reason}"),
+        None => "hidden".to_string(),
+    };
     let mut states = Vec::new();
     if el.states.enabled {
         states.push("enabled");
@@ -1007,7 +1076,7 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     if el.states.visible {
         states.push("visible");
     } else {
-        states.push("hidden");
+        states.push(hidden.as_str());
     }
     if el.states.focused {
         states.push("focused");
@@ -1044,6 +1113,9 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     }
     if el.states.busy {
         states.push("busy");
+    }
+    if el.states.password {
+        states.push("password");
     }
     if let Some(checked) = &el.states.checked {
         states.push(match checked {
@@ -1128,6 +1200,27 @@ fn print_tree_recursive(
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
+
+/// The agent guide, embedded so that what an agent reads always describes the
+/// binary it is talking to.
+///
+/// `xa11y guide` prints it and `xa11y mcp` serves it as a resource and a
+/// prompt. Its one source is `xa11y/AGENT_GUIDE.md`; the docs site page is
+/// rendered from that file by `cargo xtask sync-agent-guide`, and CI fails
+/// when the two differ.
+pub(crate) const AGENT_GUIDE: &str = include_str!("../AGENT_GUIDE.md");
+
+fn cmd_guide(args: &[String]) -> CliResult<()> {
+    // Takes no arguments; one passed anyway is a mistake worth reporting
+    // rather than ignoring (tenet 1).
+    if let Some(extra) = args.first() {
+        return Err(CliError::Usage(format!(
+            "xa11y guide takes no arguments (got {extra:?})"
+        )));
+    }
+    print!("{AGENT_GUIDE}");
+    Ok(())
+}
 
 fn cmd_apps() -> CliResult<()> {
     let apps = App::list()?;
@@ -1328,19 +1421,37 @@ fn cmd_find(args: &[String]) -> CliResult<()> {
     let selector = positional.first().ok_or_else(|| {
         CliError::Usage(
             "usage: xa11y find SELECTOR [--app NAME | --pid PID | --shell KIND] \
-             [-o pretty|bounds|center]"
+             [-o pretty|bounds|center] [--stable]"
                 .into(),
         )
     })?;
+    // Validated before the target is resolved, so a typo'd format is a usage
+    // error rather than something reported after a full stability wait.
+    let fmt = opts.output_format.as_deref().unwrap_or("pretty");
+    if !matches!(fmt, "pretty" | "bounds" | "center") {
+        return Err(CliError::Usage(format!(
+            "unknown -o format: {fmt} (expected pretty|bounds|center)"
+        )));
+    }
 
     let target = resolve_target(&opts)?;
-    let elements = target.locator(selector).elements()?;
+    let elements = if opts.stable {
+        match find_stable(&target, selector)? {
+            Ok(element) => vec![element],
+            Err(matches) => {
+                return Err(ambiguous_selector(selector, &matches, 8, |el| {
+                    format_element_oneline(el)
+                }))
+            }
+        }
+    } else {
+        target.locator(selector).elements()?
+    };
     if elements.is_empty() {
         return Err(CliError::NotFound(format!(
             "no elements matched selector: {selector}"
         )));
     }
-    let fmt = opts.output_format.as_deref().unwrap_or("pretty");
     match fmt {
         "pretty" => {
             for el in &elements {
@@ -1375,6 +1486,103 @@ fn cmd_find(args: &[String]) -> CliResult<()> {
         }
     }
     Ok(())
+}
+
+/// Resolve `selector` under `target` to its single match once that match is
+/// visible and its bounds are unchanged across two consecutive polls
+/// ([`Locator::wait_stable`]), waiting up to the default timeout.
+///
+/// The value-producing half of `find --stable`, shared by the CLI and the
+/// MCP `find` tool. `Ok(Err(matches))` means the selector matched more than
+/// one element: the caller renders that as its own ambiguity error. It is
+/// checked before the wait, so a selector that is ambiguous from the start is
+/// refused at once, and again after it, because the wait follows the first
+/// match only.
+///
+/// A wait that times out on a selector that matches nothing reports the
+/// diagnosed not-found error ([`Locator::element`]'s), the same failure a
+/// plain `find` miss gives; any other timeout keeps its stability diagnosis.
+pub(crate) fn find_stable(
+    target: &Target,
+    selector: &str,
+) -> CliResult<std::result::Result<Element, Vec<Element>>> {
+    let locator = target.locator(selector);
+    let before = locator.elements()?;
+    if before.len() > 1 {
+        return Ok(Err(before));
+    }
+    let element = match locator.wait_stable(crate::default_timeout()?) {
+        Ok(element) => element,
+        Err(timeout @ Error::Timeout { .. }) => {
+            return match locator.element() {
+                // Nothing matches now: the diagnosed miss is the failure to
+                // report (any other error from the re-query propagates).
+                Err(miss @ Error::SelectorNotMatched { .. }) => {
+                    Err(miss_after_stable_wait(miss, &timeout).into())
+                }
+                Err(other) => Err(other.into()),
+                // Something matches; it just never held still.
+                Ok(_) => Err(timeout.into()),
+            };
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let after = locator.elements()?;
+    if after.len() > 1 {
+        return Ok(Err(after));
+    }
+    Ok(Ok(element))
+}
+
+/// The not-found error a `--stable` wait ends with when nothing matches any
+/// more. The miss carries the near-miss candidates and scope; the wait's own
+/// timeout knew whether the selector matched at some point during it, and
+/// that is kept as the miss's `last_observed` rather than dropped (tenet 6).
+fn miss_after_stable_wait(miss: Error, timeout: &Error) -> Error {
+    let waited = timeout
+        .diagnosis()
+        .and_then(|d| d.last_observed.as_deref())
+        .filter(|seen| seen.contains("matched earlier"));
+    let Some(waited) = waited else {
+        return miss;
+    };
+    let mut d = miss.diagnosis().cloned().unwrap_or_default();
+    d.last_observed = Some(match d.last_observed.take() {
+        Some(now) => format!("{waited}; {now}"),
+        None => waited.to_string(),
+    });
+    miss.diagnose(d)
+}
+
+/// The "matched more than one" failure for an operation that acts on exactly
+/// one element, with a bounded candidate list (tenet 6). Shared by the CLI
+/// and the MCP tools, which differ only in how a candidate is rendered and
+/// how many are listed.
+///
+/// The list is bounded *here*, not only where it is serialized, so the
+/// rendered message is bounded too.
+pub(crate) fn ambiguous_selector(
+    selector: &str,
+    matches: &[Element],
+    max_candidates: usize,
+    describe: impl Fn(&Element) -> String,
+) -> CliError {
+    let mut candidates: Vec<String> = matches.iter().take(max_candidates).map(describe).collect();
+    if matches.len() > max_candidates {
+        candidates.push(format!(
+            "… (+{} more matches)",
+            matches.len() - max_candidates
+        ));
+    }
+    CliError::Ambiguous {
+        count: matches.len(),
+        diagnosis: Box::new(
+            Diagnosis::new()
+                .selector(selector)
+                .last_observed(format!("selector matched {} elements", matches.len()))
+                .candidates(candidates),
+        ),
+    }
 }
 
 /// Tell the user (on stderr) that a matched element was omitted from
@@ -2420,6 +2628,84 @@ mod tests {
             .expect("the mock must vend one app")
     }
 
+    // ── Delivery disposition ────────────────────────────────────────────────
+
+    #[test]
+    fn every_dispatched_command_is_classified_as_action_or_read_only() {
+        // `ACTION_COMMANDS` is hand-kept. Read the dispatcher's own arms, so
+        // a new command that nobody classified fails here instead of
+        // silently lacking the `delivery:` line.
+        const NOT_ACTIONS: [&str; 8] = [
+            "apps",
+            "shell",
+            "windows",
+            "tree",
+            "find",
+            "events",
+            "screenshot",
+            "guide",
+        ];
+        let source = include_str!("cli.rs");
+        let body = source
+            .split("pub fn run(args: &[String]) -> CliResult<()> {")
+            .nth(1)
+            .expect("run() is in this file")
+            .split("/// The `xa11y --help` text.")
+            .next()
+            .expect("run() ends before usage_text");
+        let dispatched: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("Some(\""))
+            .filter_map(|l| l.split('"').next())
+            .collect();
+        assert!(
+            dispatched.len() >= 10,
+            "dispatcher not found: {dispatched:?}"
+        );
+        for name in dispatched {
+            if name == "mcp" {
+                continue; // a server, not a one-shot operation
+            }
+            let action = ACTION_COMMANDS.contains(&name);
+            let read_only = NOT_ACTIONS.contains(&name);
+            assert!(
+                action != read_only,
+                "`{name}` must be in exactly one of ACTION_COMMANDS and NOT_ACTIONS"
+            );
+        }
+        for name in ACTION_COMMANDS {
+            assert!(
+                body.contains(&format!("Some(\"{name}\")")),
+                "ACTION_COMMANDS lists `{name}`, which the dispatcher does not route"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_action_command_names_its_delivery() {
+        let miss = CliError::Xa11y(Error::selector_not_matched("button"));
+        let line = delivery_line("action", &miss).expect("an action failure reports delivery");
+        assert!(line.starts_with("delivery: not_delivered"), "{line}");
+
+        let platform = CliError::Xa11y(Error::Platform {
+            code: -25204,
+            message: "cannot complete".into(),
+        });
+        let line = delivery_line("click", &platform).expect("a click failure reports delivery");
+        assert!(line.starts_with("delivery: unknown"), "{line}");
+    }
+
+    #[test]
+    fn read_only_commands_and_usage_errors_print_no_delivery_line() {
+        let miss = CliError::Xa11y(Error::selector_not_matched("button"));
+        assert_eq!(delivery_line("find", &miss), None);
+        assert_eq!(delivery_line("tree", &miss), None);
+        assert_eq!(
+            delivery_line("action", &CliError::Usage("bad".into())),
+            None
+        );
+    }
+
     // ── Argument parsing ────────────────────────────────────────────────────
 
     #[test]
@@ -2429,6 +2715,51 @@ mod tests {
         assert_eq!(opts.app.as_deref(), Some("Safari"));
         assert!(opts.pid.is_none());
         assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn a_stable_miss_keeps_that_the_selector_matched_during_the_wait() {
+        let miss = Error::selector_not_matched("button[name=\"Gone\"]").diagnose(
+            Diagnosis::new()
+                .last_observed("2 near misses")
+                .candidates(vec!["button \"Go\"".into()]),
+        );
+        let timeout = Error::timeout(std::time::Duration::from_secs(1)).diagnose(
+            Diagnosis::new()
+                .last_observed("selector matched earlier in the wait but no longer matches"),
+        );
+        let err = miss_after_stable_wait(miss, &timeout);
+        assert!(matches!(err, Error::SelectorNotMatched { .. }), "{err:?}");
+        let d = err.diagnosis().expect("the miss keeps its diagnosis");
+        assert_eq!(
+            d.last_observed.as_deref(),
+            Some("selector matched earlier in the wait but no longer matches; 2 near misses")
+        );
+        assert_eq!(d.candidates, vec!["button \"Go\"".to_string()]);
+    }
+
+    #[test]
+    fn a_stable_miss_that_never_matched_is_the_plain_miss() {
+        let miss = Error::selector_not_matched("x")
+            .diagnose(Diagnosis::new().last_observed("nothing close"));
+        let timeout = Error::timeout(std::time::Duration::from_secs(1))
+            .diagnose(Diagnosis::new().last_observed("selector never matched"));
+        let err = miss_after_stable_wait(miss, &timeout);
+        assert_eq!(
+            err.diagnosis().and_then(|d| d.last_observed.as_deref()),
+            Some("nothing close")
+        );
+    }
+
+    #[test]
+    fn parse_opts_stable_is_a_switch_that_consumes_no_value() {
+        let args = strs(&["button", "--stable", "-o", "center"]);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
+        assert!(opts.stable);
+        assert_eq!(opts.output_format.as_deref(), Some("center"));
+        assert_eq!(pos, vec!["button".to_string()]);
+        let (plain, _) = parse_opts(&strs(&["button"])).expect("flags must parse");
+        assert!(!plain.stable);
     }
 
     #[test]
@@ -3008,6 +3339,20 @@ mod tests {
     // ── Exit-code contract ──────────────────────────────────────────────────
 
     #[test]
+    fn guide_takes_no_arguments() {
+        let err = run(&["guide".into(), "--json".into()]).expect_err("must reject");
+        assert!(
+            matches!(&err, CliError::Usage(m) if m.contains("--json")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_usage_text_lists_the_guide_command() {
+        assert!(usage_text().contains("xa11y guide"));
+    }
+
+    #[test]
     fn exit_code_usage_is_2() {
         assert_eq!(CliError::Usage("bad flag".into()).exit_code(), 2);
     }
@@ -3054,6 +3399,16 @@ mod tests {
         assert!(out.contains("\"OK\""));
         assert!(out.contains("enabled"));
         assert!(out.contains("visible"));
+    }
+
+    #[test]
+    fn format_element_hidden_says_why() {
+        let mut el = make_element(Role::Button, Some("Long Entry 10"));
+        el.states.visible = false;
+        el.states.hidden_reason = Some(crate::HiddenReason::ScrolledOut);
+        let out = format_element_oneline(&el);
+        assert!(out.contains("hidden=scrolled_out"), "{out}");
+        assert!(!out.contains(" visible"), "{out}");
     }
 
     #[test]
@@ -3116,6 +3471,16 @@ mod tests {
         el.states.expanded = Some(false);
         let out = format_element_oneline(&el);
         assert!(out.contains("collapsed"));
+    }
+
+    #[test]
+    fn format_element_password() {
+        let mut el = make_element(Role::TextField, Some("PIN"));
+        assert!(!format_element_oneline(&el).contains("password"));
+        el.states.password = true;
+        let out = format_element_oneline(&el);
+        assert!(out.starts_with("text_field"), "{out}");
+        assert!(out.contains(" password"), "{out}");
     }
 
     #[test]

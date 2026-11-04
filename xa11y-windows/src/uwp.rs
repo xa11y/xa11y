@@ -127,7 +127,6 @@ pub struct PidFilter {
     /// The target's packaging, read once on first need. Only a packaged
     /// process can own a detached frame.
     packaging: Option<Packaging>,
-    core_window_owners: Option<HashSet<u32>>,
     index: Option<AumidIndex>,
 }
 
@@ -136,7 +135,6 @@ impl PidFilter {
         Self {
             pid,
             packaging: None,
-            core_window_owners: None,
             index: None,
         }
     }
@@ -160,7 +158,6 @@ impl PidFilter {
         if let Some(core) = hosted_core_window_pid(hwnd)? {
             return Ok(core == self.pid);
         }
-        let pid = self.pid;
         // An unpackaged process owns no detached frame, and one that has
         // exited owns nothing.
         let Packaging::Packaged(aumid) = self.packaging()? else {
@@ -170,26 +167,19 @@ impl PidFilter {
         if frame_aumid(hwnd)?.as_deref() != Some(aumid.as_str()) {
             return Ok(false);
         }
-        // The frame is this AUMID's. If our process owns a detached core
-        // window it is the app's UI process; otherwise ask the index whether
-        // it is the only candidate.
-        if self.core_window_owners.is_none() {
-            self.core_window_owners = Some(top_level_core_window_owners()?);
-        }
-        if self
-            .core_window_owners
-            .as_ref()
-            .is_some_and(|o| o.contains(&pid))
-        {
-            return Ok(true);
-        }
+        // A detached CoreWindow is evidence of a UI process, not proof that
+        // it is the unique UI process sharing this AUMID.
+        self.owns_detached_frame(&aumid)
+    }
+
+    fn owns_detached_frame(&mut self, aumid: &str) -> Result<bool> {
         if self.index.is_none() {
             self.index = Some(AumidIndex::build()?);
         }
         Ok(self
             .index
             .as_ref()
-            .is_some_and(|index| pick_process(&aumid, index) == Some(pid)))
+            .is_some_and(|index| pick_process(aumid, index) == Some(self.pid)))
     }
 }
 
@@ -630,6 +620,18 @@ mod tests {
     }
 
     const CALC: &str = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App";
+
+    #[test]
+    fn per_pid_detached_frame_ownership_requires_a_unique_app() {
+        for pid in [100, 200] {
+            let mut filter = PidFilter::for_pid(pid);
+            filter.index = Some(index(&[(CALC, &[100, 200])], &[100, 200], 0));
+            assert!(!filter.owns_detached_frame(CALC).expect("cached index"));
+            filter.index = Some(index(&[(CALC, &[100, 200])], &[100], 0));
+            assert_eq!(filter.owns_detached_frame(CALC).expect("cached index"), pid == 100);
+        }
+    }
+
 
     #[test]
     fn a_single_process_with_the_aumid_is_the_app() {

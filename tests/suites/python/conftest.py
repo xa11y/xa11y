@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
+import pytest_xa11y.plugin
+from pytest_xa11y.frontmost import macos_visible_processes
 
 import xa11y
+from tests import strict_frontmost
 from tests.launchers import launcher_for
 
 # ---------------------------------------------------------------------------
@@ -83,6 +87,9 @@ APP_CONFIGS: dict[str, dict] = {
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         # Text field — found by name
         "textfield_selector": 'text_field[name="Search"]',
+        # Not instrumented yet: the toolkit has a password entry, the test
+        # app does not show one (#522).
+        "password_field_name": None,
         "textfield_initial_value": None,  # Qt does not guarantee specific text
         # Text area
         "textarea_selector": '[name="Notes"]',
@@ -109,6 +116,29 @@ APP_CONFIGS: dict[str, dict] = {
         # Not yet verified unknown-free on all three OSes.
         "expect_no_unknown_roles": False,
         "window_name_contains": "xa11y-qt-test-app",
+        # A list longer than its viewport (#590). Linux only: Qt's AT-SPI
+        # bridge clears VISIBLE on a row outside the view, which the provider
+        # reads as scrolled out of its list. Qt's UIA and AX bridges are not
+        # verified to say the same, so the other two OSes do not run it.
+        "scrolled_pane_name": "Long Pane" if sys.platform.startswith("linux") else None,
+        "scrolled_pane_first_item": "Long Entry 1",
+        "scrolled_pane_last_item": "Long Entry 10",
+        # Buttons that scroll the pane to its last and first entries: Qt's
+        # AT-SPI bridge cannot scroll a row into view itself.
+        "scrolled_pane_end_button": "Scroll Long Pane To End",
+        "scrolled_pane_start_button": "Scroll Long Pane To Start",
+        # Qt implements no AT-SPI Component.ScrollTo, so an action on a
+        # scrolled-out row cannot scroll it into view and waits it out (#590).
+        # Linux only, like the pane itself: elsewhere the row is not reported
+        # scrolled out, so no scroll is attempted to be refused.
+        "scrolled_pane_refuses_scroll_into_view": sys.platform.startswith("linux"),
+        # A button on an inactive tab page: hidden by a container that does
+        # not scroll, so not_showing (#590). Qt reports it without bounds,
+        # so the scroll-role check is guarded by the Linux unit tests rather
+        # than here. Linux only, for the same reason as the pane above.
+        "not_showing_name": "Tab Two Button"
+        if sys.platform.startswith("linux")
+        else None,
         # Dynamic buttons for event tests
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
@@ -138,6 +168,9 @@ APP_CONFIGS: dict[str, dict] = {
         "spinbutton_selector": "spin_button",
         "progress_bar_selector": "progress_bar",
         "textfield_selector": "text_field",
+        # Not instrumented yet: the toolkit has a password entry, the test
+        # app does not show one (#522).
+        "password_field_name": None,
         "textfield_initial_value": "hello world",
         "textarea_selector": "text_area",
         # Table — Gtk.ColumnView (AT-SPI "tree table"); only one table in the
@@ -155,6 +188,17 @@ APP_CONFIGS: dict[str, dict] = {
         # Verified clean against a live AT-SPI session.
         "expect_no_unknown_roles": True,
         "window_name_contains": None,  # not asserted for GTK
+        # GTK 4 keeps VISIBLE and SHOWING on a widget scrolled out of a
+        # Gtk.ScrolledWindow, rows of a Gtk.ListBox included, and reports
+        # extents relative to the window, so nothing it exposes says
+        # "scrolled out" (#590; verified against a live AT-SPI session).
+        "scrolled_pane_name": unsupported(
+            "GTK 4 reports scrolled-out widgets as showing, so they are visible"
+        ),
+        # An inactive Gtk.Notebook page is not in the accessible tree at all.
+        "not_showing_name": unsupported(
+            "GTK 4 leaves hidden containers' children out of the tree"
+        ),
         # Dynamic buttons for event tests (Dynamic group in app.py).
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
@@ -182,6 +226,9 @@ APP_CONFIGS: dict[str, dict] = {
         "spinbutton_selector": 'spin_button[name="Quantity"]',
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
+        # Not instrumented yet: the toolkit has a password entry, the test
+        # app does not show one (#522).
+        "password_field_name": None,
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
         # Table — multi-column cell-based NSTableView ("Users Table").
@@ -206,6 +253,9 @@ APP_CONFIGS: dict[str, dict] = {
         "remove_item_button_name": "Remove Item",
     },
     "tauri": {
+        # "Start slide" / "Slide target" (#530): required, so a missing
+        # widget fails the wait_stable tests instead of skipping them.
+        "has_slide_widget": True,
         # Not instrumented yet: the webview could expose an ARIA dialog, but
         # the Tauri test page has no dialog-opening button.
         "dialog_button_name": None,
@@ -231,6 +281,9 @@ APP_CONFIGS: dict[str, dict] = {
         "spinbutton_selector": 'spin_button[name="Quantity"]',
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
+        # Password entry (#522): `<input type="password">`, flagged by the
+        # `password` state while its role stays text_field.
+        "password_field_name": "Password",
         "textfield_initial_value": "hello world",
         # Text area — WebView2 goes through UIA, which has no distinct
         # multiline text role: <textarea> collapses to UIA_EditControlTypeId
@@ -303,6 +356,8 @@ APP_CONFIGS: dict[str, dict] = {
         "spinbutton_selector": 'spin_button[name="Quantity"]',
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
+        # Password entry (#522), mirroring the Tauri page.
+        "password_field_name": "Password",
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
         # Table — markup mirrors the Tauri test app; same descendant-based
@@ -325,6 +380,9 @@ APP_CONFIGS: dict[str, dict] = {
         "remove_item_button_name": None,
     },
     "accesskit": {
+        # "Start slide" / "Slide target" (#530): required, so a missing
+        # widget fails the wait_stable tests instead of skipping them.
+        "has_slide_widget": True,
         # The AccessKit test app (test-apps/accesskit/src/main.rs) is the
         # canonical AccessKit-on-AT-SPI target on Linux. Its widget schema
         # differs from the shared toolkit fixtures: buttons are Submit/Cancel
@@ -374,6 +432,8 @@ APP_CONFIGS: dict[str, dict] = {
         # tolerates. Leave the initial value unchecked and mark the field
         # non-settable so the action tests skip rather than fail.
         "textfield_selector": 'text_field[name="Name"]',
+        # Password entry (#522): AccessKit `PasswordInput`.
+        "password_field_name": "Password",
         "textfield_initial_value": None,
         "textfield_settable": False,
         # The AccessKit app has no multiline text area.
@@ -448,6 +508,9 @@ APP_CONFIGS: dict[str, dict] = {
         # Text field — egui's `TextEdit::singleline` does not set a name, so
         # match by role (only one in the app) and verify the initial value.
         "textfield_selector": "text_field",
+        # Not instrumented yet: the toolkit has a password entry, the test
+        # app does not show one (#522).
+        "password_field_name": None,
         "textfield_initial_value": "hello world",
         # Text area — egui uses Role::MultilineTextInput which AccessKit's
         # macOS bridge maps to AXTextArea (xa11y `text_area`) but UIA on
@@ -526,6 +589,13 @@ APP_CONFIGS: dict[str, dict] = {
         # ProgressBar.ProgressBarAccessibleObject), so this one is asserted.
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
+        # Password entry (#522): a `UseSystemPasswordChar` TextBox, an
+        # `ES_PASSWORD` edit.
+        "password_field_name": "Password",
+        # The Win32 edit proxy does not withhold the value: ValuePattern.Value
+        # succeeds with a placeholder ("Access denied") instead of the text,
+        # and that placeholder is what xa11y reports (#597).
+        "password_value_withheld": False,
         "textfield_initial_value": "hello world",
         # UIA has no multiline-edit control type: a WinForms multiline TextBox
         # is ControlType.Edit like any other, which xa11y maps to `text_field`.
@@ -566,12 +636,42 @@ APP_CONFIGS: dict[str, dict] = {
         # nameless remainder of the tree is not verified clean yet, so the
         # opt-in whole-tree guard stays off.
         "expect_no_unknown_roles": False,
+        # An element whose only activation is the MSAA default action (no
+        # Invoke/Toggle/SelectionItem/ExpandCollapse) — LegacyTile in
+        # test-apps/winforms/Program.cs. Each press bumps the status label's
+        # count. Only this app has one; other configs omit the keys and
+        # test_legacy_default_action_press skips.
+        "legacy_press_name": "Legacy Tile",
+        "legacy_press_status_prefix": "Legacy activations: ",
         "window_name_contains": "xa11y-winforms-test-app",
+        # A panel longer than its viewport (issue #502): its first button is in
+        # view and its last is scrolled out, while UIA still reports the last
+        # one on screen. Scrolled-out *list items* are no use here: WinForms
+        # and WPF both report those offscreen themselves.
+        "scrolled_pane_name": "Long Pane",
+        "scrolled_pane_first_item": "Long Entry 1",
+        "scrolled_pane_last_item": "Long Entry 10",
+        # Plain buttons have no UIA ScrollItem pattern, so an action on a
+        # scrolled-out one cannot scroll it into view and waits it out (#590).
+        "scrolled_pane_refuses_scroll_into_view": True,
+        # A ComboBox in an overflowing panel: its open drop-down extends past
+        # the panel and must not be clipped to it.
+        "scrolled_panel_name": "Scroll Panel",
+        "scrolled_panel_filler_name": "Panel Filler",
+        "scrolled_panel_combo_name": "Panel Combo",
+        "scrolled_panel_combo_last_item": "Panel Choice 3",
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",
     },
     "wpf": {
+        # A list longer than its viewport whose rows have the UIA ScrollItem
+        # pattern: an auto-waiting action on a scrolled-out row scrolls it into
+        # view first (#590). Virtualization is off in the app, so the last row
+        # exists before it is scrolled to.
+        "auto_scroll_list_name": "Long List",
+        "auto_scroll_first_item": "Long Item 1",
+        "auto_scroll_last_item": "Long Item 12",
         # The second Microsoft UI framework in the matrix (step 2 of issue
         # #324), and the one that produces ControlType.Custom + TableItem
         # cells — the branch of map_uia_role added in #323, which no other app
@@ -623,6 +723,12 @@ APP_CONFIGS: dict[str, dict] = {
         # ProgressBarAutomationPeer also implements IRangeValueProvider.
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
+        # Password entry (#522): a PasswordBox.
+        "password_field_name": "Password",
+        # PasswordBoxAutomationPeer withholds the text from
+        # ValuePattern.Value, so `value` is None rather than a failed tree
+        # read (#597).
+        "password_value_withheld": True,
         "textfield_initial_value": "hello world",
         # Same UIA limitation the WinForms and egui configs note: there is no
         # multiline-edit control type, so a WPF TextBox with AcceptsReturn is
@@ -663,6 +769,62 @@ APP_CONFIGS: dict[str, dict] = {
         # Not yet verified unknown-free across the whole tree.
         "expect_no_unknown_roles": False,
         "window_name_contains": "xa11y-wpf-test-app",
+        "submit_button_name": "Submit",
+        "add_item_button_name": "Add Item",
+        "remove_item_button_name": "Remove Item",
+    },
+    "uwp": {
+        # A UWP (Windows.UI.Xaml) app hosted by ApplicationFrameHost — the
+        # only app in the matrix whose top-level window belongs to another
+        # process (issue #497). Built from test-apps/uwp; Windows-only.
+        #
+        # No dialog: a UWP app has one CoreWindow, and ContentDialog is an
+        # in-window overlay rather than a top-level window.
+        "dialog_button_name": None,
+        "dialog_name": None,
+        "ok_button_name": "OK",
+        "cancel_button_name": "Cancel",
+        # AutomationProperties.HelpText maps to UIA HelpText.
+        "ok_button_description": "Confirm the dialog",
+        "has_checkbox": True,
+        "checkbox_unchecked_name": "Agree to terms",
+        "checkbox_checked_name": "Subscribe",
+        "has_radio": True,
+        "radio_role": "radio_button",
+        "radio_a_name": "Option A",
+        "radio_b_name": "Option B",
+        # SliderAutomationPeer and ProgressBarAutomationPeer implement
+        # IRangeValueProvider.
+        "slider_selector": 'slider[name="Volume"]',
+        "slider_initial_value": 50.0,
+        "slider_min": 0.0,
+        "slider_max": 100.0,
+        # Windows.UI.Xaml ships no spin-button control (NumberBox is WinUI 2,
+        # a NuGet dependency this app deliberately does not take).
+        "spinbutton_selector": unsupported(
+            "Windows.UI.Xaml ships no in-box control that reports "
+            "ControlType.Spinner"
+        ),
+        "progress_bar_selector": 'progress_bar[name="Progress"]',
+        "textfield_selector": 'text_field[name="Search"]',
+        "textfield_initial_value": "hello world",
+        "textarea_selector": unsupported(
+            "UIA has no distinct multiline edit control type, so a multiline "
+            "TextBox is indistinguishable from a single-line one"
+        ),
+        # No grid: Windows.UI.Xaml has no in-box DataGrid (it lives in the
+        # Windows Community Toolkit). WinForms and WPF cover table shapes.
+        "table_selector": None,
+        "table_min_cells": 0,
+        "table_cell_names": None,
+        "table_content_names": None,
+        "table_cell_values": None,
+        "table_selected_cell_name": None,
+        "table_selected_cell_value": None,
+        "table_header_names": None,
+        "expect_no_unknown_roles": False,
+        # The window title is the package DisplayName (AppxManifest.xml).
+        "window_name_contains": "xa11y UWP Test",
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",
@@ -732,10 +894,18 @@ def _tauri_input_sim_reprobe(app) -> str:
     return "\n".join(lines)
 
 
+# Strict frontmost: see tests/strict_frontmost.py.
+_PYTEST_XA11Y_PLUGIN = Path(pytest_xa11y.plugin.__file__)
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     rep = outcome.get_result()
+    if strict_frontmost.enforce(
+        item, call, rep, _PYTEST_XA11Y_PLUGIN, macos_visible_processes
+    ):
+        return
     global _INPUT_SIM_DIAGNOSTICS_EMITTED
     if (
         rep.when != "call"

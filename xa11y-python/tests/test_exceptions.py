@@ -230,6 +230,9 @@ def test_timeout_diagnosis_attributes_matched_wrong_state(test_app):
     e = exc_info.value
     assert 'static_text "Status"' in e.last_observed
     assert "visible=false" in e.last_observed
+    # And why it is hidden, as an attribute and in the message (#590).
+    assert e.hidden_reason == "not_showing"
+    assert "hidden because: not_showing" in str(e)
     # A matched element needs no candidate/scope sweep.
     assert e.candidates == []
     assert e.scope is None
@@ -263,5 +266,44 @@ def test_diagnosis_attributes_always_present(test_app):
     with pytest.raises(xa11y.TimeoutError) as exc_info:
         test_app.descendant("button").wait_detached(timeout=0.05)
     e = exc_info.value
-    for attr in ("condition", "selector", "last_observed", "candidates", "scope", "elapsed"):
+    for attr in (
+        "condition",
+        "selector",
+        "last_observed",
+        "hidden_reason",
+        "auto_scroll",
+        "candidates",
+        "scope",
+        "elapsed",
+    ):
         assert hasattr(e, attr), f"missing diagnosis attribute {attr!r}"
+
+
+# ── Delivery disposition ─────────────────────────────────────────────────────
+#
+# Every error xa11y raises says whether the failed action may already have
+# taken effect, so a caller can tell a safe retry from a double-submit.
+
+
+def test_selector_miss_is_not_delivered(test_app):
+    with pytest.raises(xa11y.SelectorNotMatchedError) as exc_info:
+        test_app.descendant('button[name="Nope"]').element()
+    assert exc_info.value.delivery == "not_delivered"
+
+
+def test_wait_timeout_is_not_delivered(test_app):
+    with pytest.raises(xa11y.TimeoutError) as exc_info:
+        test_app.descendant("button").wait_detached(timeout=0.05)
+    assert exc_info.value.delivery == "not_delivered"
+
+
+def test_invalid_selector_is_not_delivered(test_app):
+    with pytest.raises(xa11y.InvalidSelectorError) as exc_info:
+        test_app.descendant("[[[bad").elements()
+    assert exc_info.value.delivery == "not_delivered"
+
+
+def test_platform_error_is_unknown(test_app):
+    with pytest.raises(xa11y.PlatformError) as exc_info:
+        test_app.element().subscribe()
+    assert exc_info.value.delivery == "unknown"

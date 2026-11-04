@@ -126,6 +126,17 @@ CFArrayRef safe_cg_window_list_copy(uint32_t option, uint32_t relativeToWindow) 
     }
 }
 
+// Safe wrapper for CGPreflightScreenCaptureAccess (macOS 10.15+): whether this
+// process has Screen Recording access, without prompting. Returns false if an
+// ObjC exception was thrown.
+bool safe_cg_preflight_screen_capture_access(void) {
+    @try {
+        return CGPreflightScreenCaptureAccess();
+    } @catch (NSException *e) {
+        return false;
+    }
+}
+
 // ── Create Application Element ───────────────────────────────────────────────
 
 // Safe wrapper for AXUIElementCreateApplication.
@@ -281,6 +292,21 @@ Boolean safe_cf_equal(CFTypeRef a, CFTypeRef b) {
         return false;
     } @catch (NSException *e) {
         return false;
+    }
+}
+
+// Safe CFHash. Consistent with CFEqual, so AXUIElementRefs to the same
+// accessibility object hash alike; used to bucket candidates before the
+// CFEqual comparison when de-duplicating search results. Returns 0 (one shared
+// bucket, still correct) if an ObjC exception was thrown.
+unsigned long safe_cf_hash(CFTypeRef cf) {
+    @try {
+        if (cf != NULL) {
+            return CFHash(cf);
+        }
+        return 0;
+    } @catch (NSException *e) {
+        return 0;
     }
 }
 

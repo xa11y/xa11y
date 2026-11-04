@@ -51,6 +51,24 @@ try {
         cargo test -p xa11y-windows --test sta_host -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
         if ($LASTEXITCODE -ne 0 -and $testExit -eq 0) { $testExit = $LASTEXITCODE }
     }
+
+    # UIPI from a medium-integrity sender to the (elevated) test app, issue
+    # #503. Needs the app up; its own binary, so it runs separately.
+    if (-not $testFilter) {
+        Write-Host "Running medium-integrity UIPI test..."
+        cargo test -p xa11y-windows --test uipi_medium -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0 -and $testExit -eq 0) { $testExit = $LASTEXITCODE }
+    }
+
+    # The system-aware host test (issue #506) needs the AccessKit app up: it
+    # pins its own process SYSTEM_AWARE and reads that app's window, so an
+    # unscoped coordinate path trips the debug_assert in
+    # xa11y-windows/src/coords.rs. Its own process, so it runs separately.
+    if (-not $testFilter) {
+        Write-Host "Running system-aware host DPI test..."
+        cargo test -p xa11y-windows --test dpi_system_aware -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0 -and $testExit -eq 0) { $testExit = $LASTEXITCODE }
+    }
 } finally {
     # 4. Cleanup
     Write-Host "Cleaning up..."

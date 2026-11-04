@@ -97,6 +97,26 @@ def _wait_until(predicate, timeout: float, what: str):
     raise AssertionError(f"timed out waiting for {what}")
 
 
+def _describe_windows(windows: list[xa11y.Element]) -> str:
+    """One bounded line per window, for a settle assertion that found none.
+
+    Tells "the window was missing from the list" from "the window was listed
+    without the verb", which an empty lookup alone cannot.
+    """
+    if not windows:
+        return "[] (the target window is not enumerated)"
+    def clip(text: str, limit: int) -> str:
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    shown = [
+        f"{w.role} {clip(repr(w.name), 60)} actions={clip(','.join(w.actions), 120)} "
+        f"minimized={w.minimized!r} fullscreen={w.fullscreen!r}"
+        for w in windows[:8]
+    ]
+    more = "; ..." if len(windows) > 8 else ""
+    return f"[{'; '.join(shown)}{more}]"
+
+
 def _settled_window(
     app: xa11y.App, verb: str, predicate, what: str
 ) -> xa11y.Element:
@@ -118,8 +138,12 @@ def _settled_window(
         return win
 
     if MACOS:
-        win = _window_advertising(app, verb)
-        assert win is not None, f"{what}: no window advertises {verb}"
+        windows = app.windows()
+        win = next((w for w in windows if verb in w.actions), None)
+        assert win is not None, (
+            f"{what}: no window advertises {verb}; app.windows() = "
+            f"{_describe_windows(windows)}"
+        )
         assert predicate(win), (
             f"{what}: minimized={win.minimized!r} fullscreen={win.fullscreen!r} "
             f"maximized={win.maximized!r}"
@@ -160,9 +184,9 @@ def _window_named(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
         raise
     # Only a *visible* window counts: the Qt fixture hides its dialog rather
     # than destroying it, and Qt keeps the hidden node in the AT-SPI tree with
-    # no X11 window behind it. Counting it would make "the dialog closed"
-    # unobservable and hand the next test a stale node before the reopened
-    # dialog is shown.
+    # no X11 window behind it. App.windows() leaves that node out since issue
+    # #492 (test_closed_dialog_is_not_listed_as_a_window pins it); the filter
+    # stays so a window caught mid-hide is not handed to the next test.
     for w in windows:
         if w.visible and w.name and dialog_name in w.name:
             return w
@@ -172,10 +196,10 @@ def _window_named(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
 def _tree_dialog(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
     """The first window/dialog element in the app's tree named `dialog_name`.
 
-    Covers toolkits whose secondary dialog appears in the accessibility tree
-    but not in ``App.windows()`` (the GTK app's AT-SPI tree has no top-level
-    window node, but its dialog is a Role::Dialog child — the same shape
-    ``test_dialog_role`` in test_compat.py relies on).
+    Covers a toolkit whose secondary dialog appears in the accessibility tree
+    as a Role::Dialog node but not in ``App.windows()`` (the shape
+    ``test_dialog_role`` in test_compat.py relies on). GTK 4 is no longer one
+    of them: its windows are listed since issue #485.
     """
     if not dialog_name:
         return None
@@ -324,9 +348,8 @@ def test_python_window_suite_resolves_the_app(app: xa11y.App) -> None:
     """The suite's smoke anchor.
 
     The harness fails a matrix cell whose suite executes zero tests. On apps
-    that expose no window-like element at all (the GTK app's AT-SPI tree has
-    no frame node) every mutating test below would skip, so this one always
-    executes and keeps the cell honest.
+    that expose no window-like element at all every mutating test below
+    would skip, so this one always executes and keeps the cell honest.
     """
     assert isinstance(app.windows(), list)
 
@@ -336,26 +359,80 @@ def test_atspi_geometry_capability_is_measured_for_gtk_and_qt(app: xa11y.App) ->
     """Pin the GTK/Qt results that decide whether geometry is advertised.
 
     Qt exports Component.SetPosition and Component.SetSize on its top-level
-    accessible, but returns ``false`` from both. GTK's adapter exposes no
-    top-level window accessible in this fixture. Neither therefore provides
-    a capability xa11y can honestly advertise.
+    accessible, but returns ``false`` from both. GTK 4's top-level window is
+    listed since role numbers take precedence over its misleading
+    ``application`` role name (issue #485), and it does not advertise AT-SPI
+    geometry either. Neither therefore provides a capability xa11y can
+    honestly advertise through AT-SPI.
+
+    Under a window manager, ``move_to`` / ``resize_to`` come from the native
+    EWMH backend instead, which binds GTK 4's window by pid and title (issue
+    #487). CI's gtk cell runs one, so there the verbs must be advertised and
+    must really move and resize the window; the Qt cell runs none.
     """
     if APP not in {"gtk", "qt"}:
         pytest.skip("this probe is specifically for the GTK and Qt adapters")
     windows = app.windows()
     if APP == "gtk":
-        assert windows == [], "GTK unexpectedly gained a targetable AT-SPI window"
-        return
-    assert windows, "Qt must expose its top-level window through AT-SPI"
+        assert windows, "GTK 4 must expose its top-level window (issue #485)"
+    else:
+        assert windows, "Qt must expose its top-level window through AT-SPI"
     win = windows[0]
-    assert "move_to" not in win.actions
-    assert "resize_to" not in win.actions
     bounds = win.bounds
     assert bounds is not None
-    with pytest.raises(xa11y.ActionNotSupportedError):
-        win.move_to(bounds.x + 10, bounds.y + 10)
-    with pytest.raises(xa11y.ActionNotSupportedError):
-        win.resize_to(bounds.width + 10, bounds.height + 10)
+    # `minimize` is advertised by the X11 backend exactly when a window
+    # manager runs (and by the Wayland backend never).
+    if "minimize" not in win.actions:
+        assert "move_to" not in win.actions, win.actions
+        assert "resize_to" not in win.actions, win.actions
+        with pytest.raises(xa11y.ActionNotSupportedError):
+            win.move_to(bounds.x + 10, bounds.y + 10)
+        with pytest.raises(xa11y.ActionNotSupportedError):
+            win.resize_to(bounds.width + 10, bounds.height + 10)
+        return
+    assert "move_to" in win.actions and "resize_to" in win.actions, (
+        f"under a window manager the EWMH verbs must be advertised: {win.actions}"
+    )
+
+    def current():
+        found = app.windows()
+        return found[0].bounds if found else None
+
+    try:
+        win.move_to(bounds.x + 40, bounds.y + 30)
+        moved = _wait_until(
+            lambda: (
+                (b := current()) is not None
+                and (b.x, b.y) != (bounds.x, bounds.y)
+                and b
+            ),
+            5.0,
+            "the window bounds to change after move_to",
+        )
+        assert (moved.x - bounds.x, moved.y - bounds.y) == (40, 30), (bounds, moved)
+        win.resize_to(bounds.width - 50, bounds.height - 40)
+        resized = _wait_until(
+            lambda: (b := current()) is not None and b.width != bounds.width and b,
+            5.0,
+            "the window bounds to change after resize_to",
+        )
+        assert (resized.width, resized.height) == (
+            bounds.width - 50,
+            bounds.height - 40,
+        ), (bounds, resized)
+    finally:
+        restore = app.windows()[0]
+        restore.resize_to(bounds.width, bounds.height)
+        restore.move_to(bounds.x, bounds.y)
+    # The shared app must leave this test at its original size and place:
+    # later tests read positions inside it (issue #487's CI failure was a
+    # window left 50x40 smaller, which scrolled their target out of view).
+    _wait_until(
+        lambda: (b := current()) is not None
+        and (b.x, b.y, b.width, b.height) == (bounds.x, bounds.y, bounds.width, bounds.height),
+        5.0,
+        f"the window to return to {bounds}",
+    )
 
 
 def test_minimize_and_restore(app: xa11y.App) -> None:
@@ -393,6 +470,62 @@ def test_minimize_and_restore(app: xa11y.App) -> None:
     except Exception:
         # Never leave the shared app minimized for the suite after this one;
         # the original failure wins over any cleanup failure.
+        _restore_window_best_effort(app)
+        raise
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or APP not in ("winforms", "wpf", "uwp"),
+    reason="minimized-window visibility is asserted on the Microsoft framework cells",
+)
+def test_controls_of_a_minimized_window_are_not_visible(
+    app: xa11y.App, app_config: dict
+) -> None:
+    """A button in a minimized window reports ``visible == False``.
+
+    UIA leaves ``IsOffscreen`` false on the descendants of a minimized
+    window, so without the provider's own check an auto-waiting action
+    would pass its ``visible`` wait and act on a control nobody can see
+    (issue #501). WinForms controls carry their own HWND and WPF's do not,
+    so the two cells cover both of the provider's paths. The uwp cell adds a
+    window whose content lives in another process's CoreWindow.
+
+    A provider may also drop the controls from the tree while the window is
+    minimized; the WinForms cell does (its child-HWND controls are gone
+    from UIA until restore). Either way nothing reports visible, which is
+    what an auto-waiting action depends on, so absence passes too.
+    """
+    win = _window_advertising(app, "minimize")
+    if win is None or "restore" not in win.actions:
+        pytest.skip("no window advertises both minimize and restore")
+    button = app.locator(f'button[name="{app_config["ok_button_name"]}"]')
+    assert button.element().visible is True, "precondition: OK is visible before minimizing"
+    try:
+        win.minimize()
+        minimized = _settled_window(
+            app, "minimize", lambda w: w.minimized is True, "minimize must report minimized"
+        )
+        still_listed = button.elements()
+        assert all(e.visible is False for e in still_listed), (
+            "a button in a minimized window must not report visible; got "
+            f"{[(e.name, e.visible) for e in still_listed]}"
+        )
+        # The minimized window is the reason, ahead of anything a control's
+        # own IsOffscreen says (#590).
+        assert all(e.hidden_reason == "window_minimized" for e in still_listed), (
+            "a button in a minimized window must say why it is hidden; got "
+            f"{[(e.name, e.hidden_reason) for e in still_listed]}"
+        )
+        minimized.restore()
+        _settled_window(
+            app, "minimize", lambda w: w.minimized is False, "restore must report restored"
+        )
+        _wait_until(
+            lambda: button.element().visible is True,
+            5.0,
+            "OK must report visible again after restore",
+        )
+    except Exception:
         _restore_window_best_effort(app)
         raise
 
@@ -545,7 +678,7 @@ def test_resize_to_restores_the_original_size(app: xa11y.App) -> None:
     if bounds is None:
         pytest.skip("the window reports no bounds to restore from")
     try:
-        win.resize_to(bounds.width + 50, bounds.height + 50)
+        win.resize_to(bounds.width - 50, bounds.height - 50)
         win.resize_to(bounds.width, bounds.height)
     except Exception:
         # Same failure-preserving cleanup: don't leave the shared app resized
@@ -997,7 +1130,7 @@ def test_locator_resize_to_restores_the_original_size(app: xa11y.App) -> None:
         pytest.skip("the window reports no bounds to restore from")
     locator = _locator_for_window(app, win)
     try:
-        locator.resize_to(bounds.width + 50, bounds.height + 50)
+        locator.resize_to(bounds.width - 50, bounds.height - 50)
         locator.resize_to(bounds.width, bounds.height)
     except Exception:
         # Same failure-preserving cleanup: don't leave the shared app resized
@@ -1074,6 +1207,28 @@ def test_close_dialog_via_locator(app: xa11y.App, app_config: dict) -> None:
         _close_dialog_from_finally(app, app_config)
 
 
+def test_closed_dialog_is_not_listed_as_a_window(
+    app: xa11y.App, app_config: dict
+) -> None:
+    """A dialog the user closed does not linger in ``App.windows()``.
+
+    The Qt fixture hides its dialog rather than destroying it, and Qt keeps
+    the hidden node in the AT-SPI tree with no native window behind it. It
+    used to be listed as a window the user cannot see (issue #492). Unlike
+    the helpers above, this reads ``App.windows()`` with no ``visible``
+    filter of its own: the listing itself must leave the ghost out.
+    """
+    dialog_name = app_config.get("dialog_name", "")
+    _open_dialog(app, app_config)
+    _close_dialog(app, app_config, strict=True)
+    if _dialog_present(app, dialog_name):
+        pytest.skip("this platform cannot dispatch a close to its dialog")
+    listed = [w.name for w in app.windows() if w.name and dialog_name in w.name]
+    assert listed == [], (
+        f"a closed dialog is still listed as a window: {listed!r} (issue #492)"
+    )
+
+
 @pytest.mark.skipif(
     APP != "cocoa",
     reason=(
@@ -1143,3 +1298,305 @@ def test_fullscreen_state_enters_and_reads_true(app: xa11y.App) -> None:
         except Exception:  # best-effort cleanup; the original error wins
             pass
         raise
+
+
+def _x11_move_client_window(pid: int, title: str, x: int, y: int) -> None:
+    """Move ``pid``'s X11 window titled ``title`` to (x, y) through Xlib.
+
+    Matched on title as well as pid: GTK also gives its unmapped client
+    leader window the process's ``_NET_WM_PID``.
+
+    The test moves the window itself, from outside xa11y, so it checks that
+    element bounds follow the window rather than xa11y's own move_to.
+    """
+    import ctypes
+    import ctypes.util
+
+    lib = ctypes.util.find_library("X11")
+    if not lib:
+        pytest.skip("libX11 is not available to move the window")
+    x11 = ctypes.cdll.LoadLibrary(lib)
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XDefaultRootWindow.restype = ctypes.c_ulong
+    x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    x11.XInternAtom.restype = ctypes.c_ulong
+    x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x11.XQueryTree.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.POINTER(ctypes.c_ulong)),
+        ctypes.POINTER(ctypes.c_uint),
+    ]
+    x11.XGetWindowProperty.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_long,
+        ctypes.c_long,
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte)),
+    ]
+    x11.XFetchName.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_char_p),
+    ]
+    x11.XMoveWindow.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
+    x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    x11.XFree.argtypes = [ctypes.c_void_p]
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+
+    display = x11.XOpenDisplay(None)
+    if not display:
+        pytest.skip("no X display to move the window on")
+    try:
+        net_wm_pid = x11.XInternAtom(display, b"_NET_WM_PID", 0)
+
+        def window_pid(window: int) -> int | None:
+            actual_type = ctypes.c_ulong()
+            actual_format = ctypes.c_int()
+            n_items = ctypes.c_ulong()
+            after = ctypes.c_ulong()
+            data = ctypes.POINTER(ctypes.c_ubyte)()
+            status = x11.XGetWindowProperty(
+                display,
+                window,
+                net_wm_pid,
+                0,
+                1,
+                0,
+                6,  # XA_CARDINAL
+                ctypes.byref(actual_type),
+                ctypes.byref(actual_format),
+                ctypes.byref(n_items),
+                ctypes.byref(after),
+                ctypes.byref(data),
+            )
+            if status != 0 or not data:
+                return None
+            try:
+                if n_items.value < 1:
+                    return None
+                return ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))[0]
+            finally:
+                x11.XFree(data)
+
+        def walk(window: int):
+            root_ret = ctypes.c_ulong()
+            parent = ctypes.c_ulong()
+            children = ctypes.POINTER(ctypes.c_ulong)()
+            count = ctypes.c_uint()
+            if not x11.XQueryTree(
+                display,
+                window,
+                ctypes.byref(root_ret),
+                ctypes.byref(parent),
+                ctypes.byref(children),
+                ctypes.byref(count),
+            ):
+                return
+            try:
+                kids = [children[i] for i in range(count.value)]
+            finally:
+                if children:
+                    x11.XFree(children)
+            for kid in kids:
+                yield kid
+                yield from walk(kid)
+
+        def window_name(window: int) -> str | None:
+            name = ctypes.c_char_p()
+            if (
+                not x11.XFetchName(display, window, ctypes.byref(name))
+                or not name.value
+            ):
+                return None
+            value = name.value.decode("utf-8", "replace")
+            x11.XFree(ctypes.cast(name, ctypes.c_void_p))
+            return value
+
+        root = x11.XDefaultRootWindow(display)
+        matches = [
+            w for w in walk(root) if window_pid(w) == pid and window_name(w) == title
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"expected one X11 window with pid {pid} titled {title!r}, found {len(matches)}"
+            )
+        x11.XMoveWindow(display, matches[0], x, y)
+        x11.XSync(display, 0)
+    finally:
+        x11.XCloseDisplay(display)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="GTK 4 X11 extents are Linux-only")
+def test_gtk4_element_bounds_follow_the_window(app: xa11y.App) -> None:
+    """GTK 4 element bounds move with the window on X11 (issue #487).
+
+    GTK 4 reports screen extents as (0, 0) for every widget, or relative to
+    its window, wherever the window is. xa11y computes them as the window
+    extents plus the X11 client window's origin, so a button's bounds must
+    shift by exactly as much as the window moved.
+    """
+    if APP != "gtk":
+        pytest.skip("pins GTK 4's extents")
+    if os.environ.get("XDG_SESSION_TYPE") == "wayland" or not os.environ.get("DISPLAY"):
+        pytest.skip("X11 only: a Wayland client has no global origin")
+    button = app.locator('button[name="OK"]')
+    windows = app.windows()
+    assert windows and windows[0].name, "GTK 4 must list its titled window (#485)"
+    title = windows[0].name
+
+    def ok_bounds():
+        return button.element().bounds
+
+    # The window's direct child is the app's ScrolledWindow. Unlike the OK
+    # button inside it, its position does not depend on how far earlier
+    # suites scrolled, so it is the element the absolute check uses.
+    viewport = app.locator(f'window[name="{title}"] > group')
+
+    def assert_viewport_inside_window() -> None:
+        # Absolute, not just relative: GTK 4 bounds land on the window,
+        # whose bounds the window backend reads from the X server.
+        inner = viewport.element().bounds
+        outer = app.windows()[0].bounds
+        assert inner is not None, "GTK 4 scrolled window has no bounds on X11"
+        assert outer is not None, "GTK 4 window has no bounds on X11"
+        assert (
+            outer.x <= inner.x
+            and outer.y <= inner.y
+            and inner.x + inner.width <= outer.x + outer.width
+            and inner.y + inner.height <= outer.y + outer.height
+        ), f"scrolled window {inner} is not inside window {outer}"
+
+    before = ok_bounds()
+    assert before is not None, "GTK 4 button has no bounds on X11"
+    assert (before.x, before.y) != (0, 0), (
+        f"GTK 4 button bounds look like raw screen extents: {before}"
+    )
+    assert_viewport_inside_window()
+    try:
+        _x11_move_client_window(app.pid, title, 200, 150)
+        _wait_until(
+            lambda: (
+                (b := ok_bounds()) is not None and (b.x, b.y) != (before.x, before.y)
+            ),
+            5.0,
+            "the button bounds to change after the window moved",
+        )
+        after = ok_bounds()
+        assert after is not None
+        assert (after.width, after.height) == (before.width, before.height)
+        _x11_move_client_window(app.pid, title, 320, 240)
+        _wait_until(
+            lambda: (b := ok_bounds()) is not None and (b.x, b.y) != (after.x, after.y),
+            5.0,
+            "the button bounds to change after the second move",
+        )
+        again = ok_bounds()
+        assert again is not None
+        # Two moves of the same client window by (+120, +90): the button
+        # moves by the same amount.
+        assert (again.x - after.x, again.y - after.y) == (120, 90), (
+            before,
+            after,
+            again,
+        )
+        assert_viewport_inside_window()
+    finally:
+        _x11_move_client_window(app.pid, title, 0, 0)
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or APP != "uwp",
+    reason="requires the UWP fixture and native package lifecycle management",
+)
+def test_uwp_suspended_frame_keeps_app_identity(app, tmp_path):
+    """A detached, suspended frame stays attributed to its packaged process (#497)."""
+    import ctypes
+    import subprocess
+    from ctypes import wintypes
+    from pathlib import Path
+
+    title = "xa11y UWP Test"
+    pid = int(os.environ["XA11Y_UWP_APP_PID"])
+    win = app.locator(f'window[name*="{title}"]').element()
+    assert "minimize" in win.actions and "restore" in win.actions
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.FindWindowExW.argtypes = [
+        wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR
+    ]
+    user32.FindWindowExW.restype = wintypes.HWND
+    frame = user32.FindWindowW("ApplicationFrameWindow", win.name)
+    assert frame, f"native ApplicationFrameWindow not found for {win.name!r}"
+    helper = Path(__file__).resolve().parents[3] / "test-apps" / "uwp" / "plm.ps1"
+    marker = tmp_path / "suspended"
+    proc = None
+    try:
+        win.minimize()
+        proc = subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(helper), "hold", "-ReadyFile", str(marker)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+        def suspended():
+            if proc.poll() is not None:
+                out, err = proc.communicate(timeout=5)
+                pytest.fail(f"lifecycle helper exited {proc.returncode}: {out}\n{err}")
+            return marker.exists()
+
+        _wait_until(suspended, 30.0, "native package state PES_SUSPENDED")
+        # Assert the fixture exercises AUMID attribution rather than passing
+        # via the normal CoreWindow-child lookup.
+        _wait_until(
+            lambda: not user32.FindWindowExW(frame, None, "Windows.UI.Core.CoreWindow", None),
+            10.0, "the suspended CoreWindow to detach from its frame",
+        )
+        by_pid = xa11y.App.by_pid(pid, timeout=5.0)
+        assert by_pid.name == title
+        assert by_pid.locator(f'window[name*="{title}"]').element()
+        listed = [candidate for candidate in xa11y.App.list() if candidate.pid == pid]
+        assert len(listed) == 1, (
+            f"suspended app not listed once: {[(a.name, a.pid) for a in listed]}"
+        )
+        assert listed[0].name == title
+        assert listed[0].locator(f'window[name*="{title}"]').element()
+    finally:
+        try:
+            if proc is not None and proc.poll() is None:
+                try:
+                    out, err = proc.communicate("resume\n", timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    out, err = proc.communicate(timeout=5)
+                    recovery = subprocess.run(
+                        ["powershell.exe", "-NoProfile", "-NonInteractive",
+                         "-ExecutionPolicy", "Bypass", "-File", str(helper), "resume"],
+                        capture_output=True, text=True, timeout=30, check=False,
+                    )
+                    pytest.fail(
+                        f"package cleanup timed out: {out}\n{err}; recovery "
+                        f"exit={recovery.returncode}: {recovery.stdout}\n{recovery.stderr}"
+                    )
+                assert proc.returncode == 0, f"package cleanup failed: {out}\n{err}"
+        finally:
+            _wait_for_window(app, "restore", "the resumed UWP frame").restore()
+    resumed = xa11y.App.by_pid(pid, timeout=5.0)
+    assert resumed.name == title
+    resumed.locator('button[name="OK"]').wait_attached(timeout=10.0)

@@ -41,6 +41,15 @@ const FIND_DEFAULT_LIMIT: usize = 50;
 const FIND_MAX_LIMIT: usize = 500;
 /// Longest candidate list carried in a failure's diagnosis.
 const MAX_DIAGNOSIS_CANDIDATES: usize = 20;
+/// Ceiling, in UTF-8 bytes, on each free-text field of an element node
+/// (`name`, `value`, `description`).
+///
+/// The node and match limits bound how many elements a result carries, not
+/// how big one of them is: a single text area holding a document would
+/// otherwise put the whole document into the context window. A cut field
+/// says so beside itself (`<field>_truncated`, `<field>_bytes`), because a
+/// silently shortened value reads as the complete one.
+pub(super) const MAX_FIELD_BYTES: usize = 1_024;
 /// Events returned by one `events_poll` when the caller does not ask.
 const EVENTS_DEFAULT_MAX: usize = 100;
 /// Ceiling on `events_poll`'s `max`, so one poll cannot dump a full buffer.
@@ -156,6 +165,20 @@ control, whether or not it lists one. A verb the element genuinely cannot do com
 `action_not_supported` rather than doing something else, so trying the one \
 the properties imply is safe.";
 
+/// The per-field byte cap, as the element-returning tools state it.
+///
+/// Built from [`MAX_FIELD_BYTES`] so the number a model reads is the number
+/// the encoder enforces.
+fn field_cap_note() -> String {
+    format!(
+        "`name`, `value` and `description` are each cut to at most {MAX_FIELD_BYTES} \
+         bytes of UTF-8, so one element holding a document cannot flood the result. A \
+         cut field is followed by `<field>_truncated: true` and `<field>_bytes`, its \
+         full length in bytes; the field then holds a prefix, not the whole text. \
+         Selectors still match against the full text."
+    )
+}
+
 /// Selector syntax, as a model needs to be told it.
 ///
 /// Every rule here is one an agent got wrong against a real application: it
@@ -177,10 +200,12 @@ match in document order, 1-based, and is the only pseudo-class — `:checked`, \
 ordinary attributes: `checked` takes `\"on\"` / `\"off\"` / `\"mixed\"`, and \
 `\"true\"` / `\"false\"` work for `enabled`, `visible`, `focused`, \
 `focusable`, `selected`, `editable`, `expanded`, `required`, `busy`, \
-`modal`, `active`, and the window states `minimized`, `maximized`, and \
+`modal`, `active`, `password`, and the window states `minimized`, `maximized`, and \
 `fullscreen`. A window state that the platform cannot report reads as absent \
 (no attribute) rather than `\"false\"`, so match `minimized=\"true\"` if you \
-need to be sure the state is known.";
+need to be sure the state is known. `hidden_reason` is present only on an \
+element that is not visible, and says why: `\"scrolled_out\"` (scroll it into \
+view), `\"window_minimized\"`, `\"not_showing\"`, or `\"unknown\"`.";
 
 /// What one tool call produced.
 #[derive(Debug)]
@@ -467,7 +492,8 @@ fn tool_definition(name: &str) -> Value {
             tool(
                 "windows",
                 "List top-level windows",
-                "List the top-level windows of one application (give `app` or \
+                &format!(
+                    "List the top-level windows of one application (give `app` or \
                  `pid`) or of every running application when neither is given. \
                  Each window reports its `name`, `bounds`, `states` (including \
                  `minimized` / `maximized` / `fullscreen` when the platform can \
@@ -491,7 +517,9 @@ fn tool_definition(name: &str) -> Value {
                  native fullscreen (macOS); a platform without one does not \
                  advertise it. `restore` is the inverse of all three entry \
                  verbs — it leaves minimized, maximized, or fullscreen; there \
-                 is no separate exit-fullscreen action.",
+                 is no separate exit-fullscreen action.\n\n{field_cap}",
+                    field_cap = field_cap_note(),
+                ),
                 object_schema(props, &[]),
             )
         }
@@ -503,7 +531,8 @@ fn tool_definition(name: &str) -> Value {
                     "How deep to walk. Default {TREE_DEFAULT_MAX_DEPTH}. \
                      0 returns the application node alone. Results are also \
                      capped at {TREE_MAX_NODES} nodes; `truncated` in the result \
-                     says whether either limit was hit."
+                     says whether either limit was hit, and each node that lost \
+                     children to one is marked where it happened."
                 )),
             );
             tool(
@@ -515,7 +544,16 @@ fn tool_definition(name: &str) -> Value {
                      understand a window before acting on it, and again afterwards to \
                      confirm what an action changed. Pass `shell` in place of `app` / \
                      `pid` to read an OS shell surface's tree instead.\n\n\
-                     {ACTIONS_FIELD_NOTE}"
+                     A node whose children were left out by `max_depth` or the \
+                     {TREE_MAX_NODES}-node cap carries `subtree_truncated: true` and \
+                     `children_count` (how many children it really has; `children`, \
+                     if present, holds only the first of them). A node without \
+                     `subtree_truncated` is complete: no `children` means a leaf. To \
+                     see what was cut, call `find` with a selector reaching into that \
+                     node (`list[name=\"Files\"] list_item`), or `tree` again with a larger `max_depth`.\n\n\
+                     {field_cap}\n\n\
+                     {ACTIONS_FIELD_NOTE}",
+                    field_cap = field_cap_note(),
                 ),
                 object_schema(props, &[]),
             )
@@ -541,6 +579,15 @@ fn tool_definition(name: &str) -> Value {
                     "Maximum matches to return. Default {FIND_DEFAULT_LIMIT}."
                 )),
             );
+            props.insert(
+                "stable".into(),
+                json!({
+                    "type": "boolean",
+                    "description": "Wait until the one match is visible and its bounds \
+                                    are unchanged across two consecutive polls before \
+                                    reporting it. Default false.",
+                }),
+            );
             tool(
                 "find",
                 "Find elements",
@@ -551,7 +598,24 @@ fn tool_definition(name: &str) -> Value {
                      the actions the application advertises. A selector that matches \
                      nothing comes back with the near-miss candidates that were in \
                      scope, so read those before guessing again.\n\n\
-                     {ACTIONS_FIELD_NOTE}"
+                     Without `stable` this reads the tree once and does not wait. Set \
+                     `stable: true` before clicking or dragging something that may \
+                     still be moving (sliding in, resizing, settling after a layout \
+                     change): the call then waits up to the default timeout, \
+                     currently {timeout} (set {timeout_env}, in seconds, where the \
+                     server is launched to change it), until the match is visible and \
+                     its bounds are unchanged across two consecutive polls, and \
+                     reports those settled coordinates. With `stable` the selector \
+                     must match exactly one element: one that matches several is \
+                     refused with an `ambiguous_selector` failure listing what it \
+                     matched. A match that never settles returns a `timeout` failure \
+                     naming the last two bounds it saw; one that never appears \
+                     returns the usual not-found failure once the wait is over.\n\n\
+                     {field_cap}\n\n\
+                     {ACTIONS_FIELD_NOTE}",
+                    field_cap = field_cap_note(),
+                    timeout = default_timeout_label(),
+                    timeout_env = crate::DEFAULT_TIMEOUT_ENV_VAR,
                 ),
                 object_schema(props, &["selector"]),
             )
@@ -635,13 +699,32 @@ fn tool_definition(name: &str) -> Value {
                      visible and must still be reachable by the very verbs that restore or \
                      activate it. `restore` is the inverse of `minimize`/`maximize`/ \
                      `enter-fullscreen`: it leaves minimized, maximized, or fullscreen. \
-                     The wait runs \
+                     When the element it finds is enabled and reported as scrolled out of \
+                     view, the wait may ask the application to scroll it into view (its own \
+                     scroll call, not a mouse gesture) and check again. It asks only then: \
+                     not for a disabled element, nor on a platform that never reports \
+                     `scrolled_out`. The wait runs \
                      up to the default timeout, currently {timeout}. Set {timeout_env} \
                      (in seconds) in the environment the server is launched with to \
                      change it; no tool argument does. A call that is going to fail \
                      therefore takes that long and returns a `timeout` failure \
-                     naming what it was waiting for and what it last saw. Do not wrap \
+                     naming what it was waiting for and what it last saw. When it \
+                     matched an element that was not visible, the diagnosis also has \
+                     `hidden_reason` (`scrolled_out`, or `window_minimized` when its window \
+                     has to be restored), and `auto_scroll` when the wait tried to scroll: \
+                     `refused` (asked once; the element has no scroll call), `no_effect` \
+                     (accepted, yet the next check still found it not visible) or `revealed` \
+                     (the next check found it visible and something else, such as being \
+                     disabled, kept the wait going). No `auto_scroll` means no scroll was \
+                     tried. Do not wrap \
                      this tool in a retry loop; the wait is the retry loop.\n\n\
+                     Every failure of every tool carries `delivery`, which says whether a \
+                     retry is safe. `not_delivered` means the action never reached the application (no \
+                     match, not supported, element gone, the wait expired), so retrying \
+                     cannot apply it twice. `unknown` means it was dispatched and the \
+                     outcome is unconfirmed (the application did not reply, the platform \
+                     call errored): re-read with `tree` or `find` before acting again, \
+                     or a second \"Send\" can be submitted twice.\n\n\
                      `ok: true` means the application accepted the call, not that \
                      anything changed: a control is free to accept an action and do \
                      nothing. Confirm the effect by re-reading with `tree` or `find`.\n\n\
@@ -976,7 +1059,9 @@ fn events_poll_description() -> String {
          application that quits keeps returning `live: true` with no events. Use \
          `apps` to find out whether it is still running.\n\n\
          An event is a snapshot from when it fired. Read the tree again to see the \
-         UI as it is now."
+         UI as it is now.\n\n\
+         {field_cap}",
+        field_cap = field_cap_note(),
     )
 }
 
@@ -1069,6 +1154,16 @@ fn opt_str<'a>(args: &'a Value, key: &str) -> CliResult<Option<&'a str>> {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.as_str())),
         Some(_) => Err(usage(format!("\"{key}\" must be a string"))),
+    }
+}
+
+/// Read a boolean argument, rejecting any other JSON type rather than
+/// guessing at truthiness.
+fn opt_bool(args: &Value, key: &str) -> CliResult<Option<bool>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(usage(format!("\"{key}\" must be a boolean"))),
     }
 }
 
@@ -1335,15 +1430,8 @@ fn tool_tree(args: &Value) -> CliResult<ToolOutput> {
     let root = target.root();
 
     let mut budget = TREE_MAX_NODES;
-    let mut depth_capped = false;
-    let node = build_node(
-        &root,
-        max_depth,
-        0,
-        &mut budget,
-        &mut depth_capped,
-        Some(&target),
-    );
+    let mut cut = Cut::default();
+    let node = build_node(&root, max_depth, 0, &mut budget, &mut cut, Some(&target));
 
     let mut out = Map::new();
     target_fields(&target, &mut out);
@@ -1351,8 +1439,8 @@ fn tool_tree(args: &Value) -> CliResult<ToolOutput> {
     out.insert(
         "truncated".into(),
         json!({
-            "by_depth": depth_capped,
-            "by_node_limit": budget == 0,
+            "by_depth": cut.by_depth,
+            "by_node_limit": cut.by_node_limit,
             "node_limit": TREE_MAX_NODES,
         }),
     );
@@ -1360,8 +1448,28 @@ fn tool_tree(args: &Value) -> CliResult<ToolOutput> {
     Ok(ToolOutput::json(Value::Object(out)))
 }
 
+/// Which of `tree`'s limits actually dropped a node.
+///
+/// Set only where children existed and were left out, so a tree that merely
+/// reached `max_depth` at its leaves, or spent its budget exactly, does not
+/// report a cut that removed nothing.
+#[derive(Debug, Default)]
+struct Cut {
+    by_depth: bool,
+    by_node_limit: bool,
+}
+
 /// Walk `element` into a JSON node, honouring both the depth limit and a
 /// shared node budget.
+///
+/// A node whose children were dropped by either limit carries
+/// `subtree_truncated: true` and `children_count` (how many children it
+/// has, of which `children` holds the first few or none). Without that a
+/// pruned node is indistinguishable from a leaf, and the global `truncated`
+/// flags cannot say *where* to look deeper. Counting the children of a node
+/// at the depth frontier costs one enumeration per frontier node — at most
+/// one per node already in the budget — and that is what lets a genuine leaf
+/// at the frontier stay unmarked.
 ///
 /// A child-enumeration failure is recorded inside the node rather than
 /// failing the whole tree: one inaccessible subtree should not cost the
@@ -1371,7 +1479,7 @@ fn build_node(
     max_depth: usize,
     depth: usize,
     budget: &mut usize,
-    depth_capped: &mut bool,
+    cut: &mut Cut,
     scope: Option<&cli::Target>,
 ) -> Value {
     // `Element` derefs to `ElementData`, so the leaf encoding is shared with
@@ -1381,38 +1489,44 @@ fn build_node(
         .as_object_mut()
         .expect("element_data_json always builds an object");
 
-    if depth >= max_depth {
-        *depth_capped = true;
-        return node;
-    }
-    if *budget == 0 {
+    let children = match scope.map_or_else(|| element.children(), cli::Target::children) {
+        Ok(children) => children,
+        Err(e) => {
+            obj.insert("children_error".into(), json!(e.to_string()));
+            // Whichever limit would have stopped here may have hidden a
+            // subtree or not; the global flag must not claim nothing was cut
+            // when that is unknown.
+            if depth >= max_depth {
+                cut.by_depth = true;
+            } else if *budget == 0 {
+                cut.by_node_limit = true;
+            }
+            return node;
+        }
+    };
+    if children.is_empty() {
         return node;
     }
 
-    match scope.map_or_else(|| element.children(), cli::Target::children) {
-        Ok(children) => {
-            let mut encoded = Vec::new();
-            for child in &children {
-                if *budget == 0 {
-                    break;
-                }
-                *budget -= 1;
-                encoded.push(build_node(
-                    child,
-                    max_depth,
-                    depth + 1,
-                    budget,
-                    depth_capped,
-                    None,
-                ));
+    let mut encoded = Vec::new();
+    if depth >= max_depth {
+        cut.by_depth = true;
+    } else {
+        for child in &children {
+            if *budget == 0 {
+                cut.by_node_limit = true;
+                break;
             }
-            if !encoded.is_empty() {
-                obj.insert("children".into(), Value::Array(encoded));
-            }
+            *budget -= 1;
+            encoded.push(build_node(child, max_depth, depth + 1, budget, cut, None));
         }
-        Err(e) => {
-            obj.insert("children_error".into(), json!(e.to_string()));
-        }
+    }
+    if encoded.len() < children.len() {
+        obj.insert("subtree_truncated".into(), json!(true));
+        obj.insert("children_count".into(), json!(children.len()));
+    }
+    if !encoded.is_empty() {
+        obj.insert("children".into(), Value::Array(encoded));
     }
     node
 }
@@ -1420,7 +1534,16 @@ fn build_node(
 fn tool_find(args: &Value) -> CliResult<ToolOutput> {
     let selector = req_str(args, "selector")?;
     let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT)?;
+    let stable = opt_bool(args, "stable")?.unwrap_or(false);
     let target = target(args)?;
+
+    if stable {
+        let element = match cli::find_stable(&target, selector)? {
+            Ok(element) => element,
+            Err(matches) => return Err(ambiguous(selector, &matches)),
+        };
+        return Ok(find_output(selector, &target, &[element], limit));
+    }
 
     let locator = target.locator(selector);
     let mut elements = locator.elements()?;
@@ -1441,6 +1564,12 @@ fn tool_find(args: &Value) -> CliResult<ToolOutput> {
         }
     }
 
+    Ok(find_output(selector, &target, &elements, limit))
+}
+
+/// The `find` result: at most `limit` of `elements`, with the counts that
+/// say whether the list was cut.
+fn find_output(selector: &str, target: &Target, elements: &[Element], limit: usize) -> ToolOutput {
     let total = elements.len();
     let matches: Vec<Value> = elements
         .iter()
@@ -1450,12 +1579,12 @@ fn tool_find(args: &Value) -> CliResult<ToolOutput> {
 
     let mut out = Map::new();
     out.insert("selector".into(), json!(selector));
-    target_fields(&target, &mut out);
+    target_fields(target, &mut out);
     out.insert("match_count".into(), json!(total));
     out.insert("returned".into(), json!(matches.len()));
     out.insert("truncated".into(), json!(total > matches.len()));
     out.insert("matches".into(), Value::Array(matches));
-    Ok(ToolOutput::json(Value::Object(out)))
+    ToolOutput::json(Value::Object(out))
 }
 
 fn tool_action(args: &Value) -> CliResult<ToolOutput> {
@@ -1642,7 +1771,10 @@ fn describe_candidate(data: &crate::ElementData) -> String {
         extras.push("disabled".into());
     }
     if !data.states.visible {
-        extras.push("hidden".into());
+        extras.push(match data.states.hidden_reason {
+            Some(reason) => format!("hidden={reason}"),
+            None => "hidden".into(),
+        });
     }
     // The centre point is what tells two identically-named siblings apart,
     // and it is also what `click` would need if the caller goes that way.
@@ -1674,26 +1806,9 @@ fn truncate(text: &str, max: usize) -> String {
 /// the rendered message is bounded too — it is the only copy a client on a
 /// revision without `structuredContent` sees.
 fn ambiguous(selector: &str, matches: &[Element]) -> CliError {
-    let mut candidates: Vec<String> = matches
-        .iter()
-        .take(MAX_DIAGNOSIS_CANDIDATES)
-        .map(|el| describe_candidate(el))
-        .collect();
-    if matches.len() > MAX_DIAGNOSIS_CANDIDATES {
-        candidates.push(format!(
-            "… (+{} more matches)",
-            matches.len() - MAX_DIAGNOSIS_CANDIDATES
-        ));
-    }
-    CliError::Ambiguous {
-        count: matches.len(),
-        diagnosis: Box::new(
-            crate::Diagnosis::new()
-                .selector(selector)
-                .last_observed(format!("selector matched {} elements", matches.len()))
-                .candidates(candidates),
-        ),
-    }
+    cli::ambiguous_selector(selector, matches, MAX_DIAGNOSIS_CANDIDATES, |el| {
+        describe_candidate(el)
+    })
 }
 
 fn tool_click(args: &Value) -> CliResult<ToolOutput> {
@@ -2023,13 +2138,9 @@ fn legend_json<T: serde::Serialize>(what: &str, value: &T) -> CliResult<Value> {
 pub(super) fn element_data_json(data: &crate::ElementData) -> Value {
     let mut node = Map::new();
     node.insert("role".into(), json!(data.role.to_snake_case()));
-    insert_some(&mut node, "name", data.name.as_deref().map(Value::from));
-    insert_some(&mut node, "value", data.value.as_deref().map(Value::from));
-    insert_some(
-        &mut node,
-        "description",
-        data.description.as_deref().map(Value::from),
-    );
+    insert_text(&mut node, "name", data.name.as_deref());
+    insert_text(&mut node, "value", data.value.as_deref());
+    insert_text(&mut node, "description", data.description.as_deref());
     insert_some(&mut node, "id", data.stable_id.as_deref().map(Value::from));
 
     if let Some(b) = data.bounds {
@@ -2061,11 +2172,56 @@ pub(super) fn element_data_json(data: &crate::ElementData) -> Value {
     Value::Object(node)
 }
 
+/// Insert a free-text field, cut to [`MAX_FIELD_BYTES`].
+///
+/// A cut field is followed by `<key>_truncated: true` and `<key>_bytes` (the
+/// original length in bytes), so the model can tell a prefix from the whole
+/// text and knows how much it is missing.
+fn insert_text(map: &mut Map<String, Value>, key: &str, text: Option<&str>) {
+    let Some(text) = text else { return };
+    let kept = utf8_prefix(text, MAX_FIELD_BYTES);
+    map.insert(key.into(), json!(kept));
+    if kept.len() < text.len() {
+        map.insert(format!("{key}_truncated"), json!(true));
+        map.insert(format!("{key}_bytes"), json!(text.len()));
+    }
+}
+
+/// The longest prefix of `text` that is at most `max` bytes and ends on a
+/// character boundary.
+fn utf8_prefix(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn insert_some(map: &mut Map<String, Value>, key: &str, value: Option<Value>) {
     if let Some(value) = value {
         map.insert(key.into(), value);
     }
 }
+
+/// The boolean states [`states_json`] sends only when true, so an absent one
+/// reads as false. One table of name and accessor, so a name cannot drift
+/// from the field it reports, and the agent guide's list is checked against
+/// the names here.
+type StateGetter = fn(&crate::StateSet) -> bool;
+const SENT_WHEN_TRUE: [(&str, StateGetter); 9] = [
+    ("focused", |s| s.focused),
+    ("focusable", |s| s.focusable),
+    ("active", |s| s.active),
+    ("editable", |s| s.editable),
+    ("selected", |s| s.selected),
+    ("modal", |s| s.modal),
+    ("required", |s| s.required),
+    ("busy", |s| s.busy),
+    ("password", |s| s.password),
+];
 
 /// Encode the state set, sending only what is true or explicitly known.
 ///
@@ -2076,17 +2232,11 @@ fn states_json(states: &crate::StateSet) -> Value {
     let mut out = Map::new();
     out.insert("enabled".into(), json!(states.enabled));
     out.insert("visible".into(), json!(states.visible));
-    for (key, value) in [
-        ("focused", states.focused),
-        ("focusable", states.focusable),
-        ("active", states.active),
-        ("editable", states.editable),
-        ("selected", states.selected),
-        ("modal", states.modal),
-        ("required", states.required),
-        ("busy", states.busy),
-    ] {
-        if value {
+    if let Some(reason) = states.hidden_reason {
+        out.insert("hidden_reason".into(), json!(reason.to_snake_case()));
+    }
+    for (key, get) in SENT_WHEN_TRUE {
+        if get(states) {
             out.insert(key.into(), json!(true));
         }
     }
@@ -2133,6 +2283,11 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
     structured.insert("tool".into(), json!(tool));
     structured.insert("message".into(), json!(text));
     structured.insert("kind".into(), json!(failure_kind(err)));
+    // Whether a retry is safe, on every failure of every tool. A usage error
+    // (`invalid_arguments`) attempted nothing, so it reads `not_delivered`:
+    // the call can be repeated once the arguments are fixed.
+    let delivery = err.delivery().unwrap_or(crate::Delivery::NotDelivered);
+    structured.insert("delivery".into(), json!(delivery.to_snake_case()));
 
     match err {
         CliError::Xa11y(inner) => {
@@ -2196,6 +2351,16 @@ fn diagnosis_json(d: &crate::Diagnosis) -> Value {
         "last_observed",
         d.last_observed.as_deref().map(Value::from),
     );
+    insert_some(
+        &mut out,
+        "hidden_reason",
+        d.hidden_reason.map(|r| Value::from(r.to_snake_case())),
+    );
+    insert_some(
+        &mut out,
+        "auto_scroll",
+        d.auto_scroll.map(|o| Value::from(o.to_snake_case())),
+    );
     if !d.candidates.is_empty() {
         out.insert(
             "candidates".into(),
@@ -2213,6 +2378,8 @@ fn diagnosis_json(d: &crate::Diagnosis) -> Value {
         }
     }
     insert_some(&mut out, "scope", d.scope.as_deref().map(Value::from));
+    // `delivery` is reported once, at the top level of the failure, where it
+    // is resolved from the variant and this diagnosis together.
     Value::Object(out)
 }
 
@@ -2265,30 +2432,199 @@ mod tests {
         let app = crate::App::by_pid_with(provider, 1234, std::time::Duration::ZERO).unwrap();
         let target = cli::Target::App(app);
         let mut budget = 20;
-        let mut capped = false;
-        let tree = build_node(
-            &target.root(),
-            1,
-            0,
-            &mut budget,
-            &mut capped,
-            Some(&target),
-        );
+        let mut cut = Cut::default();
+        let tree = build_node(&target.root(), 1, 0, &mut budget, &mut cut, Some(&target));
         let children = tree["children"].as_array().unwrap();
         assert_eq!(children.len(), 2);
         assert_eq!(children[1]["name"], "Second Window");
         assert!(children.iter().all(|child| child.get("children").is_none()));
         let mut budget = 1;
-        let tree = build_node(
-            &target.root(),
-            5,
-            0,
-            &mut budget,
-            &mut capped,
-            Some(&target),
-        );
+        let tree = build_node(&target.root(), 5, 0, &mut budget, &mut cut, Some(&target));
         assert_eq!(tree["children"].as_array().unwrap().len(), 1);
         assert_eq!(budget, 0);
+    }
+
+    /// Walk the mock app with explicit limits, returning the tree and which
+    /// limits cut something.
+    fn mock_tree(max_depth: usize, budget: usize) -> (Value, Cut) {
+        let provider: std::sync::Arc<dyn crate::Provider> = xa11y_core::mock::build_provider();
+        let app = crate::App::by_pid_with(provider, 1234, std::time::Duration::ZERO)
+            .expect("the mock app resolves by pid");
+        let target = cli::Target::App(app);
+        let mut budget = budget;
+        let mut cut = Cut::default();
+        let tree = build_node(
+            &target.root(),
+            max_depth,
+            0,
+            &mut budget,
+            &mut cut,
+            Some(&target),
+        );
+        (tree, cut)
+    }
+
+    fn kids(node: &Value) -> &[Value] {
+        node.get("children")
+            .and_then(Value::as_array)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn assert_complete(node: &Value) {
+        assert!(node.get("subtree_truncated").is_none(), "{node}");
+        assert!(node.get("children_count").is_none(), "{node}");
+        kids(node).iter().for_each(assert_complete);
+    }
+
+    #[test]
+    fn an_uncut_tree_marks_no_node_and_reports_no_truncation() {
+        let (full, cut) = mock_tree(64, TREE_MAX_NODES);
+        assert!(!cut.by_depth && !cut.by_node_limit, "{cut:?}");
+        assert_complete(&full);
+    }
+
+    #[test]
+    fn a_depth_cut_marks_each_pruned_node_with_its_real_child_count() {
+        let (full, _) = mock_tree(64, TREE_MAX_NODES);
+        let (cut_tree, cut) = mock_tree(1, TREE_MAX_NODES);
+        assert!(cut.by_depth, "the mock is deeper than one level");
+        assert!(!cut.by_node_limit);
+        assert!(
+            cut_tree.get("subtree_truncated").is_none(),
+            "the root kept its children"
+        );
+
+        let full_children = kids(&full);
+        let cut_children = kids(&cut_tree);
+        assert_eq!(full_children.len(), cut_children.len());
+        let mut pruned = 0;
+        for (whole, shown) in full_children.iter().zip(cut_children) {
+            assert!(
+                shown.get("children").is_none(),
+                "depth 1 stops here: {shown}"
+            );
+            let real = kids(whole).len();
+            if real == 0 {
+                // A genuine leaf at the frontier must still read as one.
+                assert!(shown.get("subtree_truncated").is_none(), "{shown}");
+                assert!(shown.get("children_count").is_none(), "{shown}");
+            } else {
+                pruned += 1;
+                assert_eq!(shown["subtree_truncated"], json!(true), "{shown}");
+                assert_eq!(shown["children_count"], json!(real), "{shown}");
+            }
+        }
+        assert!(pruned > 0, "the fixture must have a subtree to prune");
+    }
+
+    #[test]
+    fn max_depth_zero_marks_the_root_itself() {
+        let (full, _) = mock_tree(64, TREE_MAX_NODES);
+        let (root, cut) = mock_tree(0, TREE_MAX_NODES);
+        assert!(cut.by_depth);
+        assert!(root.get("children").is_none());
+        assert_eq!(root["subtree_truncated"], json!(true));
+        assert_eq!(root["children_count"], json!(kids(&full).len()));
+    }
+
+    #[test]
+    fn a_node_budget_cut_marks_the_parent_that_lost_children() {
+        let (full, _) = mock_tree(64, TREE_MAX_NODES);
+        let full_window = &kids(&full)[0];
+        let window_children = kids(full_window).len();
+        assert!(
+            window_children > 1,
+            "the fixture window has several children"
+        );
+
+        // Budget 1: the window is admitted with nothing left for its children.
+        let (root, cut) = mock_tree(64, 1);
+        assert!(cut.by_node_limit);
+        assert!(
+            root.get("subtree_truncated").is_none(),
+            "its one child fit: {root}"
+        );
+        let window = &kids(&root)[0];
+        assert!(window.get("children").is_none(), "{window}");
+        assert_eq!(window["subtree_truncated"], json!(true), "{window}");
+        assert_eq!(window["children_count"], json!(window_children));
+
+        // Budget 2: the window keeps its first child and says how many it has.
+        let (root, cut) = mock_tree(64, 2);
+        assert!(cut.by_node_limit);
+        let window = &kids(&root)[0];
+        assert_eq!(kids(window).len(), 1, "{window}");
+        assert_eq!(window["subtree_truncated"], json!(true), "{window}");
+        assert_eq!(window["children_count"], json!(window_children));
+    }
+
+    #[test]
+    fn spending_the_budget_exactly_is_not_a_cut() {
+        let (full, _) = mock_tree(64, TREE_MAX_NODES);
+        fn count(node: &Value) -> usize {
+            kids(node).iter().map(|c| 1 + count(c)).sum()
+        }
+        let (tree, cut) = mock_tree(64, count(&full));
+        assert!(!cut.by_node_limit, "every node fit: {cut:?}");
+        assert_complete(&tree);
+    }
+
+    #[test]
+    fn an_oversized_field_is_cut_on_a_char_boundary_and_says_so() {
+        let mut data = crate::ElementData::for_role(crate::Role::TextField);
+        // 1 + 2n bytes: the cap lands inside a two-byte character.
+        let value = format!("a{}", "é".repeat(MAX_FIELD_BYTES));
+        data.value = Some(value.clone());
+        data.name = Some("x".repeat(MAX_FIELD_BYTES));
+        data.description = Some("d".repeat(MAX_FIELD_BYTES + 1));
+        let encoded = element_data_json(&data);
+
+        let kept = encoded["value"].as_str().expect("value is a string");
+        assert!(kept.len() <= MAX_FIELD_BYTES, "{}", kept.len());
+        assert_eq!(
+            kept.len(),
+            MAX_FIELD_BYTES - 1,
+            "one byte short of a split é"
+        );
+        assert!(value.starts_with(kept), "a prefix, not a rewrite");
+        assert_eq!(encoded["value_truncated"], json!(true));
+        assert_eq!(encoded["value_bytes"], json!(value.len()));
+
+        // Exactly at the cap is whole, and says nothing.
+        assert_eq!(
+            encoded["name"].as_str().map(str::len),
+            Some(MAX_FIELD_BYTES)
+        );
+        assert!(encoded.get("name_truncated").is_none());
+        assert!(encoded.get("name_bytes").is_none());
+
+        assert_eq!(
+            encoded["description"].as_str().map(str::len),
+            Some(MAX_FIELD_BYTES)
+        );
+        assert_eq!(encoded["description_truncated"], json!(true));
+        assert_eq!(encoded["description_bytes"], json!(MAX_FIELD_BYTES + 1));
+    }
+
+    #[test]
+    fn the_element_tools_state_the_field_cap_they_enforce() {
+        for name in ["tree", "find", "windows", "events_poll"] {
+            let description = tool_definition(name)["description"]
+                .as_str()
+                .expect("description")
+                .to_owned();
+            assert!(
+                description.contains(&format!("at most {MAX_FIELD_BYTES} bytes")),
+                "{name}: {description}"
+            );
+            assert!(description.contains("_truncated"), "{name}: {description}");
+        }
+        let tree = tool_definition("tree")["description"]
+            .as_str()
+            .expect("description")
+            .to_owned();
+        assert!(tree.contains("subtree_truncated"), "{tree}");
+        assert!(tree.contains("children_count"), "{tree}");
     }
 
     fn args(v: Value) -> Value {
@@ -2904,6 +3240,204 @@ mod tests {
         );
     }
 
+    /// The `kind` column of the agent guide's failure table.
+    fn guide_failure_kinds() -> Vec<String> {
+        crate::cli::AGENT_GUIDE
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `"))
+            .filter_map(|rest| rest.split_once("` |"))
+            .map(|(kind, _)| kind.to_string())
+            .filter(|kind| kind != "kind")
+            .collect()
+    }
+
+    /// Every tag `failure_kind` can return, read from its own source.
+    ///
+    /// Parsed rather than listed by hand, so a kind added to the function is
+    /// a kind this test sees without anyone remembering to update a list.
+    fn failure_kinds_in_source() -> Vec<String> {
+        // A Windows checkout may carry CRLF line endings, which would hide
+        // the `\n}\n` that ends the function.
+        let source = include_str!("tools.rs").replace("\r\n", "\n");
+        let start = source
+            .find("\nfn failure_kind(")
+            .expect("failure_kind is defined in this file");
+        let body = &source[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("failure_kind has a closing brace");
+        let mut kinds: Vec<String> = body[..end]
+            .lines()
+            // Comment lines quote nothing that is returned.
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.split('"').skip(1).step_by(2).map(str::to_owned))
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        kinds
+    }
+
+    #[test]
+    fn the_agent_guide_explains_every_failure_kind_the_server_returns() {
+        let returned = failure_kinds_in_source();
+        assert!(
+            returned.len() > 10,
+            "the parse found too little: {returned:?}"
+        );
+        // Spot-check the parse against the function itself.
+        assert!(returned.contains(&failure_kind(&CliError::Usage("x".into())).to_string()));
+        let documented = guide_failure_kinds();
+        for kind in &returned {
+            assert!(
+                documented.contains(kind),
+                "AGENT_GUIDE.md has no row for `{kind}`: {documented:?}"
+            );
+        }
+        for kind in &documented {
+            assert!(
+                returned.contains(kind),
+                "AGENT_GUIDE.md documents `{kind}`, which the server never returns"
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_names_what_the_tools_actually_take() {
+        let guide = crate::cli::AGENT_GUIDE;
+        // Every action verb, spelled as the tool takes it.
+        for verb in cli::ACTION_NAMES {
+            assert!(guide.contains(&format!("`{verb}`")), "verb {verb}");
+        }
+        assert!(guide.contains(crate::DEFAULT_TIMEOUT_ENV_VAR));
+        assert!(guide.contains(&format!("default {TREE_DEFAULT_MAX_DEPTH}")));
+        assert!(guide.contains(&format!("default {FIND_DEFAULT_LIMIT}")));
+        assert!(guide.contains(super::super::protocol::GUIDE_URI));
+        // The workflow's numbered steps each name a tool; each must be one
+        // the server lists.
+        let tools: Vec<String> = Xa11yTools::new()
+            .list()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_owned))
+            .collect();
+        let steps: Vec<&str> = guide
+            .lines()
+            .filter(|l| l.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            .filter_map(|l| l.split('`').nth(1))
+            .collect();
+        assert!(steps.len() >= 4, "{steps:?}");
+        for tool in steps {
+            assert!(tools.iter().any(|t| t == tool), "workflow names `{tool}`");
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_selector_case_rule_the_engine_applies() {
+        use xa11y_core::selector::{match_op, MatchOp};
+        let guide = crate::cli::AGENT_GUIDE;
+        assert!(guide.contains("`=` is case-sensitive. `*=`, `^=` and `$=` ignore case."));
+        assert!(!match_op(&MatchOp::Exact, "ok", Some("OK")));
+        assert!(match_op(&MatchOp::Contains, "ok", Some("OK")));
+        assert!(match_op(&MatchOp::StartsWith, "ok", Some("OKAY")));
+        assert!(match_op(&MatchOp::EndsWith, "ok", Some("BOOK")));
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_default_timeout() {
+        assert!(crate::cli::AGENT_GUIDE.contains("5 seconds unless `XA11Y_DEFAULT_TIMEOUT`"));
+        // The number is pinned against the runtime default whenever nothing
+        // overrides it; a developer's environment may legitimately set it.
+        if std::env::var_os(crate::DEFAULT_TIMEOUT_ENV_VAR).is_none() {
+            assert_eq!(
+                crate::default_timeout().expect("the built-in default resolves"),
+                std::time::Duration::from_secs(5)
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_absent_state_rules_the_encoder_applies() {
+        let guide = crate::cli::AGENT_GUIDE;
+        // Nothing set: only the always-sent pair appears.
+        let mut states = crate::StateSet::default();
+        states.enabled = false;
+        states.visible = false;
+        let none = states_json(&states);
+        let keys: Vec<&String> = none.as_object().expect("object").keys().collect();
+        assert_eq!(keys, ["enabled", "visible"]);
+        assert!(guide.contains("`enabled` and `visible` are always present"));
+        // Each flag sent only when true is named in the guide's list of them.
+        let start = guide.find("- `focused`").expect("the sent-when-true list");
+        let section = &guide[start..];
+        let section = &section[..section.find("\n- ").unwrap_or(section.len())];
+        assert!(section.contains("appear only when true"), "{section}");
+        for (key, _) in SENT_WHEN_TRUE {
+            assert!(section.contains(&format!("`{key}`")), "{key} in {section}");
+        }
+    }
+
+    #[test]
+    fn each_sent_when_true_name_reports_its_own_field() {
+        let set = |name: &str, s: &mut crate::StateSet| match name {
+            "focused" => s.focused = true,
+            "focusable" => s.focusable = true,
+            "active" => s.active = true,
+            "editable" => s.editable = true,
+            "selected" => s.selected = true,
+            "modal" => s.modal = true,
+            "required" => s.required = true,
+            "busy" => s.busy = true,
+            "password" => s.password = true,
+            other => panic!("no setter for {other}; add one here"),
+        };
+        for (name, _) in SENT_WHEN_TRUE {
+            let mut states = crate::StateSet::default();
+            set(name, &mut states);
+            let sent = states_json(&states);
+            let extra: Vec<&String> = sent
+                .as_object()
+                .expect("object")
+                .keys()
+                .filter(|k| !matches!(k.as_str(), "enabled" | "visible"))
+                .collect();
+            assert_eq!(extra, [name], "setting {name} alone");
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_field_cap_the_encoder_applies() {
+        let guide = crate::cli::AGENT_GUIDE;
+        // Compared with whitespace collapsed: the sentence wraps, and a
+        // Windows checkout wraps it with CRLF.
+        let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains(&format!("cut to {MAX_FIELD_BYTES} bytes")),
+            "the guide must state the cap as {MAX_FIELD_BYTES} bytes"
+        );
+        let mut data = crate::ElementData::for_role(crate::Role::StaticText);
+        data.name = Some("x".repeat(MAX_FIELD_BYTES + 1));
+        let encoded = element_data_json(&data);
+        for key in ["name_truncated", "name_bytes"] {
+            assert!(encoded.get(key).is_some(), "{key} in {encoded}");
+        }
+        assert!(guide.contains("`<field>_truncated: true`"));
+        assert!(guide.contains("`<field>_bytes`"));
+    }
+
+    #[test]
+    fn the_agent_guide_names_the_per_node_cut_markers_the_encoder_sets() {
+        let guide = crate::cli::AGENT_GUIDE;
+        let (root, _) = mock_tree(0, TREE_MAX_NODES);
+        let marked: Vec<&String> = root
+            .as_object()
+            .expect("object")
+            .keys()
+            .filter(|k| matches!(k.as_str(), "subtree_truncated" | "children_count"))
+            .collect();
+        assert_eq!(marked.len(), 2, "{root}");
+        assert!(guide.contains("`subtree_truncated: true`"));
+        assert!(guide.contains("`children_count`"));
+    }
+
     #[test]
     fn a_diagnosis_reaches_the_structured_payload() {
         let err = CliError::Xa11y(crate::Error::SelectorNotMatched {
@@ -2921,6 +3455,69 @@ mod tests {
         assert_eq!(structured["tool"], "find");
         assert_eq!(structured["diagnosis"]["condition"], "visible");
         assert_eq!(structured["diagnosis"]["candidates"][0], "button \"OK\"");
+        assert!(structured["diagnosis"].get("hidden_reason").is_none());
+        assert!(structured["diagnosis"].get("auto_scroll").is_none());
+    }
+
+    #[test]
+    fn a_timeout_on_a_hidden_element_names_the_reason() {
+        let err = CliError::Xa11y(
+            crate::Error::timeout(std::time::Duration::from_secs(1)).diagnose(
+                crate::Diagnosis::new()
+                    .condition("press target actionable (visible && enabled)")
+                    .last_observed(
+                        "matched button \"Save\" (visible=false, enabled=true, focused=false)",
+                    )
+                    .hidden_reason(crate::HiddenReason::ScrolledOut)
+                    .auto_scroll(crate::AutoScrollOutcome::Refused),
+            ),
+        );
+        let (text, structured) = describe_failure("action", &err);
+        assert!(text.contains("hidden because: scrolled_out"), "{text}");
+        assert!(text.contains("auto-scroll: refused"), "{text}");
+        assert_eq!(structured["diagnosis"]["hidden_reason"], "scrolled_out");
+        assert_eq!(structured["diagnosis"]["auto_scroll"], "refused");
+    }
+
+    #[test]
+    fn every_failure_reports_its_delivery() {
+        let cases = [
+            (
+                CliError::Xa11y(crate::Error::selector_not_matched("button")),
+                Some("not_delivered"),
+            ),
+            (
+                CliError::Xa11y(crate::Error::Platform {
+                    code: -25204,
+                    message: "cannot complete".into(),
+                }),
+                Some("unknown"),
+            ),
+            (
+                // A wait that expired before acting overrides the variant.
+                CliError::Xa11y(
+                    crate::Error::timeout(std::time::Duration::from_secs(1))
+                        .diagnose(crate::Diagnosis::new().delivery(crate::Delivery::NotDelivered)),
+                ),
+                Some("not_delivered"),
+            ),
+            (
+                // A bare timeout may have been dispatched.
+                CliError::Xa11y(crate::Error::timeout(std::time::Duration::from_secs(1))),
+                Some("unknown"),
+            ),
+            (CliError::NotFound("no match".into()), Some("not_delivered")),
+            // Nothing was attempted, so repeating the call is safe.
+            (CliError::Usage("bad flag".into()), Some("not_delivered")),
+        ];
+        for (err, expected) in cases {
+            let (_, structured) = describe_failure("action", &err);
+            assert_eq!(
+                structured.get("delivery").and_then(Value::as_str),
+                expected,
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -3406,6 +4003,62 @@ mod tests {
     }
 
     #[test]
+    fn stable_find_returns_the_settled_bounds_of_the_one_match() {
+        let (target, provider) = mock_target_app();
+        let settled = xa11y_core::Rect {
+            x: 300,
+            y: 60,
+            width: 50,
+            height: 30,
+        };
+        let moving = |x| xa11y_core::Rect { x, ..settled };
+        provider.animate(
+            "Back",
+            vec![
+                (Some(moving(100)), true),
+                (Some(moving(200)), true),
+                (Some(settled), true),
+            ],
+        );
+        let element = cli::find_stable(&target, r#"button[name="Back"]"#)
+            .expect("the wait succeeds")
+            .expect("one match");
+        assert_eq!(element.bounds, Some(settled));
+        let out = find_output(r#"button[name="Back"]"#, &target, &[element], 1);
+        let structured = out.structured.expect("find results are structured");
+        assert_eq!(structured["match_count"], 1);
+        assert_eq!(structured["matches"][0]["bounds"]["x"], 300);
+    }
+
+    #[test]
+    fn stable_find_refuses_several_matches_with_the_candidates() {
+        let (target, _provider) = mock_target_app();
+        let matches = cli::find_stable(&target, "button")
+            .expect("no wait error")
+            .expect_err("two buttons match");
+        let err = ambiguous("button", &matches);
+        let CliError::Ambiguous { count, diagnosis } = err else {
+            panic!("expected ambiguous_selector, got {err:?}");
+        };
+        assert_eq!(count, 2);
+        assert!(
+            diagnosis.candidates.iter().any(|c| c.contains("Back")),
+            "{:?}",
+            diagnosis.candidates
+        );
+    }
+
+    #[test]
+    fn find_refuses_a_non_boolean_stable_before_resolving_a_target() {
+        let err = tool_find(&json!({ "selector": "button", "stable": "yes" }))
+            .expect_err("a string is not a boolean");
+        assert!(
+            err.to_string().contains("\"stable\" must be a boolean"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn action_refuses_several_matches_and_touches_none_of_them() {
         let (target, provider) = mock_target_app();
         let err = tool_action_parsed(&target, "press", "button", &cli::ActionArgs::default())
@@ -3424,6 +4077,9 @@ mod tests {
         inner: std::sync::Arc<xa11y_core::mock::MockProvider>,
         armed: std::sync::atomic::AtomicBool,
         walks: std::sync::atomic::AtomicUsize,
+        /// When set, `press` fails the way a platform call that was sent and
+        /// not answered does.
+        press_fails: std::sync::atomic::AtomicBool,
     }
 
     const INTRUDER_HANDLE: u64 = 9_999;
@@ -3469,8 +4125,17 @@ mod tests {
         ) -> crate::Result<Vec<(crate::ShellSurfaceKind, crate::ElementData)>> {
             self.inner.list_shell_surfaces()
         }
+        fn press(&self, e: &crate::ElementData) -> crate::Result<()> {
+            if self.press_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::Error::Platform {
+                    code: -25204,
+                    message: "AXPress did not complete".into(),
+                });
+            }
+            self.inner.press(e)
+        }
         forward! {
-            press() -> (); focus() -> (); blur() -> (); toggle() -> (); select() -> ();
+            focus() -> (); blur() -> (); toggle() -> (); select() -> ();
             expand() -> (); collapse() -> (); show_menu() -> (); increment() -> ();
             decrement() -> (); scroll_into_view() -> (); set_value(v: &str) -> ();
             set_numeric_value(v: f64) -> (); type_text(t: &str) -> ();
@@ -3490,6 +4155,7 @@ mod tests {
             inner: inner.clone(),
             armed: std::sync::atomic::AtomicBool::new(false),
             walks: std::sync::atomic::AtomicUsize::new(0),
+            press_fails: std::sync::atomic::AtomicBool::new(false),
         });
         let provider: std::sync::Arc<dyn crate::Provider> = shifting.clone();
         let app = App::list_with(provider)
@@ -3513,6 +4179,36 @@ mod tests {
         );
         // The hazard was live: a later resolution sees the intruder too.
         assert_eq!(target.locator(selector).count().expect("count"), 2);
+    }
+
+    #[test]
+    fn a_dispatched_action_that_fails_reports_unknown_end_to_end() {
+        // The `unknown` side through the real tool path: the element resolves,
+        // the platform call is sent, and it errors. The wire result must tell
+        // the caller a retry may double-apply.
+        let shifting = std::sync::Arc::new(ShiftingProvider {
+            inner: xa11y_core::mock::build_provider(),
+            armed: std::sync::atomic::AtomicBool::new(false),
+            walks: std::sync::atomic::AtomicUsize::new(0),
+            press_fails: std::sync::atomic::AtomicBool::new(true),
+        });
+        let provider: std::sync::Arc<dyn crate::Provider> = shifting;
+        let app = App::list_with(provider)
+            .expect("the mock lists its app")
+            .into_iter()
+            .next()
+            .expect("one app");
+        let target = Target::App(app);
+        let err = tool_action_parsed(
+            &target,
+            "press",
+            r#"button[name="Back"]"#,
+            &cli::ActionArgs::default(),
+        )
+        .expect_err("the platform call fails");
+        let (_, structured) = describe_failure("action", &err);
+        assert_eq!(structured["kind"], "platform");
+        assert_eq!(structured["delivery"], "unknown");
     }
 
     #[test]
@@ -3648,6 +4344,30 @@ mod tests {
         assert!(states.contains_key("enabled"));
         assert!(states.contains_key("visible"));
         assert!(!states.contains_key("focused"), "false states are omitted");
+        assert!(!states.contains_key("password"), "false states are omitted");
+        assert!(
+            !states.contains_key("hidden_reason"),
+            "a visible element has no hidden reason"
+        );
+    }
+
+    #[test]
+    fn a_password_field_says_so_in_its_states() {
+        let mut data = crate::ElementData::for_role(crate::Role::TextField);
+        data.states.password = true;
+        let encoded = element_data_json(&data);
+        assert_eq!(encoded["role"], "text_field");
+        assert_eq!(encoded["states"]["password"], true);
+    }
+
+    #[test]
+    fn a_hidden_element_says_why() {
+        let mut data = crate::ElementData::for_role(crate::Role::Button);
+        data.states.visible = false;
+        data.states.hidden_reason = Some(crate::HiddenReason::ScrolledOut);
+        let encoded = element_data_json(&data);
+        assert_eq!(encoded["states"]["visible"], false);
+        assert_eq!(encoded["states"]["hidden_reason"], "scrolled_out");
     }
 
     #[test]

@@ -35,9 +35,9 @@ The mechanisms are not bridged. A failed accessibility action never falls back t
 | Platform | Requirement |
 | --- | --- |
 | macOS | Accessibility + Input Monitoring for the terminal/IDE running your code |
-| Windows | None for normal user sessions |
+| Windows | None for normal user sessions. Input to an elevated window needs an elevated caller |
 | Linux (X11) | `XTest` extension enabled on the X server. Zero setup. |
-| Linux (Wayland / headless) | Membership in the `input` group (`sudo usermod -aG input $USER` then re-login). xa11y opens `/dev/uinput` and registers a virtual evdev keyboard+pointer, the same mechanism used by `xdotool --using-uinput`, `ydotool`, `wtype`, Steam Input, and Wine. **The privilege grants global input read/write access**, comparable to macOS Input Monitoring. |
+| Linux (Wayland / headless) | Write access to `/dev/uinput`: membership in the `input` group (`sudo usermod -aG input $USER` then re-login), or a udev rule that grants it. xa11y opens `/dev/uinput` and registers a virtual evdev keyboard+pointer, the same mechanism used by `xdotool --using-uinput`, `ydotool`, `wtype`, Steam Input, and Wine. **The privilege grants global input read/write access**, comparable to macOS Input Monitoring. |
 
 On macOS, input simulation usually also requires the target window to be foregrounded. Activate the window explicitly before synthesising input.
 
@@ -129,6 +129,24 @@ Every pointer method accepts either a screen-space point or an `Element`:
 
 - **Point** is an absolute desktop coordinate. Windows uses physical pixels. macOS uses points. Linux uses logical pixels, or physical pixels where the HiDPI scale can't be read reliably (see [platform details](/reference/platform-details/#coordinates-and-hidpi)). Origin is the top-left of the primary display, and negative values are valid on multi-monitor setups.
 - **Element** uses the centre of the element's `bounds` at the time of the call. Rectangles are half-open. Right and bottom anchors use the last coordinate inside the bounds rather than the exclusive far edge. `InputSim` does not re-read the accessibility tree for you, so re-fetch via a locator first if the UI may have moved.
+
+### Clicking something that is still moving
+
+An element sliding in, or a dialog still settling after a layout change, has
+bounds that are already stale by the time the click is sent. Fetch it with the
+locator's `wait_stable()` (`waitStable()` in JS) instead of `element()`. It
+returns once the bounds are unchanged across two consecutive polls, so the
+`Element` you hand to `InputSim` holds where the element comes to rest:
+
+```python
+panel_button = app.locator('button[name="Save"]').wait_stable(timeout=5)
+sim.click(panel_button)
+```
+
+The CLI spelling is `xa11y find ... -o center --stable`. See the
+[locator reference](/reference/locator/#waits) for the timeout diagnosis.
+
+On a Linux Wayland session, `Element` targets are refused with `Unsupported`. Wayland clients don't know their global position, so the bounds AT-SPI reports are not screen coordinates. Use a semantic action such as `press` or `focus` there, or pass a raw point. See [platform details](/reference/platform-details/).
 
 To click a location selected from a screenshot, convert the image pixel with
 that capture's `image_to_desktop` / `imageToDesktop` method first. On Windows
@@ -261,6 +279,8 @@ On Windows, letters and digits are positional virtual keys (`VK_A`, `VK_1`), as 
   </TabItem>
 </Tabs>
 
+On every platform, `type_text` types each line break as a press of the Enter key. A `"\r\n"` pair is one line break, and a lone `"\r"` or `"\n"` is one line break each. In a single-line field, Enter can trigger the default button, as it does when a person types it.
+
 ## Example: drag-and-drop
 
 Drag-and-drop has no accessibility equivalent on most platforms. Resolve both endpoints via the a11y tree first, then synthesise the drag.
@@ -302,7 +322,7 @@ Drag-and-drop has no accessibility equivalent on most platforms. Resolve both en
 
 Input simulation raises five of xa11y's error variants:
 
-- `PermissionDenied` when the OS denied the synthesis permission. On Linux this is the missing `input` group; macOS cannot report a missing Input Monitoring grant, so the events are dropped silently instead.
+- `PermissionDenied` when the OS denied the synthesis permission. On Linux this is the missing `input` group; macOS cannot report a missing Input Monitoring grant, so the events are dropped silently instead. On Windows it means the target window belongs to a process at a higher integrity level, such as an elevated app. UIPI drops such input and still reports it as delivered. xa11y refuses it up front instead, naming both integrity levels. When the target's level cannot be read, as with another user's process, the input is sent and UIPI may still drop it. A target that holds `uiAccess` is not checked either, and UIPI can drop input to it from a same-level sender that lacks `uiAccess`. Key and button releases are never refused, so a held key can always be released. A drag checks both of its ends before it presses the button.
 - `Unsupported` when the platform has no backend for the operation, when the Linux `uinput` kernel module is unavailable, when a `Char` key is on no key of the active Windows layout, or when that layout needs a modifier to produce it.
 - `NoElementBounds` when the target `Element` has no bounds. Re-fetch it, or anchor on a point.
 - `InvalidActionData` for an uppercase `Char` key, a malformed key name, or a bad target tuple.

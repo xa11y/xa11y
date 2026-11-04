@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
@@ -82,6 +83,29 @@ impl WindowManager {
             WindowBackend::X11(backend) => backend.facts(element).unwrap_or_default(),
             WindowBackend::Sway(backend) => backend.facts(element).unwrap_or_default(),
             WindowBackend::Unavailable(_) => WindowFacts::default(),
+        }
+    }
+
+    /// The root-window origin (physical pixels) of the X11 client window
+    /// that is `pid`'s top-level titled `title`, for toolkits whose
+    /// AT-SPI screen extents ignore the window position (GTK 4 on X11,
+    /// issue #487).
+    ///
+    /// The window is found by pid and title only, never by geometry: the
+    /// geometry is what is being computed. `Ok(None)` when the Wayland
+    /// backend is selected (a client has no global origin) or when zero or
+    /// several windows match, so the caller reports no bounds rather than
+    /// wrong ones; an error when no window backend could be set up. The
+    /// origin is cached per window and dropped when the window is
+    /// configured, reparented, destroyed or renamed, or the set of
+    /// top-levels changes.
+    pub(crate) fn x11_client_origin(&self, pid: u32, title: &str) -> Result<Option<(i32, i32)>> {
+        match &self.backend {
+            WindowBackend::X11(backend) => backend.client_origin(pid, title),
+            WindowBackend::Sway(_) => Ok(None),
+            WindowBackend::Unavailable(reason) => Err(Error::Unsupported {
+                feature: format!("X11 client origin: {reason}"),
+            }),
         }
     }
 
@@ -746,14 +770,29 @@ impl X11Atoms {
     }
 }
 
+/// A top-level window's identity for [`X11WindowBackend::client_origin`]:
+/// owning pid and title.
+type OriginKey = (u32, String);
+
+/// A cached client window and its root origin (physical pixels).
+type CachedOrigin = (Window, (i32, i32));
+
 struct X11WindowBackend {
     conn: Mutex<RustConnection>,
+    /// [`Self::client_origin`] results keyed by (pid, title): the window and
+    /// its root origin. See [`Self::forget_origins`] for what drops an entry.
+    origins: Mutex<HashMap<OriginKey, CachedOrigin>>,
     bindings: Mutex<HashMap<u64, NativeBinding<Window>>>,
     destroyed_handles: Mutex<HashSet<u64>>,
     root: Window,
     atoms: X11Atoms,
     supported: HashSet<Atom>,
     has_window_manager: bool,
+    /// Whether [`Self::client_origin`] has run, and so selected the root
+    /// mask and property changes on top-levels. Until then this connection
+    /// watches only what `bind` needs, so a client that never reads GTK 4
+    /// bounds (the MCP server, most scripts) queues no root or title events.
+    origins_watched: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -793,12 +832,14 @@ impl X11WindowBackend {
         .is_empty();
         Ok(Self {
             conn: Mutex::new(conn),
+            origins: Mutex::new(HashMap::new()),
             bindings: Mutex::new(HashMap::new()),
             destroyed_handles: Mutex::new(HashSet::new()),
             root,
             atoms,
             supported,
             has_window_manager,
+            origins_watched: AtomicBool::new(false),
         })
     }
 
@@ -937,16 +978,7 @@ impl X11WindowBackend {
         }
         // Subscribe before reading candidate properties. A destruction after
         // this point is observable even when the XID is immediately reused.
-        for &window in &clients {
-            conn.change_window_attributes(
-                window,
-                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
-                    .event_mask(EventMask::STRUCTURE_NOTIFY),
-            )
-            .map_err(platform)?
-            .check()
-            .map_err(platform)?;
-        }
+        self.watch_clients(conn, &clients)?;
         let destroyed_before_read = self.drain_destroy_events(conn)?;
         let mut candidates = Vec::new();
         for window in clients {
@@ -1092,14 +1124,62 @@ impl X11WindowBackend {
         }
     }
 
+    /// Select [`client_event_mask`] on each of `windows`. A selection
+    /// replaces this connection's previous mask on that window, so every
+    /// caller goes through here and none can narrow another's.
+    fn watch_clients(&self, conn: &RustConnection, windows: &[Window]) -> Result<()> {
+        let mask = client_event_mask(self.origins_watched.load(Ordering::Acquire));
+        for &window in windows {
+            conn.change_window_attributes(
+                window,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().event_mask(mask),
+            )
+            .map_err(platform)?
+            .check()
+            .map_err(platform)?;
+        }
+        Ok(())
+    }
+
+    /// Start watching what invalidates a cached [`Self::client_origin`], on
+    /// its first call: the set of top-levels on the root. With a window
+    /// manager the set is `_NET_CLIENT_LIST`, a root property; without one
+    /// it is the root's mapped children. The caller holds the server grab
+    /// and enumerates after this, so no window can appear unobserved.
+    fn watch_origins(&self, conn: &RustConnection) -> Result<()> {
+        if self.origins_watched.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let root_mask = if self.has_window_manager {
+            EventMask::PROPERTY_CHANGE
+        } else {
+            EventMask::PROPERTY_CHANGE | EventMask::SUBSTRUCTURE_NOTIFY
+        };
+        conn.change_window_attributes(
+            self.root,
+            &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().event_mask(root_mask),
+        )
+        .map_err(platform)?
+        .check()
+        .map_err(platform)?;
+        self.origins_watched.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Apply every event the server has sent up to now: drop stale
+    /// [`Self::client_origin`] entries, tombstone bindings whose window was
+    /// destroyed, and return the destroyed windows.
     fn drain_destroy_events(&self, conn: &RustConnection) -> Result<HashSet<Window>> {
-        // A round trip orders all prior destroy notifications before this check.
+        // A round trip orders every notification the server generated before
+        // this call ahead of the check, so none is still in flight.
         conn.get_input_focus()
             .map_err(platform)?
             .reply()
             .map_err(platform)?;
         let mut destroyed_windows = HashSet::new();
+        let mut renamed = HashSet::new();
         while let Some(event) = conn.poll_for_event().map_err(platform)? {
+            self.forget_origins(&event, &mut renamed);
             if let Event::DestroyNotify(event) = event {
                 destroyed_windows.insert(event.window);
                 let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
@@ -1114,10 +1194,187 @@ impl X11WindowBackend {
                 }
             }
         }
+        self.forget_renamed(conn, &renamed)?;
         Ok(destroyed_windows)
     }
 
-    fn candidate(&self, conn: &RustConnection, window: Window) -> Result<Option<X11Candidate>> {
+    /// Drop the cached [`Self::client_origin`] entries `event` may have made
+    /// wrong:
+    /// - the window moved or went away (`ConfigureNotify`, `ReparentNotify`,
+    ///   `DestroyNotify`). A reparenting window manager moves the frame, not
+    ///   the client, and tells the client with a synthetic `ConfigureNotify`
+    ///   (ICCCM 4.1.5), which reaches us through the same event mask;
+    /// - a watched window's `_NET_WM_NAME` or `_NET_WM_PID` changed: its own
+    ///   entries go now, and the window joins `renamed` for
+    ///   [`Self::forget_renamed`], which reads each new identity once after
+    ///   the whole batch;
+    /// - the set of top-levels changed (`_NET_CLIENT_LIST`, or a root child
+    ///   mapped, unmapped or created without a window manager). A new window
+    ///   may share a cached title, and would not be watched yet.
+    fn forget_origins(&self, event: &Event, renamed: &mut HashSet<Window>) {
+        let mut origins = self.origins.lock().unwrap_or_else(|e| e.into_inner());
+        if origins.is_empty() {
+            return;
+        }
+        match event {
+            Event::PropertyNotify(e)
+                if e.window != self.root
+                    && (e.atom == self.atoms.net_wm_name || e.atom == self.atoms.net_wm_pid) =>
+            {
+                origins.retain(|_, (cached, _)| *cached != e.window);
+                renamed.insert(e.window);
+            }
+            Event::PropertyNotify(e)
+                if e.window == self.root && e.atom == self.atoms.net_client_list =>
+            {
+                origins.clear()
+            }
+            Event::ConfigureNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
+            Event::ReparentNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
+            Event::DestroyNotify(e) => origins.retain(|_, (cached, _)| *cached != e.window),
+            Event::MapNotify(_) | Event::UnmapNotify(_) | Event::CreateNotify(_) => origins.clear(),
+            _ => {}
+        }
+    }
+
+    /// Drop the entry for each `renamed` window's new (pid, title): a window
+    /// renamed *to* a cached title makes that match ambiguous. The reads are
+    /// pipelined, so a batch of renames costs one round trip.
+    ///
+    /// A window that is gone by the time it is read (`BadWindow`, the
+    /// expected race with its destruction) clears every entry, which is never
+    /// wrong, only slower. Any other failure is returned.
+    fn forget_renamed(&self, conn: &RustConnection, renamed: &HashSet<Window>) -> Result<()> {
+        if renamed.is_empty()
+            || self
+                .origins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        {
+            return Ok(());
+        }
+        let mut cookies = Vec::with_capacity(renamed.len());
+        for &window in renamed {
+            let pid = conn
+                .get_property(
+                    false,
+                    window,
+                    self.atoms.net_wm_pid,
+                    AtomEnum::CARDINAL,
+                    0,
+                    1,
+                )
+                .map_err(platform)?;
+            let title = conn
+                .get_property(
+                    false,
+                    window,
+                    self.atoms.net_wm_name,
+                    self.atoms.utf8_string,
+                    0,
+                    u32::MAX,
+                )
+                .map_err(platform)?;
+            cookies.push((window, pid, title));
+        }
+        // Read every reply before taking the cache lock: a round trip under
+        // it would hold up a concurrent cache hit for nothing.
+        let mut keys = Vec::with_capacity(cookies.len());
+        let mut window_gone = None;
+        for (window, pid, title) in cookies {
+            let read = pid.reply().and_then(|pid| Ok((pid, title.reply()?)));
+            match read {
+                Ok((pid, title)) => {
+                    let pid = pid.value32().and_then(|mut values| values.next());
+                    let title = String::from_utf8(title.value)
+                        .ok()
+                        .filter(|title| !title.is_empty());
+                    // No pid or no title: it cannot match any cached key.
+                    if let (Some(pid), Some(title)) = (pid, title) {
+                        keys.push((pid, title));
+                    }
+                }
+                Err(x11rb::errors::ReplyError::X11Error(error))
+                    if error.error_kind == x11rb::protocol::ErrorKind::Window =>
+                {
+                    window_gone = Some(window);
+                }
+                Err(error) => return Err(platform(error)),
+            }
+        }
+        let mut origins = self.origins.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(window) = window_gone {
+            log::debug!(
+                "X11 client origin cache cleared: window {window:#x} changed its identity \
+                 and was gone before it could be read"
+            );
+            origins.clear();
+            return Ok(());
+        }
+        for key in keys {
+            origins.remove(&key);
+        }
+        Ok(())
+    }
+
+    fn client_origin(&self, pid: u32, title: &str) -> Result<Option<(i32, i32)>> {
+        let key = (pid, title.to_owned());
+        {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            // One round trip, so an invalidation the server has already sent
+            // is applied before the cache is trusted.
+            self.drain_destroy_events(&conn)?;
+            if let Some((_, origin)) = self
+                .origins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+            {
+                return Ok(Some(*origin));
+            }
+        }
+        // A miss enumerates under the server grab, as `bind` does: no window
+        // can vanish between listing the top-levels and reading them.
+        self.with_server_grab(|conn| {
+            self.watch_origins(conn)?;
+            self.drain_destroy_events(conn)?;
+            let clients = self.top_level_windows(conn)?;
+            // Watch before reading: a rename or move after the read
+            // invalidates the entry instead of racing past it.
+            self.watch_clients(conn, &clients)?;
+            let mut candidates = Vec::with_capacity(clients.len());
+            for window in clients {
+                if let Some(candidate) = self.identity(conn, window)? {
+                    candidates.push(candidate);
+                }
+            }
+            let Some(window) = select_client_by_pid_title(&candidates, pid, title) else {
+                log::debug!(
+                    "X11 client origin for pid {pid} titled {title:?}: {} of {} top-levels \
+                     match, so no origin (need exactly one)",
+                    clients_by_pid_title(&candidates, pid, title).len(),
+                    candidates.len(),
+                );
+                return Ok(None);
+            };
+            let translated = conn
+                .translate_coordinates(window, self.root, 0, 0)
+                .map_err(platform)?
+                .reply()
+                .map_err(platform)?;
+            let origin = (i32::from(translated.dst_x), i32::from(translated.dst_y));
+            self.origins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, (window, origin));
+            Ok(Some(origin))
+        })
+    }
+
+    /// A top-level's owning pid and title, without its geometry. `None`
+    /// when it has no `_NET_WM_PID`.
+    fn identity(&self, conn: &RustConnection, window: Window) -> Result<Option<X11Candidate>> {
         let Some(pid) = property_u32(
             conn,
             window,
@@ -1132,13 +1389,20 @@ impl X11WindowBackend {
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
             .filter(|title| !title.is_empty());
-        let bounds = self.window_bounds(conn, window).ok();
         Ok(Some(X11Candidate {
             window,
             pid,
             title,
-            bounds,
+            bounds: None,
         }))
+    }
+
+    fn candidate(&self, conn: &RustConnection, window: Window) -> Result<Option<X11Candidate>> {
+        let Some(mut candidate) = self.identity(conn, window)? else {
+            return Ok(None);
+        };
+        candidate.bounds = self.window_bounds(conn, window).ok();
+        Ok(Some(candidate))
     }
 
     fn window_bounds(&self, conn: &RustConnection, window: Window) -> Result<Rect> {
@@ -1194,24 +1458,32 @@ impl X11WindowBackend {
         // preserve EWMH fullscreen/maximized atoms while iconifying, which
         // would otherwise make a later restore or screen-fill operation start
         // from two active states.
+        // Several messages go out in turn. Once one has been sent, a later
+        // failure must not read as "nothing happened" (see `Sent`).
+        let mut sent = Sent::default();
         if self.supports_state(self.atoms.net_wm_state_fullscreen) {
-            self.change_state(element, STATE_REMOVE, self.atoms.net_wm_state_fullscreen, 0)?;
+            sent.step(self.change_state(
+                element,
+                STATE_REMOVE,
+                self.atoms.net_wm_state_fullscreen,
+                0,
+            ))?;
         }
         if self.supports_state(self.atoms.net_wm_state_max_horz)
             && self.supports_state(self.atoms.net_wm_state_max_vert)
         {
-            self.change_state(
+            sent.step(self.change_state(
                 element,
                 STATE_REMOVE,
                 self.atoms.net_wm_state_max_horz,
                 self.atoms.net_wm_state_max_vert,
-            )?;
+            ))?;
         }
-        self.send_for(
+        sent.step(self.send_for(
             element,
             self.atoms.wm_change_state,
             [ICONIC_STATE, 0, 0, 0, 0],
-        )
+        ))
     }
 
     fn maximize(&self, element: &ElementData) -> Result<()> {
@@ -1225,13 +1497,14 @@ impl X11WindowBackend {
                         .to_string(),
             });
         }
-        self.change_state(element, STATE_REMOVE, self.atoms.net_wm_state_fullscreen, 0)?;
-        self.change_state(
+        let mut sent = Sent::default();
+        sent.step(self.change_state(element, STATE_REMOVE, self.atoms.net_wm_state_fullscreen, 0))?;
+        sent.step(self.change_state(
             element,
             STATE_ADD,
             self.atoms.net_wm_state_max_horz,
             self.atoms.net_wm_state_max_vert,
-        )
+        ))
     }
 
     fn enter_fullscreen(&self, element: &ElementData) -> Result<()> {
@@ -1241,13 +1514,14 @@ impl X11WindowBackend {
                     .to_string(),
             });
         }
-        self.change_state(
+        let mut sent = Sent::default();
+        sent.step(self.change_state(
             element,
             STATE_REMOVE,
             self.atoms.net_wm_state_max_horz,
             self.atoms.net_wm_state_max_vert,
-        )?;
-        self.change_state(element, STATE_ADD, self.atoms.net_wm_state_fullscreen, 0)
+        ))?;
+        sent.step(self.change_state(element, STATE_ADD, self.atoms.net_wm_state_fullscreen, 0))
     }
 
     fn restore(&self, element: &ElementData) -> Result<()> {
@@ -1532,6 +1806,33 @@ fn rect_near(actual: Rect, expected: Rect, tolerance: i32) -> bool {
         && i64::from(actual.height).abs_diff(i64::from(expected.height)) <= tolerance as u64
 }
 
+/// Tracks whether an earlier message of a multi-message window verb went out.
+///
+/// `minimize`, `maximize` and `enter_fullscreen` send two or three EWMH
+/// requests. A failure on the first leaves the window untouched, so its error
+/// keeps whatever disposition it has. A failure on a later one (the window's
+/// identity lost between sends, a rejected request) follows a request the
+/// window manager may already have carried out, so it is reported as
+/// `Unknown` even when its variant alone would say `NotDelivered`.
+#[derive(Default)]
+struct Sent(bool);
+
+impl Sent {
+    fn step(&mut self, result: Result<()>) -> Result<()> {
+        let already_sent = self.0;
+        if result.is_ok() {
+            self.0 = true;
+        }
+        if already_sent {
+            result.map_err(|e| {
+                crate::atspi::unknown_after_mutation(e, "an earlier window-manager request")
+            })
+        } else {
+            result
+        }
+    }
+}
+
 fn send_client_message(
     conn: &RustConnection,
     root: Window,
@@ -1582,6 +1883,41 @@ fn send_wm_protocol(
         .map_err(platform)
 }
 
+/// The event mask kept on every X11 top-level xa11y inspects: structure
+/// changes (moves, reparenting, destruction) for bindings and cached origins,
+/// plus, once [`X11WindowBackend::client_origin`] has run, property changes
+/// so a rename invalidates a cached origin.
+fn client_event_mask(origins_watched: bool) -> EventMask {
+    if origins_watched {
+        EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE
+    } else {
+        EventMask::STRUCTURE_NOTIFY
+    }
+}
+
+/// The candidates owned by `pid` whose title is exactly `title`.
+fn clients_by_pid_title(candidates: &[X11Candidate], pid: u32, title: &str) -> Vec<Window> {
+    candidates
+        .iter()
+        .filter(|c| c.pid == pid && c.title.as_deref() == Some(title))
+        .map(|c| c.window)
+        .collect()
+}
+
+/// The one top-level owned by `pid` and titled exactly `title`, or `None`
+/// when there is none or more than one. Geometry plays no part: it is what
+/// the caller is computing.
+fn select_client_by_pid_title(
+    candidates: &[X11Candidate],
+    pid: u32,
+    title: &str,
+) -> Option<Window> {
+    match clients_by_pid_title(candidates, pid, title).as_slice() {
+        [window] => Some(*window),
+        _ => None,
+    }
+}
+
 fn property_u32(
     conn: &RustConnection,
     window: Window,
@@ -1628,10 +1964,27 @@ fn platform(error: impl std::fmt::Display) -> Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_candidate, choose_sway_candidate, collect_sway_candidates, select_close_mechanism,
-        CloseMechanism, X11Candidate,
+        choose_candidate, choose_sway_candidate, collect_sway_candidates,
+        select_client_by_pid_title, select_close_mechanism, CloseMechanism, X11Candidate,
     };
-    use xa11y_core::Rect;
+    use xa11y_core::{Delivery, Error, Rect};
+
+    #[test]
+    fn a_failure_after_an_earlier_window_message_is_unknown() {
+        let lost = || super::lost_identity("X11", 1);
+        // The first message failed: nothing was sent, the variant decides.
+        let mut sent = super::Sent::default();
+        assert_eq!(
+            sent.step(Err(lost())).unwrap_err().delivery(),
+            Delivery::NotDelivered
+        );
+        // A later message failed after one went out: the window may have moved.
+        let mut sent = super::Sent::default();
+        sent.step(Ok(())).expect("first message");
+        let err = sent.step(Err(lost())).unwrap_err();
+        assert!(matches!(err, Error::Platform { .. }), "{err:?}");
+        assert_eq!(err.delivery(), Delivery::Unknown);
+    }
 
     #[test]
     fn close_prefers_the_window_managers_request_when_advertised() {
@@ -1661,6 +2014,72 @@ mod tests {
             title: Some(title.to_string()),
             bounds: Some(bounds),
         }
+    }
+
+    fn identity(window: u32, pid: u32, title: Option<&str>) -> X11Candidate {
+        X11Candidate {
+            window,
+            pid,
+            title: title.map(str::to_string),
+            bounds: None,
+        }
+    }
+
+    #[test]
+    fn client_origin_needs_exactly_one_window_with_the_pid_and_title() {
+        let one = [identity(1, 7, Some("Foo")), identity(2, 7, Some("Bar"))];
+        assert_eq!(select_client_by_pid_title(&one, 7, "Foo"), Some(1));
+        assert_eq!(
+            select_client_by_pid_title(&[], 7, "Foo"),
+            None,
+            "no windows"
+        );
+        assert_eq!(
+            select_client_by_pid_title(&one, 7, "Baz"),
+            None,
+            "no window has the title"
+        );
+        let twins = [identity(1, 7, Some("Foo")), identity(2, 7, Some("Foo"))];
+        assert_eq!(
+            select_client_by_pid_title(&twins, 7, "Foo"),
+            None,
+            "two same-titled windows of one process are ambiguous"
+        );
+    }
+
+    #[test]
+    fn client_origin_ignores_other_processes_and_untitled_windows() {
+        // Another process's same-titled window neither matches nor makes
+        // this one ambiguous.
+        let candidates = [identity(1, 8, Some("Foo")), identity(2, 7, Some("Foo"))];
+        assert_eq!(select_client_by_pid_title(&candidates, 7, "Foo"), Some(2));
+        assert_eq!(
+            select_client_by_pid_title(&[identity(1, 8, Some("Foo"))], 7, "Foo"),
+            None
+        );
+        // A window with no readable title is never a match.
+        let candidates = [identity(1, 7, None), identity(2, 7, Some("Foo"))];
+        assert_eq!(select_client_by_pid_title(&candidates, 7, "Foo"), Some(2));
+        assert_eq!(
+            select_client_by_pid_title(&[identity(1, 7, None)], 7, ""),
+            None
+        );
+    }
+
+    #[test]
+    fn client_origin_titles_match_exactly() {
+        let candidates = [identity(1, 7, Some("Foo Bar"))];
+        for title in ["Foo", "foo bar", "Foo Bar ", "FOO BAR"] {
+            assert_eq!(
+                select_client_by_pid_title(&candidates, 7, title),
+                None,
+                "{title:?} must not match \"Foo Bar\""
+            );
+        }
+        assert_eq!(
+            select_client_by_pid_title(&candidates, 7, "Foo Bar"),
+            Some(1)
+        );
     }
 
     #[test]
@@ -2172,12 +2591,14 @@ mod tests {
         observer.flush().expect("flush setup");
         let backend = super::X11WindowBackend {
             conn: std::sync::Mutex::new(backend_conn),
+            origins: std::sync::Mutex::new(std::collections::HashMap::new()),
             bindings: std::sync::Mutex::new(std::collections::HashMap::new()),
             destroyed_handles: std::sync::Mutex::new(std::collections::HashSet::new()),
             root,
             atoms,
             supported: [atoms.net_active_window].into_iter().collect(),
             has_window_manager: true,
+            origins_watched: std::sync::atomic::AtomicBool::new(false),
         };
         let element = |handle, x| {
             let mut data = xa11y_core::ElementData::for_role(xa11y_core::Role::Window);
@@ -2457,6 +2878,273 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `client_origin` against a real X server: the origin follows a move,
+    /// two same-titled windows are ambiguous, and neither a rename nor a new
+    /// window can leave a cached origin answering for the wrong window.
+    #[test]
+    #[ignore = "requires Xvfb; run through scripts/run_integ_tests.sh"]
+    fn x11_client_origin_is_unique_and_invalidated() {
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::xproto::{
+            AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, PropMode,
+            WindowClass,
+        };
+        use x11rb::wrapper::ConnectionExt as _;
+
+        let (_xvfb, display) = isolated_xvfb();
+        let (observer, screen) = x11rb::rust_connection::RustConnection::connect(Some(&display))
+            .expect("connect isolated Xvfb");
+        let root = observer.setup().roots[screen].root;
+        let backend =
+            super::X11WindowBackend::connect(Some(&display)).expect("X11 backend on bare Xvfb");
+        assert!(
+            !backend.has_window_manager,
+            "fixture: the isolated Xvfb must run no window manager"
+        );
+        let net_wm_pid = intern(&observer, b"_NET_WM_PID");
+        let net_wm_name = intern(&observer, b"_NET_WM_NAME");
+        let utf8_string = intern(&observer, b"UTF8_STRING");
+        let pid = std::process::id();
+        let sync = || {
+            observer
+                .get_input_focus()
+                .expect("round trip")
+                .reply()
+                .expect("round trip reply");
+        };
+        let rename = |window: u32, title: &[u8]| {
+            observer
+                .change_property8(PropMode::REPLACE, window, net_wm_name, utf8_string, title)
+                .expect("set title")
+                .check()
+                .expect("title stored");
+        };
+        let create = |x: i16, y: i16, title: &[u8]| {
+            let window = observer.generate_id().expect("XID");
+            observer
+                .create_window(
+                    0,
+                    window,
+                    root,
+                    x,
+                    y,
+                    300,
+                    200,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    0,
+                    &CreateWindowAux::new(),
+                )
+                .expect("create window")
+                .check()
+                .expect("created window");
+            observer
+                .change_property32(
+                    PropMode::REPLACE,
+                    window,
+                    net_wm_pid,
+                    AtomEnum::CARDINAL,
+                    &[pid],
+                )
+                .expect("set PID")
+                .check()
+                .expect("PID stored");
+            rename(window, title);
+            observer
+                .map_window(window)
+                .expect("map window")
+                .check()
+                .expect("window mapped");
+            sync();
+            window
+        };
+        let moved = |window: u32, x: i32, y: i32| {
+            observer
+                .configure_window(window, &ConfigureWindowAux::new().x(x).y(y))
+                .expect("move")
+                .check()
+                .expect("moved");
+            sync();
+        };
+
+        // The root mask is selected lazily: a backend that never looks up a
+        // client origin queues no root events.
+        let root_mask = || {
+            let conn = backend.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.get_window_attributes(root)
+                .expect("root attributes")
+                .reply()
+                .expect("root attributes reply")
+                .your_event_mask
+        };
+        assert_eq!(
+            root_mask(),
+            x11rb::protocol::xproto::EventMask::NO_EVENT,
+            "connect must not select a root mask"
+        );
+
+        let a = create(10, 20, b"Foo");
+        let client_mask = |window: u32| {
+            let conn = backend.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.get_window_attributes(window)
+                .expect("client attributes")
+                .reply()
+                .expect("client attributes reply")
+                .your_event_mask
+        };
+        // `bind` watches a window before any origin lookup: structure only.
+        {
+            let conn = backend.conn.lock().unwrap_or_else(|e| e.into_inner());
+            backend.watch_clients(&conn, &[a]).expect("watch A");
+        }
+        assert_eq!(
+            client_mask(a),
+            x11rb::protocol::xproto::EventMask::STRUCTURE_NOTIFY,
+            "before any lookup a watched client gets no property events"
+        );
+        assert_eq!(backend.client_origin(pid, "Foo").unwrap(), Some((10, 20)));
+        assert!(
+            client_mask(a).contains(x11rb::protocol::xproto::EventMask::PROPERTY_CHANGE),
+            "the first lookup must upgrade an already-watched client's mask"
+        );
+        assert_eq!(
+            root_mask(),
+            x11rb::protocol::xproto::EventMask::PROPERTY_CHANGE
+                | x11rb::protocol::xproto::EventMask::SUBSTRUCTURE_NOTIFY,
+            "the first lookup must select the root mask"
+        );
+        assert_eq!(
+            backend.client_origin(pid + 1, "Foo").unwrap(),
+            None,
+            "another pid's lookup must not see this window"
+        );
+
+        // A move invalidates the cached origin.
+        moved(a, 50, 60);
+        assert_eq!(
+            backend.client_origin(pid, "Foo").unwrap(),
+            Some((50, 60)),
+            "the origin must follow a move"
+        );
+
+        // A second window with the same title makes "Foo" ambiguous, even
+        // though "Foo" was cached before it appeared.
+        let b = create(400, 300, b"Foo");
+        assert_eq!(
+            backend.client_origin(pid, "Foo").unwrap(),
+            None,
+            "two same-titled windows must give no origin"
+        );
+
+        // Renaming B away resolves it again, to A.
+        rename(b, b"Other");
+        sync();
+        assert_eq!(backend.client_origin(pid, "Foo").unwrap(), Some((50, 60)));
+        assert_eq!(
+            backend.client_origin(pid, "Other").unwrap(),
+            Some((400, 300))
+        );
+
+        // A rename that touches neither a cached window nor a cached title
+        // leaves the other entries alone.
+        rename(b, b"Unrelated");
+        sync();
+        // Looking up B's new title drains the rename before the checks.
+        assert_eq!(
+            backend.client_origin(pid, "Unrelated").unwrap(),
+            Some((400, 300))
+        );
+        assert!(
+            backend
+                .origins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&(pid, "Foo".to_owned())),
+            "an unrelated rename must keep A's cached origin"
+        );
+        assert!(
+            !backend
+                .origins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&(pid, "Other".to_owned())),
+            "the renamed window's own entry must go"
+        );
+        rename(b, b"Other");
+        sync();
+
+        // A is cached as "Foo". Renaming A away and B to "Foo" must not
+        // leave A's origin answering for "Foo".
+        rename(a, b"Renamed");
+        rename(b, b"Foo");
+        sync();
+        assert_eq!(
+            backend.client_origin(pid, "Foo").unwrap(),
+            Some((400, 300)),
+            "a rename must invalidate the cached origin"
+        );
+
+        // A cached window renamed so that another window shares its title,
+        // without any change to the cached window itself.
+        assert_eq!(
+            backend.client_origin(pid, "Renamed").unwrap(),
+            Some((50, 60))
+        );
+        rename(b, b"Renamed");
+        sync();
+        assert_eq!(
+            backend.client_origin(pid, "Renamed").unwrap(),
+            None,
+            "a window renamed to a cached title makes it ambiguous"
+        );
+
+        // A destroyed window's origin is gone with it.
+        observer
+            .destroy_window(b)
+            .expect("destroy B")
+            .check()
+            .expect("B destroyed");
+        sync();
+        assert_eq!(
+            backend.client_origin(pid, "Renamed").unwrap(),
+            Some((50, 60))
+        );
+        observer
+            .destroy_window(a)
+            .expect("destroy A")
+            .check()
+            .expect("A destroyed");
+        sync();
+        assert_eq!(backend.client_origin(pid, "Renamed").unwrap(), None);
+
+        // A _NET_WM_PID change onto a cached (pid, title) makes it ambiguous,
+        // with no change to the cached window itself.
+        let set_pid = |window: u32, value: u32| {
+            observer
+                .change_property32(
+                    PropMode::REPLACE,
+                    window,
+                    net_wm_pid,
+                    AtomEnum::CARDINAL,
+                    &[value],
+                )
+                .expect("set PID")
+                .check()
+                .expect("PID stored");
+            sync();
+        };
+        let _c = create(30, 40, b"Pid");
+        let d = create(500, 400, b"Pid");
+        set_pid(d, pid + 1);
+        assert_eq!(backend.client_origin(pid, "Pid").unwrap(), Some((30, 40)));
+        set_pid(d, pid);
+        assert_eq!(
+            backend.client_origin(pid, "Pid").unwrap(),
+            None,
+            "a window whose pid changes onto a cached key makes it ambiguous"
+        );
     }
 
     /// The real thing: the AccessKit + winit test app on a bare X server, with

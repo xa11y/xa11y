@@ -4,10 +4,11 @@
 // napi build.
 //
 // Responsibilities:
-//   1. Prepend shared type aliases (`CheckedState`, `EventTypeName`,
-//      `MouseButtonName`, `AnchorName`, `ShellSurfaceKindName`) that the Rust
-//      side can't express.
-//   2. Narrow `Element.checked: string | null` -> `CheckedState | null`.
+//   1. Prepend shared type aliases (`CheckedState`, `HiddenReasonName`,
+//      `AutoScrollOutcomeName`, `EventTypeName`, `MouseButtonName`, `AnchorName`,
+//      `ShellSurfaceKindName`) that the Rust side can't express.
+//   2. Narrow `Element.checked: string | null` -> `CheckedState | null`, and
+//      `Element.hiddenReason` -> `HiddenReasonName | null`.
 //   3. Narrow `Event.type: string` -> `EventTypeName`.
 //   4. Narrow the input layer's button and anchor strings.
 //   5. Narrow `ShellSurface.kind` and `ShellSurface.byKind`'s parameter to
@@ -64,6 +65,22 @@ export type AnchorName =
   | 'bottom_left'
   | 'bottom_right';
 
+/** Why an element reads \`visible: false\`. Spelled as in Python. */
+export type HiddenReasonName =
+  | 'window_minimized'
+  | 'scrolled_out'
+  | 'not_showing'
+  | 'unknown';
+
+/**
+ * Whether a failed action may already have taken effect (\`XA11yError.delivery\`).
+ * \`not_delivered\` is safe to retry. Spelled as in Python.
+ */
+export type DeliveryName = 'not_delivered' | 'unknown';
+
+/** What an auto-waiting action's scroll attempt came to. Spelled as in Python. */
+export type AutoScrollOutcomeName = 'refused' | 'no_effect' | 'revealed';
+
 /** Why an annotated element is not in the image. Spelled as in Python. */
 export type OmissionReasonName = 'no_bounds' | 'zero_area' | 'outside_capture';
 
@@ -92,6 +109,11 @@ const REPLACEMENTS = [
     name: 'Element.checked -> CheckedState | null',
     from: '  get checked(): string | null',
     to: '  get checked(): CheckedState | null',
+  },
+  {
+    name: 'Element.hiddenReason -> HiddenReasonName | null',
+    from: '  get hiddenReason(): string | null',
+    to: '  get hiddenReason(): HiddenReasonName | null',
   },
   {
     name: 'Event.type -> EventTypeName',

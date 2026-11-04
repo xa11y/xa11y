@@ -39,7 +39,10 @@ export type {
   CheckedState,
   ClickOptions,
   DragOptions,
+  DeliveryName,
   EventTypeName,
+  HiddenReasonName,
+  AutoScrollOutcomeName,
   LegendEntry,
   MouseButtonName,
   Omission,
@@ -48,9 +51,12 @@ export type {
   ShellSurfaceKindName,
 } from './native.js';
 import type {
+  AutoScrollOutcomeName,
   Element,
   Event,
+  DeliveryName,
   EventTypeName,
+  HiddenReasonName,
   Locator,
   Rect,
   Screenshot,
@@ -517,7 +523,20 @@ export declare function getDefaultTimeout(): number;
 // ── JS-only: typed error hierarchy ─────────────────────────────────────────
 
 /** Base class for all xa11y errors. */
-export class XA11yError extends Error {}
+export class XA11yError extends Error {
+  /**
+   * Whether the failed action may already have taken effect. Always set on
+   * errors xa11y throws.
+   *
+   * `'not_delivered'`: the failure happened before the action was
+   * dispatched (selector not matched, action not supported, element stale, an
+   * auto-wait that timed out), so a retry is safe. `'unknown'`: the action
+   * was dispatched or may have been (a D-Bus `NoReply`, an AX
+   * `CannotComplete`, a UIA timeout, any platform error), so a retry can
+   * apply it twice.
+   */
+  delivery: DeliveryName;
+}
 
 /** Accessibility permissions have not been granted. */
 export class PermissionDeniedError extends XA11yError {}
@@ -526,9 +545,10 @@ export class PermissionDeniedError extends XA11yError {}
  * The target app advertises an accessibility tree but it is empty.
  *
  * Raised on Linux when a Chromium/Electron app is launched without
- * `--force-renderer-accessibility` (or the `ACCESSIBILITY_ENABLED=1`
- * environment variable), so the renderer accessibility bridge never
- * populates the window's subtree.
+ * `--force-renderer-accessibility`, so the renderer accessibility bridge
+ * never populates the window's subtree. In a bare session with no settings
+ * daemon (CI, Xvfb, a container) the app needs both the flag and
+ * `ACCESSIBILITY_ENABLED=1` in its environment.
  */
 export class AccessibilityNotEnabledError extends XA11yError {}
 
@@ -547,6 +567,10 @@ export class SelectorNotMatchedError extends XA11yError {
   condition: string | null;
   /** What the failing operation last observed. */
   lastObserved: string | null;
+  /** Always `null` for this class (parity with {@link TimeoutError}). */
+  hiddenReason: HiddenReasonName | null;
+  /** Always `null` for this class (parity with {@link TimeoutError}). */
+  autoScroll: AutoScrollOutcomeName | null;
   /** Bounded near-miss candidates (e.g. same-role elements). */
   candidates: string[];
   /** Bounded rendering of the search scope (tree dump or app list). */
@@ -576,6 +600,26 @@ export class TimeoutError extends XA11yError {
   selector: string | null;
   /** The last poll's observation (matched-with-states vs never matched). */
   lastObserved: string | null;
+  /**
+   * Why the last observed element was not visible, when it matched but read
+   * `visible: false`: `'scrolled_out'` (scroll it into view first),
+   * `'window_minimized'` (restore its window), `'not_showing'` or
+   * `'unknown'`. `null` when nothing hidden was observed.
+   */
+  hiddenReason: HiddenReasonName | null;
+  /**
+   * What the action's auto-scroll came to, when its target was enabled and
+   * `hiddenReason` was `'scrolled_out'`: `'refused'` (the element has no
+   * semantic scroll; it was asked once), `'no_effect'` (the platform
+   * accepted the call, and the next check still read the element not
+   * visible, scrolled out or hidden otherwise) or `'revealed'` (the next
+   * check read it visible, and something else, such as `enabled: false`,
+   * kept the wait going). It describes the first check after the latest
+   * accepted scroll, so `'revealed'` with `hiddenReason: 'scrolled_out'`
+   * means the element came into view and later scrolled back out. `null`
+   * when the wait never tried to scroll.
+   */
+  autoScroll: AutoScrollOutcomeName | null;
   /** Bounded near-miss candidates; collected only when the selector never matched. */
   candidates: string[];
   /** Bounded rendering of the search scope; collected only when the selector never matched. */

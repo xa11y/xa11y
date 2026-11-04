@@ -32,6 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var spaceCompanion: NSWindow?
     var statusItem: NSStatusItem!
     var statusMenu: NSMenu!
+    var contextMenu: NSMenu!
 
     func applicationDidFinishLaunching(_: Notification) {
         let contentRect = NSRect(x: 0, y: 0, width: 700, height: 800)
@@ -44,9 +45,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "xa11y-cocoa-test-app"
         window.setFrameAutosaveName("TestWindow")
 
-        if headless {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        // An unbundled executable is not a regular app until it says so, and
+        // only a regular app can hold the frontmost slot — which synthesized
+        // input (CGEventPost) and OS-focus tests need. `--headless` keeps the
+        // window out of the Dock and the front slot for manual runs that
+        // must not steal focus; the test harness launches it regular.
+        NSApp.setActivationPolicy(headless ? .accessory : .regular)
 
         // A genuine NSStatusItem fixture for shell-surface integration tests.
         // The test locates and pointer-clicks this actual menu-bar element.
@@ -201,6 +205,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         progress.doubleValue = 75
         progress.setAccessibilityLabel("Progress")
         rangeBox.addSubview(progress)
+
+        // Right-click target with a real context menu: an open context menu
+        // is an app-level AXMenu child, not an AXWindows entry, which is the
+        // shape the listing-vs-search test checks. Placed low in this box so
+        // it sits in the strip of the document (y 680–800) that the scroll
+        // view shows whichever end it starts scrolled to.
+        let contextTarget = NSTextField(labelWithString: "Context Target")
+        contextTarget.frame = NSRect(x: 340, y: 30, width: 200, height: 24)
+        contextTarget.setAccessibilityLabel("Context Target")
+        contextMenu = NSMenu(title: "xa11y context menu")
+        let contextAction = NSMenuItem(
+            title: "xa11y Context Action",
+            action: #selector(AppDelegate.onContextAction),
+            keyEquivalent: ""
+        )
+        contextAction.target = self
+        contextMenu.addItem(contextAction)
+        contextTarget.menu = contextMenu
+        rangeBox.addSubview(contextTarget)
 
         // ── Text field ────────────────────────────────────────────────────
         let inputBox = NSBox(frame: NSRect(x: 12, y: y - 90, width: 656, height: 90))
@@ -357,6 +380,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         fullscreenButton.action = #selector(AppDelegate.onToggleFullscreenPressed)
         dynBox.addSubview(fullscreenButton)
 
+        // An element whose only action is AXOpen (the Finder-sidebar shape):
+        // `press` must be advertised on it and dispatch to AXOpen.
+        let openTarget = OpenOnlyHost(frame: NSRect(x: 420, y: 44, width: 200, height: 24))
+        dynBox.addSubview(openTarget)
+
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -370,6 +398,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func onStatusAction() {
         // The integration test presses this real NSMenuItem to close the menu.
+    }
+
+    @objc func onContextAction() {
+        // The context-menu test presses this item to close the menu.
     }
 
     @objc func onSubmitPressed() {
@@ -395,17 +427,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func onToggleFullscreenPressed() {
         // Native fullscreen (the Spaces transition the fullscreen state test
-        // drives) is only available to regular-policy apps; the harness
-        // launches this app accessory (--headless) so every suite before the
-        // fullscreen test keeps it out of the frontmost slot. Lift the
-        // policy for the transition — the fullscreen test runs in the last
-        // suite (python-window), after which nothing depends on accessory
-        // policy.
+        // drives) is only available to regular-policy apps. The harness
+        // launches this app regular already; a `--headless` (accessory) run
+        // has its policy lifted here for the transition. Activate either
+        // way: a regular app that lost the front slot to an earlier test
+        // still needs it for the transition.
         if NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
         }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
         // Keep a second app window on the original Space. App.windows() must
         // continue to discover it while the primary window occupies the
         // fullscreen Space; filtering by the active Space would lose it.
@@ -443,6 +474,62 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusLabel: NSTextField!
     var rowCount: Int = 5
     let users = [["Alice", "Admin"], ["Bob", "User"]]
+}
+
+// ── AXOpen-only element ───────────────────────────────────────────────────────
+
+/// Exposes `AXOpen` and no `AXPress`, like a Finder sidebar item. Each AXOpen
+/// bumps the value, which is what the test reads back.
+///
+/// The action list and dispatch come from the legacy informal protocol,
+/// because the NSAccessibility protocol has no `accessibilityPerformOpen`.
+/// This is an `NSAccessibilityElement` (an NSObject), not an NSView: on an
+/// NSView, AppKit listed the legacy AXOpen but answered a perform with
+/// kAXErrorAttributeUnsupported (-25205) without calling
+/// `accessibilityPerformAction:`. AccessKit's macOS adapter mixes the two
+/// protocols the same way on plain NSObjects, for `AXScrollToVisible`.
+class OpenOnlyElement: NSAccessibilityElement {
+    static let openAction = NSAccessibility.Action(rawValue: "AXOpen")
+    private var openCount = 0
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Open Target" }
+    override func accessibilityValue() -> Any? { "opened \(openCount)" }
+
+    override func accessibilityActionNames() -> [NSAccessibility.Action] {
+        [OpenOnlyElement.openAction]
+    }
+
+    override func isAccessibilitySelectorAllowed(_ selector: Selector) -> Bool {
+        if selector == #selector(OpenOnlyElement.accessibilityPerformAction(_:)) {
+            return true
+        }
+        return super.isAccessibilitySelectorAllowed(selector)
+    }
+
+    override func accessibilityPerformAction(_ action: NSAccessibility.Action) {
+        if action == OpenOnlyElement.openAction {
+            openCount += 1
+        }
+    }
+}
+
+/// Hosts the AXOpen-only element: an ignored view whose one accessibility
+/// child is the element, framed to the view's bounds.
+class OpenOnlyHost: NSView {
+    private lazy var element: OpenOnlyElement = {
+        let element = OpenOnlyElement()
+        element.setAccessibilityParent(self)
+        return element
+    }()
+
+    override func isAccessibilityElement() -> Bool { false }
+
+    override func accessibilityChildren() -> [Any]? {
+        element.setAccessibilityFrameInParentSpace(bounds)
+        return [element]
+    }
 }
 
 // ── NSTableViewDataSource ─────────────────────────────────────────────────────

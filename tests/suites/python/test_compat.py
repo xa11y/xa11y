@@ -13,6 +13,7 @@ does not include a particular widget type.
 from __future__ import annotations
 
 import sys
+import time
 import warnings
 
 import pytest
@@ -294,6 +295,43 @@ def test_textfield_found(app, app_config):
     initial = app_config.get("textfield_initial_value")
     if initial is not None:
         assert el.value == initial
+
+
+def test_password_field_is_flagged(app, app_config):
+    """A password entry keeps the text_field role and sets `password` (#522).
+
+    The selector form matches exactly the password entry, and the ordinary
+    text field next to it is not flagged.
+    """
+    name = app_config.get("password_field_name")
+    if not name:
+        pytest.skip("app has no password entry")
+    el = app.locator(f'text_field[name="{name}"]').element()
+    assert el.role == "text_field"
+    assert el.password is True
+    flagged = app.locator('text_field[password="true"]').elements()
+    assert [e.name for e in flagged] == [name]
+    plain = app.locator(app_config["textfield_selector"]).element()
+    assert plain.password is False
+
+
+def test_password_field_value_is_withheld(app, app_config):
+    """A password entry whose provider withholds its text reads as no value.
+
+    On Windows, a password control declines `ValuePattern.Value` with
+    `UIA_E_INVALIDOPERATION`. That must surface as `value is None` on a
+    flagged element, not as a platform error that fails every tree read of
+    the window holding it (#597). Walking the whole tree first proves the
+    snapshot of every element, the password field among them, succeeds.
+    """
+    name = app_config.get("password_field_name")
+    if not name or not app_config.get("password_value_withheld"):
+        pytest.skip("app has no password entry whose value is withheld")
+    nodes = collect_tree_nodes(app)
+    assert nodes, "tree read returned no elements"
+    el = app.locator(f'text_field[name="{name}"]').element()
+    assert el.password is True
+    assert el.value is None, f"password value leaked: {el.value!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -673,3 +711,353 @@ def test_locator_dump_shorthand(app, app_config):
     text = app.locator(f'button[name="{ok_name}"]').element().dump(max_depth=0)
     assert isinstance(text, str)
     assert "button" in text
+
+
+def test_a_selector_miss_reports_it_was_not_delivered(app):
+    """A fail-fast miss never reached the application, so a retry is safe (#523)."""
+    with pytest.raises(xa11y.SelectorNotMatchedError) as caught:
+        app.locator('button[name="NoSuchButtonAnywhere523"]').element()
+    assert caught.value.delivery == "not_delivered"
+
+
+def test_hidden_reason_is_set_exactly_when_not_visible(app):
+    """Every element carries a ``hidden_reason`` exactly when it is not
+    visible (#590), and the reason is one of the documented names."""
+    known = {"window_minimized", "scrolled_out", "not_showing", "unknown"}
+    elements = app.locator("*").elements()
+    assert elements, "the app's tree must not be empty"
+    broken = [
+        (e.role, e.name, e.visible, e.hidden_reason)
+        for e in elements
+        if (e.hidden_reason is None) != e.visible
+        or (e.hidden_reason is not None and e.hidden_reason not in known)
+    ]
+    assert not broken, (
+        f"hidden_reason must be a known name exactly when visible is False; "
+        f"these elements break it: {broken[:20]}"
+    )
+
+
+def _scrolled_pane_visibility(app, pane_name: str, first: str, last: str):
+    """The first and last entries' ``visible``, read both ways the provider
+    computes it: a selector search, which takes the one-pass subtree fetch,
+    and ``children()``, which clips each level to its parent."""
+    found = {
+        name: app.locator(f'[name="{name}"]').element().visible
+        for name in (first, last)
+    }
+    pane = app.locator(f'[name="{pane_name}"]').element()
+    listed = {c.name: c.visible for c in pane.children() if c.name in (first, last)}
+    return found, listed
+
+
+def test_controls_scrolled_out_of_a_pane_are_not_visible(app, app_config):
+    """A control scrolled out of its pane reports ``visible == False``, and
+    ``hidden_reason == "scrolled_out"``.
+
+    On Windows, some UIA providers leave ``IsOffscreen`` false on content
+    outside the viewport, so without the provider's own clipping it counted
+    as visible and an auto-waiting action would act on a control nobody can
+    see (issue #502). The test first asserts that premise on the scrolled-out
+    entry's ``raw["uia_is_offscreen"]``, so it cannot pass with or without
+    the fix. On Linux the toolkit hides the row itself, and the provider has
+    to tell scrolling from any other hiding (#590).
+    """
+    pane_name = app_config.get("scrolled_pane_name")
+    if not pane_name:
+        pytest.skip("this app has no pane longer than its viewport yet")
+    first = app_config["scrolled_pane_first_item"]
+    last = app_config["scrolled_pane_last_item"]
+
+    hidden = app.locator(f'[name="{last}"]').element()
+    if sys.platform == "win32":
+        # The premise: UIA itself says the scrolled-out entry is on screen.
+        # Without it this test would pass with or without the fix.
+        assert hidden.raw.get("uia_is_offscreen") is False, (
+            f"{last!r} reports uia_is_offscreen="
+            f"{hidden.raw.get('uia_is_offscreen')!r}, so the fixture no longer "
+            f"exercises issue #502 (UIA leaving IsOffscreen false on a "
+            f"scrolled-out control)"
+        )
+
+    found, listed = _scrolled_pane_visibility(app, pane_name, first, last)
+    expected = {first: True, last: False}
+    assert found == expected, (
+        f"selector search: the first entry must be visible and the last "
+        f"scrolled out; got {found}"
+    )
+    assert listed == expected, (
+        f"children(): the first entry must be visible and the last scrolled "
+        f"out; got {listed}"
+    )
+    # A hidden element says why, and a visible one says nothing (#590).
+    assert hidden.hidden_reason == "scrolled_out", (
+        f"{last!r} is hidden because its pane clips it, so hidden_reason "
+        f"must be 'scrolled_out'; got {hidden.hidden_reason!r}"
+    )
+    shown = app.locator(f'[name="{first}"]').element()
+    assert shown.hidden_reason is None, (
+        f"a visible element has no hidden_reason; {first!r} reports "
+        f"{shown.hidden_reason!r}"
+    )
+
+
+def test_a_control_its_container_hides_is_not_showing(app, app_config):
+    """A control on an inactive tab page reads ``hidden_reason ==
+    "not_showing"`` (#590).
+
+    A contract test: the hidden control reports no bounds, so this does not
+    exercise the scroll-role check that tells a control lying outside a
+    container that does not scroll from a scrolled-out one. The Linux unit
+    tests ``scrolled_out_needs_a_scrolling_container_on_the_climb`` and
+    ``a_hidden_row_beyond_its_list_is_scrolled_out`` guard that check.
+    """
+    name = app_config.get("not_showing_name")
+    if not name:
+        pytest.skip("this app has no control hidden by a non-scrolling container")
+    hidden = app.locator(f'[name="{name}"]').element()
+    assert hidden.visible is False, f"{name!r} is on an inactive page, so not visible"
+    assert hidden.hidden_reason == "not_showing", (
+        f"{name!r} is hidden by its tab page, which does not scroll, so "
+        f"hidden_reason must be 'not_showing'; got {hidden.hidden_reason!r}"
+    )
+
+
+def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
+    """After the pane scrolls to the last entry, it reports visible and the
+    first does not: the clip follows the scroll position rather than a
+    remembered answer.
+
+    Focus moves the WinForms viewport: the framework scrolls a pane to the
+    control that takes focus. ``scroll_into_view`` cannot, because plain
+    buttons have no UIA ScrollItem pattern. ``Element.focus`` acts without
+    waiting for ``visible``, which the scrolled-out entry is not. A Qt list
+    row offers neither focus nor AT-SPI ``ScrollTo``, so an app that sets
+    ``scrolled_pane_end_button`` / ``scrolled_pane_start_button`` scrolls by
+    pressing those instead.
+    """
+    pane_name = app_config.get("scrolled_pane_name")
+    if not pane_name:
+        pytest.skip("this app has no pane longer than its viewport yet")
+    first = app_config["scrolled_pane_first_item"]
+    last = app_config["scrolled_pane_last_item"]
+    expected = {first: False, last: True}
+
+    buttons = {
+        last: app_config.get("scrolled_pane_end_button"),
+        first: app_config.get("scrolled_pane_start_button"),
+    }
+
+    def bring_into_view(name: str) -> None:
+        if buttons[name]:
+            app.locator(f'button[name="{buttons[name]}"]').press()
+        else:
+            app.locator(f'[name="{name}"]').element().focus()
+
+    bring_into_view(last)
+    try:
+        deadline = time.monotonic() + 5.0
+        while True:
+            found, listed = _scrolled_pane_visibility(app, pane_name, first, last)
+            settled = found == expected and listed == expected
+            if settled or time.monotonic() > deadline:
+                break
+            time.sleep(0.2)
+        assert found == expected, (
+            f"selector search after scrolling to the last entry: got {found}"
+        )
+        assert listed == expected, (
+            f"children() after scrolling to the last entry: got {listed}"
+        )
+        gone = app.locator(f'[name="{first}"]').element()
+        if sys.platform == "win32":
+            # The premise again, from the other side: UIA still calls the
+            # entry that just scrolled out on screen, so the flip is the
+            # viewport clip.
+            assert gone.raw.get("uia_is_offscreen") is False, (
+                f"{first!r} reports uia_is_offscreen="
+                f"{gone.raw.get('uia_is_offscreen')!r} after scrolling out, so "
+                f"this test no longer exercises issue #502"
+            )
+        assert gone.hidden_reason == "scrolled_out", (
+            f"{first!r} scrolled out of its pane, so hidden_reason must be "
+            f"'scrolled_out'; got {gone.hidden_reason!r}"
+        )
+    finally:
+        # Put the shared app back for the test above, whatever the order.
+        bring_into_view(first)
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.2)
+    return True
+
+
+def test_an_action_scrolls_its_scrolled_out_target_into_view(app, app_config):
+    """An auto-waiting action on a row scrolled out of its list scrolls it
+    into view through the platform's own scroll call, then acts (#590).
+
+    ``select`` waits for ``visible``, which the last row starts without. The
+    test asserts that premise first, so it cannot pass on a list whose rows
+    were all in view anyway. It then selects the first row again, which has
+    to scroll back the other way: the list is scrolled back to its top, and
+    the first row (not whichever row was selected before) is left selected.
+    """
+    list_name = app_config.get("auto_scroll_list_name")
+    if not list_name:
+        pytest.skip("this app has no list whose rows scroll into view")
+    first = app_config["auto_scroll_first_item"]
+    last = app_config["auto_scroll_last_item"]
+
+    def row(name: str) -> xa11y.Element:
+        return app.locator(f'list_item[name="{name}"]').element()
+
+    hidden = row(last)
+    assert hidden.visible is False and hidden.hidden_reason == "scrolled_out", (
+        f"{last!r} must start scrolled out of {list_name!r}, or this test "
+        f"exercises nothing; got visible={hidden.visible!r}, "
+        f"hidden_reason={hidden.hidden_reason!r}"
+    )
+    try:
+        app.locator(f'list_item[name="{last}"]').select()
+        assert _wait_for(lambda: row(last).visible and row(last).selected), (
+            f"select() returned, so {last!r} was scrolled into view and "
+            f"selected; it now reads visible={row(last).visible!r}, "
+            f"selected={row(last).selected!r}"
+        )
+        assert row(first).hidden_reason == "scrolled_out", (
+            f"scrolling to {last!r} must scroll {first!r} out; got "
+            f"{row(first).hidden_reason!r}"
+        )
+    except BaseException:
+        # Restore on a best-effort basis, without letting a failure here
+        # replace the assertion that actually failed.
+        try:
+            app.locator(f'list_item[name="{first}"]').select()
+        except xa11y.XA11yError as cleanup:
+            print(f"cleanup: selecting {first!r} failed too: {cleanup}")
+        raise
+    # The scroll back is half the test (the other direction), so it runs
+    # outside the cleanup path and fails loudly.
+    app.locator(f'list_item[name="{first}"]').select()
+    assert _wait_for(lambda: row(first).visible), (
+        f"selecting {first!r} must scroll it back into view"
+    )
+
+
+def test_an_action_on_a_target_nothing_can_scroll_waits_it_out(app, app_config):
+    """When the platform refuses to scroll a scrolled-out target into view,
+    the action waits as before and its timeout says the scroll was refused
+    (#590): "nothing can scroll this" reads differently from "the scroll did
+    not help"."""
+    if not app_config.get("scrolled_pane_name"):
+        pytest.skip("this app reports no control as scrolled out")
+    if not app_config.get("scrolled_pane_refuses_scroll_into_view"):
+        pytest.skip("this app has no scrolled-out control that refuses scrolling")
+    last = app_config["scrolled_pane_last_item"]
+
+    # Act with a verb the target really advertises: an action the element
+    # does not offer is refused before the auto-wait runs, and that would
+    # prove nothing about it. Which verbs a scrolled-out row offers differs by
+    # toolkit (a Qt list row offers none), so read them off the element.
+    target = app.locator(f'[name="{last}"]')
+
+    # The shared app is put back by the test above with a scroll that settles
+    # asynchronously, so the row can still read visible for a moment. Acting
+    # then succeeds at once and nothing times out. Wait for the premise rather
+    # than assuming it, and fail (not skip) if it never holds.
+    assert _wait_for(lambda: target.element().hidden_reason == "scrolled_out"), (
+        f"{last!r} must read scrolled_out before the action, or the auto-wait "
+        f"is never exercised; got visible={target.element().visible!r}, "
+        f"hidden_reason={target.element().hidden_reason!r}"
+    )
+    advertised = target.element().actions
+    verbs = ("press", "select", "toggle", "expand", "collapse", "focus")
+    verb = next((v for v in verbs if v in advertised), None)
+    if verb is None:
+        pytest.skip(
+            f"{last!r} advertises none of {verbs} (actions: {advertised}), so "
+            f"there is no action whose auto-wait could be observed"
+        )
+
+    previous = xa11y.get_default_timeout()
+    xa11y.set_default_timeout(1.0)
+    try:
+        with pytest.raises(xa11y.TimeoutError) as excinfo:
+            getattr(target, verb)()
+    finally:
+        xa11y.set_default_timeout(previous)
+    err = excinfo.value
+    assert err.hidden_reason == "scrolled_out", (
+        f"{last!r} is scrolled out of its pane; got {err.hidden_reason!r}"
+    )
+    assert err.auto_scroll == "refused", (
+        f"the diagnosis must say the auto-scroll was refused; got "
+        f"auto_scroll={err.auto_scroll!r}, last_observed={err.last_observed!r}"
+    )
+    # The prose stays for a reader of the message.
+    assert "scroll_into_view was refused" in (err.last_observed or ""), (
+        err.last_observed
+    )
+
+
+def test_open_dropdown_in_a_scrolled_panel_is_visible(app, app_config):
+    """An open drop-down's entries report visible although they lie outside
+    the overflowing panel that holds the combo box.
+
+    The drop-down is a popup window, drawn above the panel, but UIA lists it
+    under the combo in the raw view. Clipping it to the panel would leave the
+    entries not visible and time out any auto-waiting action on them.
+    """
+    combo_name = app_config.get("scrolled_panel_combo_name")
+    if not combo_name:
+        pytest.skip("this app has no combo box in an overflowing panel yet")
+    entry = app_config["scrolled_panel_combo_last_item"]
+
+    # The panel must really clip, or the drop-down has nothing to escape:
+    # its filler sits below the panel's viewport.
+    # And it must be the provider's clip that hides the filler, not UIA's own
+    # IsOffscreen, or a clip that wrongly swallowed the popup could hide
+    # behind a framework that already reports it.
+    filler = app.locator(
+        f'[name="{app_config["scrolled_panel_filler_name"]}"]'
+    ).element()
+    assert filler.raw.get("uia_is_offscreen") is False, (
+        f"the panel's filler reports uia_is_offscreen="
+        f"{filler.raw.get('uia_is_offscreen')!r}, so its visibility does not "
+        f"show the panel's clip at work"
+    )
+    assert filler.visible is False, (
+        "the panel's filler must be scrolled out of view; if it is visible, "
+        "the panel exposes no UIA Scroll pattern and this fixture tests "
+        "nothing"
+    )
+    panel = (
+        app.locator(f'[name="{app_config["scrolled_panel_name"]}"]').element().bounds
+    )
+
+    combo = app.locator(f'[name="{combo_name}"]')
+    combo.expand()
+    try:
+        el = app.locator(f'[name="{entry}"]').element()
+        b = el.bounds
+        outside = b is not None and (
+            b.y >= panel.y + panel.height
+            or b.y + b.height <= panel.y
+            or b.x >= panel.x + panel.width
+            or b.x + b.width <= panel.x
+        )
+        assert outside, (
+            f"the drop-down entry must lie wholly outside the panel "
+            f"({panel!r}) for this to test popup clipping; got bounds={b!r}"
+        )
+        assert el.visible is True, (
+            f"an open drop-down entry must be visible, not clipped to the "
+            f"scrolling panel; got visible={el.visible!r} bounds={el.bounds!r}"
+        )
+    finally:
+        combo.collapse()

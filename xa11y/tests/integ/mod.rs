@@ -13,6 +13,7 @@
 //!   evidence that each platform's classifier matches a real surface, with
 //!   the per-platform requirement stated in the file rather than skipped
 //!   when the listing comes back empty.
+//! * `stability` — `Locator::wait_stable` against the sliding widget.
 //! * `errors` — error paths on the query/wait surface: selector misses,
 //!   invalid selectors, `wait_*` timeouts, auto-wait timeouts, unknown
 //!   actions, invalid action data.
@@ -21,15 +22,21 @@
 //!   module declaration below so individual tests don't need it.
 //! * `unresponsive_macos` — actions on a `SIGSTOP`ped app are bounded by the
 //!   AX messaging timeout and name the app (macOS-only, gated the same way).
+//! * `unresponsive_linux` — enumeration with a `SIGSTOP`ped app on the
+//!   AT-SPI bus (Linux-only, gated the same way).
+//! * `unresponsive_windows` — enumeration with a hung window on the desktop
+//!   (Windows-only, gated the same way).
 //!
 //! The helpers in this file (`app_root`, `one`, `named`, `act`, `try_act`)
 //! are reached from submodule tests via `use crate::integ as h;`.
 
 pub mod actions;
 pub mod errors;
+pub mod mcp;
 pub mod multi_window;
 pub mod screenshot;
 pub mod shell;
+pub mod stability;
 pub mod tree;
 pub mod windows;
 
@@ -42,8 +49,14 @@ pub mod unresponsive_macos;
 #[cfg(target_os = "windows")]
 pub mod events_windows;
 
+#[cfg(target_os = "windows")]
+pub mod unresponsive_windows;
+
 #[cfg(target_os = "linux")]
 pub mod events_linux;
+
+#[cfg(target_os = "linux")]
+pub mod unresponsive_linux;
 
 use xa11y::*;
 

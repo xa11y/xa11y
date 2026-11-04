@@ -1535,6 +1535,9 @@ struct AppByPidOverrideProvider {
     inner: Arc<dyn Provider>,
     app_by_pid_calls: std::sync::atomic::AtomicUsize,
     on_app_by_pid: Box<dyn Fn(u32) -> Result<ElementData> + Send + Sync>,
+    /// Answer to `app_by_pid_failure`, and how often it was asked.
+    terminal_failure: Option<Box<dyn Fn() -> Error + Send + Sync>>,
+    terminal_failure_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl Provider for AppByPidOverrideProvider {
@@ -1557,6 +1560,11 @@ impl Provider for AppByPidOverrideProvider {
         self.app_by_pid_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         (self.on_app_by_pid)(pid)
+    }
+    fn app_by_pid_failure(&self, _pid: u32, _waited: std::time::Duration) -> Option<Error> {
+        self.terminal_failure_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.terminal_failure.as_ref().map(|f| f())
     }
     fn press(&self, e: &ElementData) -> Result<()> {
         self.inner.press(e)
@@ -1643,6 +1651,8 @@ fn by_pid_with_routes_through_provider_app_by_pid() {
     let p = Arc::new(AppByPidOverrideProvider {
         inner,
         app_by_pid_calls: std::sync::atomic::AtomicUsize::new(0),
+        terminal_failure: None,
+        terminal_failure_calls: std::sync::atomic::AtomicUsize::new(0),
         on_app_by_pid: Box::new(move |pid| {
             if pid == 100 {
                 Ok(app1.clone())
@@ -1673,6 +1683,8 @@ fn by_pid_with_short_circuits_on_app_by_pid_platform_error() {
     let p = Arc::new(AppByPidOverrideProvider {
         inner: multi_app_provider(),
         app_by_pid_calls: std::sync::atomic::AtomicUsize::new(0),
+        terminal_failure: None,
+        terminal_failure_calls: std::sync::atomic::AtomicUsize::new(0),
         on_app_by_pid: Box::new(|_| {
             Err(Error::Platform {
                 code: -25211,
@@ -1849,5 +1861,62 @@ fn by_pid_timeout_reports_enumeration_diagnostics() {
     assert!(
         msg.contains("3 running apps") && msg.contains("1 without a resolvable pid"),
         "rendered message should include the diagnosis, got: {msg}"
+    );
+}
+
+#[test]
+fn by_pid_with_asks_the_provider_why_only_after_the_poll_gives_up() {
+    let p = Arc::new(AppByPidOverrideProvider {
+        inner: multi_app_provider(),
+        app_by_pid_calls: std::sync::atomic::AtomicUsize::new(0),
+        on_app_by_pid: Box::new(|pid| {
+            Err(Error::selector_not_matched(format!(
+                "application with pid={pid}"
+            )))
+        }),
+        terminal_failure: Some(Box::new(|| {
+            Error::timeout(std::time::Duration::from_millis(1))
+        })),
+        terminal_failure_calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let result = App::by_pid_with(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        100,
+        std::time::Duration::from_millis(700),
+    );
+    assert!(matches!(result, Err(Error::Timeout { .. })), "{result:?}");
+    assert!(
+        p.app_by_pid_calls.load(std::sync::atomic::Ordering::SeqCst) > 1,
+        "the lookup must keep retrying not-found before giving up"
+    );
+    assert_eq!(
+        p.terminal_failure_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the provider is asked once, after the loop, not per attempt"
+    );
+}
+
+#[test]
+fn by_pid_with_keeps_not_found_when_the_provider_has_no_better_answer() {
+    let p = Arc::new(AppByPidOverrideProvider {
+        inner: multi_app_provider(),
+        app_by_pid_calls: std::sync::atomic::AtomicUsize::new(0),
+        on_app_by_pid: Box::new(|pid| {
+            Err(Error::selector_not_matched(format!(
+                "application with pid={pid}"
+            )))
+        }),
+        terminal_failure: None,
+        terminal_failure_calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let result = App::by_pid_with(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        100,
+        std::time::Duration::ZERO,
+    );
+    assert!(
+        matches!(result, Err(Error::SelectorNotMatched { .. })),
+        "{result:?}"
     );
 }

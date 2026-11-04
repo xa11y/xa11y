@@ -221,6 +221,30 @@ Line 3</textarea>
     </div>
   </fieldset>
 
+  <!-- Password entry (#522): the `password` state. Last on the page so it is
+       never the first text_field a test picks up. -->
+  <fieldset>
+    <legend>Secret</legend>
+    <div class="row">
+      <label for="password-field">Password</label>
+      <input type="password" id="password-field" aria-label="Password" />
+    </div>
+    <!-- Motion for Locator.wait_stable (#530). "Start slide" restarts a
+         three-second slide of "Slide target" along the track; it rests at the
+         far end. The slide moves the layout box (`left`), not a transform,
+         so the accessibility bounds move with it on every engine. It sits in
+         this fieldset because the Dynamic one sets its grid row's height:
+         a row there made the page taller than the window (see the note at
+         the top of the stylesheet), and here it fits in that row as is. -->
+    <div class="row">
+      <button id="start-slide-button" aria-label="Start slide">Start slide</button>
+      <div id="slide-track" style="position: relative; width: 180px; height: 28px;">
+        <button id="slide-target" aria-label="Slide target"
+                style="position: absolute; top: 0; left: 120px; width: 60px;">Target</button>
+      </div>
+    </div>
+  </fieldset>
+
   <script>
     // OK button enables Cancel
     document.getElementById('ok-button').addEventListener('click', () => {
@@ -264,6 +288,26 @@ Line 3</textarea>
     document.getElementById('remove-item-button').addEventListener('click', () => {
       const last = itemsList.lastElementChild;
       if (last) itemsList.removeChild(last);
+    });
+
+    // Start slide restarts a 3 s slide of the target, 0 → 120 px, one step
+    // every 30 ms, so every 100 ms wait_stable poll sees a new position.
+    const slideTarget = document.getElementById('slide-target');
+    const SLIDE_MS = 3000;
+    const SLIDE_TO_PX = 120;
+    let slideTimer = null;
+    document.getElementById('start-slide-button').addEventListener('click', () => {
+      if (slideTimer !== null) clearInterval(slideTimer);
+      const started = performance.now();
+      slideTarget.style.left = '0px';
+      slideTimer = setInterval(() => {
+        const t = Math.min((performance.now() - started) / SLIDE_MS, 1);
+        slideTarget.style.left = `${Math.round(t * SLIDE_TO_PX)}px`;
+        if (t >= 1) {
+          clearInterval(slideTimer);
+          slideTimer = null;
+        }
+      }, 30);
     });
   </script>
 </body>

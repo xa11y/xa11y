@@ -9,10 +9,10 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use windows::Win32::Foundation::GetLastError;
+use windows::Win32::Foundation::{GetLastError, HWND, POINT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, SendInput, VkKeyScanExW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
-    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+    GetKeyboardLayout, VkKeyScanExW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_0,
@@ -24,13 +24,27 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_SPACE, VK_T, VK_TAB, VK_U, VK_UP, VK_V, VK_W, VK_X,
     VK_Y, VK_Z,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
 use xa11y_core::{Error, Result};
+
+/// Where a batch of input will land, for the UIPI pre-flight in
+/// [`crate::uipi::check_target`].
+#[derive(Clone, Copy)]
+enum Target {
+    /// Keyboard input goes to the foreground window.
+    Keyboard,
+    /// Mouse input goes to the window under this desktop point.
+    PointerAt(Point),
+    /// Mouse input at wherever the pointer already is.
+    PointerHere,
+    /// No pre-flight. For release events (`pointer_up`, `key_up`), which must
+    /// never be refused: a refused release would leave a button or key held.
+    /// Also for moves while a button is down, when mouse capture, not the
+    /// window under the point, decides where the input goes.
+    Unchecked,
+}
 
 /// One notch of a physical mouse wheel. Matches Win32's `WHEEL_DELTA` macro.
 const WHEEL_DELTA: i32 = 120;
@@ -51,6 +65,9 @@ pub struct WindowsInputProvider {
     /// says would leave the original key stuck down, so `key_up` releases the
     /// key `key_down` actually pressed.
     held_chars: Mutex<HashMap<char, VIRTUAL_KEY>>,
+    /// Mouse buttons currently held through this provider. While any is
+    /// down, moves are not pre-flighted (see [`Target::Unchecked`]).
+    buttons_down: std::sync::atomic::AtomicU32,
 }
 
 impl WindowsInputProvider {
@@ -63,11 +80,10 @@ impl WindowsInputProvider {
         Ok(Self::default())
     }
 
-    fn send(&self, inputs: &[INPUT]) -> Result<()> {
+    fn send(&self, dpi: &crate::dpi::DpiScope, inputs: &[INPUT], target: Target) -> Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let size = std::mem::size_of::<INPUT>() as i32;
-        // SAFETY: `inputs` is a valid slice and `size` matches `INPUT`.
-        let sent = unsafe { SendInput(inputs, size) };
+        self.preflight(dpi, target)?;
+        let sent = crate::coords::send_input(dpi, inputs);
         if sent as usize != inputs.len() {
             // SAFETY: GetLastError takes no args and is always safe to call.
             let code = unsafe { GetLastError().0 } as i64;
@@ -80,6 +96,29 @@ impl WindowsInputProvider {
             });
         }
         Ok(())
+    }
+
+    /// UIPI drops input to a higher-integrity window while SendInput still
+    /// counts every event as sent, so check where it will land before posting
+    /// (issue #503).
+    fn preflight(&self, dpi: &crate::dpi::DpiScope, target: Target) -> Result<()> {
+        let (hwnd, what) = match target {
+            Target::Unchecked => (HWND::default(), "input"),
+            // SAFETY: no arguments.
+            Target::Keyboard => (unsafe { GetForegroundWindow() }, "keyboard input"),
+            Target::PointerAt(p) => (
+                crate::coords::window_from_point(dpi, POINT { x: p.x, y: p.y }),
+                "mouse input",
+            ),
+            Target::PointerHere => {
+                let p = crate::coords::cursor_pos(dpi).map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("GetCursorPos failed while checking the mouse target: {e}"),
+                })?;
+                (crate::coords::window_from_point(dpi, p), "mouse input")
+            }
+        };
+        crate::uipi::check_target(hwnd, what)
     }
 }
 
@@ -114,6 +153,43 @@ fn key_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     }
 }
 
+/// One tap `type_text` sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Typed {
+    /// A UTF-16 code unit, as a `KEYEVENTF_UNICODE` tap.
+    Unit(u16),
+    /// A line break, as a `VK_RETURN` tap.
+    LineBreak,
+}
+
+/// What `type_text` sends for `text`.
+///
+/// Line breaks are the Enter key, not Unicode CR / LF taps. Two reasons:
+/// a Win32 / WinForms edit control turns a `WM_CHAR` CR *and* a `WM_CHAR` LF
+/// into a line break each, so `"\r\n"` sent unit by unit typed two of them
+/// (issue #498); and WPF's TextBox drops a Unicode CR or LF altogether and
+/// starts a new line only on the Enter key. Enter is how a person types a
+/// line break, so every control handles it.
+///
+/// A `"\r\n"` pair is one break, and a lone CR or a lone LF is one break
+/// each, so `"\n\r"` and `"\r\r"` are two. The pairing is per call: a CR
+/// ending one `type_text` call and an LF starting the next are two breaks.
+fn typed_events(text: &str) -> Vec<Typed> {
+    const CR: u16 = b'\r' as u16;
+    const LF: u16 = b'\n' as u16;
+    let mut out = Vec::with_capacity(text.len());
+    let mut prev = None;
+    for unit in text.encode_utf16() {
+        match unit {
+            LF if prev == Some(CR) => {}
+            CR | LF => out.push(Typed::LineBreak),
+            _ => out.push(Typed::Unit(unit)),
+        }
+        prev = Some(unit);
+    }
+    out
+}
+
 fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
     let mut flags = KEYEVENTF_UNICODE;
     if key_up {
@@ -135,14 +211,9 @@ fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
 
 /// Normalize a physical screen pixel to the 0..=65535 absolute coordinate
 /// range expected by `SendInput` with `MOUSEEVENTF_VIRTUALDESK`.
-fn to_absolute(x: i32, y: i32) -> (i32, i32) {
-    // SAFETY: GetSystemMetrics takes a constant and returns i32; always safe.
-    let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
-    let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
-    let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1);
-    let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(1);
-    // +vw/2 / vw biases toward the logical centre of each pixel (Microsoft's
-    // documented formula for normalised absolute mouse coordinates).
+fn to_absolute(dpi: &crate::dpi::DpiScope, x: i32, y: i32) -> (i32, i32) {
+    let (vx, vy, vw, vh) = crate::coords::virtual_screen(dpi);
+    let (vw, vh) = (vw.max(1), vh.max(1));
     let ax = (((x - vx) as i64 * 65535 + (vw as i64 / 2)) / vw as i64) as i32;
     let ay = (((y - vy) as i64 * 65535 + (vh as i64 / 2)) / vh as i64) as i32;
     (ax, ay)
@@ -345,30 +416,106 @@ fn button_down_up(button: MouseButton) -> (u32, u32) {
     }
 }
 
+// Every method enters a `DpiScope`: they all read or produce coordinates
+// (bounds in snapshots, window geometry, input points), which Windows answers
+// in the calling thread's DPI space (issue #506).
 impl InputProvider for WindowsInputProvider {
     fn pointer_move(&self, to: Point) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         // Windows Point and Element::bounds use physical desktop pixels.
-        let (ax, ay) = to_absolute(to.x, to.y);
+        let (ax, ay) = to_absolute(&dpi, to.x, to.y);
         let input = mouse_input(
             MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
             ax,
             ay,
             0,
         );
-        self.send(&[input])
+        // While a button is held, capture routes the move, not the window
+        // under the point, and refusing it would strand the held button.
+        let target = if self.buttons_down.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            Target::Unchecked
+        } else {
+            Target::PointerAt(to)
+        };
+        self.send(&dpi, &[input], target)
     }
 
     fn pointer_down(&self, button: MouseButton) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         let (down, _) = button_down_up(button);
-        self.send(&[mouse_input(down, 0, 0, 0)])
+        self.send(&dpi, &[mouse_input(down, 0, 0, 0)], Target::PointerHere)?;
+        self.buttons_down
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     fn pointer_up(&self, button: MouseButton) -> Result<()> {
+        // Entering the scope can fail before anything is sent, leaving the
+        // button or key held. That is acceptable: the result is deterministic
+        // per thread (the thread's awareness and whether it may switch do not
+        // change between calls, unless the host changes this thread's
+        // awareness in between), so the matching down on this thread would
+        // already have failed the same way and pressed nothing.
+        let dpi = crate::dpi::DpiScope::enter()?;
         let (_, up) = button_down_up(button);
-        self.send(&[mouse_input(up, 0, 0, 0)])
+        // Never refused: a release must always reach the wire.
+        let sent = self.send(&dpi, &[mouse_input(up, 0, 0, 0)], Target::Unchecked);
+        // Saturating, for an up with no matching down through this provider.
+        // A compare-exchange loop rather than `fetch_update`, which newer
+        // toolchains deprecate and the MSRV has no replacement for.
+        let mut n = self.buttons_down.load(std::sync::atomic::Ordering::Acquire);
+        while let Err(current) = self.buttons_down.compare_exchange_weak(
+            n,
+            n.saturating_sub(1),
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            n = current;
+        }
+        sent
+    }
+
+    fn pointer_drag(
+        &self,
+        from: Point,
+        to: Point,
+        button: MouseButton,
+        duration: std::time::Duration,
+    ) -> Result<()> {
+        // Mirrors core's default `InputProvider::pointer_drag` (same step
+        // interval and interpolation); keep the two in step. The only
+        // addition is the pre-flight below.
+        // Pre-flight both ends before anything is pressed, so a refusal can
+        // never strand a held button mid-drag. The moves in between run
+        // unchecked once the button is down (see `pointer_move`).
+        {
+            let dpi = crate::dpi::DpiScope::enter()?;
+            self.preflight(&dpi, Target::PointerAt(from))?;
+            self.preflight(&dpi, Target::PointerAt(to))?;
+        }
+        const STEP: std::time::Duration = std::time::Duration::from_millis(16);
+        self.pointer_move(from)?;
+        self.pointer_down(button)?;
+        let steps = (duration.as_millis() / STEP.as_millis().max(1)).max(1) as i32;
+        let moved = (|| {
+            for i in 1..=steps {
+                let t = f64::from(i) / f64::from(steps);
+                let x = from.x + (f64::from(to.x - from.x) * t).round() as i32;
+                let y = from.y + (f64::from(to.y - from.y) * t).round() as i32;
+                self.pointer_move(Point::new(x, y))?;
+                if i < steps {
+                    std::thread::sleep(STEP);
+                }
+            }
+            Ok(())
+        })();
+        // Release whatever happened to the moves, then report the first error.
+        let released = self.pointer_up(button);
+        moved.and(released)
     }
 
     fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         if count == 0 {
             return Ok(());
         }
@@ -378,32 +525,46 @@ impl InputProvider for WindowsInputProvider {
         // bookkeeps the click-count (double/triple click) for us when the
         // calls arrive within the OS double-click time.
         for _ in 0..count {
-            self.send(&[mouse_input(down, 0, 0, 0), mouse_input(up, 0, 0, 0)])?;
+            self.send(
+                &dpi,
+                &[mouse_input(down, 0, 0, 0), mouse_input(up, 0, 0, 0)],
+                Target::PointerAt(at),
+            )?;
         }
         Ok(())
     }
 
     fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         self.pointer_move(at)?;
         let step = WHEEL_DELTA;
         if delta.dy != 0 {
             // `Input.dy > 0` means scroll content down per module docs, which
             // maps to a *positive* wheel delta on Win32 (wheel rolled forward).
-            self.send(&[mouse_input(MOUSEEVENTF_WHEEL.0, 0, 0, delta.dy * step)])?;
+            self.send(
+                &dpi,
+                &[mouse_input(MOUSEEVENTF_WHEEL.0, 0, 0, delta.dy * step)],
+                Target::PointerAt(at),
+            )?;
         }
         if delta.dx != 0 {
-            self.send(&[mouse_input(MOUSEEVENTF_HWHEEL.0, 0, 0, delta.dx * step)])?;
+            self.send(
+                &dpi,
+                &[mouse_input(MOUSEEVENTF_HWHEEL.0, 0, 0, delta.dx * step)],
+                Target::PointerAt(at),
+            )?;
         }
         Ok(())
     }
 
     fn key_down(&self, key: &Key) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         let (vk, extended) = vk_for(key)?;
         let mut flags = KEYBD_EVENT_FLAGS(0);
         if extended {
             flags |= KEYEVENTF_EXTENDEDKEY;
         }
-        self.send(&[key_input(vk, flags)])?;
+        self.send(&dpi, &[key_input(vk, flags)], Target::Keyboard)?;
         if let Key::Char(c) = key {
             self.held_chars
                 .lock()
@@ -414,6 +575,13 @@ impl InputProvider for WindowsInputProvider {
     }
 
     fn key_up(&self, key: &Key) -> Result<()> {
+        // Entering the scope can fail before anything is sent, leaving the
+        // button or key held. That is acceptable: the result is deterministic
+        // per thread (the thread's awareness and whether it may switch do not
+        // change between calls, unless the host changes this thread's
+        // awareness in between), so the matching down on this thread would
+        // already have failed the same way and pressed nothing.
+        let dpi = crate::dpi::DpiScope::enter()?;
         // Release the key `key_down` pressed, not what the layout says now.
         let held = match key {
             Key::Char(c) => self
@@ -432,7 +600,8 @@ impl InputProvider for WindowsInputProvider {
         if extended {
             flags |= KEYEVENTF_EXTENDEDKEY;
         }
-        self.send(&[key_input(vk, flags)])?;
+        // Never refused: a release must always reach the wire.
+        self.send(&dpi, &[key_input(vk, flags)], Target::Unchecked)?;
         if let Key::Char(c) = key {
             self.held_chars
                 .lock()
@@ -443,18 +612,28 @@ impl InputProvider for WindowsInputProvider {
     }
 
     fn type_text(&self, text: &str) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         // Use KEYEVENTF_UNICODE so case/shift/IME behaviour is produced by
         // the OS text-input path rather than by synthesising shift chords
         // against whatever keyboard layout happens to be active.
-        let mut inputs: Vec<INPUT> = Vec::with_capacity(text.len() * 2);
-        for code_unit in text.encode_utf16() {
-            inputs.push(unicode_input(code_unit, false));
-            inputs.push(unicode_input(code_unit, true));
+        let events = typed_events(text);
+        let mut inputs: Vec<INPUT> = Vec::with_capacity(events.len() * 2);
+        for event in events {
+            match event {
+                Typed::Unit(code_unit) => {
+                    inputs.push(unicode_input(code_unit, false));
+                    inputs.push(unicode_input(code_unit, true));
+                }
+                Typed::LineBreak => {
+                    inputs.push(key_input(VK_RETURN, KEYBD_EVENT_FLAGS(0)));
+                    inputs.push(key_input(VK_RETURN, KEYEVENTF_KEYUP));
+                }
+            }
         }
         if inputs.is_empty() {
             return Ok(());
         }
-        self.send(&inputs)
+        self.send(&dpi, &inputs, Target::Keyboard)
     }
 }
 
@@ -496,5 +675,53 @@ mod keymap_tests {
             decode_vk_scan('/', VK_OEM_2.0 as i16, 0x409).unwrap(),
             VK_OEM_2
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{typed_events, Typed};
+
+    /// Render the events as text, with `⏎` for each Enter tap.
+    fn typed(text: &str) -> String {
+        typed_events(text)
+            .into_iter()
+            .map(|e| match e {
+                Typed::Unit(u) => String::from_utf16(&[u]).unwrap_or_else(|_| "?".into()),
+                Typed::LineBreak => "\u{23CE}".into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn crlf_is_one_enter() {
+        assert_eq!(typed("line1\r\nline2"), "line1\u{23CE}line2");
+        assert_eq!(typed("a\r\nb\r\nc"), "a\u{23CE}b\u{23CE}c");
+    }
+
+    #[test]
+    fn lone_breaks_are_one_enter_each() {
+        assert_eq!(typed("a\nb"), "a\u{23CE}b");
+        assert_eq!(typed("a\rb"), "a\u{23CE}b");
+        assert_eq!(typed("\n"), "\u{23CE}");
+        assert_eq!(typed("\r"), "\u{23CE}");
+    }
+
+    #[test]
+    fn only_the_cr_lf_pair_collapses() {
+        // LF then CR is two breaks, as is CR CR; CR CR LF is CR + CRLF.
+        assert_eq!(typed("\n\r"), "\u{23CE}\u{23CE}");
+        assert_eq!(typed("\r\r"), "\u{23CE}\u{23CE}");
+        assert_eq!(typed("\r\r\n"), "\u{23CE}\u{23CE}");
+        // The LF after a collapsed pair is a break of its own.
+        assert_eq!(typed("\r\n\n"), "\u{23CE}\u{23CE}");
+    }
+
+    #[test]
+    fn surrogate_pairs_pass_through_unit_by_unit() {
+        let events = typed_events("x\u{1F600}");
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert!(events.iter().all(|e| matches!(e, Typed::Unit(_))));
+        assert!(typed_events("").is_empty());
     }
 }

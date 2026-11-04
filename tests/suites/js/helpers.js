@@ -19,11 +19,15 @@ const { App, SelectorNotMatchedError, PlatformError, TimeoutError, ActionNotSupp
 
 const APP_CONFIG = {
   accesskit: {
+    // "Start slide" / "Slide target" (#530): required, so a missing widget
+    // fails the waitStable tests instead of skipping them.
+    hasSlideWidget: true,
     okButtonName: 'Submit',        // AccessKit test app uses "Submit" as the primary button
     textFieldName: 'Name',
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    passwordFieldName: 'Password', // password entry (#522)
   },
   qt: {
     okButtonName: 'OK',
@@ -52,11 +56,15 @@ const APP_CONFIG = {
     hasRadio: true,
   },
   tauri: {
+    // "Start slide" / "Slide target" (#530): required, so a missing widget
+    // fails the waitStable tests instead of skipping them.
+    hasSlideWidget: true,
     okButtonName: 'OK',
     textFieldName: 'Search',
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    passwordFieldName: 'Password', // password entry (#522)
   },
   electron: {
     okButtonName: 'OK',           // Electron index.html has <button id="ok">OK</button>
@@ -64,6 +72,7 @@ const APP_CONFIG = {
     minButtons: 2,                 // "OK" + "Cancel"
     hasCheckbox: false,
     hasRadio: false,
+    passwordFieldName: 'Password', // password entry (#522)
   },
   egui: {
     okButtonName: 'OK',           // egui sets the AccessKit name from the visible label
@@ -78,6 +87,7 @@ const APP_CONFIG = {
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    passwordFieldName: 'Password', // password entry (#522)
   },
   wpf: {
     okButtonName: 'OK',
@@ -85,12 +95,23 @@ const APP_CONFIG = {
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    passwordFieldName: 'Password', // password entry (#522)
     dialogButtonName: 'Open Dialog',
     dialogName: 'Sample Dialog',
     siblingButtonName: 'Open Sibling',
     siblingName: 'Sample Sibling',
     duplicateButtonName: 'Open Duplicate Windows',
     duplicateWindowName: 'Duplicate Window',
+  },
+  uwp: {
+    okButtonName: 'OK',
+    // The XAML TextBox reads as text_field "Search" with a nested child
+    // text_field "Search" (same name and value), so the exact-one lookup this
+    // key drives matches two. The Python suite still reads the field.
+    textFieldName: null,
+    minButtons: 2,
+    hasCheckbox: true,
+    hasRadio: true,
   },
 };
 
@@ -110,6 +131,9 @@ const APP_NAMES_BY_APP = {
   egui: ['xa11y-egui-test-app'],
   winforms: ['xa11y-winforms-test-app'],
   wpf: ['xa11y-wpf-test-app'],
+  // TODO(#497): drop 'ApplicationFrameHost' — see _app_command("uwp") in
+  // tests/harness/launch.py.
+  uwp: ['xa11y UWP Test', 'xa11y-uwp-test-app', 'ApplicationFrameHost'],
 };
 
 const appEnv = process.env.XA11Y_TEST_APP || 'accesskit';

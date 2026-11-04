@@ -847,10 +847,6 @@ mod tests {
     /// duplicates (issue #514). Windows minted a fresh handle per read and
     /// returned nested buttons (title bar, toolbar) once per `*` ancestor
     /// (issue #571).
-    ///
-    /// Not on macOS until #548 (the #514 fix) lands; that change drops this
-    /// gate.
-    #[cfg(not(target_os = "macos"))]
     #[test]
     #[ignore]
     fn descendant_search_returns_each_element_once() {
@@ -1105,6 +1101,21 @@ mod tests {
         assert!(submit.bounds.is_some(), "Submit button should have bounds");
     }
 
+    /// A 0x0 extents reply is a sentinel, not a point to click (issue #489):
+    /// the AccessKit node with a zero-size rectangle reports no bounds.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn element_bounds_none_for_zero_size_extents() {
+        let app = h::app_root();
+        let marker = h::named(&app, "Zero-size Marker");
+        assert!(
+            marker.bounds.is_none(),
+            "0x0 extents must read as no bounds, got {:?}",
+            marker.bounds
+        );
+    }
+
     #[test]
     #[ignore]
     fn element_actions_list_on_button() {
@@ -1195,6 +1206,42 @@ mod tests {
         assert!(submit.states.visible, "Submit should be visible");
     }
 
+    /// `hidden_reason` is set exactly when `visible` is false, on every
+    /// element the provider reports (#590). A visible element must not carry
+    /// a reason, and a hidden one must say why, even if only `Unknown`.
+    #[test]
+    #[ignore]
+    fn hidden_reason_is_set_exactly_when_not_visible() {
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
+        assert_eq!(
+            submit.states.hidden_reason, None,
+            "a visible Submit must report no hidden_reason"
+        );
+        let all = app
+            .locator("*")
+            .elements()
+            .expect("enumerating the test app's tree");
+        assert!(!all.is_empty(), "the test app's tree must not be empty");
+        let broken: Vec<_> = all
+            .iter()
+            .filter(|e| e.states.hidden_reason.is_some() == e.states.visible)
+            .map(|e| {
+                (
+                    e.role,
+                    e.name.clone(),
+                    e.states.visible,
+                    e.states.hidden_reason,
+                )
+            })
+            .collect();
+        assert!(
+            broken.is_empty(),
+            "hidden_reason must be Some exactly when visible is false; \
+             these elements break it: {broken:?}"
+        );
+    }
+
     #[test]
     #[ignore]
     fn state_focused_after_focus_action() {
@@ -1272,6 +1319,31 @@ mod tests {
                 "Text entry should be editable"
             );
         }
+    }
+
+    /// AccessKit's `PasswordInput` reaches every platform as its native
+    /// secure-text field (AXSecureTextField subrole, AT-SPI `password text`,
+    /// UIA `IsPassword`). xa11y keeps the `text_field` role and sets
+    /// `password` (#522); the ordinary Name field next to it stays unflagged.
+    #[test]
+    #[ignore]
+    fn state_password_on_password_field() {
+        let app = h::app_root();
+        let password = h::one(&app, r#"text_field[name="Password"]"#);
+        assert_eq!(password.role, Role::TextField);
+        assert!(password.states.password, "{:?}", password.states);
+
+        let flagged: Vec<Option<String>> = app
+            .locator(r#"text_field[password="true"]"#)
+            .elements()
+            .expect("password selector")
+            .into_iter()
+            .map(|e| e.name.clone())
+            .collect();
+        assert_eq!(flagged, vec![Some("Password".to_string())]);
+
+        let name = h::one(&app, r#"text_field[name="Name"]"#);
+        assert!(!name.states.password, "{:?}", name.states);
     }
 
     #[test]

@@ -16,10 +16,11 @@ use softbuffer::{Context, Surface};
 #[cfg(target_os = "linux")]
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::{Window, WindowId},
 };
 
@@ -122,6 +123,52 @@ const OPEN_DIALOG_BTN: NodeId = NodeId(75);
 // A read-only text input. AT-SPI writes to it must be refused from its
 // READ_ONLY state rather than reported as success (issue #486).
 const READONLY_FIELD: NodeId = NodeId(76);
+// A node whose bounds are a zero-size rectangle. AT-SPI GetExtents reports
+// 0x0 for it, which is "no bounds", not a clickable point (issue #489).
+const ZERO_SIZE_NODE: NodeId = NodeId(77);
+
+// A password entry (#522): AccessKit's `PasswordInput` reaches each platform
+// as its native secure-text field (AXSecureTextField subrole, AT-SPI
+// `password text`, UIA `IsPassword`), which is what the `password` state
+// reads. Late in document order so it is not the first `text_field` a test
+// picks up, and shifts no `:nth(n)` index another test relies on.
+const PASSWORD_FIELD: NodeId = NodeId(79);
+
+// A label whose text is far larger than any per-field cap a consumer applies
+// (the MCP server's `MAX_FIELD_BYTES`). Late in document order so it shifts
+// no `:nth(n)` index another test relies on.
+const LONG_TEXT: NodeId = NodeId(78);
+
+// A button that slides across the window when "Start slide" is pressed
+// (issue #530): `Locator::wait_stable` has to wait for its bounds to stop
+// changing. At rest it sits at its end position, so it is stable until
+// pressed. Late in document order so it shifts no `:nth(n)` index.
+const START_SLIDE_BTN: NodeId = NodeId(80);
+const SLIDE_TARGET: NodeId = NodeId(81);
+/// How long one slide takes. Long enough that a short `wait_stable` started
+/// right after the press is guaranteed to see it moving.
+const SLIDE_DURATION: Duration = Duration::from_millis(3000);
+/// Tree updates while sliding. Well under the 100 ms `wait_*` poll interval,
+/// so two polls never see the same mid-slide position.
+const SLIDE_TICK: Duration = Duration::from_millis(30);
+const SLIDE_FROM_X: f64 = 16.0;
+const SLIDE_TO_X: f64 = 216.0;
+
+/// The slide target's left edge `elapsed` into a slide.
+fn slide_x(elapsed: Duration) -> f64 {
+    let t = (elapsed.as_secs_f64() / SLIDE_DURATION.as_secs_f64()).min(1.0);
+    SLIDE_FROM_X + (SLIDE_TO_X - SLIDE_FROM_X) * t
+}
+
+/// The long label's text: a fixed prefix to select it by, then ~4 KiB of
+/// ASCII filler.
+fn long_text() -> String {
+    let mut text = String::from("Long text: ");
+    while text.len() < 4096 {
+        text.push_str("The quick brown fox jumps over the lazy dog. ");
+    }
+    text
+}
 
 // Dynamic items start at NodeId(100) to leave room for future static nodes
 const DYNAMIC_ITEM_BASE: u64 = 100;
@@ -154,6 +201,8 @@ struct AppState {
     announcement_counter: u32,
     /// ScrollIntoView requests received by the Cherry list item.
     cherry_scroll_requests: u32,
+    /// When the current slide started; `None` once it has finished.
+    slide_started: Option<Instant>,
 }
 
 impl AppState {
@@ -173,6 +222,7 @@ impl AppState {
             announcement_text: String::new(),
             announcement_counter: 0,
             cherry_scroll_requests: 0,
+            slide_started: None,
         }
     }
 }
@@ -212,6 +262,7 @@ fn build_tree(state: &AppState) -> TreeUpdate {
 
     // ── Main Panel ──
     build_main_panel(state, &mut nodes);
+    build_slide(state, &mut nodes);
 
     // ── Lists Panel ──
     build_lists_panel(state, &mut nodes);
@@ -335,6 +386,12 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         WELCOME_TEXT,
         NAME_ROW,
         BUTTON_ROW,
+        // Right after the button row so that, in document order, these two
+        // bounded buttons come before every bounds-less one (More Details,
+        // Add, Remove, Announce): annotation numbering counts matches, and a
+        // drawn button after an undrawn one leaves a gap in the legend.
+        START_SLIDE_BTN,
+        SLIDE_TARGET,
         CHECKBOX,
         RADIO_GROUP,
         SLIDER,
@@ -356,7 +413,11 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     // Name row
     let mut name_row = Node::new(Role::GenericContainer);
     name_row.set_label("Name Row");
-    name_row.set_children(vec![NAME_LABEL, NAME_FIELD]);
+    // The zero-size node sits right after a sibling with real bounds:
+    // AccessKit drops a child whose box does not intersect a clipping
+    // parent's unless an adjacent sibling's does, and an empty box never
+    // intersects anything.
+    name_row.set_children(vec![NAME_LABEL, NAME_FIELD, ZERO_SIZE_NODE]);
     nodes.push((NAME_ROW, name_row));
 
     let mut name_label = Node::new(Role::Label);
@@ -717,6 +778,35 @@ fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     }
 }
 
+/// "Start slide" restarts a slide of "Slide target" that ends where the
+/// target already rests; `about_to_wait` drives the frames.
+fn build_slide(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
+    let mut start_slide = Node::new(Role::Button);
+    start_slide.set_label("Start slide");
+    start_slide.add_action(Action::Click);
+    start_slide.set_bounds(Rect {
+        x0: 16.0,
+        y0: 540.0,
+        x1: 116.0,
+        y1: 565.0,
+    });
+    nodes.push((START_SLIDE_BTN, start_slide));
+
+    let x = state
+        .slide_started
+        .map_or(SLIDE_TO_X, |t| slide_x(t.elapsed()));
+    let mut slide_target = Node::new(Role::Button);
+    slide_target.set_label("Slide target");
+    slide_target.add_action(Action::Click);
+    slide_target.set_bounds(Rect {
+        x0: x,
+        y0: 500.0,
+        x1: x + 80.0,
+        y1: 530.0,
+    });
+    nodes.push((SLIDE_TARGET, slide_target));
+}
+
 fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     let mut extra_panel = Node::new(Role::GenericContainer);
     extra_panel.set_label("Extra Panel");
@@ -731,8 +821,23 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         ANNOUNCE_BTN,
         ANNOUNCE_LIVE_REGION,
         READONLY_FIELD,
+        PASSWORD_FIELD,
+        LONG_TEXT,
     ]);
     nodes.push((EXTRA_PANEL, extra_panel));
+
+    let mut password = Node::new(Role::PasswordInput);
+    password.set_label("Password");
+    password.add_action(Action::Focus);
+    nodes.push((PASSWORD_FIELD, password));
+
+    // Label and value both, as for the status text: AT-SPI reads a Label's
+    // name from its value, the other platforms from its label.
+    let mut long = Node::new(Role::Label);
+    let text = long_text();
+    long.set_label(text.as_str());
+    long.set_value(text);
+    nodes.push((LONG_TEXT, long));
 
     // Announce button + live region. Pressing the button updates the live
     // region's value, which on macOS translates to
@@ -756,6 +861,17 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     readonly_field.set_value("locked");
     readonly_field.set_read_only();
     nodes.push((READONLY_FIELD, readonly_field));
+    let mut zero_size = Node::new(Role::Label);
+    // Label + value: AT-SPI reads a Label's name from its value.
+    zero_size.set_label("Zero-size Marker");
+    zero_size.set_value("Zero-size Marker");
+    zero_size.set_bounds(Rect {
+        x0: 20.0,
+        y0: 20.0,
+        x1: 20.0,
+        y1: 20.0,
+    });
+    nodes.push((ZERO_SIZE_NODE, zero_size));
 
     let mut link = Node::new(Role::Link);
     link.set_label("Visit Example");
@@ -841,6 +957,13 @@ fn handle_action(request: &ActionRequest, state: &mut AppState) -> bool {
     let action = request.action;
 
     match (target, action) {
+        // Restart the slide from its start position; `about_to_wait` drives
+        // the frames.
+        (id, Action::Click) if id == START_SLIDE_BTN => {
+            state.slide_started = Some(Instant::now());
+            true
+        }
+
         // Submit button
         (id, Action::Click) if id == SUBMIT_BTN => {
             if state.checkbox_checked {
@@ -1233,8 +1356,25 @@ impl ApplicationHandler<AccessKitEvent> for Application {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.main.is_none() {
+        let Some(main) = self.main.as_mut() else {
             event_loop.exit();
+            return;
+        };
+        // Advance a running slide: push one frame, then sleep until the next
+        // tick. The last frame lands exactly on the end position and stops
+        // the ticking, so an idle app goes back to waiting for events.
+        match main.state.slide_started {
+            Some(started) => {
+                if started.elapsed() >= SLIDE_DURATION {
+                    main.state.slide_started = None;
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                } else {
+                    event_loop
+                        .set_control_flow(ControlFlow::WaitUntil(Instant::now() + SLIDE_TICK));
+                }
+                main.adapter.update_if_active(|| build_tree(&main.state));
+            }
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }

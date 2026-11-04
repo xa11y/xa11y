@@ -9,6 +9,16 @@
 //     pattern (DataGridViewCell.DataGridViewCellAccessibleObject), exercising
 //     the row-vs-cell disambiguation in xa11y-windows/src/uia.rs against a
 //     Microsoft framework rather than Qt.
+//   * A "Legacy Tile" whose accessible object is an MSAA chart with a
+//     default action and no UIA activation pattern, so `press` must reach
+//     LegacyIAccessible.DoDefaultAction (issue #505).
+//   * A ComboBox at the top of an overflowing AutoScroll panel ("Scroll
+//     Panel"): its drop-down is a popup window that extends past the panel,
+//     and must not be clipped to it.
+//   * An AutoScroll panel of ten buttons ("Long Pane"). Controls scrolled
+//     out of it keep `IsOffscreen = false`, and the provider clips them to
+//     the panel's viewport (issue #502). A ListBox cannot show this: WinForms
+//     and WPF both report scrolled-out list items offscreen themselves.
 //   * The WinForms UIA provider surface generally: control types come from
 //     each AccessibleObject's Role via AccessibleRoleControlTypeMap, and the
 //     top-level Form's type comes from the HWND host provider.
@@ -78,7 +88,7 @@ internal sealed class TestForm : Form
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.TopDown,
-            // Wrap into a second column instead of scrolling, so every widget
+            // Wrap into further columns instead of scrolling, so every widget
             // stays on screen (an offscreen widget is still in the UIA tree,
             // but keeping it visible makes failures easier to reproduce by eye).
             WrapContents = true,
@@ -95,6 +105,14 @@ internal sealed class TestForm : Form
         page.Controls.Add(BuildList());
         page.Controls.Add(BuildTable());
         page.Controls.Add(BuildDynamic());
+        page.Controls.Add(BuildScrollPanel());
+        page.Controls.Add(BuildLongPane());
+        // Last, after a group that ends in a button: WinForms names an
+        // unnamed control after the Label just before it in tab order, so a
+        // group placed after one ending in a Label ("Panel Filler", "Legacy
+        // activations: N") lends its inner panel that label's name, and the
+        // legacy test's unique-label lookup then finds two.
+        page.Controls.Add(BuildLegacy());
 
         Controls.Add(page);
         Controls.Add(BuildToolStrip());
@@ -217,7 +235,18 @@ internal sealed class TestForm : Form
             Width = 260,
         };
 
-        return MakeGroup("Input", new Size(300, 70), FlowDirection.TopDown, search);
+        // Password entry (#522, #597): an `ES_PASSWORD` edit, which reports
+        // UIA `IsPassword`. The Win32 edit proxy answers ValuePattern.Value
+        // with a placeholder ("Access denied") rather than the text.
+        var password = new TextBox
+        {
+            AccessibleName = "Password",
+            Text = "hunter2",
+            UseSystemPasswordChar = true,
+            Width = 260,
+        };
+
+        return MakeGroup("Input", new Size(300, 100), FlowDirection.TopDown, search, password);
     }
 
     private static GroupBox BuildText()
@@ -272,6 +301,26 @@ internal sealed class TestForm : Form
             submit,
             addItem,
             removeItem);
+    }
+
+    private static GroupBox BuildLegacy()
+    {
+        var status = MakeLabel("Legacy activations: 0");
+        int count = 0;
+        var tile = new LegacyTile(() =>
+        {
+            count++;
+            var text = $"Legacy activations: {count}";
+            status.Text = text;
+            status.AccessibleName = text;
+        })
+        {
+            AccessibleName = "Legacy Tile",
+            Size = new Size(120, 40),
+            BackColor = Color.LightSteelBlue,
+        };
+
+        return MakeGroup("Legacy", new Size(300, 110), FlowDirection.TopDown, tile, status);
     }
 
     // ── Chrome ───────────────────────────────────────────────────────────
@@ -359,6 +408,80 @@ internal sealed class TestForm : Form
     }
 
     /// <summary>
+    ///  Ten buttons in an AutoScroll panel that shows two, scrolled to the
+    ///  top, so "Long Entry 10" is out of view while UIA still reports it on
+    ///  screen (issue #502). Kept short: every button here also lands in the
+    ///  suites' `button` selectors, and the MCP screenshot legend is capped.
+    ///  Focusing a button scrolls the panel to it, which is how the suites
+    ///  move the viewport: plain buttons have no UIA ScrollItem pattern for
+    ///  `scroll_into_view`. TabStop is off so keyboard navigation tests never
+    ///  wander in. Named apart from "Item N" so no other selector matches
+    ///  them.
+    /// </summary>
+    private static GroupBox BuildLongPane()
+    {
+        var pane = new FlowLayoutPanel
+        {
+            AccessibleName = "Long Pane",
+            AutoScroll = true,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Size = new Size(260, 60),
+        };
+        for (int i = 1; i <= 10; i++)
+        {
+            pane.Controls.Add(new Button
+            {
+                Text = $"Long Entry {i}",
+                AccessibleName = $"Long Entry {i}",
+                TabStop = false,
+                AutoSize = true,
+            });
+        }
+
+        return MakeGroup("Scrolled", new Size(300, 100), FlowDirection.TopDown, pane);
+    }
+
+    /// <summary>
+    ///  A ComboBox in a panel whose content overflows it (issue #502). The
+    ///  drop-down opens below the panel's bottom edge, as a popup window that
+    ///  UIA still lists under the combo, so its entries are visible although
+    ///  they lie outside the scrolling panel's bounds.
+    /// </summary>
+    private static GroupBox BuildScrollPanel()
+    {
+        var combo = new ComboBox
+        {
+            AccessibleName = "Panel Combo",
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Location = new Point(0, 0),
+            Width = 200,
+        };
+        combo.Items.AddRange(["Panel Choice 1", "Panel Choice 2", "Panel Choice 3"]);
+        combo.SelectedIndex = 0;
+
+        // Pushes the content past the panel's 40 px so it overflows.
+        var filler = new Label
+        {
+            Text = "Panel Filler",
+            AccessibleName = "Panel Filler",
+            Location = new Point(0, 150),
+            AutoSize = true,
+        };
+
+        var panel = new Panel
+        {
+            AccessibleName = "Scroll Panel",
+            AutoScroll = true,
+            Size = new Size(260, 40),
+        };
+        panel.Controls.Add(combo);
+        panel.Controls.Add(filler);
+
+        return MakeGroup("Overflow", new Size(300, 80), FlowDirection.TopDown, panel);
+    }
+
+    /// <summary>
     ///  The canonical WinForms grid. Cells report ControlType.DataItem plus the
     ///  TableItem pattern, which is what xa11y maps to <c>table_cell</c>; the
     ///  grid itself reports ControlType.DataGrid, which maps to <c>table</c>.
@@ -411,5 +534,44 @@ internal sealed class TestForm : Form
         };
         box.Controls.Add(flow);
         return box;
+    }
+}
+
+/// <summary>
+///  A control reachable only through its MSAA default action.
+///  <para>
+///   Its accessible object reports <see cref="AccessibleRole.Chart"/>. The
+///   MSAA proxy decides Invoke from the role and the default action together:
+///   a graphic with a default action is given Invoke, but a chart is on the
+///   proxy's never-invokable list, and a chart also implies no Toggle,
+///   SelectionItem, or ExpandCollapse. So it has a default action and no UIA
+///   activation pattern, and the only way to activate it is
+///   <c>LegacyIAccessible.DoDefaultAction</c>. That is the shape issue #505
+///   is about, and the provider's <c>press</c> must dispatch to it. The integ
+///   test asserts the pattern set, so a role that picks up a pattern fails
+///   rather than passing through Invoke.
+///  </para>
+/// </summary>
+internal sealed class LegacyTile : Control
+{
+    private readonly Action _activate;
+
+    public LegacyTile(Action activate) => _activate = activate;
+
+    protected override AccessibleObject CreateAccessibilityInstance() =>
+        new LegacyTileAccessibleObject(this);
+
+    private sealed class LegacyTileAccessibleObject : ControlAccessibleObject
+    {
+        private readonly LegacyTile _owner;
+
+        public LegacyTileAccessibleObject(LegacyTile owner)
+            : base(owner) => _owner = owner;
+
+        public override AccessibleRole Role => AccessibleRole.Chart;
+
+        public override string DefaultAction => "Activate";
+
+        public override void DoDefaultAction() => _owner._activate();
     }
 }

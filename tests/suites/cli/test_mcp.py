@@ -216,7 +216,117 @@ def test_notifications_are_not_answered(mcp):
 
 
 def test_unknown_method_is_method_not_found(mcp):
-    assert mcp.request(1, "resources/list")["error"]["code"] == -32601
+    assert mcp.request(1, "sampling/createMessage")["error"]["code"] == -32601
+
+
+# ── The agent guide: prompt, resource, and `xa11y guide` ────────────────────
+
+GUIDE_URI = "xa11y://guide"
+
+
+def _normalize(text: str) -> str:
+    """Line endings only: a Windows checkout may embed the guide with CRLF."""
+    return text.replace("\r\n", "\n")
+
+
+def _cli_guide(entry_point: list[str]) -> str:
+    result = _run(entry_point, "guide")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("# xa11y agent guide"), result.stdout[:80]
+    return _normalize(result.stdout)
+
+
+def test_both_eras_advertise_prompts_and_resources(entry_point):
+    legacy = McpSession(entry_point)
+    modern = McpSession(entry_point)
+    try:
+        caps = legacy.request(
+            1, "initialize", {"protocolVersion": LEGACY_VERSION, "capabilities": {}}
+        )["result"]["capabilities"]
+        assert {"tools", "prompts", "resources"} <= caps.keys(), caps
+        caps = modern.request(
+            1, "server/discover", {"_meta": {PROTOCOL_VERSION_META: MODERN_VERSION}}
+        )["result"]["capabilities"]
+        assert {"tools", "prompts", "resources"} <= caps.keys(), caps
+    finally:
+        legacy.kill()
+        modern.kill()
+
+
+def test_the_guide_resource_is_what_xa11y_guide_prints(mcp, entry_point):
+    """One text, three ways to reach it, from every launcher."""
+    listed = mcp.request(1, "resources/list")["result"]["resources"]
+    assert [r["uri"] for r in listed] == [GUIDE_URI]
+    assert listed[0]["mimeType"] == "text/markdown"
+    contents = mcp.request(2, "resources/read", {"uri": GUIDE_URI})["result"]["contents"]
+    assert contents[0]["uri"] == GUIDE_URI
+    assert _normalize(contents[0]["text"]) == _cli_guide(entry_point)
+
+
+def test_the_guide_prompt_is_what_xa11y_guide_prints(mcp, entry_point):
+    listed = mcp.request(1, "prompts/list")["result"]["prompts"]
+    assert [p["name"] for p in listed] == ["guide"]
+    result = mcp.request(2, "prompts/get", {"name": "guide"})["result"]
+    message = result["messages"][0]
+    assert message["role"] == "user"
+    assert _normalize(message["content"]["text"]) == _cli_guide(entry_point)
+
+
+def test_legacy_guide_results_carry_no_modern_fields(mcp):
+    for i, (method, params) in enumerate(
+        [
+            ("resources/list", None),
+            ("resources/read", {"uri": GUIDE_URI}),
+            ("prompts/list", None),
+            ("prompts/get", {"name": "guide"}),
+        ]
+    ):
+        result = mcp.request(i, method, params)["result"]
+        for key in ("resultType", "ttlMs", "cacheScope"):
+            assert key not in result, (method, key)
+
+
+def test_modern_guide_lists_and_reads_carry_the_caching_hints(entry_point):
+    session = McpSession(entry_point)
+    meta = {"_meta": {PROTOCOL_VERSION_META: MODERN_VERSION}}
+    try:
+        for i, (method, extra) in enumerate(
+            [
+                ("resources/list", {}),
+                ("resources/templates/list", {}),
+                ("resources/read", {"uri": GUIDE_URI}),
+                ("prompts/list", {}),
+            ]
+        ):
+            result = session.request(i, method, {**meta, **extra})["result"]
+            assert result["resultType"] == "complete", method
+            assert result["ttlMs"] >= 0, method
+            assert result["cacheScope"] in {"public", "private"}, method
+        got = session.request(9, "prompts/get", {**meta, "name": "guide"})["result"]
+        assert got["resultType"] == "complete"
+    finally:
+        session.kill()
+
+
+def test_an_unknown_resource_or_prompt_names_what_exists(mcp):
+    error = mcp.request(1, "resources/read", {"uri": "xa11y://nope"})["error"]
+    assert error["code"] == -32602
+    assert error["data"]["available"] == [GUIDE_URI]
+    error = mcp.request(2, "prompts/get", {"name": "nope"})["error"]
+    assert error["code"] == -32602
+    assert error["data"]["available"] == ["guide"]
+
+
+def test_the_guide_prompt_refuses_arguments(mcp):
+    """It declares none, so one sent anyway must not be silently ignored."""
+    error = mcp.request(1, "prompts/get", {"name": "guide", "arguments": {"app": "x"}})
+    assert error["error"]["code"] == -32602
+
+
+def test_xa11y_guide_takes_no_arguments_from_every_launcher(entry_point):
+    result = _run(entry_point, "guide", "--json")
+    assert result.returncode == 2, result.stderr
+    assert "usage error:" in result.stderr
 
 
 # ── Framing ──────────────────────────────────────────────────────────────────
@@ -555,9 +665,8 @@ def test_windows_lists_the_test_apps_windows(mcp, app_pid, app_name):
     process twice only runs on the unfiltered path, and only the filtered path
     pins the listing to one app for the assertions below.
 
-    Not every app exposes a window-like element (the GTK app's AT-SPI tree
-    starts at a plain group), so a count of zero is the provider answering
-    honestly — skip, since the per-app matrix is the Rust integ suite's
+    Not every app exposes a window-like element, so a count of zero is the
+    provider answering honestly — skip, since the per-app matrix is the Rust integ suite's
     ground truth and this file's point is the wire shape.
     """
     by_pid = mcp.call_tool("windows", {"pid": app_pid})["result"]
@@ -612,34 +721,87 @@ def test_windows_tool_reports_limit_truncation_honestly(mcp, app_pid):
         assert payload["truncated"] is False, payload
 
 
-def _mcp_window_target_or_none(mcp, app_pid: int, *required_actions: str):
-    """A uniquely nameable window advertising every requested action, or None."""
+def _find_mcp_window_target(
+    mcp, app_pid: int, *required_actions: str
+) -> tuple[tuple[dict, str] | None, list[tuple[str, str, list[dict]]]]:
+    """Pick a top-level window whose `role[name=...]` selector matches it alone.
+
+    A name unique among the `windows` tool's top-level windows is not enough:
+    `action` resolves the selector against the whole tree, so a descendant
+    with the same role and name makes it ambiguous. Each candidate selector
+    is therefore resolved with `find` before it is used.
+
+    Returns the target, or None plus every ambiguous candidate as
+    (selector, name, matches) for `_no_mcp_window_target` to judge.
+    """
     result = mcp.call_tool("windows", {"pid": app_pid})["result"]
     assert result["isError"] is False, result["content"]
     windows = result["structuredContent"]["windows"]
     names = [w.get("name") for w in windows]
+    ambiguous = []
     for window in windows:
         name = window.get("name")
         actions = window.get("actions", [])
         if (
-            name
-            and '"' not in name
-            and names.count(name) == 1
-            and all(action in actions for action in required_actions)
+            not name
+            or '"' in name
+            or names.count(name) != 1
+            or not all(action in actions for action in required_actions)
         ):
-            selector = f'{window["role"]}[name="{name}"]'
-            return window, selector
-    return None
+            continue
+        selector = f'{window["role"]}[name="{name}"]'
+        found = mcp.call_tool(
+            "find", {"pid": app_pid, "selector": selector, "limit": 10}
+        )["result"]
+        assert found["isError"] is False, found["content"]
+        structured = found["structuredContent"]
+        assert structured["match_count"] >= 1, (
+            f"{selector} came from `windows` but `find` matches nothing"
+        )
+        if structured["match_count"] == 1:
+            return (window, selector), ambiguous
+        ambiguous.append((selector, name, structured["matches"]))
+    return None, ambiguous
 
 
-def _mcp_window_target(mcp, app_pid: int, *required_actions: str) -> tuple[dict, str]:
-    """Return a uniquely nameable window advertising every requested action."""
-    target = _mcp_window_target_or_none(mcp, app_pid, *required_actions)
+def _is_uwp_frame_shape(name: str, matches: list[dict]) -> bool:
+    """The three same-named windows a UWP frame exposes, and nothing else.
+
+    ApplicationFrameWindow, its title-bar window (the only one that reports
+    the title as its value), and the hosted CoreWindow.
+    """
+    return len(matches) == 3 and [m.get("value") for m in matches].count(name) == 1
+
+
+def _no_mcp_window_target(
+    app_name: str, ambiguous: list[tuple[str, str, list[dict]]], what: str
+):
+    """Skip or fail when no window could be targeted by name.
+
+    Only the uwp cell may skip for ambiguity, and only for the exact UWP
+    frame shape (`_is_uwp_frame_shape`), which is matrix gap
+    `uwp_frame_window_name_shared`. Any other ambiguity, on any cell, is a
+    regression and fails. With no candidate at all the test skips, as it
+    always has.
+    """
+    for selector, name, matches in ambiguous:
+        if app_name == "uwp" and _is_uwp_frame_shape(name, matches):
+            pytest.skip(
+                "uwp_frame_window_name_shared: the UWP frame window, its title "
+                f"bar and its CoreWindow all match {selector}"
+            )
+        pytest.fail(f"{selector} is ambiguous on {app_name}: {matches}")
+    pytest.skip(f"no uniquely named window advertises {what}")
+
+
+def _mcp_window_target(
+    mcp, app_pid: int, app_name: str, *required_actions: str
+) -> tuple[dict, str]:
+    """Return a uniquely addressable window advertising every requested action."""
+    target, ambiguous = _find_mcp_window_target(mcp, app_pid, *required_actions)
     if target is not None:
         return target
-    pytest.skip(
-        "no uniquely named window advertises " + ", ".join(required_actions)
-    )
+    _no_mcp_window_target(app_name, ambiguous, ", ".join(required_actions))
 
 
 def _mcp_window_by_selector(mcp, app_pid: int, selector: str) -> dict | None:
@@ -682,7 +844,7 @@ def test_mcp_minimize_restore_mutates_and_reports_window_state(
             "MCP request cannot target one to observe or restore it; the retained "
             f"Element path covers the {app_name} mutation"
         )
-    window, selector = _mcp_window_target(mcp, app_pid, "minimize", "restore")
+    window, selector = _mcp_window_target(mcp, app_pid, app_name, "minimize", "restore")
     assert "minimize" in window["actions"] and "restore" in window["actions"]
     needs_restore = False
     try:
@@ -730,24 +892,28 @@ def test_mcp_screen_fill_restore_mutates_and_reports_window_state(
 
     macOS exposes ``enter-fullscreen`` (``AXFullScreen``); Windows exposes
     ``maximize`` (UIA ``WindowVisualState``). Each is asserted against its own
-    state, and the other state must stay unknown — the two operations are
+    state, and the other state must not become true — the two operations are
     deliberately not the same bit.
     """
     candidate = None
-    for action, state, other in (
-        ("enter-fullscreen", "fullscreen", "maximized"),
-        ("maximize", "maximized", "fullscreen"),
+    ambiguous = []
+    # The `action` tool takes the CLI's hyphenated verb; the `windows` tool
+    # lists the element's actions, which are snake_case.
+    for action, listed, state, other in (
+        ("enter-fullscreen", "enter_fullscreen", "fullscreen", "maximized"),
+        ("maximize", "maximize", "maximized", "fullscreen"),
     ):
-        target = _mcp_window_target_or_none(mcp, app_pid, action, "restore")
+        target, why = _find_mcp_window_target(mcp, app_pid, listed, "restore")
+        ambiguous.extend(why)
         if target is not None:
-            candidate = (action, state, other, target)
+            candidate = (action, listed, state, other, target)
             break
     if candidate is None:
-        pytest.skip(
-            "no uniquely named window advertises a screen-filling verb with restore"
+        _no_mcp_window_target(
+            app_name, ambiguous, "a screen-filling verb with restore"
         )
-    action, state, other, (window, selector) = candidate
-    assert action in window["actions"] and "restore" in window["actions"]
+    action, listed, state, other, (window, selector) = candidate
+    assert listed in window["actions"] and "restore" in window["actions"]
     needs_restore = False
     try:
         filled = mcp.call_tool(
@@ -764,8 +930,10 @@ def test_mcp_screen_fill_restore_mutates_and_reports_window_state(
             lambda w: w["states"].get(state) is True,
             f"MCP {action} to report {state}=true",
         )
-        assert observed["states"].get(other) is None, (
-            f"{other} must stay unknown after {action}"
+        # X11 EWMH observes both states, so the other one reads False there;
+        # macOS and Windows leave it unknown (None). Either way it is not True.
+        assert observed["states"].get(other) is not True, (
+            f"{other} must not become true after {action}"
         )
 
         restored = mcp.call_tool(
@@ -792,7 +960,7 @@ def test_mcp_screen_fill_restore_mutates_and_reports_window_state(
 
 def test_mcp_move_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name):
     """The MCP geometry payload must reach the platform and move the window."""
-    window, selector = _mcp_window_target(mcp, app_pid, "move_to")
+    window, selector = _mcp_window_target(mcp, app_pid, app_name, "move_to")
     bounds = window.get("bounds")
     if not bounds:
         pytest.skip("the move_to window reports no restorable bounds")
@@ -864,12 +1032,18 @@ def test_mcp_move_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name):
 
 def test_mcp_resize_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name):
     """MCP's size payload must reach the provider and change reported bounds."""
-    window, selector = _mcp_window_target(mcp, app_pid, "resize_to")
+    window, selector = _mcp_window_target(mcp, app_pid, app_name, "resize_to")
     bounds = window.get("bounds")
     if not bounds:
         pytest.skip("the resize_to window reports no restorable bounds")
     original = (bounds["width"], bounds["height"])
-    resized_to = (original[0] + 50, original[1] + 50)
+    # Shrink, never grow: the window server keeps a window inside the screen's
+    # visible frame, and on a small runner display the test app opens already
+    # filling the visible height, so a grown target is refused (the Qt/macOS
+    # cell failed exactly that way). A smaller rect always fits, as long as it
+    # stays above the fixture's minimum size: the Qt fixture's minimum is set
+    # well below its 800x600 initial size for this reason.
+    resized_to = (original[0] - 50, original[1] - 50)
     needs_restore = False
     try:
         resized = mcp.call_tool(
@@ -897,22 +1071,14 @@ def test_mcp_resize_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name
                 "Qt/UIA interprets requested client size as decorated outer "
                 "bounds; tracked as qt_windows_geometry_offsets"
             )
-        resize_noop = app_name in {"cocoa", "egui", "winforms", "wpf"} or (
-            app_name == "tauri" and not sys.platform.startswith("linux")
-        )
-        if resize_noop:
+        # Windows-only: UIA TransformPattern.Resize answers success without
+        # moving these frameworks' bounds. On macOS resize_to verifies its own
+        # write and would have raised above instead of returning ok.
+        if sys.platform == "win32" and app_name in {"egui", "tauri", "winforms", "wpf"}:
             gap = (
-                "cocoa_resize_noop"
-                if app_name == "cocoa"
-                else (
-                    "egui_transform_resize_noop"
-                    if app_name == "egui"
-                    else (
-                        f"{app_name}_transform_resize_noop"
-                        if app_name in {"winforms", "wpf"}
-                        else "tauri_desktop_resize_noop"
-                    )
-                )
+                "tauri_desktop_resize_noop"
+                if app_name == "tauri"
+                else f"{app_name}_transform_resize_noop"
             )
             pytest.skip(
                 f"{app_name} accepts Resize without changing bounds ({gap})"
@@ -1010,6 +1176,52 @@ def test_tree_defaults_to_a_bounded_depth(mcp, app_pid):
     assert structured["max_depth"] == 12, "the default must be bounded, not unlimited"
 
 
+def _walk(node):
+    yield node
+    for child in node.get("children", []):
+        yield from _walk(child)
+
+
+def test_a_depth_cut_is_marked_on_the_node_that_lost_its_children(mcp, app_pid):
+    """A pruned node read as a leaf is the silent shortening the bound forbids.
+
+    At `max_depth: 1` the application's top-level children are the frontier.
+    Their roles vary by toolkit (GTK's top level is not always `window`), so
+    the test goes by position: every frontier node with children must say it
+    was cut and how many it has, and one that was not cut claims no count.
+    """
+    structured = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 1})["result"][
+        "structuredContent"
+    ]
+    assert structured["truncated"]["by_depth"] is True, structured["truncated"]
+    root = structured["tree"]
+    frontier = root.get("children", [])
+    assert frontier, root
+    marked = [c for c in frontier if c.get("subtree_truncated")]
+    assert marked, "by_depth is set, so some frontier node must carry the cut"
+    for child in frontier:
+        assert "children" not in child, child
+        if child.get("subtree_truncated") is True:
+            assert child["children_count"] >= 1, child
+        else:
+            assert "children_count" not in child, child
+
+
+def test_an_uncut_tree_marks_no_node(mcp, app_pid):
+    """When neither limit bit, no node may claim it lost children."""
+    structured = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 64})["result"][
+        "structuredContent"
+    ]
+    cut = structured["truncated"]
+    marked = [n for n in _walk(structured["tree"]) if n.get("subtree_truncated")]
+    if not cut["by_depth"] and not cut["by_node_limit"]:
+        assert not marked, marked[:3]
+    else:
+        assert marked, "a reported cut must be locatable on some node"
+    for node in marked:
+        assert node["children_count"] > len(node.get("children", [])), node
+
+
 def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     """Named, because `button` alone leads with window chrome on Windows.
 
@@ -1028,6 +1240,45 @@ def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     center = first["center"]
     assert center["x"] == bounds["x"] + bounds["width"] // 2
     assert center["y"] == bounds["y"] + bounds["height"] // 2
+
+
+# Apps whose test page shows a password entry named "Password" (#522).
+PASSWORD_APPS = {"tauri", "electron", "winforms", "wpf"}
+
+
+def test_find_flags_a_password_entry(mcp, app_pid, app_name):
+    """A password entry keeps `text_field` and carries `states.password`."""
+    if app_name not in PASSWORD_APPS:
+        pytest.skip(f"the {app_name} test app shows no password entry")
+    result = mcp.call_tool(
+        "find", {"pid": app_pid, "selector": 'text_field[password="true"]'}
+    )["result"]
+    assert result["isError"] is False, result["content"]
+    matches = result["structuredContent"]["matches"]
+    assert [m.get("name") for m in matches] == ["Password"], matches
+    assert matches[0]["role"] == "text_field"
+    assert matches[0]["states"]["password"] is True
+    plain = mcp.call_tool(
+        "find", {"pid": app_pid, "selector": 'text_field[name="Search"]'}
+    )["result"]["structuredContent"]["matches"]
+    assert plain, "the Search field must be found"
+    assert "password" not in plain[0]["states"], plain[0]
+
+
+def test_find_says_why_a_scrolled_out_element_is_hidden(mcp, app_pid, app_name):
+    """`states.hidden_reason` names why a match is hidden, and is absent on a
+    visible one (#590). Only the WinForms app has a scrolled-out control."""
+    if app_name != "winforms":
+        pytest.skip("only the WinForms app has a scrolled-out control")
+    states = {}
+    for name in ("Long Entry 1", "Long Entry 10"):
+        result = mcp.call_tool("find", {"pid": app_pid, "selector": f'[name="{name}"]'})[
+            "result"
+        ]
+        assert result["isError"] is False, result["content"]
+        states[name] = result["structuredContent"]["matches"][0]["states"]
+    assert states["Long Entry 10"].get("hidden_reason") == "scrolled_out", states
+    assert "hidden_reason" not in states["Long Entry 1"], states
 
 
 def test_bounds_and_center_are_reported_together_or_not_at_all(mcp, app_pid):
@@ -1286,7 +1537,16 @@ def test_a_second_selector_is_a_second_group_lettered_b(mcp, app_pid):
         assert entry["group"] in by_group, entry
         by_group[entry["group"]].append(entry)
     assert by_group[1] and by_group[2], "the same selector twice is two groups"
-    assert len(by_group[1]) == len(by_group[2])
+    first = [e["index"] for e in by_group[1]]
+    second = [e["index"] for e in by_group[2]]
+    if structured["truncated"] == 0:
+        assert first == second, "each element is boxed once per group"
+    else:
+        # The cap counts matches across groups, so it cuts the second group
+        # short: on Windows, Tauri's button count includes WebView2's own
+        # chrome, and twice that passes the cap. What survives is still the
+        # same elements as the first group's, in the same order.
+        assert second == first[: len(second)], (first, second)
     assert all(e["tag"].startswith("A") for e in by_group[1])
     assert all(e["tag"].startswith("B") for e in by_group[2])
 
@@ -1349,6 +1609,8 @@ def test_action_refuses_a_selector_that_matches_several(mcp, app_pid):
     structured = result["structuredContent"]
     assert structured["kind"] == "ambiguous_selector"
     assert structured["match_count"] == total
+    # Refused before anything was dispatched, so a retry cannot double-apply.
+    assert structured["delivery"] == "not_delivered"
     candidates = structured["diagnosis"]["candidates"]
     assert candidates, "without the candidates the caller has to go find them again"
     # Both recoveries have to be readable off the message alone: clients on the
@@ -1860,3 +2122,124 @@ def test_an_action_reaches_a_poll_as_a_shaped_event(
             assert first["target"]["role"], "a target is shaped like a find match"
     finally:
         mcp.call_tool("events_stop", {"subscription_id": handle}, id_=98)
+
+
+# ── find with stable: true (#530) ────────────────────────────────────────────
+#
+# "Start slide" restarts a three-second slide of "Slide target" that ends
+# where the target already rests. On the apps in SLIDE_APPS the widget is
+# required, so its absence fails rather than skips (#383).
+
+_START_SLIDE = 'button[name="Start slide"]'
+_SLIDE_TARGET = 'button[name="Slide target"]'
+SLIDE_APPS = {"tauri", "accesskit"}
+
+
+def _session_with_timeout(entry_point, monkeypatch, seconds: str) -> McpSession:
+    """A handshaken session whose server runs with this default timeout."""
+    monkeypatch.setenv("XA11Y_DEFAULT_TIMEOUT", seconds)
+    session = McpSession(entry_point)
+    session.request(
+        "init",
+        "initialize",
+        {
+            "protocolVersion": LEGACY_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "pytest"},
+        },
+    )
+    session.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    return session
+
+
+def _stable_find(mcp, app_pid, selector: str) -> dict:
+    return mcp.call_tool(
+        "find", {"pid": app_pid, "selector": selector, "stable": True}
+    )["result"]
+
+
+def test_the_find_description_states_what_stable_costs_and_requires(mcp):
+    """The wait and the uniqueness rule are the contract a model plans with."""
+    tools = {t["name"]: t for t in mcp.request(1, "tools/list")["result"]["tools"]}
+    find = tools["find"]
+    assert find["inputSchema"]["properties"]["stable"]["type"] == "boolean"
+    description = find["description"]
+    assert "XA11Y_DEFAULT_TIMEOUT" in description
+    assert "exactly one" in description
+    assert "ambiguous_selector" in description
+
+
+def test_stable_find_returns_the_bounds_a_slide_ends_at(
+    entry_point, app_pid, app_name, monkeypatch
+):
+    """With stable set, find waits out the motion and reports the final bounds.
+
+    The server runs with a 15 s default timeout, comfortably longer than the
+    slide; the 1.5 s floor leaves the rest of the 3 s slide for press latency.
+    """
+    if app_name not in SLIDE_APPS:
+        pytest.skip("this app has no sliding widget")
+    mcp = _session_with_timeout(entry_point, monkeypatch, "15")
+    try:
+        _assert_stable_find_waits_out_a_slide(mcp, app_pid)
+    finally:
+        mcp.kill()
+
+
+def _assert_stable_find_waits_out_a_slide(mcp, app_pid):
+    probe = mcp.call_tool("find", {"pid": app_pid, "selector": _START_SLIDE})["result"]
+    assert probe["isError"] is False, f"the app's Start slide button is missing: {probe}"
+    rest = _stable_find(mcp, app_pid, _SLIDE_TARGET)
+    assert rest["isError"] is False, rest["content"]
+    rest_bounds = rest["structuredContent"]["matches"][0]["bounds"]
+
+    pressed = mcp.call_tool(
+        "action", {"pid": app_pid, "action": "press", "selector": _START_SLIDE}
+    )["result"]
+    assert pressed["isError"] is False, pressed["content"]
+    started = time.monotonic()
+    settled = _stable_find(mcp, app_pid, _SLIDE_TARGET)
+    waited = time.monotonic() - started
+    assert settled["isError"] is False, settled["content"]
+    structured = settled["structuredContent"]
+    assert structured["match_count"] == 1
+    assert structured["matches"][0]["bounds"] == rest_bounds, (
+        f"stable find reported mid-slide bounds after {waited:.2f}s"
+    )
+    assert waited >= 1.5, f"a 3 s slide cannot be proven stable in {waited:.2f}s"
+
+
+def test_stable_find_refuses_a_selector_that_matches_several(mcp, app_pid):
+    """Stability is a claim about one element, so several is refused."""
+    result = _stable_find(mcp, app_pid, "button")
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "ambiguous_selector"
+    assert structured["match_count"] >= 2
+    assert structured["diagnosis"]["candidates"], "the candidates are the way out"
+
+
+def test_stable_must_be_a_boolean(mcp, app_pid):
+    result = mcp.call_tool(
+        "find", {"pid": app_pid, "selector": "button", "stable": "yes"}
+    )["result"]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "invalid_arguments"
+    assert '"stable"' in structured["message"]
+
+
+def test_a_stable_find_that_never_matches_is_a_diagnosed_miss(
+    entry_point, app_pid, monkeypatch
+):
+    """After the wait, a miss reports as `no_match`, not as a timeout."""
+    session = _session_with_timeout(entry_point, monkeypatch, "0.5")
+    try:
+        selector = 'button[name="Sbumit"]'
+        result = _stable_find(session, app_pid, selector)
+    finally:
+        session.kill()
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "no_match", structured
+    assert structured["diagnosis"]["selector"] == selector

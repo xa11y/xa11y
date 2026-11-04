@@ -693,6 +693,13 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
         "stable_id" => element.stable_id.clone(),
         "enabled" => Some(element.states.enabled.to_string()),
         "visible" => Some(element.states.visible.to_string()),
+        // `None` while visible, so `[hidden_reason=scrolled_out]` matches
+        // only hidden elements, the same way `expanded` matches nothing on a
+        // non-expandable one.
+        "hidden_reason" => element
+            .states
+            .hidden_reason
+            .map(|r| r.to_snake_case().to_string()),
         "focused" => Some(element.states.focused.to_string()),
         "active" => Some(element.states.active.to_string()),
         "focusable" => Some(element.states.focusable.to_string()),
@@ -701,6 +708,7 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
         "modal" => Some(element.states.modal.to_string()),
         "required" => Some(element.states.required.to_string()),
         "busy" => Some(element.states.busy.to_string()),
+        "password" => Some(element.states.password.to_string()),
         "expanded" => element.states.expanded.map(|b| b.to_string()),
         // Window states are Option<bool>: a platform that cannot report the
         // state yields `None`, which matches nothing (the same semantics as
@@ -1855,6 +1863,19 @@ mod tests {
         assert_eq!(resolve_attr(&el, "modal").as_deref(), Some("false"));
         assert_eq!(resolve_attr(&el, "required").as_deref(), Some("false"));
         assert_eq!(resolve_attr(&el, "busy").as_deref(), Some("false"));
+        assert_eq!(resolve_attr(&el, "password").as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn resolve_hidden_reason_only_while_hidden() {
+        let mut el = element_default();
+        assert_eq!(resolve_attr(&el, "hidden_reason"), None);
+        el.states.visible = false;
+        el.states.hidden_reason = Some(crate::HiddenReason::ScrolledOut);
+        assert_eq!(
+            resolve_attr(&el, "hidden_reason").as_deref(),
+            Some("scrolled_out")
+        );
     }
 
     #[test]

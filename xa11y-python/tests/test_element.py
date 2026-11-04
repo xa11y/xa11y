@@ -101,11 +101,13 @@ def test_enabled_false(test_app):
 def test_visible_default_true(test_app):
     app = test_app.element()
     assert app.visible is True
+    assert app.hidden_reason is None
 
 
 def test_visible_false(test_app):
     status = test_app.descendant("static_text").elements()[0]
     assert status.visible is False
+    assert status.hidden_reason == "not_showing"
 
 
 def test_focused(test_app):
@@ -182,6 +184,11 @@ def test_required(test_app):
 def test_busy(test_app):
     app = test_app.element()
     assert app.busy is False
+
+
+def test_password(test_app):
+    app = test_app.element()
+    assert app.password is False
 
 
 # ── Raw platform data ────────────────────────────────────────────────────────

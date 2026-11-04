@@ -34,7 +34,8 @@ COMMANDS:
     test-egui [SUITE..]  Run egui (eframe) integration tests
     test-winforms [SUITE..]  Run WinForms integration tests (Windows only)
     test-wpf [SUITE..]  Run WPF integration tests (Windows only)
-    test-apps           Run the Python suite for every app (qt, gtk, cocoa, tauri, electron, egui, winforms, wpf)
+    test-uwp [SUITE..]  Run UWP integration tests (Windows only; installs a sideloaded package, needs elevation)
+    test-apps           Run the Python suite for every app (qt, gtk, cocoa, tauri, electron, egui, winforms, wpf; not uwp, which needs elevation)
     test-compat [APP]   Run shared harness (python + js + cli suites) against APP (default: tauri)
     test-matrix-check   Validate the tests/matrix.yaml coverage index
     test-harness        Unit-test the shared integ harness (tests/harness/)
@@ -46,7 +47,9 @@ COMMANDS:
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
     sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
+    sync-agent-guide [--check]  Render xa11y/AGENT_GUIDE.md into the docs site
     check-macos-ffi     Verify xa11y-macos/src/ax.rs only uses safe_* CF/AX wrappers
+    check-windows-dpi   Verify coordinate-bearing Win32/UIA calls go through xa11y-windows/src/coords.rs
     check-mcp-stdout    Verify xa11y/src/mcp writes nothing to stdout but protocol
     check-workspace-pins   Verify intra-workspace deps keep their `=` version pins
     check-versions [--expect X.Y.Z]  Verify every release version field (crates, bindings, lockfiles) agrees
@@ -80,6 +83,7 @@ fn main() -> ExitCode {
         "test-egui" => do_test_egui(rest),
         "test-winforms" => do_test_winforms(rest),
         "test-wpf" => do_test_wpf(rest),
+        "test-uwp" => do_test_uwp(rest),
         "test-apps" => do_test_apps(),
         "test-compat" => do_test_compat(rest),
         "test-matrix-check" => do_test_matrix_check(),
@@ -92,7 +96,9 @@ fn main() -> ExitCode {
         "coverage" => do_coverage(),
         "fuzz" => do_fuzz(rest),
         "sync-readmes" => do_sync_readmes(rest),
+        "sync-agent-guide" => do_sync_agent_guide(rest),
         "check-macos-ffi" => do_check_macos_ffi(),
+        "check-windows-dpi" => do_check_windows_dpi(),
         "check-mcp-stdout" => do_check_mcp_stdout(),
         "check-workspace-pins" => do_check_workspace_pins(),
         "check-versions" => do_check_versions(rest),
@@ -579,6 +585,10 @@ fn do_test_wpf(rest: &[String]) -> bool {
     do_test_app_suite("wpf", rest, "WPF integration tests")
 }
 
+fn do_test_uwp(rest: &[String]) -> bool {
+    do_test_app_suite("uwp", rest, "UWP integration tests")
+}
+
 fn do_test_apps() -> bool {
     heading("All app integration tests");
     // Run the Python suite (incl. the mutating window suite) for each app
@@ -610,6 +620,10 @@ fn do_test_apps() -> bool {
     if env::consts::OS == "windows" && !do_test_wpf(&py) {
         ok = false;
     }
+    // uwp is left out on purpose: its setup installs a sideloaded package and
+    // trusts a certificate machine-wide (LocalMachine\TrustedPeople), which
+    // needs an elevated shell and changes the developer's machine. Run
+    // `cargo xtask test-uwp` explicitly for that.
     ok
 }
 
@@ -908,6 +922,132 @@ fn do_sync_readmes(args: &[String]) -> bool {
     ok
 }
 
+/// Source of the agent guide. The binary embeds it with `include_str!`, so it
+/// lives inside the `xa11y` crate and ships with the crate's package.
+const AGENT_GUIDE_SOURCE: &str = "xa11y/AGENT_GUIDE.md";
+/// The docs-site page rendered from [`AGENT_GUIDE_SOURCE`].
+const AGENT_GUIDE_PAGE: &str = "docs/site/src/content/docs/guides/agent-guide.mdx";
+
+/// Render the agent guide into its docs-site page, or with `--check` fail
+/// when the page has drifted from the source.
+///
+/// CLAUDE.md's docs rule is that a reference has exactly one home. The guide
+/// has to be embedded in the binary, so the binary's copy is the source and
+/// the page is generated from it, the same arrangement as the package READMEs.
+fn do_sync_agent_guide(args: &[String]) -> bool {
+    let check = args.iter().any(|a| a == "--check");
+    heading(if check {
+        "Check the agent guide page is in sync"
+    } else {
+        "Sync the agent guide page"
+    });
+    let root = project_root();
+    let source = match fs::read_to_string(root.join(AGENT_GUIDE_SOURCE)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read {AGENT_GUIDE_SOURCE}: {e}");
+            return false;
+        }
+    };
+    let expected = match render_agent_guide(&source) {
+        Ok(page) => page,
+        Err(e) => {
+            eprintln!("{AGENT_GUIDE_SOURCE}: {e}");
+            return false;
+        }
+    };
+    let path = root.join(AGENT_GUIDE_PAGE);
+    if check {
+        // A missing page is drift like any other; any other read failure is
+        // an I/O problem and is reported as one rather than as "out of date".
+        let actual = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                eprintln!("Failed to read {AGENT_GUIDE_PAGE}: {e}");
+                return false;
+            }
+        };
+        if actual.replace("\r\n", "\n") != expected {
+            eprintln!(
+                "{AGENT_GUIDE_PAGE} is out of date. Edit {AGENT_GUIDE_SOURCE}, then run \
+                 `cargo xtask sync-agent-guide`."
+            );
+            return false;
+        }
+        eprintln!("{AGENT_GUIDE_PAGE} is up to date.");
+        true
+    } else if let Err(e) = fs::write(&path, &expected) {
+        eprintln!("Failed to write {AGENT_GUIDE_PAGE}: {e}");
+        false
+    } else {
+        eprintln!("Wrote {AGENT_GUIDE_PAGE}");
+        true
+    }
+}
+
+/// Turn the guide's Markdown into the docs-site page.
+///
+/// The source opens with an `# ` title, which becomes the frontmatter title
+/// (Starlight renders it). Absolute links to the docs site become site-root
+/// links, so `docs/check_links.py` validates them. Anything MDX would read as
+/// JSX or an expression (`<`, `{`, `}` outside code) is refused here rather
+/// than breaking the site build, because the guide is written as plain
+/// Markdown for agents and nothing else stops it growing one.
+fn render_agent_guide(source: &str) -> Result<String, String> {
+    let source = source.replace("\r\n", "\n");
+    let (first, body) = source
+        .split_once('\n')
+        .ok_or_else(|| "the guide is empty".to_string())?;
+    let title = first
+        .strip_prefix("# ")
+        .ok_or_else(|| "the guide must open with an `# ` title line".to_string())?;
+    let body = body
+        .trim_start_matches('\n')
+        .replace("https://xa11y.dev/", "/");
+
+    let mut in_fence = false;
+    for (n, line) in body.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        // Drop inline code spans, which MDX leaves literal.
+        let prose: String = line
+            .split('`')
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 0)
+            .map(|(_, part)| part)
+            .collect();
+        if let Some(c) = prose.chars().find(|c| matches!(c, '<' | '{' | '}')) {
+            return Err(format!(
+                "line {} has `{c}` outside code, which MDX would parse; wrap it in backticks",
+                n + 2
+            ));
+        }
+    }
+
+    Ok(format!(
+        "---\n\
+         title: {title}\n\
+         description: How an agent drives xa11y over MCP, as the binary serves it to `xa11y guide` and the MCP server.\n\
+         pageType: how-to\n\
+         ---\n\
+         \n\
+         {{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows\n    \
+         what they want. Steps and decisions only. Concepts go to explanation/,\n    \
+         exhaustive option lists go to reference/. */}}\n\
+         \n\
+         {{/* GENERATED from {AGENT_GUIDE_SOURCE} by `cargo xtask sync-agent-guide`.\n    \
+         Edit that file and re-run the command; CI fails when this page differs. */}}\n\
+         \n\
+         {body}"
+    ))
+}
+
 /// Languages a README block can be tagged for. The root README renders every
 /// visible block, so it is the one page that shows all three install steps;
 /// each package README keeps its own language's blocks and drops the rest.
@@ -1136,6 +1276,238 @@ fn contains_macro_call(code: &str, name: &str) -> bool {
     false
 }
 
+/// Every coordinate-bearing Win32 / UIA call in `xa11y-windows` must go
+/// through a wrapper in `src/coords.rs`, each of which takes `&DpiScope`.
+///
+/// Windows answers these calls in the calling thread's DPI awareness, and a
+/// host can pin a lower awareness than the Per-Monitor V2 xa11y reports in
+/// (issue #506). The wrappers make a call without a scope fail to compile;
+/// this check makes a call that bypasses the wrappers fail the build. The
+/// third layer, a `debug_assert!` in each wrapper, runs in
+/// `tests/dpi_system_aware.rs`.
+fn do_check_windows_dpi() -> bool {
+    heading("Windows DPI-scope check");
+
+    // Coordinate-bearing Win32 / UIA symbols. Matched as *identifier tokens*
+    // anywhere in the code, so a `use ... as alias`, a fully qualified path,
+    // a reference without a call, and a property-ID constant are all caught;
+    // comments and string literals are not code and never match.
+    const FORBIDDEN_IDENTS: &[&str] = &[
+        // UIA bounds and points.
+        "CachedBoundingRectangle",
+        "CurrentBoundingRectangle",
+        "UIA_BoundingRectanglePropertyId",
+        "UIA_ClickablePointPropertyId",
+        "GetClickablePoint",
+        "GetBoundingRectangles",
+        "RangeFromPoint",
+        "ElementFromPoint",
+        "ElementFromPointBuildCache",
+        // Input.
+        "SendInput",
+        "mouse_event",
+        "GetCursorPos",
+        "GetPhysicalCursorPos",
+        "SetCursorPos",
+        "SetPhysicalCursorPos",
+        "GetCursorInfo",
+        // Capture and screen DCs.
+        "BitBlt",
+        "GetDIBits",
+        "GetDC",
+        // Monitors and DPI.
+        "EnumDisplayMonitors",
+        "MonitorFromPoint",
+        "MonitorFromRect",
+        "MonitorFromWindow",
+        "GetMonitorInfo",
+        "GetMonitorInfoA",
+        "GetMonitorInfoW",
+        "GetDpiForMonitor",
+        "GetDpiForWindow",
+        "GetDpiForSystem",
+        "GetSystemMetrics",
+        "GetSystemMetricsForDpi",
+        // Window geometry.
+        "GetWindowRect",
+        "GetClientRect",
+        "WindowFromPoint",
+        "WindowFromPhysicalPoint",
+        "ChildWindowFromPoint",
+        "ChildWindowFromPointEx",
+        "RealChildWindowFromPoint",
+        "ClientToScreen",
+        "ScreenToClient",
+        "MapWindowPoints",
+        "SetWindowPos",
+        "MoveWindow",
+        "GetWindowPlacement",
+        "SetWindowPlacement",
+        "AdjustWindowRect",
+        "AdjustWindowRectEx",
+        "AdjustWindowRectExForDpi",
+        "DwmGetWindowAttribute",
+        "LogicalToPhysicalPoint",
+        "PhysicalToLogicalPoint",
+        "LogicalToPhysicalPointForPerMonitorDPI",
+        "PhysicalToLogicalPointForPerMonitorDPI",
+        "GetWindowInfo",
+        "GetTitleBarInfo",
+        "GetWindowRgnBox",
+        "GetCaretPos",
+        "GetMessagePos",
+        "GetGUIThreadInfo",
+        // More capture and display-mode calls.
+        "GetWindowDC",
+        "GetDCEx",
+        "CreateDCW",
+        "CreateDCA",
+        "StretchBlt",
+        "PrintWindow",
+        "EnumDisplaySettingsW",
+        "EnumDisplaySettingsExW",
+        "SystemParametersInfoW",
+        // MSAA geometry.
+        "accLocation",
+        "accHitTest",
+    ];
+    // Building a property ID from its number (`UIA_PROPERTY_ID(30001)`)
+    // would reach the bounds property without naming its constant, so the
+    // newtype's constructor is flagged. The type name on its own, in a
+    // signature, is fine.
+    const FORBIDDEN_CONSTRUCTORS: &[&str] = &["UIA_PROPERTY_ID"];
+    // TransformPattern's methods share names with others, so they are
+    // matched as a method (`.Move`) or a path segment (`X::Move`) with any
+    // spacing. The one non-coordinate `Move` in use, a text range's
+    // character count, is allowed by its exact path.
+    const FORBIDDEN_METHODS: &[&str] = &["Move", "Resize"];
+    const ALLOWED_PATH_OWNERS: &[&str] = &["IUIAutomationTextRange"];
+
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                rust_files(&path, out)?;
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn scan(ts: proc_macro2::TokenStream, hits: &mut Vec<(usize, String)>) {
+        use proc_macro2::TokenTree;
+        let tokens: Vec<TokenTree> = ts.into_iter().collect();
+        for (i, t) in tokens.iter().enumerate() {
+            match t {
+                TokenTree::Group(g) => scan(g.stream(), hits),
+                TokenTree::Ident(id) => {
+                    let name = id.to_string();
+                    let line = id.span().start().line;
+                    if FORBIDDEN_IDENTS.contains(&name.as_str()) {
+                        hits.push((line, name));
+                        continue;
+                    }
+                    if FORBIDDEN_CONSTRUCTORS.contains(&name.as_str()) {
+                        if let Some(TokenTree::Group(g)) = tokens.get(i + 1) {
+                            if g.delimiter() == proc_macro2::Delimiter::Parenthesis {
+                                hits.push((line, format!("{name}(..)")));
+                            }
+                        }
+                        continue;
+                    }
+                    if !FORBIDDEN_METHODS.contains(&name.as_str()) {
+                        continue;
+                    }
+                    let punct = |k: usize| match i.checked_sub(k).map(|j| &tokens[j]) {
+                        Some(TokenTree::Punct(p)) => Some(p.as_char()),
+                        _ => None,
+                    };
+                    if punct(1) == Some('.') {
+                        hits.push((line, format!(".{name}")));
+                    } else if punct(1) == Some(':') && punct(2) == Some(':') {
+                        let owner = match i.checked_sub(3).map(|j| &tokens[j]) {
+                            Some(TokenTree::Ident(o)) => o.to_string(),
+                            _ => String::new(),
+                        };
+                        if !ALLOWED_PATH_OWNERS.contains(&owner.as_str()) {
+                            hits.push((line, format!("{owner}::{name}")));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let dir = project_root().join("xa11y-windows/src");
+    // Exempt the wrapper module by its full path: a `coords.rs` anywhere
+    // else under src/ (a submodule's own) gets no pass.
+    let wrapper_module = dir.join("coords.rs");
+    let mut files = Vec::new();
+    if let Err(e) = rust_files(&dir, &mut files) {
+        eprintln!("Failed to read {}: {e}", dir.display());
+        return false;
+    }
+    files.sort();
+
+    let mut violations: Vec<(String, usize, String, String)> = Vec::new();
+    let mut checked = 0;
+    for path in &files {
+        if *path == wrapper_module {
+            continue;
+        }
+        let src = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to read {}: {e}", path.display());
+                return false;
+            }
+        };
+        let tokens: proc_macro2::TokenStream = match src.parse() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Failed to lex {} as Rust: {e}", path.display());
+                return false;
+            }
+        };
+        checked += 1;
+        let mut hits = Vec::new();
+        scan(tokens, &mut hits);
+        let lines: Vec<&str> = src.lines().collect();
+        for (line, sym) in hits {
+            let text = lines
+                .get(line.saturating_sub(1))
+                .copied()
+                .unwrap_or("")
+                .trim();
+            violations.push((path.display().to_string(), line, sym, text.to_string()));
+        }
+    }
+
+    if violations.is_empty() {
+        eprintln!(
+            "OK: xa11y-windows names coordinate-bearing APIs only in coords.rs \
+             ({checked} file(s), {} forbidden symbols checked).",
+            FORBIDDEN_IDENTS.len() + FORBIDDEN_METHODS.len() + FORBIDDEN_CONSTRUCTORS.len()
+        );
+        return true;
+    }
+    eprintln!(
+        "!! {} coordinate-bearing symbol(s) outside xa11y-windows/src/coords.rs:",
+        violations.len()
+    );
+    for (file, lineno, sym, line) in &violations {
+        eprintln!("  {file}:{lineno}: {sym}  ->  {line}");
+    }
+    eprintln!(
+        "\n  Windows answers these in the calling thread's DPI awareness. Use the\n  \
+         wrapper in xa11y-windows/src/coords.rs, which takes &DpiScope; if there\n  \
+         is none for this API yet, add one there (issue #506)."
+    );
+    false
+}
+
 fn do_check_macos_ffi() -> bool {
     heading("macOS FFI exception-safety check");
 
@@ -1156,6 +1528,9 @@ fn do_check_macos_ffi() -> bool {
         "CFNumberGetValue",
         "CFDictionaryGetValue",
         "CFArrayCreate",
+        "CGPreflightScreenCaptureAccess",
+        "CFEqual",
+        "CFHash",
         // The AX family. `AXIsProcessTrusted` was the only one listed, so the
         // wrapper rule AGENTS.md states for "a new CF or AX interop call" was
         // unenforced for every other AX symbol — including the messaging-timeout
@@ -1524,9 +1899,21 @@ fn do_check() -> bool {
         ok = false;
     }
 
+    heading("PRE-PR CHECK: sync-agent-guide");
+    if !do_sync_agent_guide(&["--check".to_string()]) {
+        eprintln!("!! Agent guide page out of date. Run `cargo xtask sync-agent-guide` to fix.");
+        ok = false;
+    }
+
     heading("PRE-PR CHECK: macos-ffi");
     if !do_check_macos_ffi() {
         eprintln!("!! macOS FFI check failed. See above for details.");
+        ok = false;
+    }
+
+    heading("PRE-PR CHECK: windows-dpi");
+    if !do_check_windows_dpi() {
+        eprintln!("!! Windows DPI-scope check failed. See above for details.");
         ok = false;
     }
 

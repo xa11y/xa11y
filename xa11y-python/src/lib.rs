@@ -54,8 +54,8 @@ where
 
 /// Attach the structured diagnosis fields (tenet 6) as attributes on an
 /// exception instance, so harnesses can read `e.selector`, `e.condition`,
-/// `e.last_observed`, `e.candidates`, `e.scope` (and `e.elapsed` on
-/// timeouts) instead of parsing the message. Every attribute is always set
+/// `e.last_observed`, `e.hidden_reason`, `e.auto_scroll`, `e.candidates`, `e.scope` (and
+/// `e.elapsed` on timeouts) instead of parsing the message. Every attribute is always set
 /// (`None` / `[]` when absent) so consumers don't need `hasattr` guards.
 fn attach_diagnosis_attrs(
     err: PyErr,
@@ -65,15 +65,24 @@ fn attach_diagnosis_attrs(
 ) -> PyErr {
     Python::attach(|py| {
         let value = err.value(py);
-        // Best-effort by design: the rendered message already carries the
-        // same content, and replacing the original exception with an
-        // attribute-setting failure would mask the real error.
+        // Every `let _` below is best-effort by design: the rendered message
+        // already carries the same content, and replacing the original
+        // exception with an attribute-setting failure would mask the real
+        // error.
         let _ = value.setattr("selector", selector);
         let _ = value.setattr("elapsed", elapsed_secs);
         let _ = value.setattr("condition", diagnosis.and_then(|d| d.condition.clone()));
         let _ = value.setattr(
             "last_observed",
             diagnosis.and_then(|d| d.last_observed.clone()),
+        );
+        let _ = value.setattr(
+            "hidden_reason",
+            diagnosis.and_then(|d| d.hidden_reason.map(|r| r.to_snake_case())),
+        );
+        let _ = value.setattr(
+            "auto_scroll",
+            diagnosis.and_then(|d| d.auto_scroll.map(|o| o.to_snake_case())),
         );
         let _ = value.setattr(
             "candidates",
@@ -84,7 +93,28 @@ fn attach_diagnosis_attrs(
     err
 }
 
+/// Convert a core error into the matching Python exception, with the
+/// structured `delivery` attribute set on every one of them: whether the
+/// failed action may already have taken effect (`"not_delivered"` is safe to
+/// retry, `"unknown"` is not).
 fn to_py_err(e: xa11y::Error) -> PyErr {
+    let delivery = e.delivery();
+    let err = map_to_py_err(e);
+    Python::attach(|py| {
+        // A failed setattr is surfaced, not dropped: a missing `delivery` would
+        // read as "unknown" to a caller that checks `hasattr`, and the
+        // original error stays reachable as the cause.
+        match err.value(py).setattr("delivery", delivery.to_snake_case()) {
+            Ok(()) => err,
+            Err(set_failed) => {
+                set_failed.set_cause(py, Some(err));
+                set_failed
+            }
+        }
+    })
+}
+
+fn map_to_py_err(e: xa11y::Error) -> PyErr {
     match e {
         xa11y::Error::PermissionDenied { instructions } => {
             PermissionDeniedError::new_err(instructions)
@@ -229,6 +259,10 @@ fn make_py_element(
             bounds_data: data.bounds.as_ref().map(|r| (r.x, r.y, r.width, r.height)),
             enabled: data.states.enabled,
             visible: data.states.visible,
+            hidden_reason: data
+                .states
+                .hidden_reason
+                .map(|r| r.to_snake_case().to_string()),
             focused: data.states.focused,
             active: data.states.active,
             checked,
@@ -239,6 +273,7 @@ fn make_py_element(
             modal: data.states.modal,
             required: data.states.required,
             busy: data.states.busy,
+            password: data.states.password,
             minimized: data.states.minimized,
             maximized: data.states.maximized,
             fullscreen: data.states.fullscreen,
@@ -331,6 +366,11 @@ struct Element {
     enabled: bool,
     #[pyo3(get)]
     visible: bool,
+    /// Why the element is not visible: ``'scrolled_out'``,
+    /// ``'window_minimized'``, ``'not_showing'`` or ``'unknown'``. ``None``
+    /// exactly when ``visible`` is ``True``.
+    #[pyo3(get)]
+    hidden_reason: Option<String>,
     #[pyo3(get)]
     focused: bool,
     /// Whether this element is the active (foreground) window — the window that
@@ -355,6 +395,11 @@ struct Element {
     required: bool,
     #[pyo3(get)]
     busy: bool,
+    /// Whether this is a password (secure text) field. The role stays
+    /// ``text_field``; xa11y redacts nothing, so a caller that must keep a
+    /// secret out of its logs checks this flag.
+    #[pyo3(get)]
+    password: bool,
     /// Whether the window is minimized. ``None`` = unknown / not a window —
     /// a platform that cannot report the state says so rather than guessing.
     #[pyo3(get)]
@@ -963,6 +1008,22 @@ impl Locator {
         make_py_element(py, el.data(), el.provider().clone())
     }
 
+    /// Wait until the element's bounds are unchanged across two consecutive
+    /// polls and it is visible, then return it.
+    ///
+    /// Use before an `InputSim` pointer action on an element that may still
+    /// be animating, so the click lands where it settles:
+    /// `sim.click(locator.wait_stable())`. Unrelated to `stable_id`.
+    #[pyo3(signature = (timeout=None))]
+    fn wait_stable(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<Element>> {
+        let timeout = effective_timeout(timeout)?;
+        let inner = self.inner.clone();
+        let el = py
+            .detach(move || inner.wait_stable(timeout))
+            .map_err(to_py_err)?;
+        make_py_element(py, el.data(), el.provider().clone())
+    }
+
     /// Wait until an arbitrary Python predicate is satisfied.
     ///
     /// A predicate that *raises* aborts the wait immediately and propagates
@@ -1184,9 +1245,12 @@ struct Subscription {
 impl Subscription {
     fn with_sub<T>(&self, f: impl FnOnce(&xa11y::Subscription) -> T) -> PyResult<T> {
         let guard = self.inner.lock().unwrap();
-        let sub = guard
-            .as_ref()
-            .ok_or_else(|| PlatformError::new_err("Subscription is closed"))?;
+        let sub = guard.as_ref().ok_or_else(|| {
+            to_py_err(xa11y::Error::Platform {
+                code: -1,
+                message: "Subscription is closed".to_string(),
+            })
+        })?;
         Ok(f(sub))
     }
 }
@@ -1219,7 +1283,8 @@ impl Subscription {
                     xa11y::Error::timeout(start.elapsed()).diagnose(
                         xa11y::Diagnosis::new()
                             .condition("event matching predicate")
-                            .last_observed(format!("{seen} event(s) received, none matched")),
+                            .last_observed(format!("{seen} event(s) received, none matched"))
+                            .delivery(xa11y::Delivery::NotDelivered),
                     ),
                 ));
             }
@@ -1238,9 +1303,11 @@ impl Subscription {
                     // Event source is gone — no further events can match the
                     // predicate. Surface this as a platform error rather than
                     // hanging until the overall timeout elapses.
-                    return Err(PlatformError::new_err(
-                        "Subscription event source disconnected before predicate matched",
-                    ));
+                    return Err(to_py_err(xa11y::Error::Platform {
+                        code: -1,
+                        message: "Subscription event source disconnected before predicate matched"
+                            .to_string(),
+                    }));
                 }
             };
             let matched = {
@@ -1927,6 +1994,12 @@ impl InputSim {
     /// lists keys held down for the duration, and `anchor` picks the point
     /// inside an `Element`'s bounds. `anchor` is ignored when `target` is a
     /// raw `(x, y)` tuple.
+    ///
+    /// On a Linux Wayland session an `Element` target raises
+    /// `ActionNotSupportedError` (an `Unsupported` error): Wayland clients do
+    /// not know their global position, so accessibility bounds are not screen
+    /// coordinates. Use a semantic action (`press`, `focus`) or pass a raw
+    /// `(x, y)`.
     #[pyo3(signature = (target, *, button="left", count=1, held=None, anchor=None))]
     fn click(
         &self,
@@ -1937,7 +2010,7 @@ impl InputSim {
         held: Option<Vec<String>>,
         anchor: Option<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let pt = parse_target_anchored(&target, parse_anchor(anchor.as_ref())?)?;
+        let pt = parse_target_anchored(&self.inner, &target, parse_anchor(anchor.as_ref())?)?;
         let opts = xa11y::ClickOptions::new()
             .button(parse_button(button)?)
             .count(count)
@@ -1952,21 +2025,21 @@ impl InputSim {
 
     /// Left double-click at `target`.
     fn double_click(&self, py: Python<'_>, target: Bound<'_, PyAny>) -> PyResult<()> {
-        let pt = parse_target(&target)?;
+        let pt = parse_target(&self.inner, &target)?;
         py.detach(move || self.inner.mouse().double_click(pt))
             .map_err(to_py_err)
     }
 
     /// Right-click at `target`.
     fn right_click(&self, py: Python<'_>, target: Bound<'_, PyAny>) -> PyResult<()> {
-        let pt = parse_target(&target)?;
+        let pt = parse_target(&self.inner, &target)?;
         py.detach(move || self.inner.mouse().right_click(pt))
             .map_err(to_py_err)
     }
 
     /// Move the pointer to `target` without pressing any button.
     fn move_to(&self, py: Python<'_>, target: Bound<'_, PyAny>) -> PyResult<()> {
-        let pt = parse_target(&target)?;
+        let pt = parse_target(&self.inner, &target)?;
         py.detach(move || self.inner.mouse().move_to(pt))
             .map_err(to_py_err)
     }
@@ -2007,8 +2080,8 @@ impl InputSim {
         held: Option<Vec<String>>,
         duration: f64,
     ) -> PyResult<()> {
-        let from = parse_target(&start)?;
-        let to = parse_target(&end)?;
+        let from = parse_target(&self.inner, &start)?;
+        let to = parse_target(&self.inner, &end)?;
         let opts = xa11y::DragOptions::new()
             .button(parse_button(button)?)
             .held(parse_keys(held)?)
@@ -2021,7 +2094,7 @@ impl InputSim {
     /// scroll content down.
     #[pyo3(signature = (target, dx=0, dy=0))]
     fn scroll(&self, py: Python<'_>, target: Bound<'_, PyAny>, dx: i32, dy: i32) -> PyResult<()> {
-        let pt = parse_target(&target)?;
+        let pt = parse_target(&self.inner, &target)?;
         py.detach(move || {
             self.inner
                 .mouse()
@@ -2065,6 +2138,10 @@ impl InputSim {
     }
 
     /// Type literal text into the currently focused control.
+    ///
+    /// ``"\r\n"``, ``"\r"`` and ``"\n"`` each type one Return/Enter
+    /// keypress, so in a single-line field this may activate the default
+    /// button.
     fn type_text(&self, py: Python<'_>, text: &str) -> PyResult<()> {
         py.detach(move || self.inner.keyboard().type_text(text))
             .map_err(to_py_err)
@@ -2074,32 +2151,42 @@ impl InputSim {
 /// Convert a Python target (`(int, int)` tuple or `Element`) to an
 /// [`xa11y::Point`]. Keeps the target-resolution cost explicit at the call
 /// site, matching the Rust [`IntoPoint`] contract.
-fn parse_target(target: &Bound<'_, PyAny>) -> PyResult<xa11y::Point> {
-    parse_target_anchored(target, xa11y::Anchor::Center)
+fn parse_target(sim: &xa11y::InputSim, target: &Bound<'_, PyAny>) -> PyResult<xa11y::Point> {
+    parse_target_anchored(sim, target, xa11y::Anchor::Center)
 }
 
 /// [`parse_target`] with an explicit anchor for `Element` targets.
 ///
 /// `anchor` is ignored for raw points, matching core's
 /// `ClickTarget::Point` arm.
+///
+/// Element targets go through core's `Mouse::point_for_bounds`, which refuses
+/// them on backends whose accessibility bounds are not screen coordinates
+/// (Wayland, issue #495) — the same check core applies to its own `Element`
+/// targets. That check is not an OS call, so parsing still finishes before
+/// the first event is posted.
 fn parse_target_anchored(
+    sim: &xa11y::InputSim,
     target: &Bound<'_, PyAny>,
     anchor: xa11y::Anchor,
 ) -> PyResult<xa11y::Point> {
     if let Ok(el) = target.cast::<Element>() {
         let element = el.borrow();
-        let (x, y, width, height) = element
+        // The bounds go in as an `Option`: core checks the capability
+        // first, so a Wayland refusal wins over "no bounds", and a missing
+        // rect is core's own `NoElementBounds`.
+        let bounds = element
             .bounds_data
-            .ok_or_else(|| PyValueError::new_err("Element has no bounds"))?;
-        return Ok(xa11y::anchor_point(
-            &xa11y::Rect {
+            .map(|(x, y, width, height)| xa11y::Rect {
                 x,
                 y,
                 width,
                 height,
-            },
-            anchor,
-        ));
+            });
+        return sim
+            .mouse()
+            .point_for_bounds(bounds, anchor)
+            .map_err(to_py_err);
     }
     let tup: (i32, i32) = target
         .extract()

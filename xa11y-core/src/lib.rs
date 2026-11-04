@@ -23,12 +23,14 @@ pub mod mock;
 // Re-export primary types at the crate root for convenience.
 pub use app::App;
 pub use config::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
-pub use element::{Element, ElementData, RawPlatformData, Rect, StateSet, Toggled, TreeNode};
+pub use element::{
+    Element, ElementData, HiddenReason, RawPlatformData, Rect, StateSet, Toggled, TreeNode,
+};
 // `#[doc(hidden)]`: the provider-side construction contract, re-exported so
 // the backend crates can reach it. Not public API — see its docs.
 #[doc(hidden)]
 pub use element::{ElementParts, StateParts};
-pub use error::{Diagnosis, Error, Result};
+pub use error::{AutoScrollOutcome, Delivery, Diagnosis, Error, Result};
 #[doc(hidden)]
 pub use event::EventParts;
 pub use event::{ElementState, Event, EventKind, StateFlag};

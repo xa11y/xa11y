@@ -526,6 +526,27 @@ impl Locator {
             timeout_seconds,
         ))
     }
+
+    /// Wait until the element's bounds are unchanged across two consecutive
+    /// polls and it is visible, then resolve with it.
+    ///
+    /// Use before an `InputSim` pointer action on an element that may still
+    /// be animating, so the click lands where it settles:
+    /// `sim.click(await locator.waitStable())`. Unrelated to `stableId`.
+    /// Rejects with `TimeoutError` whose diagnosis names the last two
+    /// differing bounds, a match that is not visible, or a selector that
+    /// never matched.
+    #[napi(
+        ts_args_type = "timeoutSeconds?: number",
+        ts_return_type = "Promise<Element>"
+    )]
+    pub fn wait_stable(&self, timeout_seconds: Option<f64>) -> AsyncTask<WaitTask> {
+        AsyncTask::new(WaitTask::returning(
+            self.inner.clone(),
+            WaitKind::Stable,
+            timeout_seconds,
+        ))
+    }
 }
 
 // ── Query tasks ────────────────────────────────────────────────────────
@@ -804,6 +825,7 @@ pub enum WaitKind {
     Disabled,
     Focused,
     Unfocused,
+    Stable,
 }
 
 pub struct WaitTask {
@@ -853,6 +875,7 @@ impl Task for WaitTask {
             WaitKind::Disabled => self.inner.wait_disabled(timeout).map(Some),
             WaitKind::Focused => self.inner.wait_focused(timeout).map(Some),
             WaitKind::Unfocused => self.inner.wait_unfocused(timeout).map(Some),
+            WaitKind::Stable => self.inner.wait_stable(timeout).map(Some),
         };
         r.map_err(map_err)
     }

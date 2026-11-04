@@ -19,7 +19,7 @@ xa11y normalizes platform-specific APIs into a unified interface. This page docu
 | `Button` | AXButton | push button | ButtonControlType |
 | `CheckBox` | AXCheckBox | check box, check menu item | CheckBoxControlType |
 | `RadioButton` | AXRadioButton | radio button, radio menu item | RadioButtonControlType |
-| `TextField` | AXTextField, AXSecureTextField | entry, password text | EditControlType |
+| `TextField` | AXTextField, AXSecureTextField *(role or subrole)* | entry, password text | EditControlType |
 | `TextArea` | AXTextArea | text | EditControlType |
 | `StaticText` | AXStaticText | label, static, caption | TextControlType |
 | `ComboBox` | AXComboBox, AXPopUpButton | combo box | ComboBoxControlType |
@@ -55,11 +55,20 @@ xa11y normalizes platform-specific APIs into a unified interface. This page docu
 
 Roles not recognized by a platform map to `Unknown`.
 
+A password field keeps the `TextField` role and sets the `password` state
+instead: `AXSecureTextField` as the role or subrole on macOS, the
+`password text` role on Linux, and `IsPassword` on Windows. xa11y does not
+redact a password field's value or the text typed into it: the value is
+whatever the platform reports. On Windows, a password control may decline to
+report its value (a WPF `PasswordBox` does), and its `value` is then `None`.
+The Win32 edit control's provider reports a placeholder, `Access denied`, in
+place of the text, and xa11y passes that placeholder through.
+
 ## Action mapping
 
 | xa11y Action | macOS | Linux (AT-SPI) | Windows (UIA) |
 | --- | --- | --- | --- |
-| `Press` | AXPress | click, activate, press, invoke | InvokePattern |
+| `Press` | AXPress *(AXOpen when the element has AXOpen and no AXPress)* | click, activate, press, invoke | InvokePattern, TogglePattern, SelectionItemPattern, or ExpandCollapsePattern. LegacyIAccessible.DoDefaultAction only for an element with none of those and a non-empty MSAA default action |
 | `Focus` | set AXFocused=true | Component.GrabFocus | SetFocus |
 | `Blur` | set AXFocused=false | *(not directly supported)* | *(not directly supported)* |
 | `Toggle` | AXPress *(on checkbox)* | toggle, check, uncheck | TogglePattern |
@@ -73,6 +82,8 @@ Roles not recognized by a platform map to `Unknown`.
 | `Decrement` | AXDecrement | decrement *(or Value -step)* | RangeValuePattern *(-step)* |
 | `ShowMenu` | AXShowMenu | menu, showmenu, popup | ExpandCollapsePattern |
 | `ScrollIntoView` | AXScrollToVisible *(when advertised)* | Component.ScrollTo | ScrollItemPattern |
+
+On Windows, the MSAA default action stands in for `Press` only on an element served through MSAA, where the UIA `FrameworkId` is `Win32`, `WinForm`, or empty. Native UIA providers such as Chromium keep their own choice. Each Windows element's `raw` map lists the UIA activation patterns it has under `uia_activation_patterns`, and its provider under `uia_framework_id`. The `target` of an event is the exception: it has no `uia_framework_id` and never offers this `Press`, because the event handlers don't fetch the two properties that decide it. Query the element again to get both.
 
 Window verbs map differently again, because each platform's window control
 API is separate from its element-action interface:
@@ -195,6 +206,24 @@ window. Minimized, maximized, and fullscreen are mutually exclusive on macOS:
 a fullscreen window cannot be minimized, and entering fullscreen brings the
 window back from the Dock first. `Restore` has one effect from any state.
 
+### `MoveTo` and `ResizeTo`: verified geometry on macOS
+
+Setting `AXPosition` or `AXSize` succeeds when the window receives the
+request, not when the window applies it. Some toolkits apply the write later
+or drop it while the window settles from another transition. The window
+server also keeps a window inside the screen's visible frame, so it refuses a
+size that would extend past it, such as growing a window that already fills
+the display's height. The app can refuse a size outside its own minimum or
+maximum too.
+
+So the macOS provider reads the attribute back after the write and re-issues
+the same absolute value until the window reports the requested geometry,
+within 2 points, for up to 5 seconds. If the window never gets there, the
+call fails with a timeout error whose diagnosis names the requested geometry
+and the geometry the window last reported. A `ResizeTo` error also gives the
+window's origin. The verb never returns success for a window that kept its
+old frame.
+
 ### SetValue: text vs numeric
 
 - **macOS** sets the `AXValue` attribute directly, which works for both text and numeric values.
@@ -223,7 +252,7 @@ When the provider is created, xa11y sets the process-wide accessibility messagin
 Bounds use desktop coordinates with origin at the top-left of the primary display. Windows uses physical pixels. macOS and Linux use logical points where available. Use the screenshot coordinate methods to map bounds onto captured pixels. Note:
 
 - **macOS** reports in points, its native logical unit. On Retina displays, 1 point = 2 physical pixels.
-- **Windows** reports physical desktop pixels for bounds, input points, window moves and sizes, and capture regions. `Screenshot.scale` is `1.0`. A window crossing a display seam has continuous bounds and its center remains inside the window, regardless of each display's DPI scaling. Code that stored Windows DIP coordinates must convert them to physical desktop pixels before passing them to xa11y.
+- **Windows** reports physical desktop pixels for bounds, input points, window moves and sizes, and capture regions. `Screenshot.scale` is `1.0`. A window crossing a display seam has continuous bounds and its center remains inside the window, regardless of each display's DPI scaling. Windows DIP coordinates stored by older code need converting to physical desktop pixels first. xa11y asks for Per-Monitor-V2 DPI awareness for the process when it first starts. A host that already chose system-aware or unaware keeps its choice. Each xa11y call that reads coordinates then switches its own thread to Per-Monitor V2 for the duration of the call and back afterwards. Without that, a system-aware host would see scaled coordinates on any monitor whose DPI differs from the system DPI. A host thread that is a single-threaded COM apartment may dispatch its own window procedures while xa11y waits on a COM call. Those procedures inherit the Per-Monitor V2 setting.
 - **Linux** reports logical pixels where the HiDPI scale is reliably detectable, and falls back to physical at scale `1.0` otherwise. See [Coordinates and HiDPI](/reference/platform-details/#coordinates-and-hidpi) for exactly when.
 - Multi-monitor setups can produce negative coordinates for displays positioned left of or above the primary.
 
@@ -264,6 +293,12 @@ A packaged app (UWP, or a packaged desktop app) takes the display name the Start
 
 UWP and other packaged apps draw inside a frame window that `ApplicationFrameHost.exe` owns. xa11y attributes that frame to the app it shows, so each app has its own name and process ID. A running app's frame is matched through the app's own `Windows.UI.Core.CoreWindow` inside it. A minimized or suspended app's frame is matched by its AppUserModelID to the process that has the same one. A frame whose app has exited belongs to no app: it is left out of the list, and an app lookup that fails names it in its diagnosis.
 
+xa11y sets the UIA connection timeout to 2 s and the transaction timeout to 20 s, so one hung provider cannot stall a call for longer than that. A window Windows already reports as not responding (`IsHungAppWindow`) fails fast instead. Listing apps, looking an app up by process ID, reading an app's windows, and finding the foreground app all return `Timeout`, and the diagnosis names each hung window with its title, process ID and executable. The elapsed time on that `Timeout` reports the 5 s threshold Windows uses to call a window hung. xa11y itself does not wait. A window that is only briefly busy is read normally.
+
+Discovery operations also turn a UIA call that runs out either timeout into `Timeout`. UIA returns the same `UIA_E_TIMEOUT` for both limits. The error's elapsed time is how long the call took, and its diagnosis names the limit that fits. UIA doesn't say which window the app listing failed to reach. On that failure the listing probes each visible top-level window with a `WM_NULL` message, bounded at 250 ms per window and 2 s overall. The windows that time out become the diagnosis candidates. Calls on a single element still report `UIA_E_TIMEOUT` as `Platform`.
+
+A window that stopped answering less than 5 s ago is not hung yet by the operating system's rule. When the desktop query in UIA reaches such a window, it waits out its timeouts and succeeds with the window left out. To catch that, the app listing compares the windows UIA returned with the visible top-level windows that `EnumWindows` reports. An owned window, such as a dialog, counts as returned when its owner was, because UIA lists it under the owner. Only the missing ones get a `WM_NULL` probe. A missing window that doesn't answer fails the listing with `Timeout`. Its diagnosis names the window, and the elapsed time is how long the UIA query took. If a missing window answers the probe, it changed during the listing or is an app window with no name yet, so the listing succeeds with a line on stderr naming it. The same holds when Windows refuses the probe outright, as with an elevated window.
+
 Windows subscriptions register their UIA handlers on every current top-level
 window of the process, and a desktop-scoped open/close watch attaches windows
 opened after `subscribe` (and drops closed ones, so a closed window stops
@@ -276,7 +311,71 @@ The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
 
 - **macOS** parses the `AXValue` attribute, where `"0"` = Off, `"1"` = On, `"2"` = Mixed.
 - **Linux** uses the AT-SPI state bits `Checked` (0x10) and `Mixed` (0x2000).
-- **Windows** reads `TogglePattern.CurrentToggleState`, where 0 = Off, 1 = On, 2 = Indeterminate.
+- **Windows** reads `TogglePattern.CurrentToggleState`, where 0 = Off, 1 = On, 2 = Indeterminate. Any other value reads as `None`, because the state is unknown. A failed read returns a `Platform` error and is never reported as `Off`.
+
+### Visible state and bounds (Linux)
+
+On Linux, `visible` requires the AT-SPI `Showing` state as well as `Visible`. `Visible` alone means the object would be drawn if its ancestors were. Rows scrolled out of a list, widgets in a hidden page, and the contents of a minimized window keep `Visible` but lose `Showing`, so xa11y reports them as not visible. So an auto-wait on `visible` waits for the element to be on screen.
+
+`bounds` is `None` when `Component.GetExtents` reports a sentinel instead of a position: an `INT32_MIN` coordinate (unrealized GTK widgets), a negative size, or `0x0`. A zero width or a zero height alone, such as a separator line, is still reported, matching Windows.
+
+GTK 4 apps need different handling. GTK 4 doesn't know where its window is, and its screen extents are `(0, 0)` or window-relative wherever the window sits. For a GTK 4 app on X11, xa11y computes `bounds` as the widget's window-relative extents plus the X11 origin of its top-level window. It finds that window by process id and exact title, never by geometry. The origin is cached until the window moves, is renamed, or another top-level appears or goes away. When the title matches no window or several, `bounds` is `None` rather than a wrong position. `bounds` is also `None` when xa11y cannot read the app's toolkit name and version, since raw screen extents might be GTK 4's.
+
+Whenever the Wayland window backend is selected, GTK 4 `bounds` are always `None`, because a Wayland client has no global position. That includes a GTK 4 app forced onto XWayland with `GDK_BACKEND=x11`. The window-relative extents are assumed to be in the same pixels as the X11 window origin. This is correct at scale 1. xa11y has not verified it under `GDK_SCALE=2`.
+
+### Visible state (Windows)
+
+On Windows, `visible` starts from the UIA `IsOffscreen` property, which some providers leave false on content that can't be seen. xa11y corrects two cases:
+
+- The contents of a minimized window are not visible.
+- An item that lies entirely outside the bounds of an ancestor whose content overflows is not visible, while one partly inside still counts as visible. "Overflows" means the ancestor's UIA Scroll pattern says it can scroll horizontally or vertically, so a custom scrolling control with no Scroll pattern isn't covered.
+
+The scroll check has limits. UIA has no viewport rectangle, so the ancestor's bounds stand in for it, and an item hidden only behind a scroll bar or header still counts as visible. A popup or top-level window, such as an open drop-down list, isn't clipped by anything above it, because it's drawn over its owner's content. Event targets skip the scroll check, so a scrolled-out item can report visible on an event. Each element's `raw` map carries `uia_is_offscreen`, the UIA value before these corrections.
+
+Auto-waiting actions wait for `visible`, and scroll a control that is only scrolled out into view first (see the [locator reference](/reference/locator/#locator)). That scroll, like `scroll_into_view()` itself, needs the UIA ScrollItem pattern, which list items, tree items and similar controls have. A plain control such as a button has none: the call returns `ActionNotSupported`, and an action on a scrolled-out button times out with a diagnosis that says the scroll was refused. For those, call `focus()` on an `Element` snapshot, because frameworks such as WinForms scroll a focused control into view. `Locator.focus()` doesn't help there, because it also waits for `visible`.
+
+An item under a collapsed parent that also lies outside a scrolling ancestor's bounds reads `scrolled_out`, because the scroll check runs before `IsOffscreen` is consulted. Scrolling doesn't reveal it: ScrollItem accepts the call and the item stays hidden until its parent expands. The auto-wait stops calling it after three accepted calls, and its timeout says the item stayed scrolled out. Expand the parent first.
+
+### Hidden reason
+
+When `visible` is false, `hidden_reason` says why, and it is `None` (`null` in JavaScript) whenever `visible` is true. When more than one reason applies, the first in this table wins:
+
+| Value | Meaning |
+| --- | --- |
+| `window_minimized` | The element's window is minimized. Restore it to act. |
+| `scrolled_out` | An ancestor that scrolls has moved the element out of its viewport. Scroll it into view to act. |
+| `not_showing` | The platform reports the element hidden for a reason it doesn't name, such as a collapsed section or a hidden page. |
+| `unknown` | The element is hidden, and xa11y couldn't tell which of the reasons above applies. |
+
+What each platform can tell apart:
+
+- **Windows** reports `window_minimized` for the contents of a minimized window and `scrolled_out` for the scroll check described above. `IsOffscreen` alone gives `not_showing`.
+- **Linux** reads the reason from AT-SPI states and, where those don't settle it, from the element's ancestors:
+  - The `Iconified` state, on the element or on an ancestor climbed past, gives `window_minimized`.
+  - For an element that keeps `Visible` but lacks `Showing`, xa11y climbs to the nearest ancestor that is showing. The reason is `scrolled_out` only when the element lies outside that ancestor's extents and one of the ancestors climbed is a scrolling container: `list`, `list box`, `scroll pane`, `table`, `tree`, `tree table`, or `viewport`. Lying outside a container that doesn't scroll gives `not_showing`.
+  - An element without `Visible` reports `not_showing`, with one exception. An item cell (`list item`, `table cell`, `table row` or `tree item`) that lies outside a showing scrolling container that is its parent reports `scrolled_out`, because Qt clears `Visible` on a row scrolled out of its view.
+  - A read that fails during these checks gives `unknown`, and so does a failed read of the element's own bounds or state set. Event targets skip the ancestor walk and report `unknown` for the `Visible`-without-`Showing` case.
+  - GTK 4 keeps `Visible` and `Showing` on widgets scrolled out of a `GtkScrolledWindow`, so they read as visible.
+  - The auto-wait's scroll is `Component.ScrollTo`. Qt has no `ScrollTo`, so `scroll_into_view()` on a Qt row returns `ActionNotSupported`, and an action on a scrolled-out Qt row times out with a diagnosis that says the scroll was refused. A `false` reply from `ScrollTo` counts as a refusal too.
+- **macOS** has only `AXHidden`, which carries no reason, so every hidden element reports `not_showing`.
+
+A timeout on an element that matched but stayed hidden carries the reason in its diagnosis. See [errors](/reference/errors/).
+
+### Delivery disposition
+
+Each failed action reports `not_delivered` or `unknown`. See [errors](/reference/errors/#delivery-disposition) for the values. A failure is `not_delivered` only when the backend decided it before it called the application. Every platform error from the dispatching call stays `unknown`.
+
+| Platform | `not_delivered` | `unknown` |
+| --- | --- | --- |
+| Linux | The element lists no matching AT-SPI action or lacks the interface the verb needs (`ActionNotSupported`). The object or its peer is gone before dispatch (`ElementStale`). `GrabFocus` (behind `focus` and `activate`) answers `false` or D-Bus `NotSupported`, because the adapter declined to take focus and focusing twice is harmless. Bad arguments or an unsupported session. | A D-Bus method timeout (`Timeout`). A failed `DoAction`, `SetCurrentValue`, `SetTextContents` or `Select*`. `DoAction` returning `false`, because a provider that acts and then returns `false` looks the same as one that declined. A window-manager request that was sent and not confirmed. |
+| macOS | `kAXErrorActionUnsupported` (`ActionNotSupported`). Role and attribute checks made by xa11y itself. Stale handles and bad arguments. | `kAXErrorCannotComplete`, which is also what an expired messaging timeout surfaces as. Every other AX code from the dispatching call, including `kAXErrorInvalidUIElement`. A window verb that did not settle in its budget (`Timeout`). |
+| Windows | Pattern acquisition answers `E_NOINTERFACE`, `UIA_E_INVALIDOPERATION` or an empty error (`ActionNotSupported`). `ValuePattern.SetValue` answers `UIA_E_INVALIDOPERATION` for a read-only control (`TextValueNotSupported`). The handle is not in the cache or no longer matches its identity (`ElementStale`). Bad arguments. | `UIA_E_TIMEOUT` from an element-level call. Every other HRESULT, including `UIA_E_NOTSUPPORTED` and `UIA_E_ELEMENTNOTAVAILABLE`, from the pattern call that performs the action. |
+
+These rules hold on every platform:
+
+- A verb that works in several steps reports `unknown` for a failure after its first step went through, even when the failing step alone would say `not_delivered`. Linux `set_value` can fail on `InsertText` after `DeleteText` emptied the field, and the X11 `minimize`, `maximize` and `enter_fullscreen` send two or three window-manager messages. On macOS the same holds for `minimize`, `enter_fullscreen`, `restore`, `activate` and `resize_to`.
+- Input simulation reports a platform failure as `unknown`. A chord can fail after a modifier was already pressed, and the input backends do not tell that apart from a failure of the first event.
+- A `Timeout` raised by xa11y's own wait or auto-wait reports `not_delivered`, because the wait expired before the action was attempted. A `Timeout` raised by a backend while it talks to the platform, such as a D-Bus `NoReply` or a stalled discovery call, reports `unknown`, because the backend cannot say whether it came before or after dispatch.
 
 ### Selected state
 
@@ -297,7 +396,7 @@ xa11y supports both X11 and Wayland Linux sessions. Backends are selected at run
 | Capability | X11 | Wayland |
 | --- | --- | --- |
 | Accessibility (AT-SPI2) | D-Bus, no display-server dependency | D-Bus, no display-server dependency |
-| Input simulation | `XTest` extension (no setup) | `/dev/uinput` virtual evdev device (requires `input` group) |
+| Input simulation | `XTest` extension (no setup) | `/dev/uinput` virtual evdev device (requires the `input` group or a udev rule) |
 | Screen capture | `GetImage` on the root window | PNG URI from `org.freedesktop.portal.Screenshot` |
 | Window management | EWMH/ICCCM | Sway native IPC, gated by `zwlr_foreign_toplevel_manager_v1` |
 
@@ -355,7 +454,7 @@ must be observed by reading a new snapshot.
 
 `org.freedesktop.portal.RemoteDesktop` (libei) is the architecturally "correct" Wayland input-sim path and the future of structured input injection on Linux, but today it covers a strict subset of the ecosystem: only `xdg-desktop-portal-gnome` and `xdg-desktop-portal-kde` support it, and neither has a usable headless mode without a session manager (GDM / SDDM). uinput goes through the kernel and is compositor-agnostic, so it works on every Wayland desktop (GNOME, KDE Plasma, sway, Hyprland, Cosmic, weston) and on headless Linux servers, with the same code path. It is the same mechanism `xdotool --using-uinput`, `ydotool`, `wtype`, Steam Input, and Wine all use.
 
-The trade-off is that uinput requires the user to be in the `input` group, which grants global input read/write, comparable to macOS Input Monitoring. The portal model is finer-grained (per-app consent) but isn't broadly available yet. xa11y may add a libei backend later as an opt-in upgrade once the portal landscape stabilises.
+The trade-off is that uinput requires the user to be in the `input` group or to have a udev rule granting `/dev/uinput` access, which grants global input read/write, comparable to macOS Input Monitoring. The portal model is finer-grained (per-app consent) but isn't broadly available yet. xa11y may add a libei backend later as an opt-in upgrade once the portal landscape stabilises.
 
 #### Wayland screenshot portal consent
 
@@ -375,6 +474,10 @@ Every other configuration fails closed to `1.0`, so the data is never wrong. The
 - **XWayland in a Wayland session.** Auto selection uses the Wayland screenshot portal and output scale. An explicit screenshot override of `x11` uses the X11 source, which stays `1.0` under XWayland.
 
 `Point` arguments to input simulation, after the logical→physical conversion, are mapped onto the uinput virtual coordinate range. Override the assumed screen size (default 1920×1080) with `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` env vars if your setup differs.
+
+On Wayland, input simulation refuses pointer actions whose target is an `Element` (`click`, `drag`, `move_to`, `scroll`, and their variants) with an `Unsupported` error. Wayland clients don't know their global position, so the bounds AT-SPI reports are not screen coordinates, and a click computed from them would land somewhere else. Use a semantic action such as `press` or `focus`, or pass a raw screen point. Raw-point pointer actions and keyboard input work as before.
+
+The refusal follows the input backend, not the session. Forcing `XA11Y_LINUX_INPUT_BACKEND=x11` on a Wayland desktop sends input through XWayland and accepts `Element` targets, which land correctly only in X11 (XWayland) applications. Forcing `wayland` on an X11 session refuses them.
 
 ### GTK press fallback (Linux)
 
@@ -403,6 +506,8 @@ cursor --force-renderer-accessibility
 # Google Chrome / Chromium
 google-chrome --force-renderer-accessibility
 ```
+
+In a session with no settings daemon (CI, Xvfb, a container), also set `ACCESSIBILITY_ENABLED=1` in the app's environment. There, Chromium needs both the variable and the flag before it exposes web content.
 
 Representative node counts on Ubuntu 24.04 + GNOME 46 (Wayland):
 

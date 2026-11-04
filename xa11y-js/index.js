@@ -32,6 +32,11 @@ class XA11yError extends Error {
   constructor(message) {
     super(message);
     this.name = 'XA11yError';
+    // Whether the failed action may already have taken effect:
+    // 'not_delivered' is safe to retry, 'unknown' is not. Populated from the
+    // native payload in `toTypedError`; 'unknown' is the conservative
+    // default for an error that arrives without one.
+    /** @type {'not_delivered' | 'unknown'} */ this.delivery = 'unknown';
   }
 }
 
@@ -39,6 +44,8 @@ class PermissionDeniedError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'PermissionDeniedError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -46,6 +53,8 @@ class AccessibilityNotEnabledError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'AccessibilityNotEnabledError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -53,12 +62,16 @@ class SelectorNotMatchedError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'SelectorNotMatchedError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
     // Structured diagnosis (tenet 6) — populated from the native payload in
     // `toTypedError`. Defaults keep every field present so consumers never
     // need existence checks.
     /** @type {string | null} */ this.selector = null;
     /** @type {string | null} */ this.condition = null;
     /** @type {string | null} */ this.lastObserved = null;
+    /** @type {string | null} */ this.hiddenReason = null;
+    /** @type {string | null} */ this.autoScroll = null;
     /** @type {string[]} */ this.candidates = [];
     /** @type {string | null} */ this.scope = null;
     /** @type {number | null} */ this.elapsedMs = null;
@@ -69,6 +82,8 @@ class ActionNotSupportedError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'ActionNotSupportedError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -82,6 +97,8 @@ class TimeoutError extends XA11yError {
     /** @type {string | null} */ this.selector = null;
     /** @type {string | null} */ this.condition = null;
     /** @type {string | null} */ this.lastObserved = null;
+    /** @type {string | null} */ this.hiddenReason = null;
+    /** @type {string | null} */ this.autoScroll = null;
     /** @type {string[]} */ this.candidates = [];
     /** @type {string | null} */ this.scope = null;
     /** @type {number | null} */ this.elapsedMs = null;
@@ -92,6 +109,8 @@ class InvalidSelectorError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'InvalidSelectorError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -99,6 +118,8 @@ class InvalidActionDataError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'InvalidActionDataError';
+    // Core reports this variant as not delivered, so a hand-built one agrees.
+    this.delivery = 'not_delivered';
   }
 }
 
@@ -168,9 +189,14 @@ function toTypedError(err) {
   const typed = new Cls(detail);
   typed.stack = err.stack;
   if (diagnosis && typeof diagnosis === 'object') {
+    if (diagnosis.delivery === 'not_delivered' || diagnosis.delivery === 'unknown') {
+      typed.delivery = diagnosis.delivery;
+    }
     typed.selector = diagnosis.selector ?? null;
     typed.condition = diagnosis.condition ?? null;
     typed.lastObserved = diagnosis.lastObserved ?? null;
+    typed.hiddenReason = diagnosis.hiddenReason ?? null;
+    typed.autoScroll = diagnosis.autoScroll ?? null;
     typed.candidates = Array.isArray(diagnosis.candidates) ? diagnosis.candidates : [];
     typed.scope = diagnosis.scope ?? null;
     typed.elapsedMs = diagnosis.elapsedMs ?? null;
@@ -189,6 +215,8 @@ function diagnosedError(ErrorClass, summary, diagnosis) {
     selector = null,
     condition = null,
     lastObserved = null,
+    hiddenReason = null,
+    autoScroll = null,
     candidates = [],
     scope = null,
     elapsedMs = null,
@@ -197,6 +225,8 @@ function diagnosedError(ErrorClass, summary, diagnosis) {
   if (condition) message += `; waiting for: ${condition}`;
   if (selector) message += `; selector: ${selector}`;
   if (lastObserved) message += `; last observed: ${lastObserved}`;
+  if (hiddenReason) message += `; hidden because: ${hiddenReason}`;
+  if (autoScroll) message += `; auto-scroll: ${autoScroll}`;
   if (candidates.length > 0) message += `; candidates: ${candidates.join(', ')}`;
   if (scope) message += `\nsearch scope (bounded):\n${scope}`;
 
@@ -204,9 +234,13 @@ function diagnosedError(ErrorClass, summary, diagnosis) {
   err.selector = selector;
   err.condition = condition;
   err.lastObserved = lastObserved;
+  err.hiddenReason = hiddenReason;
+  err.autoScroll = autoScroll;
   err.candidates = candidates;
   err.scope = scope;
   err.elapsedMs = elapsedMs;
+  // A JS-side poll loop only observes; it never dispatches an action.
+  err.delivery = 'not_delivered';
   return err;
 }
 

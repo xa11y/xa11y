@@ -52,6 +52,20 @@ test('tree has the named text field', async () => {
   assert.equal(field.editable, true);
 });
 
+test('a password entry keeps text_field and sets password (#522)', async () => {
+  if (!appConfig.passwordFieldName) return; // skip if app has no password entry
+  const app = await getApp();
+  const field = await one(app, `text_field[name="${appConfig.passwordFieldName}"]`);
+  assert.equal(field.role, 'text_field');
+  assert.equal(field.password, true);
+  const flagged = await app.locator('text_field[password="true"]').elements();
+  assert.deepEqual(flagged.map((e) => e.name), [appConfig.passwordFieldName]);
+  if (appConfig.textFieldName) {
+    const plain = await one(app, `text_field[name="${appConfig.textFieldName}"]`);
+    assert.equal(plain.password, false);
+  }
+});
+
 test('tree has a Checkbox', async () => {
   if (!appConfig.hasCheckbox) return; // skip if app has no checkbox
   const app = await getApp();
@@ -118,4 +132,32 @@ test('descendant selector returns multiple elements', async () => {
   // match (at most) what the top-level query finds; on platforms without a
   // separate window node it may return fewer or zero — accept either.
   assert.ok(byDescendant.length <= allMax);
+});
+
+test('a selector miss reports it was not delivered (#523)', async () => {
+  const { SelectorNotMatchedError } = require('../../../xa11y-js/index.js');
+  const app = await getApp();
+  await assert.rejects(
+    app.locator('button[name="NoSuchButtonAnywhere523"]').element(),
+    (err) => {
+      assert.ok(err instanceof SelectorNotMatchedError);
+      assert.equal(err.delivery, 'not_delivered');
+      return true;
+    },
+  );
+});
+
+test('hiddenReason is set exactly when an element is not visible', async () => {
+  // #590: a hidden element says why, a visible one says nothing, and the
+  // reason is one of the documented names.
+  const known = new Set(['window_minimized', 'scrolled_out', 'not_showing', 'unknown']);
+  const app = await getApp();
+  const elements = await app.locator('*').elements();
+  assert.ok(elements.length > 0, "the app's tree must not be empty");
+  const broken = elements
+    .filter((e) => (e.hiddenReason === null) !== e.visible
+      || (e.hiddenReason !== null && !known.has(e.hiddenReason)))
+    .map((e) => [e.role, e.name, e.visible, e.hiddenReason]);
+  assert.deepEqual(broken.slice(0, 20), [],
+    'hiddenReason must be a known name exactly when visible is false');
 });

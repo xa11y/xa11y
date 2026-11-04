@@ -79,15 +79,24 @@ pub struct InputSim {
 
 /// Parse a JS target into an `xa11y::Point`. Accepts either an `[x, y]`
 /// tuple (as `Vec<i32>` of length 2) or an `Element` (uses its bounds centre).
-fn parse_target(target: Target<'_>) -> napi::Result<xa11y::Point> {
-    parse_target_anchored(target, xa11y::Anchor::Center)
+fn parse_target(sim: &xa11y::InputSim, target: Target<'_>) -> napi::Result<xa11y::Point> {
+    parse_target_anchored(sim, target, xa11y::Anchor::Center)
 }
 
 /// [`parse_target`] with an explicit anchor for `Element` targets.
 ///
 /// `anchor` is ignored for raw points, matching core's `ClickTarget::Point`
 /// arm.
-fn parse_target_anchored(target: Target<'_>, anchor: xa11y::Anchor) -> napi::Result<xa11y::Point> {
+///
+/// Element targets go through core's `Mouse::point_for_bounds`, which refuses
+/// them on backends whose accessibility bounds are not screen coordinates
+/// (Wayland, issue #495) — the same check core applies to its own `Element`
+/// targets. It is not an OS call, so parsing still precedes the first event.
+fn parse_target_anchored(
+    sim: &xa11y::InputSim,
+    target: Target<'_>,
+    anchor: xa11y::Anchor,
+) -> napi::Result<xa11y::Point> {
     match target {
         Either::A(tup) => {
             if tup.len() != 2 {
@@ -98,15 +107,13 @@ fn parse_target_anchored(target: Target<'_>, anchor: xa11y::Anchor) -> napi::Res
             }
             Ok(xa11y::Point::new(tup[0], tup[1]))
         }
-        Either::B(el) => {
-            let rect = el.data.bounds.ok_or_else(|| {
-                napi::Error::from_reason(
-                    "XA11Y_NO_ELEMENT_BOUNDS: element has no bounds; cannot compute a screen point"
-                        .to_string(),
-                )
-            })?;
-            Ok(xa11y::anchor_point(&rect, anchor))
-        }
+        // The bounds go in as an `Option`: core checks the capability
+        // first, so a Wayland refusal wins over "no bounds", and a missing
+        // rect is core's own `NoElementBounds`.
+        Either::B(el) => sim
+            .mouse()
+            .point_for_bounds(el.data.bounds, anchor)
+            .map_err(map_err),
     }
 }
 
@@ -220,6 +227,12 @@ impl InputSim {
     /// down for the duration, and `anchor` picks the point inside an
     /// `Element`'s bounds. With no options this is a single left click at the
     /// element's centre.
+    ///
+    /// On a Linux Wayland session an `Element` target rejects with
+    /// `ActionNotSupportedError` (code `XA11Y_UNSUPPORTED`): Wayland clients
+    /// do not know their global position, so accessibility bounds are not
+    /// screen coordinates. Use a semantic action (`press`, `focus`) or pass
+    /// a raw `[x, y]`.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn click(
         &self,
@@ -227,7 +240,7 @@ impl InputSim {
         options: Option<ClickOptions>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
         let options = options.unwrap_or_default();
-        let pt = parse_target_anchored(target, parse_anchor(options.anchor)?)?;
+        let pt = parse_target_anchored(&self.inner, target, parse_anchor(options.anchor)?)?;
         let opts = xa11y::ClickOptions::new()
             .button(parse_button(options.button)?)
             .count(options.count.unwrap_or(1))
@@ -244,7 +257,7 @@ impl InputSim {
         &self,
         target: Either<Vec<i32>, &Element>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
-        let pt = parse_target(target)?;
+        let pt = parse_target(&self.inner, target)?;
         Ok(AsyncTask::new(MouseTask {
             inner: self.inner.clone(),
             op: MouseOp::DoubleClick(pt),
@@ -257,7 +270,7 @@ impl InputSim {
         &self,
         target: Either<Vec<i32>, &Element>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
-        let pt = parse_target(target)?;
+        let pt = parse_target(&self.inner, target)?;
         Ok(AsyncTask::new(MouseTask {
             inner: self.inner.clone(),
             op: MouseOp::RightClick(pt),
@@ -270,7 +283,7 @@ impl InputSim {
         &self,
         target: Either<Vec<i32>, &Element>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
-        let pt = parse_target(target)?;
+        let pt = parse_target(&self.inner, target)?;
         Ok(AsyncTask::new(MouseTask {
             inner: self.inner.clone(),
             op: MouseOp::MoveTo(pt),
@@ -311,8 +324,8 @@ impl InputSim {
         end: Either<Vec<i32>, &Element>,
         options: Option<DragOptions>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
-        let from = parse_target(start)?;
-        let to = parse_target(end)?;
+        let from = parse_target(&self.inner, start)?;
+        let to = parse_target(&self.inner, end)?;
         let options = options.unwrap_or_default();
         let opts = xa11y::DragOptions::new()
             .button(parse_button(options.button)?)
@@ -335,7 +348,7 @@ impl InputSim {
         dx: Option<i32>,
         dy: Option<i32>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
-        let pt = parse_target(target)?;
+        let pt = parse_target(&self.inner, target)?;
         Ok(AsyncTask::new(MouseTask {
             inner: self.inner.clone(),
             op: MouseOp::Scroll(pt, dx.unwrap_or(0), dy.unwrap_or(0)),
@@ -396,6 +409,9 @@ impl InputSim {
     }
 
     /// Type literal text into the currently focused control.
+    ///
+    /// `"\r\n"`, `"\r"` and `"\n"` each type one Return/Enter keypress, so in
+    /// a single-line field this may activate the default button.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn type_text(&self, text: String) -> AsyncTask<KeyboardTask> {
         AsyncTask::new(KeyboardTask {

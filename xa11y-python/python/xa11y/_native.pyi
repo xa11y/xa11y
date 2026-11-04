@@ -16,6 +16,32 @@ AnchorName = Literal["center", "top_left", "top_right", "bottom_left", "bottom_r
 # binding, like every other enum value a user compares against as a literal.
 OmissionReasonName = Literal["no_bounds", "zero_area", "outside_capture"]
 
+# Why an element reads ``visible=False`` (``Element.hidden_reason``, and the
+# ``hidden_reason`` of a timeout). Identically spelled in the JS binding.
+#   scrolled_out      outside the viewport of a scrolling ancestor, so
+#                     scroll_into_view can fix it
+#   window_minimized  its window is minimized; restore the window
+#   not_showing       the platform reports it not drawn without saying why
+#                     (a collapsed container, an inactive tab)
+#   unknown           the provider did not establish why
+# The values are spelled only in the Literal (comments do not count), so the
+# parity check's variant coverage notices one going missing from it.
+HiddenReasonName = Literal["window_minimized", "scrolled_out", "not_showing", "unknown"]
+
+# Whether a failed action may already have taken effect (``XA11yError.delivery``).
+# ``"not_delivered"`` is safe to retry; ``"unknown"`` is not. Identically
+# spelled in the JS binding.
+DeliveryName = Literal["not_delivered", "unknown"]
+
+# What an auto-waiting action's scroll attempt came to (the ``auto_scroll`` of
+# a timeout). Identically spelled in the JS binding.
+#   refused    the element has no semantic scroll call; asked once per wait
+#   no_effect  the platform accepted the call, and the next check still read
+#              the element not visible (scrolled out, or hidden otherwise)
+#   revealed   the next check read it visible; something else, such as
+#              enabled=False, kept the action from running
+AutoScrollOutcomeName = Literal["refused", "no_effect", "revealed"]
+
 # Shell-surface kinds. Like roles and key names, these strings are identical in
 # the JS binding — a kind is a value the user writes as a literal.
 ShellSurfaceKindName = Literal[
@@ -34,6 +60,15 @@ ShellSurfaceKindName = Literal[
 class XA11yError(Exception):
     """Base exception for all xa11y errors."""
 
+    delivery: DeliveryName
+    """Whether the failed action may already have taken effect. Always set
+    on errors xa11y raises. ``'not_delivered'``: the failure happened before
+    the action was dispatched (selector not matched, action not supported,
+    element stale, an auto-wait that timed out), so a retry is safe.
+    ``'unknown'``: the action was dispatched or may have been (a D-Bus
+    ``NoReply``, an AX ``CannotComplete``, a UIA timeout, any platform
+    error), so a retry can apply it twice."""
+
 class PermissionDeniedError(XA11yError):
     """Accessibility permissions have not been granted."""
 
@@ -41,9 +76,10 @@ class AccessibilityNotEnabledError(XA11yError):
     """The target app advertises an accessibility tree but it is empty.
 
     Raised on Linux when a Chromium/Electron app is launched without
-    ``--force-renderer-accessibility`` (or the ``ACCESSIBILITY_ENABLED=1``
-    environment variable), so the renderer accessibility bridge never
-    populates the window's subtree.
+    ``--force-renderer-accessibility``, so the renderer accessibility bridge
+    never populates the window's subtree. In a bare session with no settings
+    daemon (CI, Xvfb, a container) the app needs both the flag and
+    ``ACCESSIBILITY_ENABLED=1`` in its environment.
     """
 
 class SelectorNotMatchedError(XA11yError):
@@ -62,6 +98,14 @@ class SelectorNotMatchedError(XA11yError):
     last_observed: str | None
     """What the failing operation last observed (e.g. ``'selector matched
     2 element(s); nth(5) requested'``)."""
+    hidden_reason: HiddenReasonName | None
+    """Why the last observed element was not visible. Set by timeouts; always
+    ``None`` for this class (present for attribute parity with
+    :class:`TimeoutError`)."""
+    auto_scroll: AutoScrollOutcomeName | None
+    """What an auto-waiting action's scroll attempt came to. Set by timeouts;
+    always ``None`` for this class (present for attribute parity with
+    :class:`TimeoutError`)."""
     candidates: list[str]
     """Bounded near-miss candidates, e.g. same-role elements with different
     names, or the running applications for app lookups."""
@@ -103,6 +147,17 @@ class TimeoutError(XA11yError):
     """The last poll's observation: ``'matched button "Export"
     (visible=false, enabled=true, focused=false)'`` vs ``'selector never
     matched'``."""
+    hidden_reason: HiddenReasonName | None
+    """Why the last observed element was not visible, when it matched but
+    read ``visible=False``; the values are listed at :data:`HiddenReasonName`.
+    ``None`` when nothing hidden was observed."""
+    auto_scroll: AutoScrollOutcomeName | None
+    """What the action's auto-scroll came to, when its target was enabled
+    and scrolled out; the values are listed at :data:`AutoScrollOutcomeName`.
+    It describes the first check after the latest accepted scroll, so
+    ``revealed`` alongside ``hidden_reason`` scrolled out means the element
+    came into view and later scrolled back out. ``None`` when the wait never
+    tried to scroll."""
     candidates: list[str]
     """Bounded near-miss candidates (same role, different attributes).
     Collected only when the selector never matched during the wait."""
@@ -504,6 +559,14 @@ class Element:
     @property
     def visible(self) -> bool: ...
     @property
+    def hidden_reason(self) -> HiddenReasonName | None:
+        """Why the element is not visible, or ``None`` when it is.
+
+        The values and what each calls for are listed at
+        :data:`HiddenReasonName`. Which reasons a platform can tell apart is
+        in the platform details reference.
+        """
+    @property
     def focused(self) -> bool: ...
     @property
     def active(self) -> bool:
@@ -538,6 +601,14 @@ class Element:
     def required(self) -> bool: ...
     @property
     def busy(self) -> bool: ...
+    @property
+    def password(self) -> bool:
+        """Whether this is a password (secure text) field.
+
+        The role stays ``text_field``. xa11y redacts nothing, so a caller that
+        must keep a secret out of its logs checks this flag.
+        """
+        ...
     @property
     def minimized(self) -> bool | None:
         """Whether the window is minimized.
@@ -782,6 +853,17 @@ class Locator:
         """Wait until the element has keyboard focus."""
     def wait_unfocused(self, timeout: float | None = None) -> Element:
         """Wait until the element does not have keyboard focus."""
+    def wait_stable(self, timeout: float | None = None) -> Element:
+        """Wait until the element's bounds are unchanged across two consecutive
+        polls and it is visible, then return it.
+
+        Use before an ``InputSim`` pointer action on an element that may still
+        be animating, so the click lands where it settles:
+        ``sim.click(locator.wait_stable())``. Unrelated to ``stable_id``.
+
+        Raises ``TimeoutError`` whose diagnosis names the last two differing
+        bounds, a match that is not visible, or a selector that never matched.
+        """
     def wait_until(
         self,
         predicate: Callable[[Element | None], bool],
@@ -830,6 +912,11 @@ class InputSim:
         duration, and ``anchor`` picks the point inside an ``Element``'s
         bounds — a named anchor or an ``(dx, dy)`` offset from its top-left
         corner. ``anchor`` is ignored when ``target`` is a raw tuple.
+
+        On a Linux Wayland session an ``Element`` target raises
+        ``ActionNotSupportedError``: Wayland clients do not know their global
+        position, so accessibility bounds are not screen coordinates. Use a
+        semantic action (``press``, ``focus``) or pass a raw ``(x, y)``.
         """
     def double_click(self, target: tuple[int, int] | Element) -> None:
         """Left double-click at ``target``."""
@@ -883,7 +970,12 @@ class InputSim:
     def key_up(self, key: str) -> None:
         """Release a key previously pressed with :meth:`key_down`."""
     def type_text(self, text: str) -> None:
-        """Type literal text into the currently focused control."""
+        """Type literal text into the currently focused control.
+
+        ``"\\r\\n"``, ``"\\r"`` and ``"\\n"`` each type one Return/Enter
+        keypress, so in a single-line field this may activate the default
+        button.
+        """
 
 # ── Screenshot ───────────────────────────────────────────────────────────────
 

@@ -31,7 +31,72 @@
 //!    JS) in addition to rendering it into the message. New fields belong on
 //!    [`Diagnosis`], not interpolated into ad-hoc message strings.
 
+use crate::element::HiddenReason;
 use crate::role::Role;
+
+/// Whether an action that failed may already have taken effect.
+///
+/// A caller deciding whether to retry a failed action needs exactly this, and
+/// no platform return code can be trusted for it: a timeout or a D-Bus
+/// `NoReply` often arrives after the application applied the action, and a
+/// retry then double-submits (a second "Send"). Read it with
+/// [`Error::delivery`].
+///
+/// There are two answers, and the absence of a third is deliberate. A
+/// confirmed delivery is not an error, so `Ok` already says it. What an
+/// error can honestly claim is "nothing reached the application"
+/// ([`NotDelivered`](Self::NotDelivered), safe to retry) or "I cannot tell"
+/// ([`Unknown`](Self::Unknown), not safe to retry blindly). A failure that
+/// does not clearly happen before dispatch is `Unknown`.
+///
+/// The disposition describes errors that come from an action. For an error
+/// from a read or a wait it says only whether an action could have reached
+/// the application.
+///
+/// Each backend documents which of its platform failures map to which value
+/// in the crate-level docs of `xa11y-linux`, `xa11y-macos`, and
+/// `xa11y-windows`.
+///
+/// `#[non_exhaustive]`: only core resolves a disposition and the bindings
+/// pass it on as a string, so a further value needs no work in a backend.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    /// The failure happened before the action was dispatched to the
+    /// application, so nothing was applied and a retry is safe. Examples:
+    /// the selector matched nothing, the element does not support the
+    /// action, the element went stale before dispatch, an argument was
+    /// rejected, an auto-wait timed out before acting.
+    NotDelivered,
+    /// The action was dispatched, or may have been, and the outcome is
+    /// unconfirmed. A retry may apply the action twice. Examples: a D-Bus
+    /// `NoReply`, an AX `kAXErrorCannotComplete`, a UIA timeout, any
+    /// platform error from the dispatch call itself.
+    Unknown,
+}
+
+impl Delivery {
+    /// The `snake_case` name this disposition crosses the bindings, the CLI
+    /// and MCP as (`"not_delivered"`, `"unknown"`).
+    pub fn to_snake_case(self) -> &'static str {
+        match self {
+            Self::NotDelivered => "not_delivered",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// True when retrying the failed action cannot apply it twice.
+    pub fn is_safe_to_retry(self) -> bool {
+        matches!(self, Self::NotDelivered)
+    }
+}
+
+impl std::fmt::Display for Delivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_snake_case())
+    }
+}
 
 /// Result type alias for xa11y operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -71,6 +136,17 @@ pub struct Diagnosis {
     /// `"selector never matched"`, or
     /// `"3 event(s) received, none matched"`.
     pub last_observed: Option<String>,
+    /// Why the last observed element was not visible, when a wait failed on
+    /// an element that matched but read `visible: false`. A harness can act
+    /// on it (`ScrolledOut` is what `scroll_into_view` fixes; a minimized
+    /// window needs restoring) without parsing `last_observed`.
+    pub hidden_reason: Option<HiddenReason>,
+    /// What an auto-waiting action did about a target that was hidden only
+    /// because it was scrolled out: whether the platform refused to scroll
+    /// it, scrolled it without effect, or brought it into view (after which
+    /// something else, such as `enabled=false`, kept the wait going).
+    /// `None` when the wait never tried to scroll.
+    pub auto_scroll: Option<AutoScrollOutcome>,
     /// Bounded list of near-miss candidates — elements or applications that
     /// were present in the search scope and partially matched (e.g. same
     /// role, different name).
@@ -79,6 +155,11 @@ pub struct Diagnosis {
     /// tree dump or an application list), so the consumer does not need to
     /// re-run the failure under `print(app.dump())`.
     pub scope: Option<String>,
+    /// Overrides the disposition [`Error::delivery`] would derive from the
+    /// error's variant. Set where the variant alone is wrong: core's own
+    /// wait timeouts happen before any dispatch (`NotDelivered`), while a
+    /// bare [`Error::Timeout`] from a backend is `Unknown`.
+    pub delivery: Option<Delivery>,
 }
 
 impl Diagnosis {
@@ -108,6 +189,20 @@ impl Diagnosis {
         self
     }
 
+    /// Set what an auto-waiting action's scroll attempt came to.
+    #[must_use]
+    pub fn auto_scroll(mut self, outcome: AutoScrollOutcome) -> Self {
+        self.auto_scroll = Some(outcome);
+        self
+    }
+
+    /// Set why the last observed element was not visible.
+    #[must_use]
+    pub fn hidden_reason(mut self, reason: HiddenReason) -> Self {
+        self.hidden_reason = Some(reason);
+        self
+    }
+
     /// Set the bounded list of near-miss candidates.
     #[must_use]
     pub fn candidates(mut self, candidates: impl IntoIterator<Item = String>) -> Self {
@@ -122,13 +217,23 @@ impl Diagnosis {
         self
     }
 
+    /// Override the delivery disposition of the error this is attached to.
+    #[must_use]
+    pub fn delivery(mut self, delivery: Delivery) -> Self {
+        self.delivery = Some(delivery);
+        self
+    }
+
     /// True when no field carries any information.
     pub fn is_empty(&self) -> bool {
         self.condition.is_none()
             && self.selector.is_none()
             && self.last_observed.is_none()
+            && self.hidden_reason.is_none()
+            && self.auto_scroll.is_none()
             && self.candidates.is_empty()
             && self.scope.is_none()
+            && self.delivery.is_none()
     }
 }
 
@@ -139,6 +244,18 @@ impl std::fmt::Display for Diagnosis {
     /// ```text
     /// ; waiting for: visible; last observed: selector never matched;
     /// candidates: button "Back", button "Forward"
+    /// ```
+    ///
+    /// or, for an element that matched but was not visible:
+    ///
+    /// ```text
+    /// ; waiting for: visible; last observed: matched button "Save"
+    /// (visible=false, enabled=true, focused=false); hidden because: scrolled_out
+    /// ```
+    ///
+    /// The scope, when present, follows on its own lines:
+    ///
+    /// ```text
     /// search scope (bounded):
     ///   window "Main"
     ///     ...
@@ -152,6 +269,12 @@ impl std::fmt::Display for Diagnosis {
         }
         if let Some(last) = &self.last_observed {
             write!(f, "; last observed: {last}")?;
+        }
+        if let Some(reason) = self.hidden_reason {
+            write!(f, "; hidden because: {reason}")?;
+        }
+        if let Some(outcome) = self.auto_scroll {
+            write!(f, "; auto-scroll: {outcome}")?;
         }
         if !self.candidates.is_empty() {
             write!(f, "; candidates: {}", self.candidates.join(", "))?;
@@ -169,6 +292,54 @@ fn diagnosis_suffix(diagnosis: &Option<Box<Diagnosis>>) -> String {
     match diagnosis {
         Some(d) if !d.is_empty() => d.to_string(),
         _ => String::new(),
+    }
+}
+
+/// How an auto-waiting action's attempt to scroll its target into view ended.
+///
+/// An action waits for its target to be visible. When the target is enabled
+/// and hidden only because it is scrolled out, the wait calls the platform's
+/// `scroll_into_view` on it, and a timeout reports the outcome here.
+///
+/// `#[non_exhaustive]`: nothing outside core matches on it. The bindings, the
+/// CLI and MCP all render it through [`AutoScrollOutcome::to_snake_case`],
+/// whose exhaustive match is the compiler's guard, and
+/// `[[types.variant_coverage]]` guards the hand-written type declarations
+/// (the Python `Literal` and the TypeScript union).
+///
+/// The outcome describes the first check after the latest accepted scroll.
+/// `Revealed` alongside `hidden_reason: scrolled_out` therefore means the
+/// element came into view and later scrolled back out.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AutoScrollOutcome {
+    /// The platform refused to scroll this element (it has no semantic
+    /// scroll call for it). The wait asked once and kept polling.
+    Refused,
+    /// The platform accepted the call, but the element was still not
+    /// visible when it was next observed: still `scrolled_out`, or hidden
+    /// for another reason. `last_observed` says which.
+    NoEffect,
+    /// The next check after the scroll read the element visible; something
+    /// else (such as `enabled=false`) kept the action from running.
+    Revealed,
+}
+
+impl AutoScrollOutcome {
+    /// The `snake_case` name this outcome crosses the bindings, the CLI and
+    /// MCP as (`"refused"`, `"no_effect"`, `"revealed"`).
+    pub fn to_snake_case(self) -> &'static str {
+        match self {
+            Self::Refused => "refused",
+            Self::NoEffect => "no_effect",
+            Self::Revealed => "revealed",
+        }
+    }
+}
+
+impl std::fmt::Display for AutoScrollOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_snake_case())
     }
 }
 
@@ -307,6 +478,42 @@ impl Error {
         self
     }
 
+    /// Whether the failed action may already have taken effect.
+    ///
+    /// Safe to call on any error. The value is the attached
+    /// [`Diagnosis::delivery`] when one is set, otherwise derived from the
+    /// variant:
+    ///
+    /// - [`NotDelivered`](Delivery::NotDelivered): the failure is decided
+    ///   before dispatch. These are `SelectorNotMatched`, `ElementStale`,
+    ///   `ActionNotSupported`, `TextValueNotSupported`, `InvalidSelector`,
+    ///   `InvalidActionData`, `InvalidConfig`, `NoElementBounds`,
+    ///   `Unsupported`, `PermissionDenied` and `AccessibilityNotEnabled`.
+    /// - [`Unknown`](Delivery::Unknown): `Timeout` and `Platform`, where the
+    ///   platform call may have reached the application.
+    ///
+    /// The match has no wildcard arm, so a new variant does not compile until
+    /// someone classifies it here.
+    pub fn delivery(&self) -> Delivery {
+        if let Some(delivery) = self.diagnosis().and_then(|d| d.delivery) {
+            return delivery;
+        }
+        match self {
+            Self::PermissionDenied { .. }
+            | Self::AccessibilityNotEnabled { .. }
+            | Self::SelectorNotMatched { .. }
+            | Self::ElementStale { .. }
+            | Self::ActionNotSupported { .. }
+            | Self::TextValueNotSupported
+            | Self::InvalidSelector { .. }
+            | Self::InvalidActionData { .. }
+            | Self::InvalidConfig { .. }
+            | Self::NoElementBounds
+            | Self::Unsupported { .. } => Delivery::NotDelivered,
+            Self::Timeout { .. } | Self::Platform { .. } => Delivery::Unknown,
+        }
+    }
+
     /// The attached [`Diagnosis`], if this error carries one. Bindings use
     /// this to expose structured fields on their exception types.
     pub fn diagnosis(&self) -> Option<&Diagnosis> {
@@ -391,5 +598,69 @@ mod tests {
             d.last_observed.as_deref(),
             Some("selector matched 1 element(s); nth(3) requested")
         );
+    }
+
+    #[test]
+    fn delivery_is_not_delivered_for_errors_decided_before_dispatch() {
+        let cases = [
+            Error::selector_not_matched("button"),
+            Error::ElementStale {
+                selector: "button".into(),
+            },
+            Error::ActionNotSupported {
+                action: "press".into(),
+                role: Role::Button,
+            },
+            Error::TextValueNotSupported,
+            Error::InvalidSelector {
+                selector: "[".into(),
+                message: "bad".into(),
+            },
+            Error::InvalidActionData {
+                message: "bad".into(),
+            },
+            Error::NoElementBounds,
+            Error::Unsupported {
+                feature: "x".into(),
+            },
+            Error::PermissionDenied {
+                instructions: "grant".into(),
+            },
+        ];
+        for err in cases {
+            assert_eq!(err.delivery(), Delivery::NotDelivered, "{err}");
+            assert!(err.delivery().is_safe_to_retry(), "{err}");
+        }
+    }
+
+    #[test]
+    fn delivery_is_unknown_for_platform_failures_and_bare_timeouts() {
+        let platform = Error::Platform {
+            code: -25204,
+            message: "cannot complete".into(),
+        };
+        assert_eq!(platform.delivery(), Delivery::Unknown);
+        assert!(!platform.delivery().is_safe_to_retry());
+        assert_eq!(
+            Error::timeout(Duration::from_secs(1)).delivery(),
+            Delivery::Unknown
+        );
+    }
+
+    #[test]
+    fn diagnosis_delivery_overrides_the_variant_default() {
+        let err = Error::timeout(Duration::from_secs(1))
+            .diagnose(Diagnosis::new().delivery(Delivery::NotDelivered));
+        assert_eq!(err.delivery(), Delivery::NotDelivered);
+        // A diagnosis carrying only a disposition is not empty, and adds
+        // nothing to the rendered message.
+        assert!(err.diagnosis().is_some());
+        assert_eq!(format!("{err}"), "Timeout after 1.0s");
+    }
+
+    #[test]
+    fn delivery_names_are_stable_snake_case() {
+        assert_eq!(Delivery::NotDelivered.to_snake_case(), "not_delivered");
+        assert_eq!(Delivery::Unknown.to_string(), "unknown");
     }
 }

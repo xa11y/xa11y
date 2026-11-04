@@ -311,3 +311,78 @@ def test_readiness_failure_is_fatal_not_a_warning():
     assert "content never became " in source
     assert "raise RuntimeError(" in source
     assert "XA11Y_TEST_CONTENT_TIMEOUT" in source
+
+
+# ── Discovery failures (issue #599) ──────────────────────────────────────────
+
+
+def _fake_xa11y(find_error_name: str, listed: list[tuple[str, int]]):
+    """A stand-in `xa11y` module whose `App.find` raises its own
+    `find_error_name` exception, available as `mod.find_error`."""
+    import types
+
+    mod = types.ModuleType("xa11y")
+
+    class Xa11yError(Exception):
+        pass
+
+    for name in (
+        "PermissionDeniedError",
+        "SelectorNotMatchedError",
+        "PlatformError",
+        "TimeoutError",
+    ):
+        setattr(mod, name, type(name, (Xa11yError,), {}))
+
+    class App:
+        def __init__(self, name: str, pid: int) -> None:
+            self.name, self.pid = name, pid
+
+        @staticmethod
+        def find(_predicate, timeout):
+            raise mod.find_error
+
+        @staticmethod
+        def list():
+            return [App(n, p) for n, p in listed]
+
+    mod.App = App
+    mod.find_error = getattr(mod, find_error_name)("UIA gave up after 2.0s")
+    return mod
+
+
+@pytest.mark.parametrize(
+    "error_name", ["TimeoutError", "PlatformError", "SelectorNotMatchedError"]
+)
+def test_a_discovery_failure_keeps_the_harness_context(monkeypatch, error_name):
+    """Every error that ends `App.find` gets the running-apps context.
+
+    #599: a UIA timeout surfaced as `xa11y.TimeoutError`, which the handler did
+    not catch, so the run printed a bare traceback with no app list and no
+    output from the app. And the message claimed the whole budget had run out
+    when discovery had ended after about two seconds.
+    """
+    holder: dict[str, object] = {}
+    fake = _fake_xa11y(error_name, [("Other", 4242)])
+    monkeypatch.setitem(sys.modules, "xa11y", fake)
+    sleeper = [sys.executable, "-c", "import time; time.sleep(30)"]
+    monkeypatch.setattr(launch, "_app_command", lambda _app: (sleeper, {}, ["x"], None))
+    real_popen = subprocess.Popen
+
+    def popen(*args, **kwargs):
+        holder["proc"] = real_popen(*args, **kwargs)
+        return holder["proc"]
+
+    monkeypatch.setattr(launch.subprocess, "Popen", popen)
+
+    with pytest.raises(RuntimeError) as info:
+        launch._launch_app("fake")
+
+    message = str(info.value)
+    assert info.value.__cause__ is fake.find_error
+    assert "UIA gave up after 2.0s" in message
+    assert "('Other', 4242)" in message
+    assert f"of its {launch.STARTUP_TIMEOUT}s budget" in message
+    assert "not found after" not in message
+    # The spawned app is reaped, not left running.
+    assert holder["proc"].poll() is not None

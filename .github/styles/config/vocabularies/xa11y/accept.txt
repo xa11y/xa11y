@@ -42,6 +42,7 @@ eframe
 egui
 evdev
 flyouts?
+frontmost
 fullscreen
 libei
 libevdev
@@ -50,6 +51,7 @@ tmpfs
 toolkits?
 tooltip
 uinput
+udev
 weston
 widget
 winit
@@ -98,6 +100,7 @@ readback
 renderers
 repo
 runtime
+stderr
 stdout
 subprocess
 substring

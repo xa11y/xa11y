@@ -135,11 +135,25 @@ pub(crate) fn plan_keystrokes<K: Copy>(
 ) -> Result<Vec<Keystroke<K>>> {
     let mut shift: Option<K> = None;
     let mut plan = Vec::with_capacity(text.len());
-    for (index, c) in text.chars().enumerate() {
-        let keysym = char_keysym(c);
+    let mut chars = text.chars().enumerate().peekable();
+    while let Some((index, c)) = chars.next() {
+        // A line break is the Enter key on every platform (issue #498):
+        // "\r\n", "\r" and "\n" each type one Return press. The Unicode
+        // keysyms for U+000A / U+000D are in no layout, so without this a
+        // multi-line string could not be typed at all.
+        let keysym = match c {
+            '\r' => {
+                if matches!(chars.peek(), Some((_, '\n'))) {
+                    chars.next();
+                }
+                XK_RETURN
+            }
+            '\n' => XK_RETURN,
+            _ => char_keysym(c),
+        };
         let (keycode, needs_shift) = lookup(keysym).ok_or_else(|| Error::Unsupported {
             feature: format!(
-                "typing character '{c}' (U+{:04X}, keysym 0x{keysym:04x}) at index {index} of \
+                "typing character {c:?} (U+{:04X}, keysym 0x{keysym:04x}) at index {index} of \
                  the text: it has no keycode in the current {layout}; nothing was typed",
                 c as u32
             ),
@@ -150,7 +164,7 @@ pub(crate) fn plan_keystrokes<K: Copy>(
                 None => {
                     let (kc, _) = lookup(XK_SHIFT_L).ok_or_else(|| Error::Unsupported {
                         feature: format!(
-                            "typing character '{c}' at index {index} of the text needs Shift, \
+                            "typing character {c:?} at index {index} of the text needs Shift, \
                              but Shift_L has no keycode in the current {layout}; nothing was \
                              typed"
                         ),
@@ -418,6 +432,17 @@ impl LinuxInputProvider {
 }
 
 impl InputProvider for LinuxInputProvider {
+    /// X11 shares one global coordinate space between AT-SPI extents and
+    /// XTest. On Wayland, clients do not know their global position, so the
+    /// bounds AT-SPI reports are not screen coordinates and an
+    /// element-targeted click would land somewhere else (issue #495).
+    fn element_bounds_are_screen_coordinates(&self) -> bool {
+        match self.backend {
+            InputBackend::X11(_) => true,
+            InputBackend::Wayland(_) => false,
+        }
+    }
+
     fn pointer_move(&self, to: Point) -> Result<()> {
         let to = self.to_physical(to);
         match &self.backend {
@@ -545,6 +570,32 @@ mod tests {
         assert!(feature.contains("U+65E5"), "{feature}");
         assert!(feature.contains("index 2"), "{feature}");
         assert!(feature.contains("nothing was typed"), "{feature}");
+    }
+
+    #[test]
+    fn line_breaks_type_one_return_each() {
+        let mut map = keymap(true);
+        // Keycode 11: Return.
+        map.syms.extend([XK_RETURN, 0]);
+        let plan = |text: &str| {
+            plan_keystrokes(text, "X keyboard layout", |k| map.lookup(k)).expect("plans")
+        };
+        let ret = (11, None);
+        assert_eq!(plan("a\nb"), vec![(8, None), ret, (9, None)]);
+        assert_eq!(plan("a\rb"), vec![(8, None), ret, (9, None)]);
+        // CRLF is one line break, not two.
+        assert_eq!(plan("a\r\nb"), vec![(8, None), ret, (9, None)]);
+        // …but LF CR is two, as are consecutive breaks.
+        assert_eq!(plan("\n\r"), vec![ret, ret]);
+        assert_eq!(plan("\r\n\r\n"), vec![ret, ret]);
+    }
+
+    #[test]
+    fn line_break_without_return_key_fails_before_typing() {
+        let map = keymap(true);
+        let err = plan_keystrokes("a\nb", "X keyboard layout", |k| map.lookup(k))
+            .expect_err("no Return in this keymap");
+        assert!(err.to_string().contains("index 1"), "{err}");
     }
 
     #[test]

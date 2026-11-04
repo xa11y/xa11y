@@ -53,7 +53,10 @@ opaque = [
     { type = "TreeNode", reason = "`tree()` returns nested plain data (dicts / objects), not a mirrored node class." },
     { type = "LegendEntry", reason = "Python exposes a frozen LegendEntry class; JS returns a plain object literal, typed by the generated native.d.ts and forwarded from index.d.ts. Same split as Rect — members are not mirrored uniformly, so they are covered by the per-binding type tests instead." },
     { type = "Omission", reason = "Python exposes a frozen Omission class; JS returns a plain object literal, typed by the generated native.d.ts and forwarded from index.d.ts. Same split as Rect and LegendEntry." },
+    { type = "HiddenReason", reason = "Reasons cross the boundary as identically-spelled snake_case strings (`scrolled_out`, `window_minimized`, ...) via HiddenReason::to_snake_case, as Element.hidden_reason and as the hidden_reason diagnosis field; the enum's variants are not mirrored as binding members. See [[types.variant_coverage]]." },
+    { type = "Delivery", reason = "Dispositions cross the boundary as identically-spelled snake_case strings (`not_delivered`, `unknown`) via Delivery::to_snake_case, as the `delivery` attribute of every exception, the `delivery` field of an MCP failure, and the CLI's `delivery:` line; the enum's variants are not mirrored as binding members. See [[types.variant_coverage]]." },
     { type = "OmissionReason", reason = "Reasons cross the boundary as identically-spelled snake_case strings (`no_bounds`, `zero_area`, `outside_capture`); the enum's variants are not mirrored as binding members. See [[types.variant_coverage]]." },
+    { type = "AutoScrollOutcome", reason = "Outcomes cross the boundary as identically-spelled snake_case strings (`refused`, `no_effect`, `revealed`) via AutoScrollOutcome::to_snake_case, as the auto_scroll diagnosis field (Python attribute, JS `autoScroll`); the enum's variants are not mirrored as binding members. See [[types.variant_coverage]]." },
 ]
 
 # Not part of the binding surface at all.
@@ -227,6 +230,43 @@ files = [
     # has no `;` for the slicer to stop at.
     { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "OmissionReasonName" },
+]
+
+# Hidden reasons follow the OmissionReason pattern: every Rust-side rendering
+# (the CLI, MCP, both bindings, the diagnosis message) goes through
+# `HiddenReason::to_snake_case`, whose exhaustive match in core is the
+# compiler's guard. The two hand-written type declarations are not guarded by
+# anything else.
+[[types.variant_coverage]]
+type = "HiddenReason"
+reason = "Reasons cross as identically-spelled snake_case strings via HiddenReason::to_snake_case; the Python Literal and the TypeScript union are hand-maintained and would silently narrow a reason out of the typed API."
+files = [
+    # Whole-file, like the OmissionReason entry above.
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "HiddenReasonName" },
+]
+
+# Delivery follows the HiddenReason pattern: every Rust-side rendering goes
+# through `Delivery::to_snake_case`, whose exhaustive match in core is the
+# compiler's guard, and the two hand-written type declarations are not
+# guarded by anything else.
+[[types.variant_coverage]]
+type = "Delivery"
+reason = "Dispositions cross as identically-spelled snake_case strings via Delivery::to_snake_case; the Python Literal and the TypeScript union are hand-maintained and would silently narrow a disposition out of the typed API."
+files = [
+    # Whole-file, like the HiddenReason entry above.
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "DeliveryName" },
+]
+
+# Same shape as HiddenReason: every Rust-side rendering goes through
+# `AutoScrollOutcome::to_snake_case`; the hand-written declarations are not.
+[[types.variant_coverage]]
+type = "AutoScrollOutcome"
+reason = "Outcomes cross as identically-spelled snake_case strings via AutoScrollOutcome::to_snake_case; the Python Literal and the TypeScript union are hand-maintained and would silently narrow an outcome out of the typed API."
+files = [
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "AutoScrollOutcomeName" },
 ]
 
 [[types.variant_coverage]]

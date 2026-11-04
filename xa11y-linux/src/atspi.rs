@@ -6,12 +6,23 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 use xa11y_core::{
-    ElementData, ElementParts, Error, Provider, Rect, Result, Role, ShellSurfaceKind, StateParts,
-    StateSet, Subscription, Toggled,
+    ElementData, ElementParts, Error, HiddenReason, Provider, Rect, Result, Role, ShellSurfaceKind,
+    StateParts, StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
+use zbus::DBusError;
 
 use crate::window::WindowManager;
+
+/// Upper bound on a single AT-SPI D-Bus method call.
+///
+/// zbus applies no method timeout of its own, so without this a call to an
+/// application that is stopped (`SIGSTOP`, a debugger) or whose main loop is
+/// hung blocks forever — and because enumeration reads every application on
+/// the bus, one such app hangs `App::list` and `App::by_name` for everyone.
+/// Long enough for a slow but live toolkit to answer a large `GetChildren`;
+/// short enough that a hung peer surfaces as an error in seconds.
+pub(crate) const ATSPI_METHOD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Global handle counter for mapping ElementData back to AccessibleRefs.
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -45,7 +56,9 @@ fn state_attr_to_string(name: &str, s: &StateSet) -> Option<String> {
 
 /// Linux accessibility provider using AT-SPI2 over D-Bus.
 pub struct LinuxProvider {
-    a11y_bus: Connection,
+    /// The accessibility-bus connection. Behind a lock so a connection the
+    /// bus closed can be replaced; see [`LinuxProvider::connection`].
+    a11y_bus: Mutex<Connection>,
     /// Cached AT-SPI accessible refs keyed by handle ID.
     handle_cache: Mutex<HashMap<u64, AccessibleRef>>,
     /// Cached AT-SPI2 action indices keyed by element handle.
@@ -54,7 +67,26 @@ pub struct LinuxProvider {
     /// Native X11/Wayland window-manager channel, selected independently of
     /// the AT-SPI accessibility connection.
     window_manager: WindowManager,
+    /// Per-application facts for GTK 4's screen extents (issue #487).
+    gtk4: Gtk4Geometry,
 }
+
+/// Caches for [`LinuxProvider::gtk4_screen_extents`]: whether each
+/// application bus is GTK 4, and each object's top-level window. Cleared
+/// with the handle cache on a reconnect, which reuses bus names.
+#[derive(Default)]
+struct Gtk4Geometry {
+    is_gtk4: Mutex<HashMap<String, bool>>,
+    /// Each GTK 4 application bus's process id.
+    pids: Mutex<HashMap<String, u32>>,
+    /// `bus + path` → the top-level window's `(bus, path)`. Bounded by
+    /// [`GTK4_TOPLEVEL_CACHE_LIMIT`]: objects that go defunct are never
+    /// removed one by one, so the map is cleared when it fills.
+    toplevels: Mutex<HashMap<String, AccessibleRef>>,
+}
+
+/// Entries [`Gtk4Geometry::toplevels`] holds before it is cleared.
+const GTK4_TOPLEVEL_CACHE_LIMIT: usize = 4096;
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
 #[derive(Debug, Clone)]
@@ -108,55 +140,171 @@ pub(crate) fn read_interfaces(accessible: &Proxy<'_>) -> Result<Interfaces> {
 impl LinuxProvider {
     /// Create a new Linux accessibility provider.
     ///
-    /// Connects to the AT-SPI2 bus. Falls back to the session bus
-    /// if the dedicated AT-SPI bus is unavailable.
+    /// Connects to the dedicated AT-SPI2 accessibility bus, whose address
+    /// the `org.a11y.Bus` launcher publishes on the session bus. There is no
+    /// fallback to the session bus itself: the AT-SPI registry never lives
+    /// there, so a provider connected to it would answer every query with an
+    /// empty desktop and lose the reason the real connection failed.
     pub fn new() -> Result<Self> {
         let a11y_bus = Self::connect_a11y_bus()?;
         Ok(Self {
-            a11y_bus,
+            a11y_bus: Mutex::new(a11y_bus),
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         })
     }
 
+    /// Connect to the AT-SPI2 accessibility bus.
+    ///
+    /// Each way this can fail is reported as its own error naming what was
+    /// tried: the session bus being unreachable, the `org.a11y.Bus` launcher
+    /// being absent (AT-SPI is not installed or not running), the launcher
+    /// failing to answer, or the published address refusing a connection.
+    ///
+    /// Both connections carry [`ATSPI_METHOD_TIMEOUT`], so a hung bus
+    /// launcher or a stopped application fails a call instead of blocking it
+    /// forever (zbus has no default method timeout).
     pub(crate) fn connect_a11y_bus() -> Result<Connection> {
-        // Try getting the AT-SPI bus address from the a11y bus launcher,
-        // then connect to it. If that fails, fall back to the session bus
-        // (AT-SPI2 may use the session bus directly).
-        if let Ok(session) = Connection::session() {
-            let proxy = Proxy::new(&session, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus")
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("Failed to create a11y bus proxy: {}", e),
-                })?;
+        let address = Self::a11y_bus_address()?;
+        let parsed = zbus::Address::try_from(address.as_str()).map_err(|e| Error::Platform {
+            code: -1,
+            message: format!(
+                "the AT-SPI bus launcher (org.a11y.Bus) published an unparsable \
+                 accessibility bus address {address:?}: {e}"
+            ),
+        })?;
+        zbus::blocking::connection::Builder::address(parsed)
+            .map(|b| b.method_timeout(ATSPI_METHOD_TIMEOUT))
+            .and_then(|b| b.build())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!(
+                    "could not connect to the AT-SPI accessibility bus at {address:?} \
+                     (published by org.a11y.Bus on the session bus): {e}"
+                ),
+            })
+    }
 
-            if let Ok(addr_reply) = proxy.call_method("GetAddress", &()) {
-                if let Ok(address) = addr_reply.body().deserialize::<String>() {
-                    if let Ok(addr) = zbus::Address::try_from(address.as_str()) {
-                        if let Ok(Ok(conn)) =
-                            zbus::blocking::connection::Builder::address(addr).map(|b| b.build())
-                        {
-                            return Ok(conn);
-                        }
+    /// Ask the `org.a11y.Bus` launcher on the session bus for the address
+    /// of the accessibility bus.
+    fn a11y_bus_address() -> Result<String> {
+        let session_address =
+            std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_else(|_| "<unset>".to_string());
+        let session = zbus::blocking::connection::Builder::session()
+            .map(|b| b.method_timeout(ATSPI_METHOD_TIMEOUT))
+            .and_then(|b| b.build())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!(
+                    "could not connect to the D-Bus session bus \
+                     (DBUS_SESSION_BUS_ADDRESS={session_address}) to look up the AT-SPI \
+                     accessibility bus: {e}"
+                ),
+            })?;
+        let reply = session
+            .call_method(
+                Some("org.a11y.Bus"),
+                "/org/a11y/bus",
+                Some("org.a11y.Bus"),
+                "GetAddress",
+                &(),
+            )
+            .map_err(|e| {
+                if is_peer_gone(&e) {
+                    Error::Platform {
+                        code: -1,
+                        message: format!(
+                            "AT-SPI is not running: no org.a11y.Bus service on the session bus \
+                             (DBUS_SESSION_BUS_ADDRESS={session_address}). Install at-spi2-core \
+                             and start at-spi-bus-launcher, or log in to a desktop session that \
+                             runs it: {e}"
+                        ),
+                    }
+                } else {
+                    Error::Platform {
+                        code: -1,
+                        message: format!(
+                            "the AT-SPI bus launcher (org.a11y.Bus on the session bus \
+                             {session_address}) did not return the accessibility bus address: {e}"
+                        ),
                     }
                 }
-            }
+            })?;
+        reply
+            .body()
+            .deserialize::<String>()
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("org.a11y.Bus.GetAddress returned an unexpected reply: {e}"),
+            })
+    }
 
-            // Fall back to session bus
-            return Ok(session);
+    /// The live accessibility-bus connection, reconnecting first when the
+    /// previous one has closed.
+    ///
+    /// zbus marks a connection closed when its socket hits an I/O error or
+    /// the bus hangs up (the bus was restarted, the session ended). Every call
+    /// on a closed connection fails, and the provider is memoized for the
+    /// life of the process, so without this one dropped socket would break
+    /// the process for good. The call that observed the failure still
+    /// returned its error; only the next one reconnects. A failed reconnect
+    /// is returned as-is and leaves the closed connection in place, so the
+    /// call after that tries again.
+    fn connection(&self) -> Result<Connection> {
+        self.connection_with(Self::connect_a11y_bus)
+    }
+
+    /// [`connection`](Self::connection) with the reconnect step supplied,
+    /// so the replacement path is testable without a desktop bus.
+    fn connection_with(
+        &self,
+        reconnect: impl FnOnce() -> Result<Connection>,
+    ) -> Result<Connection> {
+        let mut conn = self.a11y_bus.lock().unwrap_or_else(|e| e.into_inner());
+        if conn.is_closed() {
+            log::warn!("AT-SPI accessibility bus connection closed; reconnecting");
+            *conn = reconnect()?;
+            // Handles minted on the old connection name objects by bus
+            // unique name, and a restarted bus hands the same `:1.N` names
+            // out again — to different applications. Forget them, so an old
+            // handle is `ElementStale` instead of silently resolving to
+            // whatever owns that name now. Taken while `a11y_bus` is held so
+            // no call can mint a handle on the new connection first; neither
+            // map's lock is ever held while acquiring `a11y_bus`.
+            self.handle_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.action_indices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.gtk4
+                .is_gtk4
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.gtk4
+                .pids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.gtk4
+                .toplevels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
         }
-
-        Connection::session().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Failed to connect to D-Bus session bus: {}", e),
-        })
+        Ok(conn.clone())
     }
 
     fn make_proxy(&self, bus_name: &str, path: &str, interface: &str) -> Result<Proxy<'_>> {
         // Use uncached proxy to avoid GetAll calls — Qt's AT-SPI adaptor
         // doesn't support GetAll on all objects, causing spurious errors.
-        zbus::blocking::proxy::Builder::<Proxy>::new(&self.a11y_bus)
+        let conn = self.connection()?;
+        zbus::blocking::proxy::Builder::<Proxy>::new(&conn)
             .destination(bus_name.to_owned())
             .map_err(|e| Error::Platform {
                 code: -1,
@@ -271,8 +419,9 @@ impl LinuxProvider {
         Err(Error::AccessibilityNotEnabled {
             app: app_name,
             instructions: "Chromium/Electron app exposes an empty accessibility tree on Linux. \
-                Relaunch with `--force-renderer-accessibility` (or set the env var \
-                `ACCESSIBILITY_ENABLED=1`) so the renderer accessibility bridge is initialised."
+                Relaunch it with `--force-renderer-accessibility`. In a session with no \
+                settings daemon (CI, Xvfb, a container), also set `ACCESSIBILITY_ENABLED=1` \
+                in its environment: there Chromium needs both before it exposes web content."
                 .to_string(),
         })
     }
@@ -286,6 +435,113 @@ impl LinuxProvider {
                 code: -1,
                 message: format!("Get Name property failed: {}", e),
             })
+    }
+
+    /// Read a registry entry's application name for enumeration.
+    ///
+    /// `Ok(None)` means the entry has no name to report: the application
+    /// left the bus between `GetChildren` and this read, or its root does
+    /// not implement `Name`. A peer that does not answer within
+    /// [`ATSPI_METHOD_TIMEOUT`] is an [`Error::Timeout`] naming the
+    /// application, its pid and its process state, so the caller can see
+    /// which app is hung instead of the listing stalling or quietly
+    /// omitting it.
+    fn read_app_name(&self, aref: &AccessibleRef) -> Result<Option<String>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        match proxy.get_property::<String>("Name") {
+            Ok(name) => Ok(Some(name)),
+            Err(e) if is_peer_gone(&e) || is_absent_member(&e) => Ok(None),
+            Err(e) if is_timeout(&e) => Err(self.unresponsive_peer(aref, "Accessible.Name")),
+            Err(e) => Err(Error::Platform {
+                code: -1,
+                message: format!(
+                    "reading the name of AT-SPI application {}{}{} failed: {e}",
+                    aref.bus_name,
+                    aref.path,
+                    self.get_dbus_pid(&aref.bus_name)
+                        .map(|p| format!(" (pid {p})"))
+                        .unwrap_or_default(),
+                ),
+            }),
+        }
+    }
+
+    /// `GetChildren` for a registry scan: `Ok(None)` when the peer left the
+    /// bus, the object was destroyed, or it does not implement the call;
+    /// [`Error::Timeout`] naming the app when it does not answer.
+    fn scan_children(&self, aref: &AccessibleRef) -> Result<Option<Vec<AccessibleRef>>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = match proxy.call_method("GetChildren", &()) {
+            Ok(reply) => reply,
+            Err(e) if is_peer_gone(&e) || is_absent_member(&e) => return Ok(None),
+            Err(e) if is_timeout(&e) => {
+                return Err(self.unresponsive_peer(aref, "Accessible.GetChildren"))
+            }
+            Err(e) => return Err(children_call_error(e, aref)),
+        };
+        let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetChildren deserialize failed: {}", e),
+            })?;
+        Ok(Some(
+            children
+                .into_iter()
+                .map(|(bus_name, path)| AccessibleRef {
+                    bus_name,
+                    path: path.to_string(),
+                })
+                .collect(),
+        ))
+    }
+
+    /// `GetState` as one 64-bit set, for a decision that must not guess (the
+    /// registry scans and the `App::windows()` filter, #492). `Ok(None)` when
+    /// the object or its peer is gone: GDBus (GTK 4) answers a destroyed
+    /// object with `UnknownMethod`, so every absent-member reply counts.
+    /// [`Error::Timeout`] naming the app when it does not answer; any other
+    /// failure is returned. Contrast [`Self::state_bits`], which the snapshot
+    /// path uses to tolerate an unreadable state per field.
+    fn scan_state_bits(&self, aref: &AccessibleRef) -> Result<Option<u64>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = match proxy.call_method("GetState", &()) {
+            Ok(reply) => reply,
+            Err(e) if is_peer_gone(&e) || is_absent_member(&e) => return Ok(None),
+            Err(e) if is_timeout(&e) => {
+                return Err(self.unresponsive_peer(aref, "Accessible.GetState"))
+            }
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: format!("GetState on {}{} failed: {e}", aref.bus_name, aref.path),
+                })
+            }
+        };
+        let words: Vec<u32> = reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!(
+                "GetState deserialize failed for {}{}: {e}",
+                aref.bus_name, aref.path
+            ),
+        })?;
+        Ok(Some(
+            words
+                .iter()
+                .take(2)
+                .enumerate()
+                .fold(0u64, |acc, (i, w)| acc | ((*w as u64) << (32 * i))),
+        ))
+    }
+
+    /// The [`Error::Timeout`] for a peer that did not answer `call` within
+    /// [`ATSPI_METHOD_TIMEOUT`].
+    ///
+    /// Built on the failure path only: it costs one bus-daemon round trip
+    /// for the pid (the daemon answers even when the application cannot)
+    /// and one `/proc` read for the process state.
+    fn unresponsive_peer(&self, aref: &AccessibleRef, call: &str) -> Error {
+        let pid = self.get_dbus_pid(&aref.bus_name);
+        unresponsive_peer_error(aref, call, pid, pid.and_then(read_process_state))
     }
 
     /// Get the description of an accessible element.
@@ -304,9 +560,13 @@ impl LinuxProvider {
     /// so we use GetChildren which is more reliable.
     fn get_atspi_children(&self, aref: &AccessibleRef) -> Result<Vec<AccessibleRef>> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
-        let reply = proxy
-            .call_method("GetChildren", &())
-            .map_err(|e| children_call_error(e, aref))?;
+        let reply = proxy.call_method("GetChildren", &()).map_err(|e| {
+            if is_timeout(&e) {
+                self.unresponsive_peer(aref, "Accessible.GetChildren")
+            } else {
+                children_call_error(e, aref)
+            }
+        })?;
         let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
             reply.body().deserialize().map_err(|e| Error::Platform {
                 code: -1,
@@ -454,36 +714,241 @@ impl LinuxProvider {
         }
     }
 
-    /// Get bounds via Component interface.
+    /// Bounds via the Component interface: `Ok(None)` for an object without
+    /// one or with sentinel extents, `Err` for a read that failed.
     /// Gated on the node reporting Component, to avoid GTK CRITICAL warnings
     /// on objects (e.g. TreeView cell renderers) that don't implement it.
-    fn get_extents(&self, aref: &AccessibleRef, ifaces: Interfaces) -> Option<Rect> {
+    fn read_extents(&self, aref: &AccessibleRef, ifaces: Interfaces) -> Result<Option<Rect>> {
         if !ifaces.component {
-            return None;
+            return Ok(None);
         }
-        let proxy = self
-            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
-            .ok()?;
+        match self.is_gtk4(&aref.bus_name) {
+            Ok(true) => {
+                return Ok(self
+                    .gtk4_screen_extents(aref)
+                    .map(|r| r.to_logical(crate::scale::coordinate_scale())));
+            }
+            Ok(false) => {}
+            // Unknown toolkit: raw SCREEN extents could be GTK 4's (0, 0),
+            // the wrong coordinates issue #487 is about, so report none.
+            // The read fails rather than answering `None`: the element then
+            // has no bounds, and the hidden-reason climb says `Unknown`
+            // instead of drawing a conclusion from extents it never read.
+            Err(error) => {
+                log::debug!(
+                    "no bounds for {}{}: cannot tell whether it is GTK 4: {error}",
+                    aref.bus_name,
+                    aref.path
+                );
+                return Err(error);
+            }
+        }
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")?;
         // GetExtents(coord_type: u32) -> (x, y, width, height)
         // coord_type 0 = screen coordinates
-        let reply = proxy.call_method("GetExtents", &(0u32,)).ok()?;
-        let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().ok()?;
-        if w <= 0 && h <= 0 {
-            return None;
-        }
+        let reply = proxy
+            .call_method("GetExtents", &(0u32,))
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetExtents failed: {e}"),
+            })?;
+        let (x, y, w, h): (i32, i32, i32, i32) =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetExtents deserialize failed: {e}"),
+            })?;
         // AT-SPI screen extents are physical device pixels. Convert to logical
         // coordinates (the cross-platform contract, same space as the
         // screenshot/input layers) using the detected display scale. On the
         // common 1.0 case this is a no-op. See `crate::scale`.
-        Some(
-            Rect {
-                x,
-                y,
-                width: w.max(0) as u32,
-                height: h.max(0) as u32,
+        Ok(extents_to_rect(x, y, w, h).map(|r| r.to_logical(crate::scale::coordinate_scale())))
+    }
+
+    /// Whether the application on `bus` is GTK 4, from
+    /// `Application.ToolkitName` / `Version`, cached per bus.
+    ///
+    /// An unreadable answer is an error, not "no": treating it as "not
+    /// GTK 4" would report GTK 4's raw SCREEN extents. Errors are not
+    /// cached, so a transient failure is retried. Two answers settle it
+    /// without the version: a toolkit name other than GTK, and a bus whose
+    /// root object has no `Application` interface at all. GTK 4 always
+    /// exports one there; WebKitGTK's web process, which serves a Tauri
+    /// app's page content, does not.
+    fn is_gtk4(&self, bus: &str) -> Result<bool> {
+        if let Some(known) = self
+            .gtk4
+            .is_gtk4
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(bus)
+        {
+            return Ok(*known);
+        }
+        let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application")?;
+        let read = |property: &str| {
+            proxy
+                .get_property::<String>(property)
+                .map_err(|e| Error::Platform {
+                    code: -1,
+                    message: format!("Application.{property} on {bus}: {e}"),
+                })
+        };
+        let name = match read("ToolkitName") {
+            Ok(name) => name,
+            Err(error) => {
+                if self.root_exports_application(bus)? {
+                    return Err(error);
+                }
+                self.gtk4
+                    .is_gtk4
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(bus.to_owned(), false);
+                return Ok(false);
             }
-            .to_logical(crate::scale::coordinate_scale()),
-        )
+        };
+        let gtk4 = if name.eq_ignore_ascii_case("GTK") {
+            // The toolkit's version is the `Version` property (GTK 4 has no
+            // `ToolkitVersion`; `AtspiVersion` is the protocol's).
+            is_gtk4_toolkit(&name, &read("Version")?)
+        } else {
+            false
+        };
+        self.gtk4
+            .is_gtk4
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(bus.to_owned(), gtk4);
+        Ok(gtk4)
+    }
+
+    /// Screen extents (physical pixels) for a GTK 4 object.
+    ///
+    /// GTK 4 does not know its window's position, and on X11 its
+    /// `GetExtents(SCREEN)` reports (0, 0) for every widget (GTK 4.14) or a
+    /// window-relative position, wherever the window is (issue #487). The
+    /// `WINDOW` extents are right, so the screen position is those plus the
+    /// root origin of the top-level's X11 client window, found by pid and
+    /// title. `None` — no bounds, rather than wrong ones — under the Wayland
+    /// window backend, when the window cannot be matched to exactly one X11
+    /// window, or when any read fails; the reason is logged at debug level.
+    fn gtk4_screen_extents(&self, aref: &AccessibleRef) -> Option<Rect> {
+        const ATSPI_COORD_TYPE_WINDOW: u32 = 1;
+        let proxy = self
+            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
+            .ok()?;
+        let reply = proxy
+            .call_method("GetExtents", &(ATSPI_COORD_TYPE_WINDOW,))
+            .ok()?;
+        let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().ok()?;
+        let toplevel = self.toplevel_of(aref)?;
+        let title = self.get_name(&toplevel).ok().filter(|t| !t.is_empty())?;
+        let pid = self.gtk4_pid(&aref.bus_name)?;
+        let (ox, oy) = match self.window_manager.x11_client_origin(pid, &title) {
+            Ok(Some(origin)) => origin,
+            Ok(None) => {
+                log::debug!(
+                    "no bounds for {}{}: no single X11 client window for pid {pid} titled \
+                     {title:?}",
+                    aref.bus_name,
+                    aref.path
+                );
+                return None;
+            }
+            Err(error) => {
+                log::debug!(
+                    "no bounds for {}{}: X11 client origin for pid {pid} titled {title:?}: \
+                     {error}",
+                    aref.bus_name,
+                    aref.path
+                );
+                return None;
+            }
+        };
+        extents_to_rect(x.checked_add(ox)?, y.checked_add(oy)?, w, h)
+    }
+
+    /// Whether `bus`'s root object lists `org.a11y.atspi.Application` in
+    /// its introspection data. An error when the introspection itself
+    /// cannot be read, so "unknown" never reads as "absent".
+    fn root_exports_application(&self, bus: &str) -> Result<bool> {
+        let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.freedesktop.DBus.Introspectable")?;
+        let reply = proxy
+            .call_method("Introspect", &())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"),
+            })?;
+        let xml: String = reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"),
+        })?;
+        Ok(introspection_lists_interface(
+            &xml,
+            "org.a11y.atspi.Application",
+        ))
+    }
+
+    /// The process id behind a GTK 4 application bus, cached per bus.
+    fn gtk4_pid(&self, bus: &str) -> Option<u32> {
+        if let Some(pid) = self
+            .gtk4
+            .pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(bus)
+        {
+            return Some(*pid);
+        }
+        let pid = self.get_dbus_pid(bus)?;
+        self.gtk4
+            .pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(bus.to_owned(), pid);
+        Some(pid)
+    }
+
+    /// The top-level window `aref` belongs to: the ancestor whose parent is
+    /// the application object. Every object visited on the way is cached,
+    /// so siblings and descendants resolve without walking again.
+    fn toplevel_of(&self, aref: &AccessibleRef) -> Option<AccessibleRef> {
+        let key = |r: &AccessibleRef| format!("{}{}", r.bus_name, r.path);
+        let mut visited = Vec::new();
+        let mut current = aref.clone();
+        let toplevel = loop {
+            if let Some(found) = self
+                .gtk4
+                .toplevels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key(&current))
+            {
+                break found.clone();
+            }
+            if current.path == APP_ROOT_PATH {
+                return None;
+            }
+            let parent = self.get_atspi_parent(&current).ok()?;
+            visited.push(current.clone());
+            match parent {
+                Some(p) if p.path == APP_ROOT_PATH => break current,
+                Some(p) => current = p,
+                None => break current,
+            }
+        };
+        let mut cache = self
+            .gtk4
+            .toplevels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if cache.len() + visited.len() > GTK4_TOPLEVEL_CACHE_LIMIT {
+            cache.clear();
+        }
+        for r in visited {
+            cache.insert(key(&r), toplevel.clone());
+        }
+        Some(toplevel)
     }
 
     /// Get available actions via Action interface, returning both the action list
@@ -804,6 +1269,18 @@ impl LinuxProvider {
     /// After resolving the role (1-3 sequential D-Bus calls), all remaining
     /// property fetches are independent and run in parallel via rayon::join.
     fn build_element_data(&self, aref: &AccessibleRef, pid: Option<u32>) -> ElementData {
+        self.build_element_data_in(aref, pid, &AncestorMemo::default())
+    }
+
+    /// [`build_element_data`](Self::build_element_data) sharing `memo` with
+    /// the other elements built in the same call, so siblings settling why
+    /// they are hidden read their common ancestors once.
+    fn build_element_data_in(
+        &self,
+        aref: &AccessibleRef,
+        pid: Option<u32>,
+        memo: &AncestorMemo,
+    ) -> ElementData {
         // GetInterfaces runs alongside the role reads so it costs no extra
         // latency, and its result gates every Text / Value / Component read
         // below. A failed read gates them all off: like the other per-field
@@ -819,19 +1296,7 @@ impl LinuxProvider {
             },
             || self.get_interfaces(aref).unwrap_or_default(),
         );
-        let coarse_role = {
-            let by_name = if !role_name.is_empty() {
-                map_atspi_role(&role_name)
-            } else {
-                Role::Unknown
-            };
-            let coarse = if by_name != Role::Unknown {
-                by_name
-            } else {
-                map_atspi_role_number(role_num)
-            };
-            self.refine_text_role(coarse, aref)
-        };
+        let coarse_role = self.refine_text_role(role_from_atspi(role_num, &role_name), aref);
         // GTK 3 overloads AT-SPI's `menu` role: both a popup menu container
         // and the MenuItem that opens a submenu report `menu`. The entry is
         // distinguishable by its native activation action (`click`, normalized
@@ -857,7 +1322,7 @@ impl LinuxProvider {
         let (
             ((mut name, value), description),
             (
-                ((states, state_bits), bounds),
+                ((states, state_bits, state_read_ok), bounds_read),
                 ((actions, action_index_map), (numeric_value, min_value, max_value)),
             ),
         ) = rayon::join(
@@ -879,12 +1344,18 @@ impl LinuxProvider {
                 rayon::join(
                     || {
                         rayon::join(
-                            || self.parse_states_with_bits(aref, role),
+                            || {
+                                self.parse_states_with_bits(
+                                    aref,
+                                    role,
+                                    is_password_role(&role_name, role_num),
+                                )
+                            },
                             || {
                                 if role != Role::Application {
-                                    self.get_extents(aref, ifaces)
+                                    self.read_extents(aref, ifaces)
                                 } else {
-                                    None
+                                    Ok(None)
                                 }
                             },
                         )
@@ -1015,6 +1486,30 @@ impl LinuxProvider {
                 .insert(handle, action_index_map);
         }
 
+        let bounds = match &bounds_read {
+            Ok(bounds) => *bounds,
+            Err(_) => None,
+        };
+        let mut states = states;
+        states.hidden_reason = match states.hidden_reason {
+            // The element's own state read failed: nothing to refine.
+            reason if !state_read_ok => reason,
+            // VISIBLE without SHOWING: the answer is above it.
+            Some(HiddenReason::Unknown) => {
+                Some(self.ancestor_hidden_reason(aref, &bounds_read, memo))
+            }
+            // VISIBLE cleared, which is also how a Qt item view reports a
+            // row scrolled out of it. Only item cells take this path: a
+            // hidden widget (a GTK 3 list box child with a stale
+            // allocation, say) is hidden by its toolkit wherever it lies.
+            Some(HiddenReason::NotShowing)
+                if state_bits & ATSPI_VISIBLE == 0 && is_item_cell_role(role_num) =>
+            {
+                Some(self.item_view_hidden_reason(aref, &bounds_read, memo))
+            }
+            reason => reason,
+        };
+
         let mut data: ElementData = ElementParts {
             role,
             name,
@@ -1098,6 +1593,148 @@ impl LinuxProvider {
         data
     }
 
+    /// Why an object that is `VISIBLE` but not `SHOWING` is not drawn.
+    ///
+    /// Such an object would be drawn if its ancestors were, so the answer
+    /// is above it. Climb to the first ancestor that is drawn (or minimized):
+    ///
+    /// - a minimized (`ICONIFIED`) frame on the way: `WindowMinimized`;
+    /// - a drawn ancestor whose extents the object lies entirely outside,
+    ///   with a scrolling container (see [`is_scrolling_container_role`])
+    ///   among the ancestors climbed, the drawn one included: `ScrolledOut`.
+    ///   That is an item scrolled out of a list or a scrolled window (GTK 3
+    ///   tree views clear `SHOWING` on exactly those). Geometry alone is not
+    ///   enough: a control laid out beyond a container that only clips it
+    ///   is not scrolled anywhere;
+    /// - anything else with no read failing: `NotShowing` (a collapsed
+    ///   panel, an inactive tab page, no drawn ancestor at all).
+    ///
+    /// It runs only for hidden objects, so a tree of visible ones pays
+    /// nothing. Any read on the way that fails, the object's own bounds
+    /// included, returns `Unknown` rather than a guess; an object without a
+    /// Component, or with sentinel extents, has no bounds to compare and is
+    /// `NotShowing`.
+    fn ancestor_hidden_reason(
+        &self,
+        aref: &AccessibleRef,
+        bounds: &Result<Option<Rect>>,
+        memo: &AncestorMemo,
+    ) -> HiddenReason {
+        let mut current = match self.get_atspi_parent(aref) {
+            Ok(Some(parent)) => parent,
+            Ok(None) => return HiddenReason::NotShowing,
+            Err(_) => return HiddenReason::Unknown,
+        };
+        let mut scrolling = false;
+        for _ in 0..HIDDEN_REASON_MAX_WALK {
+            let Some(facts) = self.ancestor_facts(&current, memo) else {
+                return HiddenReason::Unknown;
+            };
+            if facts.iconified {
+                return HiddenReason::WindowMinimized;
+            }
+            scrolling |= facts.scrolling;
+            if facts.drawn {
+                return clipped_reason(bounds, facts.extents.as_ref(), scrolling);
+            }
+            match facts.parent {
+                Some(parent) => current = parent,
+                None => return HiddenReason::NotShowing,
+            }
+        }
+        HiddenReason::Unknown
+    }
+
+    /// Why an object whose toolkit cleared `VISIBLE` is not drawn.
+    ///
+    /// Usually because its toolkit hid it (`NotShowing`), but Qt item views
+    /// also clear `VISIBLE`, not just `SHOWING`, on a row or cell outside the
+    /// view's viewport (`QAccessibleTableCell::state` marks it `invisible`).
+    /// So an item cell ([`is_item_cell_role`], checked by the caller) whose
+    /// parent is a drawn scrolling container, and which lies entirely
+    /// outside that parent's extents, is `ScrolledOut`. Only the parent is
+    /// consulted: a cell further down is hidden by its toolkit whatever
+    /// scrolls above it. Read failures are `Unknown`, as in
+    /// [`ancestor_hidden_reason`](Self::ancestor_hidden_reason).
+    fn item_view_hidden_reason(
+        &self,
+        aref: &AccessibleRef,
+        bounds: &Result<Option<Rect>>,
+        memo: &AncestorMemo,
+    ) -> HiddenReason {
+        match bounds {
+            // A hidden widget usually reports sentinel extents: nothing to
+            // compare, and no reason to read its parent.
+            Ok(None) => return HiddenReason::NotShowing,
+            Err(_) => return HiddenReason::Unknown,
+            Ok(Some(_)) => {}
+        }
+        let parent = match self.get_atspi_parent(aref) {
+            Ok(Some(parent)) => parent,
+            Ok(None) => return HiddenReason::NotShowing,
+            Err(_) => return HiddenReason::Unknown,
+        };
+        match self.ancestor_facts(&parent, memo) {
+            None => HiddenReason::Unknown,
+            Some(facts) if facts.drawn && !facts.iconified => {
+                clipped_reason(bounds, facts.extents.as_ref(), facts.scrolling)
+            }
+            Some(_) => HiddenReason::NotShowing,
+        }
+    }
+
+    /// What the hidden-reason climb needs from one ancestor, from `memo` when
+    /// an element built earlier in the same call already asked. `None` when
+    /// a read failed, which the callers answer with `Unknown`: the error
+    /// itself is not reported, because an unreadable property in a snapshot
+    /// degrades to absent and `Unknown` is the reason's "absent".
+    fn ancestor_facts(&self, aref: &AccessibleRef, memo: &AncestorMemo) -> Option<AncestorFacts> {
+        let key = (aref.bus_name.clone(), aref.path.clone());
+        if let Some(facts) = memo.0.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return facts.clone();
+        }
+        // Two threads building siblings may both read the same ancestor
+        // before either stores it; the answers are the same, so the second
+        // insert is harmless.
+        let facts = self.read_ancestor_facts(aref).ok();
+        memo.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, facts.clone());
+        facts
+    }
+
+    fn read_ancestor_facts(&self, aref: &AccessibleRef) -> Result<AncestorFacts> {
+        let (bits, read_ok) = self.state_bits(aref);
+        if !read_ok {
+            return Err(Error::Platform {
+                code: -1,
+                message: format!("GetState on {}{} failed", aref.bus_name, aref.path),
+            });
+        }
+        let iconified = bits & ATSPI_ICONIFIED != 0;
+        let drawn = atspi_visible(bits);
+        let scrolling = is_scrolling_container_role(self.get_role_number(aref)?);
+        let extents = if drawn && !iconified {
+            let ifaces = self.get_interfaces(aref)?;
+            self.read_extents(aref, ifaces)?
+        } else {
+            None
+        };
+        let parent = if drawn || iconified {
+            None
+        } else {
+            self.get_atspi_parent(aref)?
+        };
+        Ok(AncestorFacts {
+            iconified,
+            drawn,
+            scrolling,
+            extents,
+            parent,
+        })
+    }
+
     /// Get the AT-SPI parent of an accessible ref.
     fn get_atspi_parent(&self, aref: &AccessibleRef) -> Result<Option<AccessibleRef>> {
         // Read the Parent property via the D-Bus Properties interface.
@@ -1108,9 +1745,23 @@ impl LinuxProvider {
         )?;
         let reply = proxy
             .call_method("Get", &("org.a11y.atspi.Accessible", "Parent"))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Get Parent property failed: {}", e),
+            .map_err(|e| {
+                // `Parent` is a mandatory property of every AT-SPI accessible,
+                // so a reply saying the member is absent is the object being
+                // gone, not a bridge that skipped it: zbus answers a destroyed
+                // object with `UnknownObject`, and GDBus (GTK 4) with
+                // `UnknownMethod` "Object does not exist at path". Stale,
+                // like `children_call_error`; every other failure stays one.
+                if is_absent_member(&e) {
+                    Error::ElementStale {
+                        selector: format!("{}{}", aref.bus_name, aref.path),
+                    }
+                } else {
+                    Error::Platform {
+                        code: -1,
+                        message: format!("Get Parent property failed: {}", e),
+                    }
+                }
             })?;
         // The reply is a Variant containing (so) — a struct of (bus_name, object_path)
         let variant: zbus::zvariant::OwnedValue =
@@ -1161,14 +1812,29 @@ impl LinuxProvider {
     }
 
     /// Parse AT-SPI2 state bitfield into xa11y StateSet.
+    ///
+    /// Serves only the selector fast path, which never asks it for
+    /// `password`: that flag comes from the raw AT-SPI role rather than the
+    /// state bits, so `state_attr_to_string` has no arm for it and a
+    /// `[password=..]` filter takes the full-`ElementData` route instead. The
+    /// `false` passed here is therefore never read.
     fn parse_states(&self, aref: &AccessibleRef, role: Role) -> StateSet {
-        self.parse_states_with_bits(aref, role).0
+        self.parse_states_with_bits(aref, role, false).0
     }
 
     /// Like [`parse_states`], but also returns the raw AT-SPI state bitset so
     /// callers can surface provider-only facts (notably DEFUNCT) that have no
     /// cross-platform `StateSet` field.
-    fn parse_states_with_bits(&self, aref: &AccessibleRef, role: Role) -> (StateSet, u64) {
+    ///
+    /// `password` is decided by the caller from the raw role (see
+    /// [`is_password_role`]); the mapped `Role` cannot carry it, because a
+    /// password field maps to `TextField` like any other entry.
+    fn parse_states_with_bits(
+        &self,
+        aref: &AccessibleRef,
+        role: Role,
+        password: bool,
+    ) -> (StateSet, u64, bool) {
         let (bits, state_read_ok) = self.state_bits(aref);
 
         // AT-SPI2 state bit positions: each is `1 << ordinal` of the
@@ -1188,13 +1854,11 @@ impl LinuxProvider {
         const MODAL: u64 = 1 << 16;
         const SELECTED: u64 = 1 << 23;
         const SENSITIVE: u64 = 1 << 24;
-        const SHOWING: u64 = 1 << 25;
-        const VISIBLE: u64 = 1 << 30;
         const INDETERMINATE: u64 = 1 << 32;
         const REQUIRED: u64 = 1 << 33;
 
         let enabled = (bits & ENABLED) != 0 || (bits & SENSITIVE) != 0;
-        let visible = (bits & VISIBLE) != 0 || (bits & SHOWING) != 0;
+        let visible = atspi_visible(bits);
 
         let checked = match role {
             Role::CheckBox | Role::RadioButton | Role::MenuItem | Role::Switch => {
@@ -1218,6 +1882,13 @@ impl LinuxProvider {
         let states = StateParts {
             enabled,
             visible,
+            // An unread state set is not one read as empty: its zero bits
+            // would say not_showing, a guess.
+            hidden_reason: if state_read_ok {
+                hidden_reason_from_bits(bits)
+            } else {
+                Some(HiddenReason::Unknown)
+            },
             focused: (bits & FOCUSED) != 0,
             // AT-SPI `ACTIVE` marks the foreground window/frame (see
             // `focused_app`, which relies on the same bit).
@@ -1250,9 +1921,10 @@ impl LinuxProvider {
             },
             maximized: None,
             fullscreen: None,
+            password,
         }
         .into();
-        (states, bits)
+        (states, bits, state_read_ok)
     }
 
     /// Find an application by PID.
@@ -1317,8 +1989,111 @@ impl LinuxProvider {
         }
     }
 
+    /// Fail with [`Error::ElementStale`] when `aref` is no longer attached to
+    /// its parent.
+    ///
+    /// GTK 3 keeps a destroyed widget's accessible answering D-Bus calls for
+    /// roughly 15–20 s, and `DoAction` on it returns `true` without doing
+    /// anything (issue #491). Its parent stops counting it at once, so that is
+    /// the check, at constant cost whatever the number of siblings:
+    /// `GetIndexInParent` (-1 means detached), then the parent's
+    /// `GetChildAtIndex` at that index must be this object. A parent that
+    /// `MANAGES_DESCENDANTS` (large tables and tree views) does not keep its
+    /// children as live objects, so there only the object's own `DEFUNCT`
+    /// state is consulted. A top-level object (no parent, or the registry
+    /// root) has nothing to be detached from and passes. An object or parent
+    /// that is already gone is stale too; any other failure is returned.
+    fn ensure_attached(&self, aref: &AccessibleRef) -> Result<()> {
+        const DEFUNCT: u64 = 1 << 6;
+        const MANAGES_DESCENDANTS: u64 = 1 << 31;
+        let stale = || Error::ElementStale {
+            selector: format!("{}{}", aref.bus_name, aref.path),
+        };
+        let parent = match self.get_atspi_parent(aref) {
+            Ok(Some(parent)) => parent,
+            Ok(None) => return Ok(()),
+            Err(Error::ElementStale { .. }) => return Err(stale()),
+            Err(e) => return Err(e),
+        };
+        let Some(parent_state) = self.scan_state_bits(&parent)? else {
+            return Err(stale());
+        };
+        if parent_state & MANAGES_DESCENDANTS != 0 {
+            return match self.scan_state_bits(aref)? {
+                Some(bits) if bits & DEFUNCT == 0 => Ok(()),
+                _ => Err(stale()),
+            };
+        }
+        let Some(index) = self.attach_call::<i32>(aref, "GetIndexInParent", ())? else {
+            return Err(stale());
+        };
+        if index < 0 {
+            return Err(stale());
+        }
+        let Some((bus, path)) = self.attach_call::<(String, zbus::zvariant::OwnedObjectPath)>(
+            &parent,
+            "GetChildAtIndex",
+            (index,),
+        )?
+        else {
+            return Err(stale());
+        };
+        // A sibling inserted between the two calls can shift the index and
+        // make this a spurious stale; a locator re-resolves and retries.
+        if bus == aref.bus_name && path.as_str() == aref.path {
+            Ok(())
+        } else {
+            Err(stale())
+        }
+    }
+
+    /// One `org.a11y.atspi.Accessible` call for [`Self::ensure_attached`]:
+    /// `Ok(None)` when the object or its peer is gone (the member is
+    /// mandatory, so absence means the object is), a `Timeout` naming the app
+    /// when it does not answer, and every other failure as an error.
+    fn attach_call<R>(
+        &self,
+        aref: &AccessibleRef,
+        method: &str,
+        args: impl zbus::export::serde::Serialize + zbus::zvariant::DynamicType,
+    ) -> Result<Option<R>>
+    where
+        R: for<'d> zbus::export::serde::Deserialize<'d> + zbus::zvariant::Type,
+    {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = match proxy.call_method(method, &args) {
+            Ok(reply) => reply,
+            Err(e) if is_peer_gone(&e) || is_absent_member(&e) => return Ok(None),
+            Err(e) if is_timeout(&e) => {
+                return Err(self.unresponsive_peer(aref, &format!("Accessible.{method}")))
+            }
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: format!("{method} on {}{} failed: {e}", aref.bus_name, aref.path),
+                })
+            }
+        };
+        reply
+            .body()
+            .deserialize::<R>()
+            .map(Some)
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!(
+                    "{method} reply from {}{} did not decode: {e}",
+                    aref.bus_name, aref.path
+                ),
+            })
+    }
+
     /// Perform an AT-SPI2 action by its integer index (from discovery).
+    ///
+    /// Checks first that the object is still attached to the tree
+    /// ([`Self::ensure_attached`]): a destroyed GTK 3 widget would otherwise
+    /// report the action as performed (issue #491).
     fn do_atspi_action_by_index(&self, aref: &AccessibleRef, index: i32) -> Result<()> {
+        self.ensure_attached(aref)?;
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
         let reply = proxy
             .call_method("DoAction", &(index,))
@@ -1389,18 +2164,12 @@ impl LinuxProvider {
     /// Resolve the mapped Role for an accessible ref (1-3 D-Bus calls, plus
     /// an Action probe for AT-SPI `menu`, whose meaning is ambiguous on GTK 3).
     fn resolve_role(&self, aref: &AccessibleRef) -> Role {
-        let role_name = self.get_role_name(aref).unwrap_or_default();
-        let by_name = if !role_name.is_empty() {
-            map_atspi_role(&role_name)
-        } else {
-            Role::Unknown
-        };
-        let coarse = if by_name != Role::Unknown {
-            by_name
-        } else {
-            // Unmapped or missing role name — fall back to numeric role.
-            let role_num = self.get_role_number(aref).unwrap_or(0);
-            map_atspi_role_number(role_num)
+        let role_num = self.get_role_number(aref).unwrap_or(0);
+        // The name is only consulted when the number does not map, so it is
+        // not read at all on the common path.
+        let coarse = match try_map_atspi_role_number(role_num) {
+            Some(role) => role,
+            None => role_from_atspi(role_num, &self.get_role_name(aref).unwrap_or_default()),
         };
         let role = self.refine_text_role(coarse, aref);
         if role == Role::Menu {
@@ -1411,25 +2180,29 @@ impl LinuxProvider {
         }
     }
 
-    /// AT-SPI role-name probe for top-level decisions: is `parent` the
-    /// application node?
+    /// Top-level probe: is `parent` the application node?
     ///
-    /// AccessKit's AT-SPI bridge reports role names as empty strings and
-    /// carries the actual role as the numeric one (see `resolve_role`); an
-    /// empty name fed to `map_atspi_role` would hit the strict mapper's panic
-    /// arm — the exact failure the integration suite surfaced (every element's
-    /// snapshot went through the round-4 top-level probe and died). The empty
-    /// name is resolved numerically, exactly like `resolve_role`, so the
-    /// probe agrees with the snapshot path, and a D-Bus failure is the
-    /// caller's decision to make (propagated for the runtime guard).
+    /// Decided by the `GetRole` *number* alone (`ATSPI_ROLE_APPLICATION`),
+    /// never the role name. GTK 4 names its top-level window `application`
+    /// while numbering it a frame, so a name check took the window for the
+    /// application and its own children for top-level windows (issue #485);
+    /// AccessKit reports no role names at all. The number is the AT-SPI
+    /// contract and every bridge sets it. A D-Bus failure is the caller's
+    /// decision to make (propagated for the runtime guard).
     fn parent_role_is_application(&self, parent: &AccessibleRef) -> Result<bool> {
-        let role_name = self.get_role_name(parent)?;
-        let role = if role_name.is_empty() {
-            map_atspi_role_number(self.get_role_number(parent)?)
-        } else {
-            map_atspi_role(&role_name)
-        };
-        Ok(role == Role::Application)
+        Ok(self.get_role_number(parent)? == ATSPI_ROLE_APPLICATION)
+    }
+
+    /// Whether `aref` is an AT-SPI application object, by role *number*.
+    ///
+    /// Used to flatten nested application objects out of a window's
+    /// children. The role name cannot be trusted for this: GTK 4 names its
+    /// top-level window `application` while numbering it a frame, so a name
+    /// check flattened the window itself away (issue #485). An unreadable
+    /// role is not an application, matching the per-field tolerance of the
+    /// surrounding traversal.
+    fn is_application_object(&self, aref: &AccessibleRef) -> bool {
+        self.get_role_number(aref).ok() == Some(ATSPI_ROLE_APPLICATION)
     }
 
     fn ensure_top_level_window_target(&self, element: &ElementData, action: &str) -> Result<()> {
@@ -1448,10 +2221,10 @@ impl LinuxProvider {
         let Some(parent) = self.get_atspi_parent(&target)? else {
             return Ok(());
         };
-        // Same resolution as the advertisement probe (`is_atspi_top_level`),
-        // so a window the snapshot advertised and the runtime guard can never
-        // disagree; empty role names resolve numerically (AccessKit's bridge)
-        // instead of feeding the strict mapper's panic arm.
+        // Same probe as the advertisement (`is_top_level_window_ref`), so a window
+        // the snapshot advertised and the runtime guard can never disagree.
+        // Both key on the role number, which GTK 4 and AccessKit report
+        // correctly where their role names do not (#485).
         if self.parent_role_is_application(&parent)? {
             Ok(())
         } else {
@@ -1624,25 +2397,21 @@ impl LinuxProvider {
                 continue;
             }
 
-            if !parent_is_registry {
-                let child_role = self.get_role_name(&child).unwrap_or_default();
-                if child_role == "application" {
-                    let grandchildren = self.get_atspi_children(&child).unwrap_or_default();
-                    for gc in grandchildren {
-                        if gc.path == "/org/a11y/atspi/null"
-                            || gc.bus_name.is_empty()
-                            || gc.path.is_empty()
-                        {
-                            continue;
-                        }
-                        let gc_role = self.get_role_name(&gc).unwrap_or_default();
-                        if gc_role == "application" {
-                            continue;
-                        }
-                        to_search.push(gc);
+            if !parent_is_registry && self.is_application_object(&child) {
+                let grandchildren = self.get_atspi_children(&child).unwrap_or_default();
+                for gc in grandchildren {
+                    if gc.path == "/org/a11y/atspi/null"
+                        || gc.bus_name.is_empty()
+                        || gc.path.is_empty()
+                    {
+                        continue;
                     }
-                    continue;
+                    if self.is_application_object(&gc) {
+                        continue;
+                    }
+                    to_search.push(gc);
                 }
+                continue;
             }
             to_search.push(child);
         }
@@ -1752,8 +2521,7 @@ impl Provider for LinuxProvider {
                     {
                         continue;
                     }
-                    let child_role = self.get_role_name(child_ref).unwrap_or_default();
-                    if child_role == "application" {
+                    if self.is_application_object(child_ref) {
                         // Nested application objects can also disappear between
                         // enumeration and this read. Prune only confirmed absence.
                         let Some(grandchildren) = self.live_atspi_children(child_ref)? else {
@@ -1766,8 +2534,7 @@ impl Provider for LinuxProvider {
                             {
                                 continue;
                             }
-                            let gc_role = self.get_role_name(&gc_ref).unwrap_or_default();
-                            if gc_role == "application" {
+                            if self.is_application_object(&gc_ref) {
                                 continue;
                             }
                             to_build.push(gc_ref);
@@ -1781,9 +2548,10 @@ impl Provider for LinuxProvider {
                     self.check_chromium_a11y_enabled(&aref, Some(element_data.role))?;
                 }
 
+                let memo = AncestorMemo::default();
                 let results: Vec<ElementData> = to_build
                     .par_iter()
-                    .map(|r| self.build_element_data(r, pid))
+                    .map(|r| self.build_element_data_in(r, pid, &memo))
                     .collect();
 
                 Ok(results)
@@ -1880,13 +2648,14 @@ impl Provider for LinuxProvider {
             }
             let clause = &group.clauses[clause_idx];
             // Build ElementData for this clause's phase-1 hits in parallel.
+            let memo = AncestorMemo::default();
             let phase1_data: Vec<(usize, ElementData)> = hits
                 .par_iter()
                 .map(|(pos, aref)| {
                     // `root` is always present now, so the PID comes from
                     // the root element. No need to re-resolve via
                     // `get_app_pid` / `get_dbus_pid`.
-                    (*pos, self.build_element_data(aref, pid_from_root))
+                    (*pos, self.build_element_data_in(aref, pid_from_root, &memo))
                 })
                 .collect();
 
@@ -2056,6 +2825,35 @@ impl Provider for LinuxProvider {
         Ok(surfaces)
     }
 
+    /// The application's top-level children, minus windows that are not on
+    /// screen in any sense.
+    ///
+    /// Qt keeps a hidden top-level dialog alive in the AT-SPI tree after
+    /// `hide()`, with no native window behind it, so it was listed as a window
+    /// the user cannot see (issue #492). A top-level window or dialog is
+    /// dropped when its state set has neither `VISIBLE` nor `ICONIFIED`. A
+    /// minimized window keeps `ICONIFIED`, and an unmapped one (minimized,
+    /// or on another workspace) keeps `VISIBLE` without `SHOWING`; both stay
+    /// listed. A window destroyed since the children read is gone and
+    /// skipped; any other state-read failure fails the listing rather than
+    /// guessing either way.
+    fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        let children = self.get_children(Some(app))?;
+        let mut windows = Vec::with_capacity(children.len());
+        for child in children {
+            if matches!(child.role, Role::Window | Role::Dialog) {
+                let aref = self.get_cached(child.handle)?;
+                match self.scan_state_bits(&aref)? {
+                    Some(bits) if is_listable_top_level(bits) => {}
+                    // Hidden toolkit object, or destroyed since enumeration.
+                    _ => continue,
+                }
+            }
+            windows.push(child);
+        }
+        Ok(windows)
+    }
+
     /// A single process can register several AT-SPI Application entries
     /// (per-process instance plus per-event-loop pieces), so `App::windows`
     /// must merge their window children by pid. The same-pid merge and the
@@ -2092,18 +2890,23 @@ impl Provider for LinuxProvider {
         };
         let children = self.get_atspi_children(&registry)?;
 
-        // Filter valid children first, then build in parallel
-        let valid: Vec<(&AccessibleRef, String)> = children
+        // Read every application's name in parallel: each is a round trip to
+        // a different process, and an unresponsive one costs a full
+        // `ATSPI_METHOD_TIMEOUT`. An application that does not answer fails
+        // the listing with an error naming it, rather than being dropped from
+        // the list as if it were not running (tenet 1).
+        let entries: Vec<&AccessibleRef> = children
             .iter()
             .filter(|c| c.path != "/org/a11y/atspi/null")
-            .filter_map(|c| {
-                let name = self.get_name(c).unwrap_or_default();
-                if name.is_empty() {
-                    None
-                } else {
-                    Some((c, name))
-                }
-            })
+            .collect();
+        let names: Vec<Option<String>> = entries
+            .par_iter()
+            .map(|c| self.read_app_name(c))
+            .collect::<Result<_>>()?;
+        let valid: Vec<(&AccessibleRef, String)> = entries
+            .into_iter()
+            .zip(names)
+            .filter_map(|(c, name)| name.filter(|n| !n.is_empty()).map(|n| (c, n)))
             .collect();
 
         let results: Vec<ElementData> = valid
@@ -2143,10 +2946,14 @@ impl Provider for LinuxProvider {
             total += 1;
             match self.get_app_pid(child) {
                 Some(p) if p == pid => {
+                    // Read the name before building: it is the one read that
+                    // fails fast on a hung app. `build_element_data` tolerates
+                    // per-field failures, so on an unresponsive peer it would
+                    // wait out a method timeout for every field instead.
+                    let name = self.read_app_name(child)?;
                     let mut data = self.build_element_data(child, Some(p));
                     // Mirror list_apps: prefer the registry-reported name.
-                    let name = self.get_name(child).unwrap_or_default();
-                    if !name.is_empty() {
+                    if let Some(name) = name.filter(|n| !n.is_empty()) {
                         data.name = Some(name);
                     }
                     return Ok(data);
@@ -2188,20 +2995,30 @@ impl Provider for LinuxProvider {
         let apps = self.get_atspi_children(&registry)?;
 
         for app in apps.iter().filter(|c| c.path != "/org/a11y/atspi/null") {
-            let windows = match self.get_atspi_children(app) {
-                Ok(w) => w,
-                // A single app failing to enumerate its windows shouldn't abort
-                // the whole foreground probe — skip it and keep scanning.
-                Err(_) => continue,
+            // An application that left the bus mid-scan (or whose root has no
+            // children to give) is skipped. One that does not answer is an
+            // error naming it: skipping it would report "nothing focused"
+            // when the hung app may be exactly the one in the foreground.
+            let Some(windows) = self.scan_children(app)? else {
+                continue;
             };
-            let has_active_window = windows
-                .iter()
-                .filter(|w| w.path != "/org/a11y/atspi/null")
-                .any(|w| self.state_bits(w).0 & ACTIVE != 0);
+            let mut has_active_window = false;
+            for w in windows.iter().filter(|w| w.path != "/org/a11y/atspi/null") {
+                if self
+                    .scan_state_bits(w)?
+                    .is_some_and(|bits| bits & ACTIVE != 0)
+                {
+                    has_active_window = true;
+                    break;
+                }
+            }
             if has_active_window {
+                let Some(name) = self.read_app_name(app)? else {
+                    // Gone between the state read and now.
+                    continue;
+                };
                 let pid = self.get_app_pid(app);
                 let mut data = self.build_element_data(app, pid);
-                let name = self.get_name(app).unwrap_or_default();
                 if !name.is_empty() {
                     data.name = Some(name);
                 }
@@ -2451,13 +3268,75 @@ impl Provider for LinuxProvider {
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
-        proxy
-            .call_method("ScrollTo", &(0u32,))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("ScrollTo failed: {}", e),
-            })?;
-        Ok(())
+        let not_supported = || Error::ActionNotSupported {
+            action: "scroll_into_view".to_string(),
+            role: element.role,
+        };
+        let reply = match proxy.call_method("ScrollTo", &(0u32,)) {
+            Ok(reply) => reply,
+            // An absent member is ambiguous here. Qt implements no
+            // Component.ScrollTo and answers UnknownObject ("No such object
+            // path") for an object it is serving, while GDBus answers a
+            // destroyed object with UnknownMethod. One GetState read on the
+            // same path says which: an object that still answers it is alive
+            // and simply cannot be scrolled; one that does not is gone.
+            //
+            // A probe that itself fails names the ScrollTo reply too, so the
+            // error says what was being disambiguated (tenet 6).
+            Err(e) if is_absent_member(&e) => {
+                return match self.scan_state_bits(&target) {
+                    Ok(Some(_)) => Err(not_supported()),
+                    Ok(None) => Err(Error::ElementStale {
+                        selector: format!("{}{}", target.bus_name, target.path),
+                    }),
+                    Err(Error::Timeout { .. }) => Err(self.unresponsive_peer(
+                        &target,
+                        &format!(
+                            "Accessible.GetState (probing after Component.ScrollTo answered: {e})"
+                        ),
+                    )),
+                    Err(probe) => Err(Error::Platform {
+                        code: -1,
+                        message: format!(
+                            "Component.ScrollTo answered {e}; probing GetState to tell a live \
+                             object from a destroyed one then failed: {probe}"
+                        ),
+                    }),
+                };
+            }
+            Err(e) if is_timeout(&e) => {
+                return Err(self.unresponsive_peer(&target, "Component.ScrollTo"))
+            }
+            Err(e) if is_peer_gone(&e) => {
+                return Err(Error::ElementStale {
+                    selector: format!("{}{}", target.bus_name, target.path),
+                })
+            }
+            Err(zbus::Error::MethodError(name, _, _))
+                if name.as_str() == "org.freedesktop.DBus.Error.NotSupported" =>
+            {
+                return Err(not_supported())
+            }
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: format!("Component.ScrollTo failed: {e}"),
+                })
+            }
+        };
+        let scrolled: bool = reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Component.ScrollTo reply failed: {e}"),
+        })?;
+        // ScrollTo answers false when the adapter declines (ATK's default
+        // `scroll_to` does, for a component that does not implement it).
+        // Reporting that as success would tell an auto-wait the element was
+        // scrolled when nothing moved.
+        if scrolled {
+            Ok(())
+        } else {
+            Err(not_supported())
+        }
     }
 
     // ── Window management ──────────────────────────────────────────
@@ -2667,11 +3546,16 @@ impl Provider for LinuxProvider {
         atspi_bool_reply(reply, "EditableText.DeleteText", &target, element)?;
         // Not atomic: if InsertText fails after DeleteText succeeded, the
         // field is left empty, and the error says which call failed.
-        let length = self.insert_text_length(&target, value)?;
-        let reply = proxy
-            .call_method("InsertText", &(0i32, value, length))
-            .map_err(|e| editable_text_call_error("InsertText", e, &target))?;
-        atspi_bool_reply(reply, "EditableText.InsertText", &target, element)
+        // DeleteText has already changed the field, so no failure from here on
+        // may read as "never delivered" (see `unknown_after_mutation`).
+        let insert = || -> Result<()> {
+            let length = self.insert_text_length(&target, value)?;
+            let reply = proxy
+                .call_method("InsertText", &(0i32, value, length))
+                .map_err(|e| editable_text_call_error("InsertText", e, &target))?;
+            atspi_bool_reply(reply, "EditableText.InsertText", &target, element)
+        };
+        insert().map_err(|e| unknown_after_mutation(e, "DeleteText"))
     }
 
     fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
@@ -2884,9 +3768,49 @@ fn grab_focus_error(name: String, verb: &str, action: &str, role: Role) -> Error
     }
 }
 
+/// Map an accessible's AT-SPI role to an xa11y [`Role`], keyed on the
+/// `GetRole` *number*.
+///
+/// The number is the AT-SPI contract; the name is a display string, and
+/// toolkits disagree with themselves there: GTK 4 names its window
+/// `application`, containers `generic` and entries `text box` while
+/// numbering them frame, filler/panel and text. Reading the name first made
+/// GTK 4 windows nested applications that were then flattened out of the
+/// tree (issue #485). The name is consulted only when the number does not
+/// map — AccessKit reports no names at all, and a few bridges report a
+/// number this table does not know — and both unmapped is
+/// [`xa11y_core::unknown_role`] naming both. Refinements that need more than
+/// the role (GTK 3 `menu` vs menu item, text field vs area) run after this.
+pub(crate) fn role_from_atspi(role_num: u32, role_name: &str) -> Role {
+    if let Some(role) = try_map_atspi_role_number(role_num) {
+        return role;
+    }
+    if !role_name.is_empty() {
+        if let Some(role) = try_map_atspi_role(role_name) {
+            return role;
+        }
+    }
+    // `AtspiRole::Unknown` with nothing better in the name is the platform
+    // answering "unknown", not a role this table has yet to map.
+    if role_num == ATSPI_ROLE_UNKNOWN {
+        return Role::Unknown;
+    }
+    xa11y_core::unknown_role(&format!(
+        "AT-SPI role number {role_num}, role name {role_name:?}"
+    ))
+}
+
 /// Map AT-SPI2 role name to xa11y Role.
+/// Test-only: production code goes through [`role_from_atspi`].
+#[cfg(test)]
 pub(crate) fn map_atspi_role(role_name: &str) -> Role {
-    match role_name.to_lowercase().as_str() {
+    try_map_atspi_role(role_name).unwrap_or_else(|| xa11y_core::unknown_role(role_name))
+}
+
+/// [`map_atspi_role`] without the unknown-role arm: `None` for a name the
+/// table does not know.
+fn try_map_atspi_role(role_name: &str) -> Option<Role> {
+    Some(match role_name.to_lowercase().as_str() {
         "application" => Role::Application,
         "window" | "frame" => Role::Window,
         "dialog" | "file chooser" => Role::Dialog,
@@ -2944,8 +3868,21 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
         "tooltip" | "tool tip" => Role::Tooltip,
         "status bar" | "statusbar" => Role::Status,
         "landmark" | "navigation" => Role::Navigation,
-        _ => xa11y_core::unknown_role(role_name),
-    }
+        _ => return None,
+    })
+}
+
+/// `AtspiRole::PasswordText` — the numeric role of a password entry.
+const ATSPI_ROLE_PASSWORD_TEXT: u32 = 40;
+
+/// Whether an AT-SPI role, by name or number, is `PasswordText`.
+///
+/// Both forms are accepted because bridges disagree on which they fill in:
+/// AccessKit reports an empty role name and only the number, GTK both. The
+/// mapped `Role` cannot answer this, since `PasswordText` maps to
+/// `TextField` so `text_field` selectors keep matching password entries.
+pub(crate) fn is_password_role(role_name: &str, role_num: u32) -> bool {
+    role_num == ATSPI_ROLE_PASSWORD_TEXT || role_name.eq_ignore_ascii_case("password text")
 }
 
 /// `AtspiRole::Frame` — the numeric role a top-level window frame reports.
@@ -2956,10 +3893,27 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
 /// pins it against the AtspiRole enum the tests carry.
 const ATSPI_ROLE_FRAME: u32 = 23;
 
+/// `AtspiRole::Application`.
+const ATSPI_ROLE_APPLICATION: u32 = 75;
+
+/// `AtspiRole::Unknown`.
+const ATSPI_ROLE_UNKNOWN: u32 = 67;
+
 /// Map AT-SPI2 numeric role (AtspiRole enum) to xa11y Role.
 /// Values from atspi-common Role enum (repr(u32)).
+/// Test-only: production code goes through [`role_from_atspi`].
+#[cfg(test)]
 pub(crate) fn map_atspi_role_number(role: u32) -> Role {
-    match role {
+    try_map_atspi_role_number(role)
+        .unwrap_or_else(|| xa11y_core::unknown_role(&format!("AT-SPI role number {role}")))
+}
+
+/// [`map_atspi_role_number`] without the unknown-role arm: `None` for a
+/// number the table does not map, including `Invalid` (0, also what an
+/// unreadable role defaults to) and `Unknown` (67), so the caller can fall
+/// back to the name.
+pub(crate) fn try_map_atspi_role_number(role: u32) -> Option<Role> {
+    Some(match role {
         2 => Role::Alert,    // Alert
         5 => Role::Group,    // Calendar (mirrors UIA CalendarControlType)
         7 => Role::CheckBox, // CheckBox
@@ -2967,53 +3921,52 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         // Bare ColumnHeader/RowHeader (10/47): WebKit and GTK emit these for
         // <th> / column-view header cells, distinct from the
         // TableColumnHeader/TableRowHeader pair (57/58) below.
-        10 => Role::TableCell,   // ColumnHeader
-        11 => Role::ComboBox,    // ComboBox
-        13 => Role::Image,       // DesktopIcon
-        16 => Role::Dialog,      // Dialog
-        19 => Role::Dialog,      // FileChooser
-        20 => Role::Group,       // Filler
-        23 => Role::Window,      // Frame
-        26 => Role::Image,       // Icon
-        27 => Role::Image,       // Image
-        29 => Role::StaticText,  // Label
-        31 => Role::List,        // List
-        32 => Role::ListItem,    // ListItem
-        33 => Role::Menu,        // Menu
-        34 => Role::MenuBar,     // MenuBar
-        35 => Role::MenuItem,    // MenuItem
-        37 => Role::Tab,         // PageTab
-        38 => Role::TabGroup,    // PageTabList
-        39 => Role::Group,       // Panel
-        40 => Role::TextField,   // PasswordText
-        41 => Role::Menu,        // PopupMenu
-        42 => Role::ProgressBar, // ProgressBar
-        43 => Role::Button,      // Button (push button)
-        44 => Role::RadioButton, // RadioButton
-        45 => Role::RadioButton, // RadioMenuItem
-        47 => Role::TableCell,   // RowHeader
-        48 => Role::ScrollBar,   // ScrollBar
-        49 => Role::Group,       // ScrollPane
-        50 => Role::Separator,   // Separator
-        51 => Role::Slider,      // Slider
-        52 => Role::SpinButton,  // SpinButton
-        53 => Role::SplitGroup,  // SplitPane
-        54 => Role::Status,      // StatusBar
-        55 => Role::Table,       // Table
-        56 => Role::TableCell,   // TableCell
-        57 => Role::TableCell,   // TableColumnHeader
-        58 => Role::TableCell,   // TableRowHeader
-        59 => Role::MenuItem,    // TearoffMenuItem
-        60 => Role::TextArea,    // Terminal (VTE and friends — text via the Text interface)
-        61 => Role::TextArea,    // Text
-        62 => Role::Switch,      // ToggleButton
-        63 => Role::Toolbar,     // ToolBar
-        64 => Role::Tooltip,     // ToolTip
-        65 => Role::Group,       // Tree
-        66 => Role::Table,       // TreeTable
-        67 => Role::Unknown,     // Unknown
-        68 => Role::Group,       // Viewport
-        69 => Role::Window,      // Window
+        10 => Role::TableCell,                       // ColumnHeader
+        11 => Role::ComboBox,                        // ComboBox
+        13 => Role::Image,                           // DesktopIcon
+        16 => Role::Dialog,                          // Dialog
+        19 => Role::Dialog,                          // FileChooser
+        20 => Role::Group,                           // Filler
+        23 => Role::Window,                          // Frame
+        26 => Role::Image,                           // Icon
+        27 => Role::Image,                           // Image
+        29 => Role::StaticText,                      // Label
+        31 => Role::List,                            // List
+        32 => Role::ListItem,                        // ListItem
+        33 => Role::Menu,                            // Menu
+        34 => Role::MenuBar,                         // MenuBar
+        35 => Role::MenuItem,                        // MenuItem
+        37 => Role::Tab,                             // PageTab
+        38 => Role::TabGroup,                        // PageTabList
+        39 => Role::Group,                           // Panel
+        ATSPI_ROLE_PASSWORD_TEXT => Role::TextField, // PasswordText; see `is_password_role`
+        41 => Role::Menu,                            // PopupMenu
+        42 => Role::ProgressBar,                     // ProgressBar
+        43 => Role::Button,                          // Button (push button)
+        44 => Role::RadioButton,                     // RadioButton
+        45 => Role::RadioButton,                     // RadioMenuItem
+        47 => Role::TableCell,                       // RowHeader
+        48 => Role::ScrollBar,                       // ScrollBar
+        49 => Role::Group,                           // ScrollPane
+        50 => Role::Separator,                       // Separator
+        51 => Role::Slider,                          // Slider
+        52 => Role::SpinButton,                      // SpinButton
+        53 => Role::SplitGroup,                      // SplitPane
+        54 => Role::Status,                          // StatusBar
+        55 => Role::Table,                           // Table
+        56 => Role::TableCell,                       // TableCell
+        57 => Role::TableCell,                       // TableColumnHeader
+        58 => Role::TableCell,                       // TableRowHeader
+        59 => Role::MenuItem,                        // TearoffMenuItem
+        60 => Role::TextArea, // Terminal (VTE and friends — text via the Text interface)
+        61 => Role::TextArea, // Text
+        62 => Role::Switch,   // ToggleButton
+        63 => Role::Toolbar,  // ToolBar
+        64 => Role::Tooltip,  // ToolTip
+        65 => Role::Group,    // Tree
+        66 => Role::Table,    // TreeTable
+        68 => Role::Group,    // Viewport
+        69 => Role::Window,   // Window
         // Text-document containers WebKit emits for plain markup: a bare
         // <p> (no ARIA naming) is Paragraph; header/footer/caption/block
         // quote come from the matching HTML elements. Containers normalize
@@ -3053,8 +4006,8 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         110 => Role::Navigation,  // Landmark
         116 => Role::StaticText,  // Static
         129 => Role::Button,      // PushButtonMenu
-        _ => xa11y_core::unknown_role(&format!("AT-SPI role number {role}")),
-    }
+        _ => return None,
+    })
 }
 
 /// Depth cap for the GTK press-fallback BFS. Wrapper patterns nest at most
@@ -3116,15 +4069,176 @@ fn is_dock_frame(role_number: u32, attributes: &HashMap<String, String>) -> bool
     role_number == ATSPI_ROLE_FRAME && attributes.get("window-type").is_some_and(|t| t == "dock")
 }
 
+/// Whether an AT-SPI state set means "on screen".
+///
+/// `VISIBLE` only says the object *would* be shown if its ancestors were —
+/// a widget in a hidden dialog, a collapsed panel or a minimised window keeps
+/// it. `SHOWING` is the state that means it is actually drawn, so `visible`
+/// requires it (issue #489). `VISIBLE` is still required alongside it: an
+/// object a toolkit has explicitly hidden is not visible even if a stale
+/// `SHOWING` lingers. Shared by the tree read and the event decoder so the
+/// two never disagree.
+pub(crate) fn atspi_visible(bits: u64) -> bool {
+    bits & ATSPI_SHOWING != 0 && bits & ATSPI_VISIBLE != 0
+}
+
+const ATSPI_ICONIFIED: u64 = 1 << 15;
+const ATSPI_SHOWING: u64 = 1 << 25;
+const ATSPI_VISIBLE: u64 = 1 << 30;
+
+/// Why a state set means "not on screen", as far as the bits alone say, or
+/// `None` when it is on screen.
+///
+/// `ICONIFIED` (a minimized frame) and a cleared `VISIBLE` (an object its
+/// toolkit hid) answer it. `VISIBLE` without `SHOWING` does not: the object
+/// would be drawn if its ancestors were, so the answer is above it, and this
+/// returns [`HiddenReason::Unknown`] for the tree read to settle with
+/// [`LinuxProvider::ancestor_hidden_reason`]. The event decoder leaves it
+/// `Unknown`, because a signal handler does not walk ancestors.
+pub(crate) fn hidden_reason_from_bits(bits: u64) -> Option<HiddenReason> {
+    if atspi_visible(bits) {
+        None
+    } else if bits & ATSPI_ICONIFIED != 0 {
+        Some(HiddenReason::WindowMinimized)
+    } else if bits & ATSPI_VISIBLE != 0 {
+        Some(HiddenReason::Unknown)
+    } else {
+        Some(HiddenReason::NotShowing)
+    }
+}
+
+/// How many ancestors [`LinuxProvider::ancestor_hidden_reason`] climbs
+/// looking for a drawn one before it gives up and says `Unknown`.
+const HIDDEN_REASON_MAX_WALK: usize = 32;
+
+/// One ancestor's answers to what the hidden-reason climb asks of it.
+#[derive(Clone)]
+struct AncestorFacts {
+    iconified: bool,
+    /// `VISIBLE` and `SHOWING`.
+    drawn: bool,
+    /// Its role is a scrolling container ([`is_scrolling_container_role`]).
+    scrolling: bool,
+    /// Read only for a drawn ancestor. `None` without a Component or with
+    /// sentinel extents.
+    extents: Option<Rect>,
+    /// Read only for an ancestor the climb passes through (neither drawn nor
+    /// minimized). `None` at the root.
+    parent: Option<AccessibleRef>,
+}
+
+/// [`AncestorFacts`] keyed by `(bus_name, path)`, shared by the elements
+/// built in one provider call: every row of a long list climbs through the
+/// same ancestors, which then cost one read each instead of one per row.
+/// `None` records a failed read. Scoped to the call, so it never serves an
+/// answer older than the snapshot it is part of.
+#[derive(Default)]
+struct AncestorMemo(Mutex<HashMap<(String, String), Option<AncestorFacts>>>);
+
+/// AT-SPI roles that scroll their content: `List` (31), `ScrollPane` (49),
+/// `Table` (55), `Tree` (65), `TreeTable` (66), `Viewport` (68) and
+/// `ListBox` (98). Several map to [`Role::Group`], so the raw number is what
+/// says it.
+fn is_scrolling_container_role(role: u32) -> bool {
+    matches!(role, 31 | 49 | 55 | 65 | 66 | 68 | 98)
+}
+
+/// AT-SPI roles of the cells an item view lays out, and hides once they are
+/// scrolled out: `ListItem` (32), `TableCell` (56), `TableRow` (90) and
+/// `TreeItem` (91).
+fn is_item_cell_role(role: u32) -> bool {
+    matches!(role, 32 | 56 | 90 | 91)
+}
+
+/// `ScrolledOut` when the object lies entirely outside a drawn ancestor's
+/// extents and a scrolling container was on the way to it; `NotShowing`
+/// when either is missing; `Unknown` when the object's own bounds could not
+/// be read.
+fn clipped_reason(
+    bounds: &Result<Option<Rect>>,
+    viewport: Option<&Rect>,
+    scrolling: bool,
+) -> HiddenReason {
+    match (bounds, viewport) {
+        (Err(_), _) => HiddenReason::Unknown,
+        (Ok(Some(bounds)), Some(viewport)) if scrolling && !shows_within(bounds, viewport) => {
+            HiddenReason::ScrolledOut
+        }
+        _ => HiddenReason::NotShowing,
+    }
+}
+
+/// Whether `inner` shows through `outer` at all: some area in common, or, for
+/// a zero-width or zero-height `inner` (a separator), lying on or within
+/// `outer`'s edges. The same rule as the Windows provider's scroll clip.
+fn shows_within(inner: &Rect, outer: &Rect) -> bool {
+    let (il, it) = (inner.x as i64, inner.y as i64);
+    let (ir, ib) = (il + inner.width as i64, it + inner.height as i64);
+    let (ol, ot) = (outer.x as i64, outer.y as i64);
+    let (or, ob) = (ol + outer.width as i64, ot + outer.height as i64);
+    if inner.width > 0 && inner.height > 0 {
+        il < or && ol < ir && it < ob && ot < ib
+    } else {
+        il <= or && ol <= ir && it <= ob && ot <= ib
+    }
+}
+
+/// The application object's path on every AT-SPI application connection.
+const APP_ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
+
+/// Whether introspection `xml` declares `interface` on its node.
+fn introspection_lists_interface(xml: &str, interface: &str) -> bool {
+    xml.contains(&format!("<interface name=\"{interface}\""))
+}
+
+/// Whether `Application.ToolkitName` / `Version` name GTK 4.
+fn is_gtk4_toolkit(name: &str, version: &str) -> bool {
+    name.eq_ignore_ascii_case("GTK") && version.trim().split('.').next() == Some("4")
+}
+
+/// Turn a `Component.GetExtents` reply into bounds, or `None` when the reply
+/// is a sentinel rather than a position.
+///
+/// Toolkits report an unrealised or off-screen widget as `INT32_MIN`
+/// coordinates (GTK 3), a negative size (`-1,-1,-1,-1`) or `0x0`. Accepting
+/// those as bounds put click targets and screenshot crops at -2147483648, so
+/// they are "no bounds" (issue #489). A zero width *or* height alone (a
+/// separator line) is a real, if thin, rectangle and is kept — the same rule
+/// the Windows backend applies.
+fn extents_to_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Rect> {
+    if x == i32::MIN || y == i32::MIN || w < 0 || h < 0 || (w == 0 && h == 0) {
+        return None;
+    }
+    Some(Rect {
+        x,
+        y,
+        width: w as u32,
+        height: h as u32,
+    })
+}
+
+/// Whether a top-level window's AT-SPI state set means it exists for the
+/// user: `VISIBLE` (mapped, or unmapped but not hidden: minimized or on
+/// another workspace, where `SHOWING` is clear) or `ICONIFIED` (minimized).
+/// A window with neither is a hidden toolkit object, not a window (issue
+/// #492). `SHOWING` alone does not count, matching the provider's own
+/// definition of a hidden element.
+pub(crate) fn is_listable_top_level(bits: u64) -> bool {
+    const ICONIFIED: u64 = 1 << 15;
+    const VISIBLE: u64 = 1 << 30;
+    bits & (VISIBLE | ICONIFIED) != 0
+}
+
+/// The D-Bus error a peer answers for an object path it no longer serves.
+const UNKNOWN_OBJECT: &str = "org.freedesktop.DBus.Error.UnknownObject";
+
 /// Classify the structured reply before rendering it. `UnknownObject` means
 /// this exact accessible was destroyed, not that the peer timed out or that
 /// `GetChildren` is unimplemented. Direct reads retain the stale-element error;
 /// live traversals prune it through `live_atspi_children`.
 fn children_call_error(err: zbus::Error, aref: &AccessibleRef) -> Error {
     match &err {
-        zbus::Error::MethodError(name, ..)
-            if name.as_str() == "org.freedesktop.DBus.Error.UnknownObject" =>
-        {
+        zbus::Error::MethodError(name, ..) if name.as_str() == UNKNOWN_OBJECT => {
             Error::ElementStale {
                 selector: format!("{}{}", aref.bus_name, aref.path),
             }
@@ -3184,6 +4298,25 @@ fn atspi_bool_reply(
     }
 }
 
+/// Re-classify an error raised by a step that ran after `done` had already
+/// mutated the application.
+///
+/// A pre-dispatch-class error (`TextValueNotSupported`, `ActionNotSupported`,
+/// ...) describes the later step, but the earlier one went through, so
+/// reporting `NotDelivered` would invite a retry on top of a changed field.
+/// Such an error becomes a `Platform` error, which reads as `Unknown`, and the
+/// message keeps the original reason. Errors that are already `Unknown` pass
+/// through untouched.
+pub(crate) fn unknown_after_mutation(e: Error, done: &str) -> Error {
+    if e.delivery() == xa11y_core::Delivery::Unknown {
+        return e;
+    }
+    Error::Platform {
+        code: -1,
+        message: format!("{e}, after {done} had already changed the element"),
+    }
+}
+
 /// Map a failed `EditableText` call. A missing member or interface is
 /// [`Error::TextValueNotSupported`] (common on Chromium, whose URL bar only
 /// exposes read-only `Text`; issue #101); anything else, including no reply,
@@ -3235,6 +4368,83 @@ fn is_unimplemented(err: &zbus::Error) -> bool {
     }
 }
 
+/// Whether a failed D-Bus call is the connection's method timeout expiring
+/// (see [`ATSPI_METHOD_TIMEOUT`]): zbus reports it as an I/O error of kind
+/// `TimedOut`, distinct from a peer's own `org.freedesktop.DBus.Error.*` reply.
+fn is_timeout(err: &zbus::Error) -> bool {
+    matches!(err, zbus::Error::InputOutput(io) if io.kind() == std::io::ErrorKind::TimedOut)
+}
+
+/// The scheduler state of a process, read from the third field of
+/// `/proc/<pid>/stat`. `None` when the process is gone or the file is not
+/// readable.
+fn read_process_state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_process_state(&stat)
+}
+
+/// Parse the state field out of a `/proc/<pid>/stat` line. The command name
+/// in field two is parenthesised and may itself contain spaces or `)`, so the
+/// state is the first token after the *last* `)`.
+fn parse_process_state(stat: &str) -> Option<char> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().next()?.chars().next()
+}
+
+/// Render a `/proc` state letter as the reason a process might not answer.
+fn describe_process_state(state: char) -> &'static str {
+    match state {
+        'T' => "stopped (SIGSTOP or job control); it cannot answer until it receives SIGCONT",
+        't' => "stopped by a debugger (tracing stop)",
+        'D' => "in uninterruptible sleep (blocked on I/O)",
+        'Z' => "a zombie (exited but not yet reaped)",
+        'R' | 'S' => {
+            "running, so its event loop is busy or deadlocked rather than the process being \
+             stopped"
+        }
+        _ => "in an unrecognised scheduler state",
+    }
+}
+
+/// Build the timeout error for an application that did not answer `call`.
+///
+/// Kept free of D-Bus so its wording is unit-testable: the diagnosis names
+/// the call, the bus name and object, the pid and what `/proc` says about the
+/// process — everything a caller needs to decide whether to skip, retry, or
+/// `SIGCONT` the app without re-running under logging (tenet 6).
+fn unresponsive_peer_error(
+    aref: &AccessibleRef,
+    call: &str,
+    pid: Option<u32>,
+    state: Option<char>,
+) -> Error {
+    let who = match pid {
+        Some(pid) => format!("AT-SPI application {} (pid {pid})", aref.bus_name),
+        None => format!("AT-SPI application {} (pid unknown)", aref.bus_name),
+    };
+    let observed = match (pid, state) {
+        (Some(pid), Some(state)) => format!(
+            "no reply to {call} on {} within {:?}; process {pid} is {}",
+            aref.path,
+            ATSPI_METHOD_TIMEOUT,
+            describe_process_state(state)
+        ),
+        (Some(pid), None) => format!(
+            "no reply to {call} on {} within {:?}; process {pid} has no readable /proc entry",
+            aref.path, ATSPI_METHOD_TIMEOUT
+        ),
+        (None, _) => format!(
+            "no reply to {call} on {} within {:?}",
+            aref.path, ATSPI_METHOD_TIMEOUT
+        ),
+    };
+    Error::timeout(ATSPI_METHOD_TIMEOUT).diagnose(
+        xa11y_core::Diagnosis::new()
+            .condition(format!("{who} to answer {call}"))
+            .last_observed(observed),
+    )
+}
+
 /// D-Bus error names that mean the member was never there, as opposed to the
 /// call having failed.
 ///
@@ -3276,8 +4486,20 @@ const PEER_GONE_ERRORS: [&str; 2] = [
 fn is_peer_gone(err: &zbus::Error) -> bool {
     match err {
         zbus::Error::MethodError(name, ..) => PEER_GONE_ERRORS.contains(&name.as_str()),
+        // Property reads go through `org.freedesktop.DBus.Properties`, whose
+        // error replies zbus surfaces as a structured `fdo::Error` instead.
+        zbus::Error::FDO(e) => PEER_GONE_ERRORS.contains(&e.name().as_str()),
         _ => false,
     }
+}
+
+/// Whether a failed D-Bus call means the object or its application is gone:
+/// an absent member (see [`is_absent_member`]; GDBus answers a destroyed
+/// object with `UnknownMethod`) or a departed peer (see [`is_peer_gone`]).
+/// Only for members every accessible implements, where absence can mean
+/// nothing else.
+pub(crate) fn is_gone(err: &zbus::Error) -> bool {
+    is_absent_member(err) || is_peer_gone(err)
 }
 
 /// Whether a failed D-Bus call means the member is absent (see
@@ -3291,6 +4513,7 @@ fn is_peer_gone(err: &zbus::Error) -> bool {
 fn is_absent_member(err: &zbus::Error) -> bool {
     match err {
         zbus::Error::MethodError(name, ..) => ABSENT_MEMBER_ERRORS.contains(&name.as_str()),
+        zbus::Error::FDO(e) => ABSENT_MEMBER_ERRORS.contains(&e.name().as_str()),
         _ => false,
     }
 }
@@ -3456,6 +4679,31 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_after_a_completed_step_is_never_not_delivered() {
+        // set_value: DeleteText emptied the field, then InsertText answered
+        // UnknownInterface. TextValueNotSupported alone would say "retry safe".
+        assert_eq!(
+            Error::TextValueNotSupported.delivery(),
+            xa11y_core::Delivery::NotDelivered
+        );
+        let e = unknown_after_mutation(Error::TextValueNotSupported, "DeleteText");
+        assert_eq!(e.delivery(), xa11y_core::Delivery::Unknown);
+        assert!(
+            matches!(&e, Error::Platform { message, .. } if message.contains("DeleteText")),
+            "{e:?}"
+        );
+        // Already-unknown errors are untouched.
+        let platform = Error::Platform {
+            code: 7,
+            message: "x".into(),
+        };
+        assert!(matches!(
+            unknown_after_mutation(platform, "DeleteText"),
+            Error::Platform { code: 7, .. }
+        ));
+    }
+
+    #[test]
     fn false_set_selection_reply_is_an_error() {
         let (target, element) = text_target();
         let err = atspi_bool_reply(
@@ -3514,6 +4762,190 @@ mod tests {
         assert_eq!(insert_text_length_for(None, "a😀"), 5);
     }
 
+    // ── #489: SHOWING and sentinel extents ───────────────────────────────
+
+    #[test]
+    fn visible_requires_showing() {
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        assert!(atspi_visible(VISIBLE | SHOWING));
+        // Would be shown if its parents were — e.g. inside a hidden dialog.
+        assert!(!atspi_visible(VISIBLE));
+        assert!(!atspi_visible(SHOWING));
+        assert!(!atspi_visible(0));
+        // The event decoder uses the same rule.
+        assert!(!crate::events::states_from_bits(VISIBLE, Role::Button, true, false).visible);
+        assert!(
+            crate::events::states_from_bits(VISIBLE | SHOWING, Role::Button, true, false).visible
+        );
+    }
+
+    #[test]
+    fn hidden_reason_from_bits_says_what_the_bits_can() {
+        const ICONIFIED: u64 = 1 << 15;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        assert_eq!(hidden_reason_from_bits(VISIBLE | SHOWING), None);
+        assert_eq!(
+            hidden_reason_from_bits(VISIBLE | ICONIFIED),
+            Some(HiddenReason::WindowMinimized)
+        );
+        // Hidden by its toolkit.
+        assert_eq!(
+            hidden_reason_from_bits(SHOWING),
+            Some(HiddenReason::NotShowing)
+        );
+        assert_eq!(hidden_reason_from_bits(0), Some(HiddenReason::NotShowing));
+        // Would be drawn if its ancestors were: the answer is above it.
+        assert_eq!(
+            hidden_reason_from_bits(VISIBLE),
+            Some(HiddenReason::Unknown)
+        );
+        // The event decoder agrees, and `Some` exactly when not visible.
+        for bits in [0, VISIBLE, SHOWING, VISIBLE | SHOWING, VISIBLE | ICONIFIED] {
+            let states = crate::events::states_from_bits(bits, Role::Button, true, false);
+            assert_eq!(states.hidden_reason, hidden_reason_from_bits(bits));
+            assert_eq!(states.visible, states.hidden_reason.is_none());
+        }
+    }
+
+    #[test]
+    fn shows_within_needs_area_in_common() {
+        let viewport = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let at = |x, y, width, height| Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        assert!(shows_within(&at(10, 10, 20, 20), &viewport));
+        // Partly inside still shows.
+        assert!(shows_within(&at(90, 90, 20, 20), &viewport));
+        // Touching the edge is not showing; beyond it is not either.
+        assert!(!shows_within(&at(0, 100, 20, 20), &viewport));
+        assert!(!shows_within(&at(0, 250, 20, 20), &viewport));
+        assert!(!shows_within(&at(-30, 10, 20, 20), &viewport));
+        // A separator on the edge shows; one beyond it does not.
+        assert!(shows_within(&at(0, 100, 50, 0), &viewport));
+        assert!(!shows_within(&at(0, 101, 50, 0), &viewport));
+    }
+
+    #[test]
+    fn sentinel_extents_are_no_bounds() {
+        assert_eq!(
+            extents_to_rect(10, 20, 30, 40),
+            Some(Rect {
+                x: 10,
+                y: 20,
+                width: 30,
+                height: 40
+            })
+        );
+        // Off-screen to the left/top is a real position.
+        assert!(extents_to_rect(-50, -5, 30, 40).is_some());
+        assert_eq!(extents_to_rect(i32::MIN, i32::MIN, 0, 0), None);
+        assert_eq!(extents_to_rect(i32::MIN, 0, 30, 40), None);
+        assert_eq!(extents_to_rect(0, i32::MIN, 30, 40), None);
+        assert_eq!(extents_to_rect(-1, -1, -1, -1), None);
+        assert_eq!(extents_to_rect(5, 5, -3, 10), None);
+        assert_eq!(extents_to_rect(5, 5, 0, 0), None);
+        // N×0 and 0×N are thin but real (a separator), as on Windows.
+        assert!(extents_to_rect(5, 5, 30, 0).is_some());
+        assert!(extents_to_rect(5, 5, 0, 30).is_some());
+    }
+
+    // ── #485: role number before role name ───────────────────────────────
+
+    #[test]
+    fn role_number_wins_over_a_disagreeing_name() {
+        // GTK 4: a window frame named "application" is a window, not a
+        // nested application to flatten away.
+        assert_eq!(
+            role_from_atspi(ATSPI_ROLE_FRAME, "application"),
+            Role::Window
+        );
+        // GTK 4 "text box" numbered as an entry / text.
+        assert_eq!(role_from_atspi(79, "text box"), Role::TextField);
+        assert_eq!(role_from_atspi(61, "text box"), Role::TextArea);
+        // "generic" is no name we map, and the number answers first anyway.
+        assert_eq!(role_from_atspi(39, "generic"), Role::Group);
+        // The application number is still the application.
+        assert_eq!(
+            role_from_atspi(ATSPI_ROLE_APPLICATION, ""),
+            Role::Application
+        );
+    }
+
+    #[test]
+    fn role_name_is_the_fallback_for_an_unmapped_number() {
+        // AccessKit: numbers only, no names.
+        assert_eq!(role_from_atspi(43, ""), Role::Button);
+        // Unreadable role (defaults to 0, Invalid) with a readable name.
+        assert_eq!(role_from_atspi(0, "push button"), Role::Button);
+        // AtspiRole::Unknown defers to a known name…
+        assert_eq!(
+            role_from_atspi(ATSPI_ROLE_UNKNOWN, "check box"),
+            Role::CheckBox
+        );
+        // …and is otherwise the platform's own "unknown", not an unmapped role
+        // (this must not hit the strict-roles panic).
+        assert_eq!(role_from_atspi(ATSPI_ROLE_UNKNOWN, ""), Role::Unknown);
+    }
+
+    #[test]
+    fn hidden_top_levels_are_not_listed_but_minimized_ones_are() {
+        const ICONIFIED: u64 = 1 << 15;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        // Qt's hidden dialog: none of the three.
+        assert!(!is_listable_top_level(0));
+        assert!(!is_listable_top_level(1 << 8)); // ENABLED alone
+        assert!(is_listable_top_level(VISIBLE | SHOWING));
+        // Unmapped (another workspace): VISIBLE without SHOWING.
+        assert!(is_listable_top_level(VISIBLE));
+        // SHOWING without VISIBLE is not a shown window.
+        assert!(!is_listable_top_level(SHOWING));
+        // Minimized: no SHOWING, but ICONIFIED keeps it listed.
+        assert!(is_listable_top_level(ICONIFIED));
+    }
+
+    #[test]
+    fn application_interface_is_found_in_introspection_only_when_declared() {
+        let gtk = r#"<node><interface name="org.a11y.atspi.Accessible"></interface>
+            <interface name="org.a11y.atspi.Application"><property name="ToolkitName" type="s" access="read"/></interface></node>"#;
+        assert!(introspection_lists_interface(
+            gtk,
+            "org.a11y.atspi.Application"
+        ));
+        // A root path no object is registered at: children only.
+        let bare = r#"<node><node name="org"/></node>"#;
+        assert!(!introspection_lists_interface(
+            bare,
+            "org.a11y.atspi.Application"
+        ));
+        let other =
+            r#"<node><interface name="org.a11y.atspi.ApplicationExtra"></interface></node>"#;
+        assert!(!introspection_lists_interface(
+            other,
+            "org.a11y.atspi.Application"
+        ));
+    }
+
+    #[test]
+    fn gtk4_is_detected_from_toolkit_name_and_major_version() {
+        assert!(is_gtk4_toolkit("GTK", "4.14.5"));
+        assert!(is_gtk4_toolkit("gtk", "4.16.0"));
+        assert!(!is_gtk4_toolkit("GTK", "3.24.41"));
+        assert!(!is_gtk4_toolkit("GTK", "40.1"));
+        assert!(!is_gtk4_toolkit("Qt", "4.8.7"));
+        assert!(!is_gtk4_toolkit("GTK", ""));
+    }
+
     #[test]
     fn test_role_mapping() {
         assert_eq!(map_atspi_role("push button"), Role::Button);
@@ -3567,7 +4999,7 @@ mod tests {
         // Sanity-check a few well-established numeric mappings.
         assert_eq!(map_atspi_role_number(43), Role::Button); // PushButton
         assert_eq!(map_atspi_role_number(7), Role::CheckBox);
-        assert_eq!(map_atspi_role_number(67), Role::Unknown); // AT-SPI Unknown
+        assert!(try_map_atspi_role_number(67).is_none()); // AT-SPI Unknown: defers to the name
     }
 
     #[test]
@@ -3583,6 +5015,10 @@ mod tests {
             "focus",
             Role::Button,
         );
+        // The adapter declined to take focus: documented as not delivered
+        // (focusing twice is harmless), and the Unknown side is the broken
+        // call below.
+        assert_eq!(declined.delivery(), xa11y_core::Delivery::NotDelivered);
         match declined {
             Error::ActionNotSupported { action, role } => {
                 assert_eq!(action, "focus");
@@ -3597,6 +5033,7 @@ mod tests {
             "activate",
             Role::Window,
         );
+        assert_eq!(broken.delivery(), xa11y_core::Delivery::Unknown);
         match broken {
             Error::Platform { code, .. } => assert_eq!(code, -1),
             other => panic!("expected Platform error, got {other:?}"),
@@ -3984,6 +5421,26 @@ mod tests {
         assert_eq!(number, ATSPI_ROLE_FRAME, "{name} moved");
     }
 
+    /// `is_password_role` must agree with the AtspiRole table by number and
+    /// by name, and must leave the mapped role at `TextField` so existing
+    /// `text_field` selectors keep matching password entries (#522).
+    #[test]
+    fn test_password_text_is_flagged_by_name_or_number() {
+        let (number, name) = ATSPI_ROLE_ENUM
+            .iter()
+            .find(|(_, name)| *name == "password text")
+            .copied()
+            .expect("the AtspiRole table must carry `password text`");
+        assert_eq!(number, ATSPI_ROLE_PASSWORD_TEXT, "{name} moved");
+        assert!(is_password_role("", number), "AccessKit: number only");
+        assert!(is_password_role("password text", 0), "name only");
+        assert!(is_password_role("Password Text", number));
+        assert!(!is_password_role("entry", 61));
+        assert!(!is_password_role("", 0), "an unread role is not a password");
+        assert_eq!(map_atspi_role_number(number), Role::TextField);
+        assert_eq!(map_atspi_role(name), Role::TextField);
+    }
+
     /// The dock attribute only makes a surface on a top-level frame. `panel`
     /// (39) is the AT-SPI role for an ordinary grouping container (it maps to
     /// `Role::Group`), and `window` (69) / `dialog` (16) are not what panels
@@ -4056,6 +5513,474 @@ mod tests {
         ));
     }
 
+    /// AT-SPI peer for the #492 window filter: a role, a state set, and a
+    /// `GetState` that can fail the way a destroyed or hung object does.
+    struct StatePeer {
+        name: &'static str,
+        role: &'static str,
+        children: Vec<&'static str>,
+        state: u64,
+        state_error: Option<&'static str>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl StatePeer {
+        fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            self.children
+                .iter()
+                .map(|path| {
+                    (
+                        "org.test.States".into(),
+                        zbus::zvariant::OwnedObjectPath::try_from(*path).expect("test path"),
+                    )
+                })
+                .collect()
+        }
+
+        fn get_role_name(&self) -> &str {
+            self.role
+        }
+
+        fn get_role(&self) -> u32 {
+            match self.role {
+                "application" => 75,
+                "frame" => 23,
+                "dialog" => 16,
+                "push button" => 43,
+                other => panic!("no role number for fixture role {other:?}"),
+            }
+        }
+
+        fn get_state(&self) -> zbus::fdo::Result<Vec<u32>> {
+            match self.state_error {
+                None => Ok(vec![self.state as u32, (self.state >> 32) as u32]),
+                Some("UnknownObject") => Err(zbus::fdo::Error::UnknownObject("destroyed".into())),
+                Some("NoReply") => Err(zbus::fdo::Error::NoReply("unresponsive".into())),
+                Some("UnknownMethod") => Err(zbus::fdo::Error::UnknownMethod(
+                    "Object does not exist at path".into(),
+                )),
+                Some(other) => panic!("unsupported test error {other:?}"),
+            }
+        }
+
+        #[zbus(property)]
+        fn name(&self) -> &str {
+            self.name
+        }
+    }
+
+    /// Serve `peers` (path, peer) under an application at `/root` and return
+    /// a provider connected to them plus the application snapshot.
+    fn state_peer_app(
+        peers: Vec<(&'static str, StatePeer)>,
+    ) -> (Connection, LinuxProvider, ElementData) {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            let root = StatePeer {
+                name: "App",
+                role: "application",
+                children: peers.iter().map(|(path, _)| *path).collect(),
+                state: 0,
+                state_error: None,
+            };
+            let mut builder =
+                zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                    .server(zbus::Guid::generate())
+                    .expect("server GUID")
+                    .p2p()
+                    .serve_at("/root", root)
+                    .expect("root interface");
+            for (path, peer) in peers {
+                builder = builder.serve_at(path, peer).expect("peer interface");
+            }
+            builder.build().expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        let root = provider.build_element_data(
+            &AccessibleRef {
+                bus_name: "org.test.States".into(),
+                path: "/root".into(),
+            },
+            None,
+        );
+        (server, provider, root)
+    }
+
+    fn state_peer(name: &'static str, role: &'static str, state: u64) -> StatePeer {
+        StatePeer {
+            name,
+            role,
+            children: vec![],
+            state,
+            state_error: None,
+        }
+    }
+
+    /// Issue #492: Qt's hidden dialog (neither VISIBLE nor ICONIFIED) is not
+    /// a window; a minimized or unmapped one is; a window destroyed since the
+    /// children read is gone, whether the peer says `UnknownObject` (zbus) or
+    /// `UnknownMethod` (GDBus); a non-window child is never filtered.
+    #[test]
+    fn app_windows_drops_hidden_top_levels_and_keeps_minimized_ones() {
+        const ICONIFIED: u64 = 1 << 15;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        let mut gone = state_peer("Gone", "frame", VISIBLE | SHOWING);
+        gone.state_error = Some("UnknownObject");
+        // GDBus (GTK 4) answers a destroyed object with UnknownMethod.
+        let mut gdbus_gone = state_peer("GdbusGone", "frame", VISIBLE | SHOWING);
+        gdbus_gone.state_error = Some("UnknownMethod");
+        let (_server, provider, app) = state_peer_app(vec![
+            ("/main", state_peer("Main", "frame", VISIBLE | SHOWING)),
+            ("/hidden", state_peer("Sample Dialog", "dialog", 1 << 8)),
+            ("/minimized", state_peer("Minimized", "frame", ICONIFIED)),
+            ("/unmapped", state_peer("Unmapped", "dialog", VISIBLE)),
+            ("/gdbus_gone", gdbus_gone),
+            ("/gone", gone),
+            ("/button", state_peer("Stray", "push button", 0)),
+        ]);
+        let windows = provider.app_windows(&app).expect("app windows");
+        let names: Vec<_> = windows
+            .iter()
+            .map(|w| w.name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(names, vec!["Main", "Minimized", "Unmapped", "Stray"]);
+    }
+
+    /// A state read that fails for any reason but a destroyed object fails
+    /// the listing: the window is neither listed nor hidden on a guess.
+    #[test]
+    fn app_windows_surfaces_a_failed_state_read() {
+        let mut hung = state_peer("Hung", "frame", 0);
+        hung.state_error = Some("NoReply");
+        let (_server, provider, app) = state_peer_app(vec![("/hung", hung)]);
+        let err = provider.app_windows(&app).expect_err("NoReply must fail");
+        assert!(
+            matches!(&err, Error::Platform { message, .. }
+                if message.contains("GetState") && message.contains("/hung")),
+            "{err:?}"
+        );
+    }
+
+    /// Accessible half of the #491 fixture: a parent link and a child list
+    /// that can disagree, the way a destroyed GTK 3 widget's do.
+    struct AttachPeer {
+        parent: &'static str,
+        children: Vec<&'static str>,
+        /// What `GetIndexInParent` answers: -1 for GTK 3's detached zombie.
+        index: i32,
+        state: u64,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl AttachPeer {
+        fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            panic!("ensure_attached must not enumerate the siblings");
+        }
+
+        fn get_index_in_parent(&self) -> i32 {
+            self.index
+        }
+
+        fn get_child_at_index(
+            &self,
+            index: i32,
+        ) -> zbus::fdo::Result<(String, zbus::zvariant::OwnedObjectPath)> {
+            let path = usize::try_from(index)
+                .ok()
+                .and_then(|i| self.children.get(i))
+                .ok_or_else(|| zbus::fdo::Error::InvalidArgs("no such child".into()))?;
+            Ok((
+                "org.test.Attach".into(),
+                zbus::zvariant::OwnedObjectPath::try_from(*path).expect("test path"),
+            ))
+        }
+
+        fn get_state(&self) -> Vec<u32> {
+            vec![self.state as u32, (self.state >> 32) as u32]
+        }
+
+        #[zbus(property)]
+        fn parent(&self) -> (String, zbus::zvariant::OwnedObjectPath) {
+            (
+                "org.test.Attach".into(),
+                zbus::zvariant::OwnedObjectPath::try_from(self.parent).expect("test path"),
+            )
+        }
+    }
+
+    /// Action half: `DoAction` always claims success (GTK 3's zombie reply)
+    /// and counts the calls, so a test can tell whether it was reached.
+    struct CountingAction(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[zbus::interface(name = "org.a11y.atspi.Action")]
+    impl CountingAction {
+        fn do_action(&self, _index: i32) -> bool {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        }
+    }
+
+    /// Issue #491: a destroyed GTK 3 widget still answers `DoAction` with
+    /// `true`, but its parent no longer lists it. The action must fail as
+    /// stale without reaching `DoAction`; an attached sibling still acts.
+    #[test]
+    fn an_action_on_a_detached_object_is_stale_not_a_false_success() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            const DEFUNCT: u64 = 1 << 6;
+            const MANAGES_DESCENDANTS: u64 = 1 << 31;
+            let peer = |parent, children, index, state| AttachPeer {
+                parent,
+                children,
+                index,
+                state,
+            };
+            let action = |calls: &std::sync::Arc<_>| CountingAction(std::sync::Arc::clone(calls));
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at("/panel", peer("/org/a11y/atspi/null", vec!["/live"], 0, 0))
+                .expect("panel")
+                .serve_at("/live", peer("/panel", vec![], 0, 0))
+                .expect("live")
+                .serve_at("/live", action(&server_calls))
+                .expect("live action")
+                // GTK 3's zombie: still answers, index -1.
+                .serve_at("/zombie", peer("/panel", vec![], -1, 0))
+                .expect("zombie")
+                .serve_at("/zombie", action(&server_calls))
+                .expect("zombie action")
+                // Claims an index whose slot now holds a different object.
+                .serve_at("/usurped", peer("/panel", vec![], 0, 0))
+                .expect("usurped")
+                .serve_at("/usurped", action(&server_calls))
+                .expect("usurped action")
+                // A table that manages descendants: only DEFUNCT counts.
+                .serve_at(
+                    "/table",
+                    peer("/org/a11y/atspi/null", vec![], 0, MANAGES_DESCENDANTS),
+                )
+                .expect("table")
+                .serve_at("/cell", peer("/table", vec![], 7, 0))
+                .expect("cell")
+                .serve_at("/cell", action(&server_calls))
+                .expect("cell action")
+                .serve_at("/dead_cell", peer("/table", vec![], 8, DEFUNCT))
+                .expect("dead cell")
+                .serve_at("/dead_cell", action(&server_calls))
+                .expect("dead cell action")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        let at = |path: &str| AccessibleRef {
+            bus_name: "org.test.Attach".into(),
+            path: path.into(),
+        };
+
+        provider
+            .do_atspi_action_by_index(&at("/live"), 0)
+            .expect("an attached object acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let err = provider
+            .do_atspi_action_by_index(&at("/zombie"), 0)
+            .expect_err("a detached object is stale");
+        assert!(
+            matches!(&err, Error::ElementStale { selector } if selector == "org.test.Attach/zombie"),
+            "{err:?}"
+        );
+        for path in ["/usurped", "/dead_cell", "/gone"] {
+            assert!(
+                matches!(
+                    provider.do_atspi_action_by_index(&at(path), 0),
+                    Err(Error::ElementStale { .. })
+                ),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "DoAction must not be reached on a detached object"
+        );
+        // A live cell of a MANAGES_DESCENDANTS table acts without a
+        // membership walk.
+        provider
+            .do_atspi_action_by_index(&at("/cell"), 0)
+            .expect("a live managed cell acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Accessible half of the `scroll_into_view` fixture: answers `GetState`,
+    /// which is how the provider tells a live object from a destroyed one.
+    struct ScrollAccessible {
+        /// `GetState` fails, so the absent-ScrollTo probe cannot decide.
+        state_fails: bool,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl ScrollAccessible {
+        fn get_state(&self) -> zbus::fdo::Result<Vec<u32>> {
+            if self.state_fails {
+                return Err(zbus::fdo::Error::Failed("state unreadable".into()));
+            }
+            Ok(vec![0, 0])
+        }
+    }
+
+    /// Component half: `ScrollTo` answers as `reply` says.
+    struct ScrollComponent {
+        reply: &'static str,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Component")]
+    impl ScrollComponent {
+        fn scroll_to(&self, _kind: u32) -> zbus::fdo::Result<bool> {
+            match self.reply {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                "NotSupported" => Err(zbus::fdo::Error::NotSupported("no scroller".into())),
+                "Failed" => Err(zbus::fdo::Error::Failed("layout busy".into())),
+                _ => panic!("unsupported test reply"),
+            }
+        }
+    }
+
+    /// Issue #590: an auto-wait scrolls a scrolled-out target only if
+    /// `scroll_into_view` tells "scrolled" apart from "cannot scroll this"
+    /// and from "this is gone". Qt implements no `ScrollTo` and answers it
+    /// with UnknownObject for an object it is still serving.
+    #[test]
+    fn scroll_into_view_says_whether_it_scrolled() {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            let mut builder =
+                zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                    .server(zbus::Guid::generate())
+                    .expect("server GUID")
+                    .p2p();
+            for (path, reply) in [
+                ("/scrolls", Some("true")),
+                ("/declines", Some("false")),
+                ("/refuses", Some("NotSupported")),
+                ("/broken", Some("Failed")),
+                // Qt: the object answers GetState but has no Component.ScrollTo.
+                ("/qt", None),
+                // No ScrollTo, and the GetState probe fails too.
+                ("/unprobed", None),
+            ] {
+                let state_fails = path == "/unprobed";
+                builder = builder
+                    .serve_at(path, ScrollAccessible { state_fails })
+                    .expect("accessible");
+                if let Some(reply) = reply {
+                    builder = builder
+                        .serve_at(path, ScrollComponent { reply })
+                        .expect("component");
+                }
+            }
+            builder.build().expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let paths = [
+            "/scrolls",
+            "/declines",
+            "/refuses",
+            "/broken",
+            "/qt",
+            "/unprobed",
+            "/gone",
+        ];
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(
+                paths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, path)| {
+                        (
+                            i as u64,
+                            AccessibleRef {
+                                bus_name: "org.test.Scroll".into(),
+                                path: (*path).into(),
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        let scroll = |path: &str| {
+            let mut data = ElementData::for_role(Role::ListItem);
+            data.handle = paths.iter().position(|p| *p == path).expect("known path") as u64;
+            provider.scroll_into_view(&data)
+        };
+
+        scroll("/scrolls").expect("a true reply scrolled");
+        for path in ["/declines", "/refuses", "/qt"] {
+            let result = scroll(path);
+            assert!(
+                matches!(&result, Err(Error::ActionNotSupported { action, .. }) if action == "scroll_into_view"),
+                "{path}: {result:?}"
+            );
+        }
+        let result = scroll("/gone");
+        assert!(
+            matches!(&result, Err(Error::ElementStale { selector }) if selector == "org.test.Scroll/gone"),
+            "{result:?}"
+        );
+        let result = scroll("/broken");
+        assert!(
+            matches!(&result, Err(Error::Platform { message, .. }) if message.contains("layout busy")),
+            "{result:?}"
+        );
+        // A failed probe names both replies: what ScrollTo said, and why the
+        // probe could not tell what that meant.
+        let result = scroll("/unprobed");
+        assert!(
+            matches!(&result, Err(Error::Platform { message, .. })
+                if message.contains("Component.ScrollTo answered")
+                    && message.contains("state unreadable")),
+            "{result:?}"
+        );
+    }
+
     /// Minimal AT-SPI peer: the first child disappears when its children are
     /// read, while a later sibling stays live. Exercises the real D-Bus reply
     /// path deterministically instead of relying on a scheduling race in Qt.
@@ -4064,6 +5989,9 @@ mod tests {
         role: &'static str,
         children: Vec<&'static str>,
         children_error: Option<&'static str>,
+        /// Overrides the role number derived from `role`, for a toolkit
+        /// whose name and number disagree (GTK 4).
+        role_number: Option<u32>,
     }
 
     #[zbus::interface(name = "org.a11y.atspi.Accessible")]
@@ -4094,6 +6022,29 @@ mod tests {
             self.role
         }
 
+        /// The number for each role name these fixtures use: the provider
+        /// keys on the number and reads the name only as a fallback.
+        fn get_role(&self) -> u32 {
+            if let Some(number) = self.role_number {
+                return number;
+            }
+            match self.role {
+                "application" => ATSPI_ROLE_APPLICATION,
+                "panel" => 39,
+                "push button" => 43,
+                other => panic!("no role number for fixture role {other:?}"),
+            }
+        }
+
+        /// Visible and showing: `App::windows` lists a top-level window only
+        /// when it is `VISIBLE` or `ICONIFIED` (#492).
+        fn get_state(&self) -> Vec<u32> {
+            const SHOWING: u64 = 1 << 25;
+            const VISIBLE: u64 = 1 << 30;
+            let bits = SHOWING | VISIBLE;
+            vec![bits as u32, (bits >> 32) as u32]
+        }
+
         #[zbus(property)]
         fn name(&self) -> &str {
             self.name
@@ -4118,6 +6069,7 @@ mod tests {
                         role: "application",
                         children: vec!["/vanished", "/survivor"],
                         children_error: None,
+                        role_number: None,
                     },
                 )
                 .expect("root interface")
@@ -4128,6 +6080,7 @@ mod tests {
                         role: vanished_role,
                         children: vec![],
                         children_error: Some(error),
+                        role_number: None,
                     },
                 )
                 .expect("vanished interface")
@@ -4138,6 +6091,7 @@ mod tests {
                         role: "push button",
                         children: vec![],
                         children_error: None,
+                        role_number: None,
                     },
                 )
                 .expect("survivor interface")
@@ -4150,10 +6104,11 @@ mod tests {
             .expect("client connection");
         let server = server.join().expect("server thread");
         let provider = std::sync::Arc::new(LinuxProvider {
-            a11y_bus: connection,
+            a11y_bus: Mutex::new(connection),
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         });
         let root_ref = AccessibleRef {
             bus_name: "org.test.LiveTree".into(),
@@ -4207,6 +6162,86 @@ mod tests {
         let dump = app.dump(None).expect("nested application pruned");
         assert!(dump.contains("Survivor"));
         assert!(!dump.contains("Vanished"));
+    }
+
+    /// GTK 4 names its top-level window `application` while numbering it a
+    /// frame (23). The application flattening keys on the number, so the
+    /// window survives as a window instead of being dissolved into its
+    /// children (issue #485); a real nested application (number 75) is still
+    /// flattened.
+    #[test]
+    fn a_window_named_application_survives_window_flattening() {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let peer = |name, role, children, role_number| LiveTreePeer {
+            name,
+            role,
+            children,
+            children_error: None,
+            role_number,
+        };
+        let server = std::thread::spawn(move || {
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at(
+                    "/root",
+                    peer("App", "application", vec!["/frame", "/nested"], None),
+                )
+                .expect("root interface")
+                .serve_at(
+                    "/frame",
+                    peer(
+                        "Main Window",
+                        "application",
+                        vec!["/inner"],
+                        Some(ATSPI_ROLE_FRAME),
+                    ),
+                )
+                .expect("frame interface")
+                .serve_at("/inner", peer("Inner", "push button", vec![], None))
+                .expect("inner interface")
+                .serve_at(
+                    "/nested",
+                    peer("Nested", "application", vec!["/hoisted"], None),
+                )
+                .expect("nested interface")
+                .serve_at("/hoisted", peer("Hoisted", "push button", vec![], None))
+                .expect("hoisted interface")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        let root = provider.build_element_data(
+            &AccessibleRef {
+                bus_name: "org.test.LiveTree".into(),
+                path: "/root".into(),
+            },
+            None,
+        );
+        let windows = provider.app_windows(&root).expect("app windows");
+        let names: Vec<_> = windows
+            .iter()
+            .map(|w| (w.name.as_deref().unwrap_or(""), w.role))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("Main Window", Role::Window), ("Hoisted", Role::Button)],
+            "the frame named `application` stays a window; the real nested \
+             application is flattened into its children"
+        );
     }
 
     #[test]
@@ -4553,10 +6588,11 @@ mod tests {
             .expect("client connection");
         let server = server.join().expect("server thread");
         let provider = std::sync::Arc::new(LinuxProvider {
-            a11y_bus: connection,
+            a11y_bus: Mutex::new(connection),
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         });
         let root = provider.build_element_data(
             &AccessibleRef {
@@ -4629,5 +6665,673 @@ mod tests {
             0,
             "matcher read Value on a node without Value"
         );
+    }
+
+    // ── #484: method timeout and unresponsive-peer errors ────────────────
+
+    #[test]
+    fn process_state_parses_after_the_last_paren() {
+        assert_eq!(
+            parse_process_state("1234 (xa11y-test-app) T 1 1234 1234 0 -1"),
+            Some('T')
+        );
+        // A command name containing ") S (" must not be read as the state.
+        assert_eq!(
+            parse_process_state("42 (evil) S (name) t 1 42 42 0 -1"),
+            Some('t')
+        );
+        assert_eq!(parse_process_state("garbage"), None);
+        assert_eq!(parse_process_state("1 (x)"), None);
+    }
+
+    #[test]
+    fn own_process_state_is_readable() {
+        let state = read_process_state(std::process::id()).expect("own /proc stat");
+        assert!(matches!(state, 'R' | 'S'), "unexpected own state {state}");
+    }
+
+    #[test]
+    fn unresponsive_peer_error_names_app_pid_and_state() {
+        let aref = AccessibleRef {
+            bus_name: ":1.42".into(),
+            path: "/org/a11y/atspi/accessible/root".into(),
+        };
+        let err = unresponsive_peer_error(&aref, "Accessible.Name", Some(4321), Some('T'));
+        let Error::Timeout { elapsed, diagnosis } = &err else {
+            panic!("expected Timeout, got {err:?}");
+        };
+        assert_eq!(*elapsed, ATSPI_METHOD_TIMEOUT);
+        let d = diagnosis.as_deref().expect("diagnosis attached");
+        let condition = d.condition.as_deref().expect("condition");
+        assert!(condition.contains(":1.42") && condition.contains("pid 4321"));
+        assert!(condition.contains("Accessible.Name"));
+        let observed = d.last_observed.as_deref().expect("last_observed");
+        assert!(observed.contains("stopped (SIGSTOP"), "{observed}");
+        assert!(observed.contains("/org/a11y/atspi/accessible/root"));
+        // Rendered message carries it too, for consumers that only print.
+        assert!(err.to_string().contains("pid 4321"));
+
+        let err = unresponsive_peer_error(&aref, "Accessible.Name", None, None);
+        let d = err.diagnosis().expect("diagnosis");
+        assert!(d.condition.as_deref().unwrap_or("").contains("pid unknown"));
+    }
+
+    #[test]
+    fn timeout_classification_is_the_io_kind_only() {
+        let timed_out = zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        )));
+        assert!(is_timeout(&timed_out));
+        let reset = zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        )));
+        assert!(!is_timeout(&reset));
+        // A peer's own Timeout *reply* is not our method timeout expiring.
+        assert!(!is_timeout(&method_error(
+            "org.freedesktop.DBus.Error.Timeout"
+        )));
+    }
+
+    #[test]
+    fn property_read_errors_classify_like_method_errors() {
+        let gone = zbus::Error::from(zbus::fdo::Error::ServiceUnknown("gone".into()));
+        assert!(is_peer_gone(&gone));
+        let absent = zbus::Error::from(zbus::fdo::Error::UnknownProperty("Name".into()));
+        assert!(!is_peer_gone(&absent));
+        let absent = zbus::Error::from(zbus::fdo::Error::UnknownInterface("x".into()));
+        assert!(is_absent_member(&absent));
+        let no_reply = zbus::Error::from(zbus::fdo::Error::NoReply("hung".into()));
+        assert!(!is_peer_gone(&no_reply) && !is_absent_member(&no_reply));
+    }
+
+    /// An application whose `Name` getter never returns in time: what a
+    /// SIGSTOPped process looks like from the bus.
+    struct HungPeer;
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl HungPeer {
+        #[zbus(property)]
+        fn name(&self) -> String {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            "late".into()
+        }
+    }
+
+    #[test]
+    fn hung_peer_name_read_times_out_with_a_named_error() {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at("/org/a11y/atspi/accessible/root", HungPeer)
+                .expect("hung interface")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .method_timeout(std::time::Duration::from_millis(200))
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        let aref = AccessibleRef {
+            bus_name: "org.test.Hung".into(),
+            path: "/org/a11y/atspi/accessible/root".into(),
+        };
+        let start = std::time::Instant::now();
+        let err = provider
+            .read_app_name(&aref)
+            .expect_err("a hung peer must not read as a name or as absent");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(1500),
+            "the read waited for the peer instead of timing out: {:?}",
+            start.elapsed()
+        );
+        let d = err.diagnosis().expect("timeout carries a diagnosis");
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        assert!(d
+            .condition
+            .as_deref()
+            .unwrap_or("")
+            .contains("org.test.Hung"));
+    }
+
+    /// A registry listing one application whose own `GetChildren` hangs.
+    struct RegistryRoot;
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl RegistryRoot {
+        fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            vec![(
+                "org.test.Hung".into(),
+                zbus::zvariant::OwnedObjectPath::try_from("/hungapp").expect("path"),
+            )]
+        }
+    }
+
+    struct HungChildren;
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl HungChildren {
+        fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            vec![]
+        }
+    }
+
+    #[test]
+    fn focused_app_reports_a_hung_app_instead_of_skipping_it() {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at("/org/a11y/atspi/accessible/root", RegistryRoot)
+                .expect("registry interface")
+                .serve_at("/hungapp", HungChildren)
+                .expect("hung interface")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .method_timeout(std::time::Duration::from_millis(200))
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        let err = provider
+            .focused_app()
+            .expect_err("a hung app must not read as 'nothing focused'");
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        let condition = err
+            .diagnosis()
+            .and_then(|d| d.condition.clone())
+            .unwrap_or_default();
+        assert!(
+            condition.contains("org.test.Hung") && condition.contains("GetChildren"),
+            "{condition}"
+        );
+    }
+
+    /// A connected client/server pair over a socket pair: the server end
+    /// stands in for the bus, so dropping it is the bus hanging up.
+    fn p2p_pair() -> (Connection, Connection) {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .build()
+                .expect("server connection")
+        });
+        let client = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        (server.join().expect("server thread"), client)
+    }
+
+    fn wait_closed(conn: &Connection) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !conn.is_closed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "peer hang-up never closed the client connection"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn closed_connection_is_replaced_and_old_handles_go_stale() {
+        let (server, client) = p2p_pair();
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(client.clone()),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        let handle = provider.cache_element(AccessibleRef {
+            bus_name: ":1.7".into(),
+            path: "/org/a11y/atspi/accessible/3".into(),
+        });
+        provider
+            .action_indices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle, HashMap::from([("press".to_string(), 0)]));
+
+        // While the connection is live, nothing is reconnected or forgotten.
+        let live = provider
+            .connection_with(|| panic!("reconnected a live connection"))
+            .expect("live connection");
+        assert!(!live.is_closed());
+        assert!(provider.get_cached(handle).is_ok());
+
+        drop(server);
+        wait_closed(&client);
+
+        // A failed reconnect is returned as-is, and the next call retries.
+        let err = provider
+            .connection_with(|| {
+                Err(Error::Platform {
+                    code: -1,
+                    message: "bus still down".into(),
+                })
+            })
+            .expect_err("reconnect failure surfaces");
+        assert!(err.to_string().contains("bus still down"));
+
+        let (_server2, client2) = p2p_pair();
+        let fresh = provider
+            .connection_with(|| Ok(client2))
+            .expect("reconnected");
+        assert!(!fresh.is_closed(), "handed out the closed connection");
+        // A restarted bus reuses `:1.N` names, so a handle from the old
+        // connection must not resolve to whoever owns that name now.
+        assert!(matches!(
+            provider.get_cached(handle),
+            Err(Error::ElementStale { .. })
+        ));
+        assert!(provider.get_action_index(handle, "press").is_err());
+    }
+
+    /// One node of the #590 hidden-reason fixture: a role number, a state
+    /// set, a parent link and extents, any of which can fail to read.
+    struct ClimbPeer {
+        parent: &'static str,
+        role: u32,
+        state: u64,
+        extents: (i32, i32, i32, i32),
+        /// Reject `GetExtents` the way a hung or destroyed peer does.
+        extents_error: bool,
+        /// Counts `GetState` calls, to tell a memoized answer from a re-read.
+        state_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// Reject `GetState` the way a hung peer does.
+        state_error: bool,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl ClimbPeer {
+        fn get_role(&self) -> u32 {
+            self.role
+        }
+
+        fn get_state(&self) -> zbus::fdo::Result<Vec<u32>> {
+            self.state_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.state_error {
+                return Err(zbus::fdo::Error::NoReply("unresponsive".into()));
+            }
+            Ok(vec![self.state as u32, (self.state >> 32) as u32])
+        }
+
+        fn get_interfaces(&self) -> Vec<String> {
+            vec![
+                "org.a11y.atspi.Accessible".into(),
+                "org.a11y.atspi.Component".into(),
+            ]
+        }
+
+        #[zbus(property)]
+        fn parent(&self) -> (String, zbus::zvariant::OwnedObjectPath) {
+            (
+                "org.test.Climb".into(),
+                zbus::zvariant::OwnedObjectPath::try_from(self.parent).expect("test path"),
+            )
+        }
+    }
+
+    struct ClimbComponent {
+        extents: (i32, i32, i32, i32),
+        extents_error: bool,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Component")]
+    impl ClimbComponent {
+        fn get_extents(&self, _coord_type: u32) -> zbus::fdo::Result<(i32, i32, i32, i32)> {
+            if self.extents_error {
+                Err(zbus::fdo::Error::NoReply("unresponsive".into()))
+            } else {
+                Ok(self.extents)
+            }
+        }
+    }
+
+    /// The climb bus's application object. Bounds are read only once the
+    /// toolkit is known not to be GTK 4, so the mock names one.
+    struct ClimbApplication;
+
+    #[zbus::interface(name = "org.a11y.atspi.Application")]
+    impl ClimbApplication {
+        #[zbus(property)]
+        fn toolkit_name(&self) -> String {
+            "ClimbKit".into()
+        }
+    }
+
+    const CLIMB_DRAWN: u64 = ATSPI_VISIBLE | ATSPI_SHOWING;
+    const ROLE_FILLER: u32 = 20;
+    const ROLE_LAYERED_PANE: u32 = 30;
+    const ROLE_LIST: u32 = 31;
+    const ROLE_SCROLL_PANE: u32 = 49;
+
+    /// A viewport-sized ancestor; the hidden object below sits far beneath it.
+    const VIEWPORT: (i32, i32, i32, i32) = (0, 0, 200, 100);
+    const BELOW: Rect = Rect {
+        x: 0,
+        y: 500,
+        width: 200,
+        height: 20,
+    };
+    const INSIDE: Rect = Rect {
+        x: 0,
+        y: 10,
+        width: 200,
+        height: 20,
+    };
+
+    fn climb_peer(parent: &'static str, role: u32, state: u64) -> ClimbPeer {
+        ClimbPeer {
+            parent,
+            role,
+            state,
+            extents: VIEWPORT,
+            extents_error: false,
+            state_reads: Default::default(),
+            state_error: false,
+        }
+    }
+
+    /// Serve `peers` and return a provider connected to them.
+    fn climb_provider(peers: Vec<(&'static str, ClimbPeer)>) -> (Connection, LinuxProvider) {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            let mut builder =
+                zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                    .server(zbus::Guid::generate())
+                    .expect("server GUID")
+                    .p2p()
+                    .serve_at(APP_ROOT_PATH, ClimbApplication)
+                    .expect("application interface");
+            for (path, peer) in peers {
+                let component = ClimbComponent {
+                    extents: peer.extents,
+                    extents_error: peer.extents_error,
+                };
+                builder = builder
+                    .serve_at(path, peer)
+                    .expect("accessible interface")
+                    .serve_at(path, component)
+                    .expect("component interface");
+            }
+            builder.build().expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        (server, provider)
+    }
+
+    fn climb_ref(path: &str) -> AccessibleRef {
+        AccessibleRef {
+            bus_name: "org.test.Climb".into(),
+            path: path.into(),
+        }
+    }
+
+    /// `VISIBLE` without `SHOWING`, settled by the climb from `/item`.
+    fn climb_reason(provider: &LinuxProvider, bounds: Result<Option<Rect>>) -> HiddenReason {
+        provider.ancestor_hidden_reason(&climb_ref("/item"), &bounds, &AncestorMemo::default())
+    }
+
+    /// Geometry alone is not "scrolled out": an object beyond a drawn
+    /// container that does not scroll is `NotShowing`. The same layout
+    /// under a scroll pane is `ScrolledOut`, whether the scroll pane is the
+    /// drawn ancestor or one the climb passes through on the way to it.
+    #[test]
+    fn scrolled_out_needs_a_scrolling_container_on_the_climb() {
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/panel", 43, ATSPI_VISIBLE)),
+            (
+                "/panel",
+                climb_peer("/org/a11y/atspi/null", ROLE_FILLER, CLIMB_DRAWN),
+            ),
+        ]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::NotShowing
+        );
+
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            (
+                "/pane",
+                climb_peer("/org/a11y/atspi/null", ROLE_SCROLL_PANE, CLIMB_DRAWN),
+            ),
+        ]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::ScrolledOut
+        );
+        // Inside the viewport, something else hides it.
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(INSIDE))),
+            HiddenReason::NotShowing
+        );
+        // No bounds to compare.
+        assert_eq!(climb_reason(&provider, Ok(None)), HiddenReason::NotShowing);
+
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            (
+                "/pane",
+                climb_peer("/panel", ROLE_SCROLL_PANE, ATSPI_VISIBLE),
+            ),
+            (
+                "/panel",
+                climb_peer("/org/a11y/atspi/null", ROLE_FILLER, CLIMB_DRAWN),
+            ),
+        ]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::ScrolledOut
+        );
+    }
+
+    /// A read that fails on the climb, the object's own bounds included, is
+    /// `Unknown`, never a guessed `NotShowing`.
+    #[test]
+    fn a_failed_read_on_the_climb_is_unknown() {
+        let mut pane = climb_peer("/org/a11y/atspi/null", ROLE_SCROLL_PANE, CLIMB_DRAWN);
+        pane.extents_error = true;
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            ("/pane", pane),
+        ]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::Unknown
+        );
+
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            (
+                "/pane",
+                climb_peer("/org/a11y/atspi/null", ROLE_SCROLL_PANE, CLIMB_DRAWN),
+            ),
+        ]);
+        let unreadable = Err(Error::Platform {
+            code: -1,
+            message: "GetExtents failed".into(),
+        });
+        assert_eq!(climb_reason(&provider, unreadable), HiddenReason::Unknown);
+
+        // A parent that is not served at all fails its reads.
+        let (_server, provider) =
+            climb_provider(vec![("/item", climb_peer("/missing", 43, ATSPI_VISIBLE))]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::Unknown
+        );
+    }
+
+    /// A minimized frame on the climb answers before any geometry.
+    #[test]
+    fn a_minimized_frame_on_the_climb_is_window_minimized() {
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/frame", 43, ATSPI_VISIBLE)),
+            (
+                "/frame",
+                climb_peer("/org/a11y/atspi/null", 23, ATSPI_VISIBLE | ATSPI_ICONIFIED),
+            ),
+        ]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::WindowMinimized
+        );
+    }
+
+    /// Qt clears `VISIBLE` on an item-view row outside the viewport: under
+    /// a drawn list, beyond its extents, that is `ScrolledOut`. A widget
+    /// hidden by a non-scrolling container (an inactive tab page) stays
+    /// `NotShowing`, and so does one with no bounds at all.
+    #[test]
+    fn a_hidden_row_beyond_its_list_is_scrolled_out() {
+        let (_server, provider) = climb_provider(vec![
+            ("/row", climb_peer("/list", 32, 0)),
+            (
+                "/list",
+                climb_peer("/org/a11y/atspi/null", ROLE_LIST, CLIMB_DRAWN),
+            ),
+            ("/page", climb_peer("/tabs", 43, 0)),
+            (
+                "/tabs",
+                climb_peer("/org/a11y/atspi/null", ROLE_LAYERED_PANE, CLIMB_DRAWN),
+            ),
+        ]);
+        let memo = AncestorMemo::default();
+        let reason =
+            |path, bounds| provider.item_view_hidden_reason(&climb_ref(path), &bounds, &memo);
+        assert_eq!(reason("/row", Ok(Some(BELOW))), HiddenReason::ScrolledOut);
+        assert_eq!(reason("/row", Ok(Some(INSIDE))), HiddenReason::NotShowing);
+        assert_eq!(reason("/page", Ok(Some(BELOW))), HiddenReason::NotShowing);
+        assert_eq!(reason("/page", Ok(None)), HiddenReason::NotShowing);
+    }
+
+    /// Siblings built in one call read their shared ancestors once.
+    #[test]
+    fn siblings_share_one_read_of_each_ancestor() {
+        let pane = climb_peer("/panel", ROLE_SCROLL_PANE, ATSPI_VISIBLE);
+        let panel = climb_peer("/org/a11y/atspi/null", ROLE_FILLER, CLIMB_DRAWN);
+        let (pane_reads, panel_reads) = (pane.state_reads.clone(), panel.state_reads.clone());
+        let (_server, provider) = climb_provider(vec![
+            ("/a", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            ("/b", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            ("/pane", pane),
+            ("/panel", panel),
+        ]);
+        let memo = AncestorMemo::default();
+        for path in ["/a", "/b"] {
+            assert_eq!(
+                provider.ancestor_hidden_reason(&climb_ref(path), &Ok(Some(BELOW)), &memo),
+                HiddenReason::ScrolledOut
+            );
+        }
+        let reads = |n: &std::sync::Arc<std::sync::atomic::AtomicUsize>| {
+            n.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        assert_eq!((reads(&pane_reads), reads(&panel_reads)), (1, 1));
+    }
+
+    #[test]
+    fn scrolling_container_roles_are_the_ones_that_scroll() {
+        for role in [31, 49, 55, 65, 66, 68, 98] {
+            assert!(is_scrolling_container_role(role), "{role}");
+        }
+        // Filler, panel, layered pane, page tab, frame.
+        for role in [20, 39, 30, 37, 23] {
+            assert!(!is_scrolling_container_role(role), "{role}");
+        }
+    }
+
+    /// An element whose own `GetState` fails reads `unknown`. Its zero bits
+    /// would otherwise say `not_showing`, and a list row lying outside its
+    /// list would then be refined into `scrolled_out`: two guesses.
+    #[test]
+    fn a_failed_state_read_is_unknown_and_never_refined() {
+        let mut row = climb_peer("/list", 32, 0);
+        row.state_error = true;
+        row.extents = (0, 500, 200, 20);
+        let (_server, provider) = climb_provider(vec![
+            ("/row", row),
+            (
+                "/list",
+                climb_peer("/org/a11y/atspi/null", ROLE_LIST, CLIMB_DRAWN),
+            ),
+        ]);
+        let data = provider.build_element_data(&climb_ref("/row"), None);
+        assert!(!data.states.visible);
+        assert_eq!(data.states.hidden_reason, Some(HiddenReason::Unknown));
+    }
+
+    /// The control: the same row with a readable state set is scrolled out,
+    /// and a hidden cell-less widget in the same place is not.
+    #[test]
+    fn only_an_item_cell_beyond_its_list_is_scrolled_out() {
+        let mut row = climb_peer("/list", 32, 0);
+        row.extents = (0, 500, 200, 20);
+        let mut widget = climb_peer("/list", 43, 0);
+        widget.extents = (0, 500, 200, 20);
+        let (_server, provider) = climb_provider(vec![
+            ("/row", row),
+            ("/widget", widget),
+            (
+                "/list",
+                climb_peer("/org/a11y/atspi/null", ROLE_LIST, CLIMB_DRAWN),
+            ),
+        ]);
+        let reason = |path| {
+            provider
+                .build_element_data(&climb_ref(path), None)
+                .states
+                .hidden_reason
+        };
+        assert_eq!(reason("/row"), Some(HiddenReason::ScrolledOut));
+        assert_eq!(reason("/widget"), Some(HiddenReason::NotShowing));
     }
 }

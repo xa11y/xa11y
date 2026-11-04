@@ -187,8 +187,8 @@ UIA provides COM event handler interfaces registered against the `IUIAutomation`
 | **Name changed** | `AXTitleChanged` | `Object:PropertyChange(Name)` | `PropertyChanged(Name)` |
 | **State changed** | Separate per-state notifications¹ | `Object:StateChanged(state, value)` | `PropertyChanged(IsEnabled/ToggleState/ExpandCollapseState/WindowVisualState)` |
 | **Structure changed** | `AXUIElementDestroyed` (app) / `AXCreated` (elem only) | `Object:ChildrenChanged` | `StructureChangedEventHandler` |
-| **Window opened** | `AXWindowCreated` | `Window:Create` | `UIA_Window_WindowOpenedEventId` |
-| **Window closed** | `AXUIElementDestroyed` on window | `Window:Destroy` | `UIA_Window_WindowClosedEventId` |
+| **Window opened** | `AXWindowCreated` | `Window:Create`, or derived: window enters the listing ³ | `UIA_Window_WindowOpenedEventId` |
+| **Window closed** | `AXUIElementDestroyed` on window | `Window:Destroy`, or derived: window leaves the listing ³ | `UIA_Window_WindowClosedEventId` |
 | **Window activated** | `AXFocusedWindowChanged` | `Window:Activate` | Not emitted² |
 | **Window deactivated** | `AXFocusedWindowChanged` | `Window:Deactivate` | Not emitted² |
 | **Menu opened/closed** | `AXMenuOpened` / `AXMenuClosed` | None reliably | `UIA_MenuOpenedEventId` / `UIA_MenuClosedEventId` |
@@ -199,6 +199,8 @@ UIA provides COM event handler interfaces registered against the `IUIAutomation`
 ¹ macOS has no single "state changed" notification. Separate notifications exist for some state transitions (`AXValueChanged` covers checkbox toggle, `AXElementBusyChanged` for busy), but `AXEnabledChanged` does not exist as a public notification. To detect enabled/disabled changes on macOS, you must either poll or observe `AXValueChanged` on the element and re-query `AXEnabled`. This is a genuine gap.
 
 ² Windows has no `WindowActivated` UIA event ID. Inferring from `AddFocusChangedEventHandler` is possible but lossy — focus moves from an always-focused child across apps (alt-tab) don't fire, tool windows that open without taking element focus don't fire, and internal focus moves across windows in a multi-window app fire spuriously. xa11y does not emit `WindowActivated`/`WindowDeactivated` on Windows; consumers that need it should watch `WindowOpened` plus focus changes explicitly.
+
+³ Neither GTK 4 nor Qt emits `Window:Create` / `Window:Destroy`. On Linux the two kinds mean a top-level window entering or leaving `App::windows()` (`VISIBLE` or `ICONIFIED`), derived from the application's children and the window's states; see "Linux — shipping".
 
 ---
 
@@ -490,8 +492,8 @@ Subscribe to signals on the AT-SPI2 bus, filtered to the target app's D-Bus send
 - `Object:StateChanged(visible, _)` → `StateChanged { Visible, _ }`
 - `Object:PropertyChange(Name)` → `NameChanged`
 - `Object:ChildrenChanged` → `StructureChanged`
-- `Window:Create` → `WindowOpened`
-- `Window:Destroy` → `WindowClosed`
+- `Window:Create` → `WindowOpened`, and derived for GTK 4 / Qt (see "Linux — shipping")
+- `Window:Destroy` → `WindowClosed`, and derived likewise
 - `Window:Activate` → `WindowActivated`
 - `Window:Deactivate` → `WindowDeactivated`
 - `Object:SelectionChanged` → `SelectionChanged`
@@ -581,11 +583,13 @@ Implemented in `xa11y-windows/src/uia.rs`:
 
 Implemented in `xa11y-linux/src/events.rs`:
 
-- Each `subscribe()` call opens a dedicated `zbus::blocking::Connection` to the AT-SPI accessibility bus (falling back to the session bus when the a11y bus launcher is unavailable) and registers four AT-SPI2 signal match rules via `org.freedesktop.DBus.AddMatch`: one per event interface (`Event.Object`, `Event.Window`, `Event.Focus`, `Event.Document`). Every rule is scoped by the target app's D-Bus unique name — resolved via `LinuxProvider::find_app_by_pid` — so signals from other applications never enter the subscription's channel.
+- Each `subscribe()` call opens a dedicated `zbus::blocking::Connection` to the AT-SPI accessibility bus (there is no session-bus fallback: an unavailable a11y bus launcher fails the subscription with an error naming it) and registers four AT-SPI2 signal match rules via `org.freedesktop.DBus.AddMatch`: one per event interface (`Event.Object`, `Event.Window`, `Event.Focus`, `Event.Document`). Every rule is scoped by the target app's D-Bus unique name — resolved via `LinuxProvider::find_app_by_pid` — so signals from other applications never enter the subscription's channel.
 - A dedicated OS thread drives `zbus::blocking::MessageIterator::from(conn.clone())` and fan-outs received signals to an `mpsc::Sender<Event>`. Because match rules are installed on the same Connection the iterator reads, the D-Bus daemon only forwards relevant traffic to us.
 - Each incoming signal is dispatched through `signal_to_kinds(interface, member, detail, detail1, target_role)`, a pure mapping table covered by unit tests. The table intentionally emits multiple `EventKind`s from a single signal when the cross-platform model requires it: `Object:StateChanged(focused,true)` raises both `FocusChanged` and `StateChanged{Focused,true}` (AccessKit emits only the StateChanged variant, not `Focus:Focus`), and `Object:PropertyChange(accessible-value)` on a text role raises both `ValueChanged` and `TextChanged` (matching the macOS fan-out). AccessKit's AT-SPI bridge publishes slider/range value changes as `Object:PropertyChange(accessible-value)` rather than on the (older) `Object:ValueChanged` signal; both are wired through the table for compatibility with non-AccessKit toolkits.
 - The event's `target` is built via a free `build_event_snapshot(conn, aref, pid)` helper that fetches role (name + numeric fallback), states (parsed from the AT-SPI2 bitfield), name, value (Text interface, then Value), and numeric bounds via direct D-Bus method calls. The snapshot's `handle` is always `0` — event targets are read-only, not live handles into the provider's cache. Consumers that need to drive actions must re-locate through the normal locator path.
 - Cancellation is cooperative: on drop the cancel closure flips an `AtomicBool`, removes every match rule via `DBusProxy::remove_match_rule`, and triggers a D-Bus `Peer.Ping` round-trip whose reply travels through the iterator thread, forcing `.next()` to return so the stop flag can be observed. The thread is then joined — a subsequent `subscribe()` starts with a clean slate.
+- After installing the match rules, `subscribe()` registers `object:`, `window:` and `focus:` with the registry (`org.a11y.atspi.Registry.RegisterEvent`, in whichever signature the registry's introspection data declares) and deregisters on drop. Qt and GTK 3's atk-bridge emit only events some listener has registered for, so without this a Qt subscription heard nothing (issue #488). Subscribe then reads each top-level window's state, which doubles as the barrier: the application answers those reads after it has handled the registry's `EventListenerRegistered` signal.
+- `WindowOpened` / `WindowClosed` mean a top-level window entering or leaving `App::windows()` (`VISIBLE` or `ICONIFIED`, #492), once per transition. `Window:Create` / `Window:Destroy` feed it where a toolkit emits them; neither GTK 4 nor Qt does, so it is also derived: a `ChildrenChanged` on the application object rescans the top-level windows (GTK 4 opens; its signal names the application itself as the child, so the child reference is not used), `defunct` on a tracked window closes it (GTK 4 close), and `showing` / `visible` / `iconified` on a top-level window re-read its state (Qt keeps a hidden dialog in the tree and only toggles states). GTK 4 sends some events, including that `ChildrenChanged`, in the legacy `(siiv(so))` body, which is read alongside `(siiva{sv})`.
 - `MenuOpened`/`MenuClosed` never fire on Linux (AT-SPI2 has no menu signals — documented in the design section above). `StateChanged{Enabled}` is sourced from either `Object:StateChanged(enabled, _)` or `Object:StateChanged(sensitive, _)` — AT-SPI2 still exposes both, and xa11y collapses them.
 
 ### End-to-end test coverage (macOS + Windows + Linux)
@@ -604,7 +608,7 @@ On Windows the tests now run in CI on `windows-latest` via `scripts/run_integ_te
 | `Announcement`                    | Yes   | Yes     | Yes   | Press "Announce" button (updates a `Live::Polite` label value) |
 | `StructureChanged`                | **No** | **No** | **No** | See below                                                     |
 | `SelectionChanged`                | **No** | **No** | **No** | See below                                                     |
-| `WindowOpened` / `WindowClosed`   | **No** | **No** | **No** | Test app is single-window                                     |
+| `WindowOpened` / `WindowClosed`   | **No** | **No** | Yes (GTK, Qt) | Linux: the GTK / Qt dialog opens and closes (`test_window_opened_and_closed_for_dialog`); the AccessKit test app is single-window |
 | `WindowActivated`                 | **No** | **n/a** | **No** | Not emitted on Windows (UIA has no such event)                |
 | `WindowDeactivated`               | **No** | **n/a** | **No** | Not emitted on Windows (UIA has no such event)                |
 | `MenuOpened` / `MenuClosed`       | **No** | **No** | **No**² | AccessKit bridges do not synthesize menu events               |
@@ -630,5 +634,5 @@ On Windows the tests now run in CI on `windows-latest` via `scripts/run_integ_te
 
 - Either element-scoped subscriptions or a Cocoa test harness to cover the EventKinds that AccessKit's macOS bridge does not raise.
 - A dedicated Win32/WPF test app (or widget additions to the AccessKit test app) so the Windows integration suite can cover `MenuOpened`/`MenuClosed`, `WindowOpened`/`WindowClosed`, and `StateChanged { Enabled | Expanded }`.
-- A GTK / Qt harness on Linux so we can reliably drive `Window:Create`/`Destroy` and state deltas (`StateChanged{Busy,Enabled,Expanded}`) that AccessKit's AT-SPI bridge doesn't synthesize against our winit test app.
+- State deltas (`StateChanged{Busy,Enabled,Expanded}`) that AccessKit's AT-SPI bridge doesn't synthesize against our winit test app.
 - Test-app enhancements: `Role::TextRun` children on the text field to enable text-selection events; a secondary-window workflow; `Node::set_busy()` drive for `StateChanged { Busy }`.

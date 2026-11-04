@@ -53,6 +53,51 @@ def test_button_press_ok_enables_cancel(app, app_config):
         assert isinstance(cancel_after.enabled, bool)
 
 
+def test_legacy_default_action_press(app, app_config):
+    """``press`` on an MSAA-only element reaches its default action.
+
+    The element has no Invoke/Toggle/SelectionItem/ExpandCollapse pattern,
+    only LegacyIAccessible with a default action. ``press`` must be advertised
+    and must run that default action, which the app counts in a status label
+    (issue #505).
+    """
+    name = app_config.get("legacy_press_name")
+    if not name:
+        pytest.skip("app has no element whose only activation is the MSAA default action")
+    prefix = app_config["legacy_press_status_prefix"]
+
+    tile = app.locator(f'[name="{name}"]')
+    element = tile.element()
+    # Guard: the tile must have no UIA activation pattern, or the press below
+    # would go through Invoke/Toggle/... and never reach DoDefaultAction.
+    patterns = element.raw.get("uia_activation_patterns")
+    assert patterns == [], (
+        f"{name!r} must expose no UIA activation pattern so press reaches "
+        f"LegacyIAccessible.DoDefaultAction; it has {patterns!r}"
+    )
+    actions = element.actions
+    assert "press" in actions, f"{name!r} must advertise press; actions were {actions}"
+
+    def count() -> int:
+        labels = [
+            e.name for e in app.locator(f'[name^="{prefix}"]').elements() if e.name
+        ]
+        assert len(labels) == 1, f"expected one {prefix!r} label, found {labels}"
+        return int(labels[0][len(prefix) :])
+
+    before = count()
+    tile.press()
+    deadline = time.monotonic() + 3.0
+    after = count()
+    while after == before and time.monotonic() < deadline:
+        time.sleep(0.05)
+        after = count()
+    assert after == before + 1, (
+        f"press on {name!r} should run its default action exactly once; "
+        f"activation count went {before} -> {after}"
+    )
+
+
 def test_perform_action_press_equivalent(app, app_config):
     """perform_action('press') behaves like press() on a button."""
     ok_name = app_config["ok_button_name"]
@@ -531,3 +576,121 @@ def test_snapshot_bound_element_press_twice(app, app_name, app_config):
     except xa11y.ActionNotSupportedError:
         pytest.xfail("press() not exposed for button on this platform")
     time.sleep(ACTION_SETTLE)
+
+
+# ---------------------------------------------------------------------------
+# press → AXOpen (macOS)
+# ---------------------------------------------------------------------------
+
+
+def test_press_dispatches_to_axopen_when_it_is_the_only_activation(app, app_name):
+    """An element exposing only AXOpen advertises press, and press fires AXOpen.
+
+    The Cocoa fixture's "Open Target" lists AXOpen and no AXPress (the Finder
+    sidebar shape) and counts each AXOpen in its value (issue #517).
+    """
+    if sys.platform != "darwin" or app_name != "cocoa":
+        pytest.skip("the AXOpen-only fixture belongs to the macOS Cocoa cell")
+
+    target = app.locator('[name="Open Target"]')
+    el = target.element()
+    assert "press" in el.actions, f"press not advertised; actions={el.actions!r}"
+    assert "open" in el.actions, f"native open not listed; actions={el.actions!r}"
+    before = int((el.value or "").removeprefix("opened "))
+
+    el.press()
+
+    deadline = time.monotonic() + 2.0
+    value = el.value
+    while time.monotonic() < deadline:
+        value = target.element().value
+        if value == f"opened {before + 1}":
+            break
+        time.sleep(0.05)
+    assert value == f"opened {before + 1}", f"AXOpen never arrived; value={value!r}"
+
+
+def test_action_on_a_destroyed_widget_is_stale(app):
+    """Acting on a handle whose widget was destroyed fails as stale (#491).
+
+    GTK 3 keeps a destroyed widget's accessible answering for ~15-20 s and
+    reports ``DoAction`` as performed while doing nothing, so a press on a
+    handle read just before a re-render claimed success. The GTK app's
+    "Rebuild" button swaps itself for a fresh one on every click; the old
+    handle must then raise the stale-element error, and a locator must
+    re-resolve to the new widget.
+    """
+    locator = app.locator('button[name="Rebuild"]')
+    if locator.count() == 0:
+        pytest.skip("this app has no self-replacing Rebuild button")
+    old = locator.element()
+    before = old.description
+    old.press()
+    deadline = time.monotonic() + 5.0
+    while locator.element().description == before:
+        assert time.monotonic() < deadline, "the Rebuild button never swapped"
+        time.sleep(0.1)
+    with pytest.raises(xa11y.SelectorNotMatchedError, match="stale"):
+        old.press()
+    locator.press()
+
+
+# ---------------------------------------------------------------------------
+# wait_stable (#530): a widget that moves
+# ---------------------------------------------------------------------------
+
+_START_SLIDE = 'button[name="Start slide"]'
+_SLIDE_TARGET = 'button[name="Slide target"]'
+
+
+def _slide_app(app, app_config):
+    if not app_config.get("has_slide_widget"):
+        pytest.skip("this app has no sliding widget")
+    # Required where the config claims it: a skip on a missing widget would
+    # pass just as well when the widget, or the selector, broke (#383).
+    assert app.locator(_START_SLIDE).count() == 1, (
+        "the app's Start slide button is missing"
+    )
+    target = app.locator(_SLIDE_TARGET)
+    rest = target.wait_stable(timeout=10).bounds
+    assert rest is not None, "the slide target reports no bounds"
+    return target, rest
+
+
+def test_wait_stable_returns_where_a_slide_ends(app, app_config):
+    """``wait_stable`` returns the bounds the widget comes to rest at.
+
+    "Start slide" restarts a three-second slide that ends where the target
+    already rests, so the bounds a correct wait returns equal the resting
+    ones, and the wait cannot finish in much under the slide's length. The
+    1.5 s floor leaves the rest for press latency.
+    """
+    target, rest = _slide_app(app, app_config)
+    app.locator(_START_SLIDE).press()
+    started = time.monotonic()
+    settled = target.wait_stable(timeout=10)
+    waited = time.monotonic() - started
+    assert settled.bounds == rest, (
+        f"wait_stable returned mid-slide after {waited:.2f}s: "
+        f"{settled.bounds} vs rest {rest}"
+    )
+    assert waited >= 1.5, f"a 3 s slide cannot be proven stable in {waited:.2f}s"
+
+
+def test_wait_stable_timeout_names_the_moving_bounds(app, app_config):
+    """A slide outlasting the timeout fails with both rectangles named."""
+    target, _ = _slide_app(app, app_config)
+    app.locator(_START_SLIDE).press()
+    try:
+        with pytest.raises(xa11y.TimeoutError) as info:
+            # 1.5 s leaves room for several polls where a resolve is slow
+            # (UIA), and still ends inside the 3 s slide.
+            target.wait_stable(timeout=1.5)
+        err = info.value
+        assert "two consecutive polls" in err.condition, err.condition
+        assert err.last_observed.startswith("bounds still changing:"), (
+            err.last_observed
+        )
+    finally:
+        # Leave the target at rest for whatever test runs next.
+        target.wait_stable(timeout=10)

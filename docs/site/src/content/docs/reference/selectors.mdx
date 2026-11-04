@@ -140,6 +140,7 @@ Element properties, matched against the element's normalized data:
 | `min_value` | Number formatted as a string |
 | `max_value` | Number formatted as a string |
 | `stable_id` | String |
+| `hidden_reason` | The `snake_case` reason a hidden element gives, such as `scrolled_out`. Absent on a visible element, which then matches nothing. See [hidden reason](/reference/platform-details/#hidden-reason). |
 
 State flags, matched as the strings `'true'` and `'false'`:
 
@@ -155,6 +156,7 @@ State flags, matched as the strings `'true'` and `'false'`:
 | `modal` | |
 | `required` | |
 | `busy` | |
+| `password` | `true` on a password field, whose role stays `text_field` |
 | `expanded` | Absent on elements with no expand/collapse concept, which then match nothing |
 
 Window states are also `Option<bool>`: `None` means the platform cannot

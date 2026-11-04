@@ -85,6 +85,20 @@ async function waitUntil(predicate, timeoutMs, what) {
   throw new Error(`Timed out waiting for ${what}`);
 }
 
+function describeWindows(windows) {
+  // One bounded entry per window, so a settle assertion that found nothing
+  // tells "the window was missing from the list" from "it was listed without
+  // the verb", which an empty lookup alone cannot.
+  if (windows.length === 0) return '[] (the target window is not enumerated)';
+  const clip = (text, limit) =>
+    (text.length <= limit ? text : `${text.slice(0, limit - 3)}...`);
+  const shown = windows.slice(0, 8).map((w) =>
+    `${w.role} ${clip(JSON.stringify(w.name), 60)} ` +
+    `actions=${clip(w.actions.join(','), 120)} ` +
+    `minimized=${w.minimized} fullscreen=${w.fullscreen}`);
+  return `[${shown.join('; ')}${windows.length > 8 ? '; ...' : ''}]`;
+}
+
 async function settledWindow(app, verb, predicate, what) {
   // macOS settles a window-state transition before the verb returns (the
   // provider polls the platform state), so one fresh read must already hold
@@ -93,8 +107,12 @@ async function settledWindow(app, verb, predicate, what) {
   // succeeded, so it keeps the poll. Linux never reaches either branch: the
   // window verbs are unsupported there and the callers skip.
   if (MACOS) {
-    const win = await windowAdvertising(app, verb);
-    assert.ok(win, `${what}: no window advertises ${verb}`);
+    const windows = await app.windows();
+    const win = windows.find((w) => w.actions.includes(verb)) || null;
+    assert.ok(
+      win,
+      `${what}: no window advertises ${verb}; app.windows() = ${describeWindows(windows)}`,
+    );
     assert.ok(
       predicate(win),
       `${what}: minimized=${win.minimized} fullscreen=${win.fullscreen} maximized=${win.maximized}`,
@@ -123,9 +141,9 @@ async function restoreWindowBestEffort(app) {
 
 async function dialogWindow(app) {
   // Prefer the top-level window shape (what `close` acts on); fall back to
-  // the in-tree dialog node — the GTK app's AT-SPI tree has no top-level
-  // window node, but its dialog is a Role::Dialog child (the same shape the
-  // shared Python dialog test relies on).
+  // the in-tree dialog node, for a toolkit whose dialog is a Role::Dialog
+  // child but not in app.windows() (the same shape the shared Python dialog
+  // test relies on). GTK 4 windows are listed since issue #485.
   //
   // Only a *visible* dialog counts. The Qt fixture hides its dialog rather
   // than destroying it, and Qt keeps the hidden node in the AT-SPI tree
@@ -497,7 +515,9 @@ test('resizeTo() changes the reported bounds and restores the original size', as
     return;
   }
   const { width, height } = win.bounds;
-  const resizedBounds = { width: width + 50, height: height + 50 };
+  // Shrink rather than grow: a window filling a small display's visible
+  // frame cannot grow, and macOS resizeTo() now reports that refusal.
+  const resizedBounds = { width: width - 50, height: height - 50 };
   try {
     await win.resizeTo(resizedBounds.width, resizedBounds.height);
     if (appEnv === 'qt' && process.platform === 'win32') {
@@ -515,8 +535,10 @@ test('resizeTo() changes the reported bounds and restores the original size', as
       t.skip('Qt/UIA client size differs from decorated outer bounds (qt_windows_geometry_offsets)');
       return;
     }
-    const resizeNoop = appEnv === 'cocoa' || appEnv === 'winforms' || appEnv === 'wpf' || appEnv === 'egui' ||
-      (appEnv === 'tauri' && process.platform !== 'linux');
+    // Windows-only gap: on macOS resizeTo() verifies its own write, so a
+    // refused resize has already rejected above.
+    const resizeNoop = process.platform === 'win32' &&
+      ['egui', 'tauri', 'winforms', 'wpf'].includes(appEnv);
     if (resizeNoop) {
       // The provider advertises and accepts TransformPattern.Resize, but the
       // framework leaves its bounds unchanged. Keep the dispatch covered and
@@ -527,13 +549,9 @@ test('resizeTo() changes the reported bounds and restores the original size', as
       } catch (_cleanup) {
         // best-effort cleanup before reporting the known platform gap
       }
-      const gap = appEnv === 'cocoa'
-        ? 'cocoa_resize_noop'
-        : appEnv === 'egui'
-          ? 'egui_transform_resize_noop'
-        : appEnv === 'winforms' || appEnv === 'wpf'
-          ? `${appEnv}_transform_resize_noop`
-          : 'tauri_desktop_resize_noop';
+      const gap = appEnv === 'tauri'
+        ? 'tauri_desktop_resize_noop'
+        : `${appEnv}_transform_resize_noop`;
       t.skip(`${appEnv} accepts Resize without changing bounds (${gap})`);
       return;
     }
@@ -783,7 +801,7 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
   }
   const { width, height } = win.bounds;
   try {
-    await locator.resizeTo(width + 50, height + 50);
+    await locator.resizeTo(width - 50, height - 50);
     if (appEnv === 'qt' && process.platform === 'win32') {
       await waitUntil(async () => {
         const current = await currentWindow(app, win, 'resize_to');
@@ -799,8 +817,10 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
       t.skip('Qt/UIA client size differs from decorated outer bounds (qt_windows_geometry_offsets)');
       return;
     }
-    const resizeNoop = appEnv === 'cocoa' || appEnv === 'winforms' || appEnv === 'wpf' || appEnv === 'egui' ||
-      (appEnv === 'tauri' && process.platform !== 'linux');
+    // Windows-only gap: on macOS resizeTo() verifies its own write, so a
+    // refused resize has already rejected above.
+    const resizeNoop = process.platform === 'win32' &&
+      ['egui', 'tauri', 'winforms', 'wpf'].includes(appEnv);
     if (resizeNoop) {
       try {
         const current = await currentWindow(app, win, 'resize_to');
@@ -808,13 +828,9 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
       } catch (_cleanup) {
         // best-effort cleanup before reporting the known platform gap
       }
-      const gap = appEnv === 'cocoa'
-        ? 'cocoa_resize_noop'
-        : appEnv === 'egui'
-          ? 'egui_transform_resize_noop'
-        : appEnv === 'winforms' || appEnv === 'wpf'
-          ? `${appEnv}_transform_resize_noop`
-          : 'tauri_desktop_resize_noop';
+      const gap = appEnv === 'tauri'
+        ? 'tauri_desktop_resize_noop'
+        : `${appEnv}_transform_resize_noop`;
       t.skip(`${appEnv} accepts Resize without changing bounds (${gap})`);
       return;
     }
@@ -822,7 +838,7 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
       const current = await currentWindow(app, win, 'resize_to');
       return current !== null && boundsNear(
         current.bounds,
-        { width: width + 50, height: height + 50 },
+        { width: width - 50, height: height - 50 },
         ['width', 'height'],
       );
     }, 5000, 'Locator.resizeTo() to change the reported size');

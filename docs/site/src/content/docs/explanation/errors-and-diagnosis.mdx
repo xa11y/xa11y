@@ -54,6 +54,14 @@ Reading it back:
   - `matched button "Export" (visible=false, enabled=true, focused=false)`
     means the element was there in the wrong state. No candidate or scope
     sweep is attached in this case. The states already tell the story.
+    When it was hidden, the message ends with `hidden because:
+    scrolled_out` (or `window_minimized`, `not_showing`, `unknown`), and the
+    reason is also the `hidden_reason` field. See
+    [hidden reason](/reference/platform-details/#hidden-reason).
+    When an action's wait tried to scroll the element into view, the
+    message also ends with `auto-scroll: refused`, `no_effect` or
+    `revealed`, which is the `auto_scroll` field. See
+    [auto-scroll](/reference/locator/#locator).
   - `selector matched 2 element(s); nth(5) requested` means an `nth()`
     index out of range.
 - **`candidates`** lists near-misses: elements with the selector's target
@@ -153,6 +161,26 @@ Timeout after 5.0s; waiting for: event matching predicate; last observed:
 event source disconnected after 3 non-matching event(s) — no further
 events will arrive
 ```
+
+## Retrying after a failure
+
+A failed action leaves one question open: did it happen anyway? A click that
+times out waiting for the application's reply may have been applied, and a
+second click submits the form twice. Every error therefore carries a
+`delivery` value that answers it.
+
+`not_delivered` means the action never reached the application. A selector
+that matched nothing, an action the element does not support, and a wait that
+expired before the action was attempted all fall here, and retrying them is
+safe. `unknown` means the call was dispatched and the outcome is unconfirmed.
+Re-read the element's state before acting again.
+
+xa11y reports `unknown` whenever it cannot prove the action stayed local. A
+platform error from the dispatching call is `unknown` even when the code
+usually means the element was gone, because the application may have acted
+before it failed. Each platform's rules are in
+[Platform details](/reference/platform-details/#delivery-disposition), and the
+attribute names are in [Errors](/reference/errors/#delivery-disposition).
 
 ## For contributors
 

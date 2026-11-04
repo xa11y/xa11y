@@ -15,8 +15,8 @@ use rayon::prelude::*;
 use xa11y_core::Selector;
 use xa11y_core::{
     CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    Provider, Rect, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet, Subscription,
-    Toggled,
+    HiddenReason, Provider, Rect, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet,
+    Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -95,6 +95,7 @@ extern "C" {
     fn safe_ax_set_messaging_timeout(element: AXUIElementRef, timeout_seconds: f32) -> i32;
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
+    fn safe_cg_preflight_screen_capture_access() -> bool;
     fn safe_ax_observer_create(
         pid: i32,
         callback: unsafe extern "C" fn(CFTypeRef, AXUIElementRef, CFTypeRef, *mut c_void),
@@ -128,6 +129,7 @@ extern "C" {
     fn safe_cf_array_get_value(arr: CFArrayRef, idx: CFIndex) -> CFTypeRef;
     fn safe_cf_boolean_get_value(b: CFTypeRef) -> bool;
     fn safe_cf_equal(a: CFTypeRef, b: CFTypeRef) -> bool;
+    fn safe_cf_hash(cf: CFTypeRef) -> u64;
     fn safe_cf_number_get_value(num: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cf_dict_get_value(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
     fn safe_cf_array_create(values: *const CFTypeRef, num_values: CFIndex) -> CFArrayRef;
@@ -641,7 +643,63 @@ fn read_raw_attr(element: AXUIElementRef, attribute: &str) -> RawAttr {
 /// platform failure and propagates (tenet 1), never an empty success that
 /// reads as "no windows".
 fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
-    let attr = CFString::new("AXWindows");
+    ax_element_list_strict(element, "AXWindows")
+}
+
+/// The top-level children of an application element: its `AXWindows`, then
+/// any app-level `AXMenu` from `AXChildren` that is not one of them.
+///
+/// An open context menu is an `AXMenu` child of the application, never an
+/// entry in `AXWindows`. Search walks `AXChildren`, so a listing built from
+/// `AXWindows` alone missed a menu that a selector found (issue #518). The
+/// menu bar stays out, as it does for search (`should_filter_child_with_role`).
+/// Both reads are error-preserving, like [`ax_windows`]: a child that vanished
+/// between the reads is dropped, any other unreadable role is an error.
+fn app_top_level_children(app: AXUIElementRef) -> Result<Vec<AXElement>> {
+    let mut out = ax_windows(app)?;
+    let windows = out.len();
+    for child in ax_element_list_strict(app, "AXChildren")? {
+        let is_menu = match read_raw_attr(child.as_ptr(), "AXRole") {
+            RawAttr::Value(v) => {
+                if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
+                    // Adopts the +1 retain; released when the CFString drops.
+                    let role = unsafe { CFString::wrap_under_create_rule(v as *const _) };
+                    role == "AXMenu"
+                } else {
+                    // Not a role string, so not a menu; release the copy.
+                    unsafe { safe_cf_release(v) };
+                    false
+                }
+            }
+            RawAttr::Absent => false,
+            RawAttr::Unanswered(code) => match classify_element_churn_code(i64::from(code)) {
+                ElementChurn::Gone => false,
+                ElementChurn::Unreachable | ElementChurn::Fatal => {
+                    return Err(Error::Platform {
+                        code: i64::from(code),
+                        message: format!(
+                            "AXRole read of an application child failed (AXError {code}); \
+                             cannot tell whether it is a menu"
+                        ),
+                    })
+                }
+            },
+        };
+        let already_listed = out[..windows].iter().any(|w| unsafe {
+            safe_cf_equal(w.as_ptr() as CFTypeRef, child.as_ptr() as CFTypeRef)
+        });
+        if is_menu && !already_listed {
+            out.push(child);
+        }
+    }
+    Ok(out)
+}
+
+/// Read an attribute holding an array of accessibility elements, preserving
+/// its AXError: absent / no value is an empty list, anything unanswered or
+/// malformed is an error. Each element is retained via `from_borrowed`.
+fn ax_element_list_strict(element: AXUIElementRef, attribute: &str) -> Result<Vec<AXElement>> {
+    let attr = CFString::new(attribute);
     let mut value: CFTypeRef = std::ptr::null();
     let err =
         ffi_copy_attribute_value(element, attr.as_concrete_TypeRef() as CFTypeRef, &mut value);
@@ -655,9 +713,10 @@ fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
                     safe_cf_release(value);
                     return Err(Error::Platform {
                         code: -1,
-                        message: "AXWindows returned a non-array value; the provider answered \
-                                  malformed, not empty"
-                            .to_string(),
+                        message: format!(
+                            "{attribute} returned a non-array value; the provider answered \
+                             malformed, not empty"
+                        ),
                     });
                 }
                 let count = safe_cf_array_get_count(value);
@@ -673,14 +732,14 @@ fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
             }
         }
         // The process answered and said it has no such attribute / no value:
-        // an application without windows, honestly reported as an empty list.
+        // e.g. an application without windows, honestly an empty list.
         AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(vec![]),
         // Everything else — kAXErrorCannotComplete (the code a messaging
         // timeout surfaces as), kAXErrorInvalidUIElement, an ObjC exception
         // caught by the wrapper — means we did not get an answer.
         code => Err(Error::Platform {
             code: code as i64,
-            message: format!("AXUIElementCopyAttributeValue(AXWindows) failed (AXError {code})"),
+            message: format!("AXUIElementCopyAttributeValue({attribute}) failed (AXError {code})"),
         }),
     }
 }
@@ -747,6 +806,39 @@ fn tolerate_churn<T>(result: Result<T>) -> Result<Option<T>> {
             ElementChurn::Unreachable | ElementChurn::Fatal => Err(err),
         },
     }
+}
+
+/// Drop repeat sightings of the same accessibility object from `items`,
+/// keeping order, then apply `limit`. Each item carries its walk position
+/// (ignored here), its `AXUIElementRef`, and its payload.
+///
+/// Pointer identity is not element identity: every `AXChildren` read vends
+/// fresh `AXUIElementRef`s, so an element reached along two paths (`group
+/// button` with nested groups finds the button under each group) arrives as
+/// two different pointers. `CFEqual` compares the underlying object, and
+/// `CFHash` is consistent with it, so hashing buckets the candidates and
+/// keeps this linear for distinct results. The pointers must stay valid for
+/// the call; the search's are retained by the handle cache.
+fn dedup_by_ax_identity<T>(items: Vec<(usize, AXUIElementRef, T)>, limit: Option<usize>) -> Vec<T> {
+    let mut buckets: HashMap<u64, Vec<AXUIElementRef>> = HashMap::new();
+    let mut out = Vec::with_capacity(items.len());
+    for (_, ptr, item) in items {
+        if limit.is_some_and(|l| out.len() >= l) {
+            break;
+        }
+        let bucket = buckets
+            .entry(unsafe { safe_cf_hash(ptr as CFTypeRef) })
+            .or_default();
+        if bucket
+            .iter()
+            .any(|&seen| unsafe { safe_cf_equal(seen as CFTypeRef, ptr as CFTypeRef) })
+        {
+            continue;
+        }
+        bucket.push(ptr);
+        out.push(item);
+    }
+    out
 }
 
 /// The close button of a window, or `None` when there is none.
@@ -930,13 +1022,41 @@ fn container_selection_contains(element: AXUIElementRef, max_hops: usize) -> boo
     false
 }
 
+/// The element's native action names, with every failure read as "none".
+/// For snapshots, where a missing action list only narrows `actions`.
+/// Dispatch decisions use [`try_ax_action_names`].
 fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
+    try_ax_action_names(element).unwrap_or_default()
+}
+
+/// The element's native action names, error-preserving: an element that
+/// answered with no actions is `Ok(vec![])`, while an unanswered or malformed
+/// reply is `Error::Platform`. A dispatch that picks its AX action from this
+/// list must not mistake a failed read for an empty one (tenet 1).
+fn try_ax_action_names(element: AXUIElementRef) -> Result<Vec<String>> {
     let mut names: CFArrayRef = std::ptr::null();
     let err = ffi_copy_action_names(element, &mut names);
-    if err != AX_ERROR_SUCCESS || names.is_null() {
-        return vec![];
+    match err {
+        AX_ERROR_SUCCESS => {}
+        AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => return Ok(vec![]),
+        code => {
+            return Err(Error::Platform {
+                code: i64::from(code),
+                message: format!("AXUIElementCopyActionNames failed (AXError {code})"),
+            })
+        }
     }
-    unsafe {
+    if names.is_null() {
+        return Ok(vec![]);
+    }
+    if unsafe { safe_cf_get_type_id(names) } != unsafe { safe_cf_array_get_type_id() } {
+        unsafe { safe_cf_release(names) };
+        return Err(Error::Platform {
+            code: -1,
+            message: "AXUIElementCopyActionNames returned a non-array value".to_string(),
+        });
+    }
+    Ok(unsafe {
         let count = safe_cf_array_get_count(names);
         let mut result = Vec::with_capacity(count as usize);
         for i in 0..count {
@@ -948,7 +1068,7 @@ fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
         }
         safe_cf_release(names);
         result
-    }
+    })
 }
 
 fn ax_position(element: AXUIElementRef) -> Option<(f64, f64)> {
@@ -1481,6 +1601,25 @@ fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFType
     })
 }
 
+/// Re-classify an error from a step that ran after `done` had already changed
+/// the window.
+///
+/// Verbs such as `minimize`, `enter_fullscreen` and `restore` mutate in
+/// several steps. A pre-dispatch-class error (`ActionNotSupported`,
+/// `ElementStale`, ...) from a later step describes that step only. Reporting
+/// it as `NotDelivered` would invite a retry on a window that has already
+/// changed, so it becomes a `Platform` error, which reads as `Unknown`. An
+/// error that is already `Unknown` passes through.
+fn unknown_after_step(e: Error, done: &str) -> Error {
+    if e.delivery() == xa11y_core::Delivery::Unknown {
+        return e;
+    }
+    Error::Platform {
+        code: -1,
+        message: format!("{e}, after {done} had already changed the window"),
+    }
+}
+
 /// Convert a failed AX action call into an appropriate `Error`. Returns
 /// `ActionNotSupported` for -25206 (kAXErrorActionUnsupported) so callers get
 /// a clear, structured error instead of a raw platform code, and describes a
@@ -1841,8 +1980,9 @@ const WINDOW_FULLSCREEN_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 /// restore promise — so a confirmation shorter than the transition can
 /// confirm the pre-commit value. Measured on macOS 26.4, the transition takes
 /// ~0.5 s and the window is absent from `AXWindows` for 450–650 ms once under
-/// way; the grace is that absence plus a margin. Any unreadable sample or
-/// state change restarts the run (see [`SettleRun`]).
+/// way. The hold counts only while the target is enumerated, so the absence
+/// itself never counts toward it, however long it runs. Any unreadable sample,
+/// absence or state change restarts the run (see [`SettleRun`]).
 const WINDOW_FULLSCREEN_SETTLE_GRACE: Duration = Duration::from_millis(700);
 
 /// How long `minimize` / `restore` wait for the `AXMinimized` state to commit,
@@ -1858,19 +1998,19 @@ const WINDOW_FULLSCREEN_SETTLE_GRACE: Duration = Duration::from_millis(700);
 const WINDOW_MINIMIZED_SETTLE_BUDGET: Duration = Duration::from_secs(5);
 const WINDOW_MINIMIZED_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 
-/// How long `move_to` waits for an `AXPosition` write to become observable,
-/// and the poll cadence during the wait.
+/// How long `move_to` and `resize_to` wait for an `AXPosition` / `AXSize` write
+/// to become observable, and the poll cadence during the wait.
 ///
-/// Some toolkit bridges acknowledge `AXPosition` before their event loop has
+/// Some toolkit bridges acknowledge a geometry write before their event loop has
 /// applied it, and can drop that first write while the window is settling
-/// from another transition. Re-issuing the absolute position is idempotent
-/// and turns the accepted write into the promise `move_to` exposes.
-const WINDOW_POSITION_SETTLE_BUDGET: Duration = Duration::from_secs(5);
-const WINDOW_POSITION_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
+/// from another transition. Re-issuing the absolute value is idempotent
+/// and turns the accepted write into the promise `move_to` and `resize_to` expose.
+const WINDOW_GEOMETRY_SETTLE_BUDGET: Duration = Duration::from_secs(5);
+const WINDOW_GEOMETRY_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 /// AX bridges can round logical coordinates while crossing the native
 /// boundary. This matches the tolerance used by the cross-binding integration
 /// tests and is small enough to distinguish their 10-point move.
-const WINDOW_POSITION_TOLERANCE: f64 = 2.0;
+const WINDOW_GEOMETRY_TOLERANCE: f64 = 2.0;
 
 /// Read a boolean AX attribute with the tenet-1 distinction: a failed read is
 /// an error (the state is unknown, not false), an absent / unsupported
@@ -2046,8 +2186,9 @@ fn probe_settable(result: Result<bool>) -> Result<AttrProbe> {
 /// holds it in the app's enumerated window set the sample is read from the
 /// fresh object (the transition can recreate the window); while it is missing
 /// from `AXWindows` the cached handle answers instead. The two shapes are
-/// kept apart because a cached sample cannot count toward the same hold as an
-/// enumerated one (see [`SettleRun`]).
+/// kept apart because only an enumerated sample can confirm the promise (see
+/// [`SettleRun`]); a cached one still decides whether to re-issue the set and
+/// feeds the timeout diagnosis.
 enum TargetSample {
     /// The target's own sample from the app's enumerated window set. An
     /// absent `AXFullScreen` reads as `false`: a window without the surface
@@ -2156,47 +2297,127 @@ fn poll_target(
 }
 
 /// The continuous-hold bookkeeping behind [`settle_window_fullscreen`]: the
-/// promise must hold without interruption for
+/// promise must hold on the *enumerated* target, without interruption, for
 /// [`WINDOW_FULLSCREEN_SETTLE_GRACE`].
+///
+/// A sample answered by the cached handle never confirms, and it breaks a
+/// running hold. The verb's promise is what the next read observes, and that
+/// read goes through `AXWindows` (`App::windows`, a re-resolved locator): a
+/// settle that returned while the target was still off the list handed the
+/// caller a window it could not find (#591: the cached handle used to
+/// confirm on its own grace run, sized to outlast the absence measured on an
+/// idle machine, 450–650 ms; on a loaded CI runner the absence ran longer and
+/// `enter_fullscreen` returned into it).
 #[derive(Default)]
 struct SettleRun {
     /// When the current run of promise-holding enumerated samples started.
     held_since: Option<Instant>,
-    /// When the current run of promise-holding cached samples started. Kept
-    /// apart from the enumerated run: time spent in the set before the target
-    /// left must not pad the absence, because the entry transient itself
-    /// reads the restore promise and only a hold longer than the transition
-    /// rules it out.
-    cached_held_since: Option<Instant>,
+    /// Whether any poll found the target in the enumerated window set.
+    ever_enumerated: bool,
+    /// The most recent poll that found the target off the enumerated set.
+    last_absence: Option<Instant>,
+    /// The most recent poll that broke (or prevented) a hold, and why.
+    last_break: Option<(HoldBreak, Instant)>,
+    /// How many running holds were broken before the grace: a target that
+    /// flickers in and out of the promise shows up here.
+    holds_broken: u32,
+}
+
+/// Why a poll did not extend the hold. Diagnosis only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoldBreak {
+    /// The target was off the enumerated window set.
+    Absent,
+    /// The target was enumerated but read a state away from the promise.
+    WrongState,
+    /// No readable sample of the target.
+    Unreadable,
+}
+
+impl HoldBreak {
+    fn describe(self) -> &'static str {
+        match self {
+            HoldBreak::Absent => "the target was off AXWindows",
+            HoldBreak::WrongState => "the enumerated target read a state away from the promise",
+            HoldBreak::Unreadable => "the target gave no readable sample",
+        }
+    }
 }
 
 impl SettleRun {
     /// Fold one poll in. `reached` is [`TargetSample::evaluate`]'s verdict.
     fn observe(&mut self, sample: Option<&TargetSample>, reached: bool, now: Instant) {
-        match sample {
-            Some(TargetSample::Enumerated { .. }) if reached => {
-                self.held_since.get_or_insert(now);
-                self.cached_held_since = None;
+        // A target off the enumerated set, an unreadable sample, or a state
+        // away from the promise is not evidence the caller's next read will
+        // see the promise: the hold starts over.
+        let cause = match sample {
+            Some(TargetSample::Enumerated { .. }) => {
+                self.ever_enumerated = true;
+                if reached {
+                    self.held_since.get_or_insert(now);
+                    return;
+                }
+                HoldBreak::WrongState
             }
-            Some(TargetSample::Cached { .. }) if reached => {
-                self.cached_held_since.get_or_insert(now);
-                self.held_since = None;
+            Some(TargetSample::Cached { .. }) => {
+                self.last_absence = Some(now);
+                HoldBreak::Absent
             }
-            // An unreadable sample or a state away from the promise is
-            // unknown, not evidence of the promise: the hold starts over.
-            _ => {
-                self.held_since = None;
-                self.cached_held_since = None;
-            }
+            None => HoldBreak::Unreadable,
+        };
+        if self.held_since.take().is_some() {
+            self.holds_broken += 1;
         }
+        self.last_break = Some((cause, now));
     }
 
-    /// Whether the promise has held for the grace, uninterrupted.
+    /// Whether the promise has held on the enumerated target for the grace,
+    /// uninterrupted.
     fn confirmed(&self, now: Instant) -> bool {
-        [self.held_since, self.cached_held_since]
-            .into_iter()
-            .flatten()
-            .any(|since| now.duration_since(since) >= WINDOW_FULLSCREEN_SETTLE_GRACE)
+        self.held_since
+            .is_some_and(|since| now.duration_since(since) >= WINDOW_FULLSCREEN_SETTLE_GRACE)
+    }
+
+    /// Which half of the confirmation was missing at the deadline, for the
+    /// timeout diagnosis: the target was not back in `AXWindows`, or it was
+    /// listed but the promised state did not hold there. Every arm carries
+    /// the run's history, so a churned last sample keeps the context.
+    fn describe_failure(&self, last: Option<&TargetSample>, now: Instant) -> String {
+        let state = describe_target(last);
+        let headline = match last {
+            Some(TargetSample::Cached { .. }) if self.ever_enumerated => format!(
+                "the target window left the app's window list (AXWindows) during the \
+                 transition and was not re-enumerated before the deadline; {state}"
+            ),
+            Some(TargetSample::Cached { .. }) => format!(
+                "the target window was never enumerated in the app's window list \
+                 (AXWindows) during the wait; {state}"
+            ),
+            Some(TargetSample::Enumerated { .. }) => format!(
+                "the target window is enumerated, but the promised state did not hold \
+                 there for {} ms; {state}",
+                WINDOW_FULLSCREEN_SETTLE_GRACE.as_millis()
+            ),
+            None => state,
+        };
+        let ago = |at: Instant| now.saturating_duration_since(at).as_millis();
+        let absence = match self.last_absence {
+            Some(at) => format!("last off AXWindows {} ms before the deadline", ago(at)),
+            None => "never off AXWindows".to_string(),
+        };
+        let interruption = match self.last_break {
+            Some((cause, at)) => format!(
+                "last interruption {} ms before the deadline: {}",
+                ago(at),
+                cause.describe()
+            ),
+            None => "no interruption".to_string(),
+        };
+        format!(
+            "{headline} [ever enumerated: {}; {absence}; {interruption}; holds broken \
+             before the grace: {}]",
+            self.ever_enumerated, self.holds_broken
+        )
     }
 }
 
@@ -2243,10 +2464,12 @@ fn describe_cached_target(fullscreen: &AttrProbe, settable: &AttrProbe) -> Strin
 /// `false` after `restore` (and after the fullscreen exit `minimize` performs
 /// before it iconifies). The wait succeeds once the *target* window's own state
 /// holds the promise for [`WINDOW_FULLSCREEN_SETTLE_GRACE`] without
-/// interruption. The target is followed across the transition's window
-/// recreation through the app's enumerated window set ([`safe_cf_equal`]),
-/// and while it is missing from `AXWindows` its cached handle is read
-/// directly.
+/// interruption *while enumerated in `AXWindows`*, so a caller's next
+/// `App::windows()` finds it. The target is followed across the transition's
+/// window recreation through the app's enumerated window set
+/// ([`safe_cf_equal`]). While it is missing from `AXWindows` its cached handle
+/// is read for the re-issue decision and the diagnosis, but cannot confirm
+/// (see [`SettleRun`]).
 ///
 /// Every unconfirmed iteration re-issues `AXFullScreen = want`: a set that
 /// lands mid-transition is discarded rather than queued (see the constants),
@@ -2325,7 +2548,7 @@ fn settle_window_fullscreen(
             }
         }
         if Instant::now() >= deadline {
-            let mut last = describe_target(sample.as_ref());
+            let mut last = run.describe_failure(sample.as_ref(), Instant::now());
             if let Some(err) = last_set_error {
                 last = format!("{last}; the last retry set failed: {err}");
             }
@@ -2496,9 +2719,9 @@ fn set_window_position(
     Ok(())
 }
 
-fn position_near(actual: (f64, f64), expected: (f64, f64)) -> bool {
-    (actual.0 - expected.0).abs() <= WINDOW_POSITION_TOLERANCE
-        && (actual.1 - expected.1).abs() <= WINDOW_POSITION_TOLERANCE
+fn geometry_near(actual: (f64, f64), expected: (f64, f64)) -> bool {
+    (actual.0 - expected.0).abs() <= WINDOW_GEOMETRY_TOLERANCE
+        && (actual.1 - expected.1).abs() <= WINDOW_GEOMETRY_TOLERANCE
 }
 
 /// Wait until `AXPosition` reflects the requested logical coordinates,
@@ -2518,7 +2741,7 @@ fn settle_window_position(
     role: Role,
 ) -> Result<()> {
     let app = owning_app_element(el_ptr, action, role)?;
-    let deadline = Instant::now() + WINDOW_POSITION_SETTLE_BUDGET;
+    let deadline = Instant::now() + WINDOW_GEOMETRY_SETTLE_BUDGET;
     let expected = (f64::from(x), f64::from(y));
     let mut last_observed: Option<String> = None;
     let mut fresh: Option<AXElement> = None;
@@ -2527,7 +2750,7 @@ fn settle_window_position(
         let failure = match read_window_position(target, action, role) {
             Ok(Some(actual)) => {
                 last_observed = Some(format!("AXPosition reads ({}, {})", actual.0, actual.1));
-                if position_near(actual, expected) {
+                if geometry_near(actual, expected) {
                     return Ok(());
                 }
                 set_window_position(target, x, y, action, role).err()
@@ -2550,22 +2773,198 @@ fn settle_window_position(
             }
         }
         if Instant::now() >= deadline {
-            return Err(Error::timeout(WINDOW_POSITION_SETTLE_BUDGET).diagnose(
+            return Err(Error::timeout(WINDOW_GEOMETRY_SETTLE_BUDGET).diagnose(
                 xa11y_core::Diagnosis::new()
                     .condition(format!(
                         "window reaches position ({x}, {y}) within {} points",
-                        WINDOW_POSITION_TOLERANCE
+                        WINDOW_GEOMETRY_TOLERANCE
                     ))
                     .last_observed(last_observed.unwrap_or_else(|| {
                         "AXPosition could not be observed before the deadline".to_string()
                     })),
             ));
         }
-        std::thread::sleep(WINDOW_POSITION_SETTLE_INTERVAL);
+        std::thread::sleep(WINDOW_GEOMETRY_SETTLE_INTERVAL);
+    }
+}
+
+// ── Window Size Settling ──────────────────────────────────────────────────────
+
+/// Read `AXSize` with the same failure distinction as
+/// [`read_window_position`]: a failed or malformed read is an error, and only
+/// a genuinely absent attribute is `None`.
+fn read_window_size(
+    el_ptr: AXUIElementRef,
+    action: &str,
+    role: Role,
+) -> Result<Option<(f64, f64)>> {
+    match read_raw_attr(el_ptr, "AXSize") {
+        RawAttr::Value(value) => {
+            let mut size = CGSize::default();
+            let ok = unsafe {
+                safe_ax_value_get_value(value, AX_VALUE_CGSIZE, &mut size as *mut _ as *mut c_void)
+            };
+            unsafe { safe_cf_release(value) };
+            if ok {
+                Ok(Some((size.width, size.height)))
+            } else {
+                Err(Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "AXSize returned a non-size value while handling {action} on a \
+                         {role}; the size is unknown"
+                    ),
+                })
+            }
+        }
+        RawAttr::Absent => Ok(None),
+        RawAttr::Unanswered(code) => Err(Error::Platform {
+            code: code as i64,
+            message: format!(
+                "AXSize read failed while handling {action} on a {role} (AXError {code}); \
+                 the size is unknown"
+            ),
+        }),
+    }
+}
+
+/// Set the window's absolute AX size once.
+fn set_window_size(
+    el_ptr: AXUIElementRef,
+    width: u32,
+    height: u32,
+    action: &str,
+    role: Role,
+) -> Result<()> {
+    let value = unsafe { safe_ax_value_create_cg_size(f64::from(width), f64::from(height)) };
+    if value.is_null() {
+        return Err(Error::Platform {
+            code: -1,
+            message: "Failed to create CGSize AXValue for window resize".to_string(),
+        });
+    }
+    let attr = CFString::new("AXSize");
+    let err = do_set_attribute(el_ptr, &attr, value);
+    unsafe { safe_cf_release(value) };
+    if err != AX_ERROR_SUCCESS {
+        return Err(action_error(el_ptr, err, action, role, "Set AXSize failed"));
+    }
+    Ok(())
+}
+
+/// What `resize_to` saw when the window would not take the requested size:
+/// the requested rect and the one the window actually reports, so the error
+/// says which way it was refused without a re-run.
+fn describe_refused_resize(
+    width: u32,
+    height: u32,
+    observed_size: (f64, f64),
+    origin: &str,
+) -> String {
+    let (ow, oh) = observed_size;
+    format!(
+        "requested {width}x{height} at origin {origin} but the window reports {ow}x{oh}; \
+         AXSize accepted the write and the window refused it. The window server \
+         constrains windows to the screen's visible frame (and the app to its own \
+         minimum/maximum size), so a size that does not fit there is refused"
+    )
+}
+
+/// Wait until `AXSize` reflects the requested size, re-issuing the absolute
+/// write while it does not — the `resize_to` counterpart of
+/// [`settle_window_position`].
+///
+/// `AXUIElementSetAttributeValue(AXSize)` returns success when the window
+/// *received* the request, not when it applied it, and macOS silently keeps
+/// the old frame for a size the window cannot take (one already filling the
+/// visible height cannot grow taller). Without this read-back `resize_to`
+/// reported `ok` for a resize that never happened (tenet 1). Element churn is
+/// handled exactly as in the move settle.
+fn settle_window_size(
+    el_ptr: AXUIElementRef,
+    width: u32,
+    height: u32,
+    action: &str,
+    role: Role,
+) -> Result<()> {
+    let app = owning_app_element(el_ptr, action, role)?;
+    let deadline = Instant::now() + WINDOW_GEOMETRY_SETTLE_BUDGET;
+    let expected = (f64::from(width), f64::from(height));
+    // Only raw observations are kept while polling; the diagnosis text (and
+    // the extra origin read it needs) is built once, at the deadline.
+    let mut last_size: Option<(f64, f64)> = None;
+    let mut last_other: Option<String> = None;
+    let mut fresh: Option<AXElement> = None;
+    loop {
+        let target = fresh.as_ref().map_or(el_ptr, |el| el.as_ptr());
+        let failure = match read_window_size(target, action, role) {
+            Ok(Some(actual)) => {
+                if geometry_near(actual, expected) {
+                    return Ok(());
+                }
+                last_size = Some(actual);
+                last_other = None;
+                set_window_size(target, width, height, action, role).err()
+            }
+            Ok(None) => {
+                last_size = None;
+                last_other = Some("the window has no AXSize attribute".to_string());
+                set_window_size(target, width, height, action, role).err()
+            }
+            Err(err) => Some(err),
+        };
+        if let Some(err) = failure {
+            match classify_element_churn(&err) {
+                ElementChurn::Gone => {
+                    last_size = None;
+                    last_other = Some(err.to_string());
+                    if let Some(found) = fresh_target_in_app(app.as_ptr(), el_ptr)? {
+                        fresh = Some(found);
+                    }
+                }
+                ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
+            }
+        }
+        if Instant::now() >= deadline {
+            let observed = match (last_size, last_other) {
+                (Some(actual), _) => {
+                    // The origin is context for the error only, so a failed
+                    // origin read is reported in that context rather than
+                    // replacing the size the window did report.
+                    let origin = match read_window_position(target, action, role) {
+                        Ok(Some((x, y))) => format!("({x}, {y})"),
+                        Ok(None) => "(no AXPosition)".to_string(),
+                        Err(err) => format!("(origin unreadable: {err})"),
+                    };
+                    describe_refused_resize(width, height, actual, &origin)
+                }
+                (None, Some(other)) => other,
+                (None, None) => "AXSize could not be observed before the deadline".to_string(),
+            };
+            return Err(Error::timeout(WINDOW_GEOMETRY_SETTLE_BUDGET).diagnose(
+                xa11y_core::Diagnosis::new()
+                    .condition(format!(
+                        "window reaches size {width}x{height} within {} points",
+                        WINDOW_GEOMETRY_TOLERANCE
+                    ))
+                    .last_observed(observed),
+            ));
+        }
+        std::thread::sleep(WINDOW_GEOMETRY_SETTLE_INTERVAL);
     }
 }
 
 // ── Role Mapping ──────────────────────────────────────────────────────────────
+
+/// Whether an AX role/subrole pair is a secure (password) text field.
+///
+/// AppKit's `NSSecureTextField` reports `AXSecureTextField` as its role;
+/// WebKit and AccessKit report `AXTextField` with `AXSecureTextField` as the
+/// subrole. Both map to `Role::TextField` in [`map_ax_role`], so this is the
+/// only place the distinction survives.
+fn is_secure_text_field(role: &str, subrole: Option<&str>) -> bool {
+    role == "AXSecureTextField" || subrole == Some("AXSecureTextField")
+}
 
 fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
     match subrole {
@@ -2687,6 +3086,24 @@ fn ax_action_to_name(ax_name: &str) -> Option<&'static str> {
         "AXRaise" => Some("activate"),
         "AXScrollToVisible" => Some("scroll_into_view"),
         _ => None,
+    }
+}
+
+/// The AX action `press` dispatches to, given the element's native action
+/// names.
+///
+/// `AXPress` when the element has it. Otherwise `AXOpen` when that is the
+/// element's activation action: Finder sidebar items, for example, advertise
+/// `AXOpen` and no `AXPress`. This is the primary-activation reading of
+/// tenet 3, the same way Windows `press` dispatches to the element's
+/// activation pattern. Nothing is tried after a failure (tenet 1). Every other
+/// shape keeps `AXPress`, which is what `press` has always sent.
+fn press_ax_action(ax_actions: &[String]) -> &'static str {
+    let has = |name: &str| ax_actions.iter().any(|a| a == name);
+    if !has("AXPress") && has("AXOpen") {
+        "AXOpen"
+    } else {
+        "AXPress"
     }
 }
 
@@ -2902,9 +3319,11 @@ fn instructions_for_major(major: u32) -> String {
 }
 
 /// macOS major version from `kern.osproductversion`, cached after the first
-/// read. On a probe failure it reports 0, which yields the pre-27 section
-/// name: the probe is a local `sysctl` and should not fail, and a wrong
-/// section name is only a hint, but this keeps the behavior stable.
+/// read. On a probe failure it reports 0. The probe is a local `sysctl` and
+/// should not fail. `0` has two consumers: the grant instruction falls back to
+/// the pre-27 section name (only a hint), and `screen_recording_gates_ax`
+/// treats it as "requires Screen Recording", so an unknown version makes
+/// `MacOSProvider::new` demand the grant rather than skip it.
 fn macos_major_version() -> u32 {
     static VERSION: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
         std::process::Command::new("sysctl")
@@ -2923,6 +3342,35 @@ fn macos_major_version() -> u32 {
             .unwrap_or(0)
     });
     *VERSION
+}
+
+/// The provider's Screen Recording denial, naming the detected version (or
+/// that it could not be detected, which is why the grant is demanded).
+fn screen_recording_instructions(major: u32) -> String {
+    let why = if major == 0 {
+        "The macOS version could not be detected, so xa11y requires it as it does on \
+         macOS 26+, where it is needed to read window content via the accessibility API."
+            .to_string()
+    } else {
+        format!(
+            "This is macOS {major}; on macOS 26+ it is required to read window content via \
+             the accessibility API."
+        )
+    };
+    format!(
+        "Enable Screen Recording in System Settings → Privacy & Security → \
+         Screen & System Audio Recording, then restart this process (or the terminal \
+         that launched it): the permission is read once per process.\n{why}"
+    )
+}
+
+/// Whether the accessibility API needs Screen Recording to read window
+/// content on macOS `major` (26 and later). An unknown version (`0`, the
+/// probe-failure value of [`macos_major_version`]) is treated as needing it:
+/// demanding a grant the system may not need fails loudly, while skipping
+/// one it does need returns window-less trees with no error.
+fn screen_recording_gates_ax(major: u32) -> bool {
+    major == 0 || major >= 26
 }
 
 /// Global handle counter for mapping ElementData back to AXElements.
@@ -2987,13 +3435,13 @@ impl MacOSProvider {
         // On macOS 26+, Screen Recording permission is required to read
         // window content via the accessibility API. Without it, AXChildren
         // returns only self-referencing AXApplication wrappers and menu bars.
-        if !Self::has_screen_recording_permission() {
+        // Earlier releases read window content without it, so the provider
+        // does not demand it there (the screenshot backend always does).
+        if screen_recording_gates_ax(macos_major_version())
+            && !Self::has_screen_recording_permission()
+        {
             return Err(Error::PermissionDenied {
-                instructions:
-                    "Enable Screen Recording in System Settings → Privacy & Security → \
-                     Screen & System Audio Recording.\n\
-                     On macOS 26+, this is required to read window content via the accessibility API."
-                        .to_string(),
+                instructions: screen_recording_instructions(macos_major_version()),
             });
         }
 
@@ -3067,44 +3515,16 @@ impl MacOSProvider {
         apps
     }
 
-    /// Check if Screen Recording permission is granted by inspecting
-    /// CGWindowListCopyWindowInfo. Without this permission, the list
-    /// contains only system chrome (layer != 0). With it, app windows
-    /// (layer 0) are included.
+    /// Whether this process has Screen Recording permission, from
+    /// `CGPreflightScreenCaptureAccess` (macOS 10.15+), which reads the grant
+    /// itself and never prompts.
+    ///
+    /// This used to be inferred from `CGWindowListCopyWindowInfo` listing a
+    /// layer-0 (app) window, which read as "denied" whenever no app window
+    /// was open — a fresh CI runner, a cleared desktop — however the
+    /// permission was set (issue #516).
     pub(crate) fn has_screen_recording_permission() -> bool {
-        let info = unsafe { safe_cg_window_list_copy(0, 0) };
-        if info.is_null() {
-            return false;
-        }
-        let layer_key = CFString::new("kCGWindowLayer");
-        let mut has_app_window = false;
-        unsafe {
-            let count = safe_cf_array_get_count(info);
-            for i in 0..count {
-                let dict = safe_cf_array_get_value(info, i);
-                if dict.is_null() {
-                    continue;
-                }
-                let layer_val =
-                    safe_cf_dict_get_value(dict, layer_key.as_concrete_TypeRef() as CFTypeRef);
-                if !layer_val.is_null()
-                    && safe_cf_get_type_id(layer_val) == safe_cf_number_get_type_id()
-                {
-                    let mut layer: i32 = -1;
-                    safe_cf_number_get_value(
-                        layer_val,
-                        CF_NUMBER_SINT32,
-                        &mut layer as *mut _ as *mut c_void,
-                    );
-                    if layer == 0 {
-                        has_app_window = true;
-                        break;
-                    }
-                }
-            }
-            safe_cf_release(info);
-        }
-        has_app_window
+        unsafe { safe_cg_preflight_screen_capture_access() }
     }
 
     /// Cache an AXElement and return a new handle ID.
@@ -3190,6 +3610,7 @@ fn build_snapshot_data(
         };
 
         let role = map_ax_role(&attrs.role_str, attrs.subrole_str.as_deref());
+        let password = is_secure_text_field(&attrs.role_str, attrs.subrole_str.as_deref());
 
         // Build raw platform data map before consuming attrs fields.
         let mut raw = std::collections::HashMap::new();
@@ -3325,6 +3746,13 @@ fn build_snapshot_data(
         let states: StateSet = StateParts {
             enabled: attrs.enabled.unwrap_or(true),
             visible: !attrs.hidden.unwrap_or(false),
+            // `AXHidden` is the only visibility AX reports, and it says
+            // nothing about why: AX has no scrolled-out or minimized-content
+            // signal on the element itself.
+            hidden_reason: attrs
+                .hidden
+                .unwrap_or(false)
+                .then_some(HiddenReason::NotShowing),
             focused: attrs.focused.unwrap_or(false),
             active,
             focusable,
@@ -3365,6 +3793,7 @@ fn build_snapshot_data(
             editable: matches!(role, Role::TextField | Role::TextArea),
             required: false,
             busy: false,
+            password,
         }
         .into();
 
@@ -3394,6 +3823,14 @@ fn build_snapshot_data(
                     actions.push(snake);
                 }
             }
+        }
+
+        // `press` on an element whose only activation action is `AXOpen`
+        // dispatches to it (see `press_ax_action`), so it is advertised too.
+        // `open` stays listed: it is the element's native action.
+        let press_str = "press".to_string();
+        if press_ax_action(&ax_actions) == "AXOpen" && !actions.contains(&press_str) {
+            actions.push(press_str);
         }
 
         // Implicit actions from settable attributes.
@@ -3582,6 +4019,44 @@ impl MacOSProvider {
         }
 
         false
+    }
+
+    /// Snapshot `children` of `parent`, dropping system chrome.
+    ///
+    /// Filters first (cheap string checks), then builds ElementData in
+    /// parallel (each build is an IPC round-trip). A child that vanished
+    /// between the children read and its snapshot (macOS invalidates a
+    /// window's AX object during fullscreen transitions and on close) is no
+    /// longer part of this parent's live surface, so it is dropped. A child
+    /// the process did not answer for is *not* a fact about the tree —
+    /// reporting a smaller one would be indistinguishable from a genuine
+    /// subtree, so the walk fails with the platform error (tenet 1).
+    fn snapshot_children(
+        &self,
+        parent: &ElementData,
+        children: &[AXElement],
+    ) -> Result<Vec<ElementData>> {
+        let role = parent.role;
+        let name = parent.name.as_deref();
+        let filtered: Vec<&AXElement> = children
+            .iter()
+            .filter(|child| !Self::should_filter_child(role, name, child))
+            .collect();
+        let built: Vec<Result<ElementData>> = filtered
+            .par_iter()
+            .map(|child| self.build_element_data(child, parent.pid))
+            .collect();
+        let mut results: Vec<ElementData> = Vec::with_capacity(built.len());
+        for data in built {
+            match data {
+                Ok(data) => results.push(data),
+                Err(err) => match classify_element_churn(&err) {
+                    ElementChurn::Gone => {}
+                    ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
+                },
+            }
+        }
+        Ok(results)
     }
 
     /// Convenience wrapper that fetches role/subrole before filtering.
@@ -4092,53 +4567,34 @@ impl Provider for MacOSProvider {
             }
             Some(element_data) => {
                 let ax = self.get_cached(element_data.handle)?;
-                let role = element_data.role;
-                let name = element_data.name.as_deref();
 
-                // An Application element's children are its top-level windows:
-                // `AXWindows` is the single canonical window-discovery source
-                // (the same answer `App::windows` now reads on every platform).
-                // Every other role keeps the raw `AXChildren` walk. The read is
-                // error-preserving on purpose — a dead app must report its
-                // failure, not an empty window list (tenet 1).
-                let ax_children_list = match role {
-                    Role::Application => ax_windows(ax.as_ptr())?,
+                // An Application element's children are its top-level
+                // windows (`AXWindows`) followed by any app-level `AXMenu`,
+                // such as an open context menu, which search reaches through
+                // `AXChildren` and `AXWindows` never lists (see
+                // `app_top_level_children`). Every other role keeps the raw
+                // `AXChildren` walk. The application read is error-preserving
+                // on purpose: a dead app must report its failure, not an
+                // empty list (tenet 1).
+                let ax_children_list = match element_data.role {
+                    Role::Application => app_top_level_children(ax.as_ptr())?,
                     _ => ax_children(ax.as_ptr()),
                 };
-
-                // Filter first (cheap string checks), then build ElementData
-                // in parallel (each build_element_data is an IPC round-trip).
-                let filtered: Vec<&AXElement> = ax_children_list
-                    .iter()
-                    .filter(|child| !Self::should_filter_child(role, name, child))
-                    .collect();
-
-                // A child that vanished between the children read and its
-                // snapshot (macOS invalidates a window's AX object during
-                // fullscreen transitions and on close) is no longer part of
-                // this parent's live surface, so it is dropped. A child the
-                // process did not answer for is *not* a fact about the tree —
-                // reporting a smaller one would be indistinguishable from a
-                // genuine subtree, so the walk fails with the platform error
-                // (tenet 1).
-                let built: Vec<Result<ElementData>> = filtered
-                    .par_iter()
-                    .map(|child| self.build_element_data(child, element_data.pid))
-                    .collect();
-                let mut results: Vec<ElementData> = Vec::with_capacity(built.len());
-                for data in built {
-                    match data {
-                        Ok(data) => results.push(data),
-                        Err(err) => match classify_element_churn(&err) {
-                            ElementChurn::Gone => {}
-                            ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
-                        },
-                    }
-                }
-
-                Ok(results)
+                self.snapshot_children(element_data, &ax_children_list)
             }
         }
+    }
+
+    /// `App::windows` reads `AXWindows` alone: windows are all it keeps, so
+    /// the app-level menu read `get_children` adds would only cost an IPC
+    /// round-trip and a failure mode.
+    fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        if app.role != Role::Application {
+            return self.get_children(Some(app));
+        }
+        let ax = self.get_cached(app.handle)?;
+        let windows = ax_windows(ax.as_ptr())?;
+        self.snapshot_children(app, &windows)
     }
 
     fn find_elements_group(
@@ -4284,34 +4740,20 @@ impl Provider for MacOSProvider {
                 for n in narrowed {
                     // Anchor identity is for dedup vs other clauses' phase-1
                     // hits; for phase-2 outputs we use the narrowed element's
-                    // own AXUIElement pointer (resolved via the cache).
-                    let ptr = self
-                        .get_cached(n.handle)
-                        .map(|ax| ax.as_ptr())
-                        .unwrap_or(std::ptr::null());
+                    // own AXUIElement (resolved via the cache, which retains
+                    // it, so the pointer stays valid for the merge below).
+                    // The handle was minted by this call; a miss is a bug,
+                    // not an element to keep without identity.
+                    let ptr = self.get_cached(n.handle)?.as_ptr();
                     merged.push((anchor_pos, ptr, n));
                 }
             }
         }
 
-        // Stable sort by walk position keeps doc-order; dedup by
-        // AXUIElement pointer identity ensures `X, X` collapses correctly.
+        // Stable sort by walk position keeps doc-order; the dedup keeps the
+        // first of each accessibility object.
         merged.sort_by_key(|(pos, _, _)| *pos);
-        let mut seen: HashSet<usize> = HashSet::new();
-        let mut out: Vec<ElementData> = Vec::with_capacity(merged.len());
-        for (_, ptr, data) in merged {
-            // Null pointers (resolution failures) can't be sensibly deduped;
-            // treat each null as its own key so we keep the element.
-            let key = ptr as usize;
-            if key != 0 && !seen.insert(key) {
-                continue;
-            }
-            out.push(data);
-        }
-        if let Some(l) = limit {
-            out.truncate(l);
-        }
-        Ok(out)
+        Ok(dedup_by_ax_identity(merged, limit))
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
@@ -4624,7 +5066,14 @@ impl Provider for MacOSProvider {
             });
         }
         let ax = self.get_cached(element.handle)?;
-        perform_ax_action(ax.as_ptr(), "AXPress", "press", element.role)
+        // The snapshot's `press` cannot say which AX action it came from
+        // (`AXPress` + `AXOpen` and `AXOpen` alone both list `press` and
+        // `open`), so the dispatch target is read from the live action list.
+        // That read must not fail open: an empty list would pick AXPress,
+        // which AppKit acknowledges on an AXOpen-only element without doing
+        // anything.
+        let ax_name = press_ax_action(&try_ax_action_names(ax.as_ptr())?);
+        perform_ax_action(ax.as_ptr(), ax_name, "press", element.role)
     }
 
     fn toggle(&self, element: &ElementData) -> Result<()> {
@@ -4735,8 +5184,15 @@ impl Provider for MacOSProvider {
         // `xa11y action activate` "does nothing". Activate the app first through
         // the accessibility API (the application element's AXFrontmost), then
         // activate the window.
-        activate_owning_app(ax.as_ptr(), "activate", element.role)?;
+        // Conservative: the clear above is a no-op on a window that was not
+        // minimized, but it cannot be told apart here, so a failure from this
+        // step is `unknown`.
+        activate_owning_app(ax.as_ptr(), "activate", element.role)
+            .map_err(|e| unknown_after_step(e, "clearing AXMinimized"))?;
+        // The window or its app has changed by now, so an AXRaise refusal
+        // must not read as "not delivered".
         perform_ax_action(ax.as_ptr(), "AXRaise", "activate", element.role)
+            .map_err(|e| unknown_after_step(e, "activating the owning app"))
     }
 
     fn minimize(&self, element: &ElementData) -> Result<()> {
@@ -4757,6 +5213,7 @@ impl Provider for MacOSProvider {
             });
         }
         let mut target = ax;
+        let left_fullscreen = state.fullscreen == Some(true);
         if state.fullscreen == Some(true) {
             // Leave fullscreen first: the window server suppresses minimize
             // while the window is fullscreen, so a minimize issued now would
@@ -4768,19 +5225,33 @@ impl Provider for MacOSProvider {
             // handle would then answer kAXErrorInvalidUIElement to the
             // minimize set. Prefer the fresh object from the app's enumerated
             // window set — the same lookup the settle follows the target
-            // with — and fall back to the cached handle when it is not
-            // listed.
-            if let Some(fresh) = fresh_target_in_app(app.as_ptr(), target.as_ptr())? {
+            // with. The settle only returns once the target is enumerated
+            // (see `SettleRun`), so the cached handle is used only if the
+            // window drops off the list again in the moment between the
+            // settle's last poll and this lookup.
+            if let Some(fresh) = fresh_target_in_app(app.as_ptr(), target.as_ptr())
+                .map_err(|e| unknown_after_step(e, "leaving fullscreen"))?
+            {
                 target = fresh;
             }
         }
+        // After leaving fullscreen the window has already changed, so a later
+        // failure must not read as "not delivered".
+        let after_exit = |e: Error| {
+            if left_fullscreen {
+                unknown_after_step(e, "leaving fullscreen")
+            } else {
+                e
+            }
+        };
         set_bool_attr(
             target.as_ptr(),
             "AXMinimized",
             true,
             "minimize",
             element.role,
-        )?;
+        )
+        .map_err(after_exit)?;
         // The iconify is applied asynchronously on native windows (see
         // [`WINDOW_MINIMIZED_SETTLE_BUDGET`]); settle the read-back so the
         // caller never has to discover the Dock animation.
@@ -4791,6 +5262,7 @@ impl Provider for MacOSProvider {
             "minimize",
             element.role,
         )
+        .map_err(|e| unknown_after_step(e, "setting AXMinimized"))
     }
 
     fn maximize(&self, element: &ElementData) -> Result<()> {
@@ -4841,8 +5313,12 @@ impl Provider for MacOSProvider {
         // `true` read would let an enter-fullscreen that races an exit
         // transition return success on a window that ends up restored. The
         // settle loop issues the set and re-issues it until the state
-        // commits.
+        // commits. Conservative: the AXMinimized clear above is a no-op on a
+        // window that was not minimized and that cannot be told apart here,
+        // and the settle loop itself sets AXFullScreen, so any error from it
+        // is `unknown`.
         settle_window_fullscreen(ax.as_ptr(), true, "enter_fullscreen", element.role)
+            .map_err(|e| unknown_after_step(e, "clearing AXMinimized or setting AXFullScreen"))
     }
 
     fn restore(&self, element: &ElementData) -> Result<()> {
@@ -4871,7 +5347,8 @@ impl Provider for MacOSProvider {
             // [`WINDOW_MINIMIZED_SETTLE_BUDGET`]); settle before the caller
             // can read the state back. A window that was not minimized reads
             // `false` on the first poll, so this costs one AX read.
-            settle_bool_attr(ax.as_ptr(), "AXMinimized", false, "restore", element.role)?;
+            settle_bool_attr(ax.as_ptr(), "AXMinimized", false, "restore", element.role)
+                .map_err(|e| unknown_after_step(e, "setting AXMinimized"))?;
         }
         // Never press the green button here: the press toggles, so a window
         // that is not fullscreen would be *entered* fullscreen by its own
@@ -4884,7 +5361,13 @@ impl Provider for MacOSProvider {
         // predicate refuses that state otherwise — so the settability flag
         // alone says whether there is a fullscreen state to clear.
         if state.fullscreen_settable {
-            settle_window_fullscreen(ax.as_ptr(), false, "restore", element.role)?;
+            settle_window_fullscreen(ax.as_ptr(), false, "restore", element.role).map_err(|e| {
+                if state.minimized_settable {
+                    unknown_after_step(e, "clearing AXMinimized")
+                } else {
+                    e
+                }
+            })?;
         }
         Ok(())
     }
@@ -4920,26 +5403,9 @@ impl Provider for MacOSProvider {
                 role: element.role,
             });
         }
-        let value = unsafe { safe_ax_value_create_cg_size(f64::from(width), f64::from(height)) };
-        if value.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Failed to create CGSize AXValue for window resize".to_string(),
-            });
-        }
-        let attr = CFString::new("AXSize");
-        let err = do_set_attribute(ax.as_ptr(), &attr, value);
-        unsafe { safe_cf_release(value) };
-        if err != AX_ERROR_SUCCESS {
-            return Err(action_error(
-                ax.as_ptr(),
-                err,
-                "resize_to",
-                element.role,
-                "Set AXSize failed",
-            ));
-        }
-        Ok(())
+        set_window_size(ax.as_ptr(), width, height, "resize_to", element.role)?;
+        settle_window_size(ax.as_ptr(), width, height, "resize_to", element.role)
+            .map_err(|e| unknown_after_step(e, "setting AXSize"))
     }
 
     // ── Typed operations ────────────────────────────────────────────
@@ -5504,6 +5970,17 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_after_a_completed_step_is_never_not_delivered() {
+        let refused = Error::ActionNotSupported {
+            action: "minimize".to_string(),
+            role: Role::Window,
+        };
+        assert_eq!(refused.delivery(), xa11y_core::Delivery::NotDelivered);
+        let e = unknown_after_step(refused, "leaving fullscreen");
+        assert_eq!(e.delivery(), xa11y_core::Delivery::Unknown);
+    }
+
+    #[test]
     fn maximize_is_platform_unsupported() {
         let provider = MacOSProvider::new().expect("provider construction must succeed");
         let window = ElementData::for_role(Role::Window);
@@ -5587,10 +6064,26 @@ mod tests {
     }
 
     #[test]
-    fn position_near_allows_only_the_documented_rounding_tolerance() {
-        assert!(position_near((12.0, 18.0), (10.0, 20.0)));
-        assert!(!position_near((12.1, 18.0), (10.0, 20.0)));
-        assert!(!position_near((12.0, 17.9), (10.0, 20.0)));
+    fn settle_window_size_propagates_unreadable_element() {
+        // Same contract as the move settle: an unreadable target surfaces its
+        // platform failure instead of a resize reported as applied.
+        let result = settle_window_size(std::ptr::null(), 900, 700, "resize_to", Role::Window);
+        assert!(matches!(result, Err(Error::Platform { .. })));
+    }
+
+    #[test]
+    fn refused_resize_names_the_requested_and_observed_rects() {
+        let msg = describe_refused_resize(900, 723, (850.0, 673.0), "(0, 31)");
+        assert!(msg.contains("requested 900x723 at origin (0, 31)"), "{msg}");
+        assert!(msg.contains("window reports 850x673"), "{msg}");
+        assert!(msg.contains("visible frame"), "{msg}");
+    }
+
+    #[test]
+    fn geometry_near_allows_only_the_documented_rounding_tolerance() {
+        assert!(geometry_near((12.0, 18.0), (10.0, 20.0)));
+        assert!(!geometry_near((12.1, 18.0), (10.0, 20.0)));
+        assert!(!geometry_near((12.0, 17.9), (10.0, 20.0)));
     }
 
     /// An enumerated target sample holding `fullscreen` / `settable`.
@@ -5667,44 +6160,103 @@ mod tests {
     }
 
     #[test]
-    fn settle_run_confirms_a_cached_target_only_on_its_own_grace_run() {
+    fn settle_run_never_confirms_on_the_cached_handle() {
+        // The target off `AXWindows` with its cached handle reading the
+        // promise is not confirmation, however long it lasts: the caller's
+        // next read goes through `AXWindows` and would not find the window.
+        // This is the "no window advertises enter_fullscreen" flake: the old
+        // run confirmed the cached handle after the grace.
         let t0 = Instant::now();
-        let promise = settle_poll(true, true);
-        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(false));
+        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(true));
         let mut run = SettleRun::default();
 
-        // Time held while the target was enumerated must not pad the cached
-        // run: the window is absent from `AXWindows` during the transition,
-        // and only a hold that starts there outlasts the absence (the entry
-        // transient reads the restore promise).
-        run.observe(promise.as_ref(), true, t0);
-        run.observe(cached.as_ref(), true, t0 + Duration::from_millis(100));
-        assert!(!run.confirmed(t0 + WINDOW_FULLSCREEN_SETTLE_GRACE));
-        assert!(!run.confirmed(
-            t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE
-                - Duration::from_millis(1)
-        ));
-        assert!(run.confirmed(t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE));
+        let mut now = t0;
+        while now < t0 + WINDOW_FULLSCREEN_SETTLE_BUDGET {
+            run.observe(cached.as_ref(), true, now);
+            assert!(
+                !run.confirmed(now),
+                "confirmed off AXWindows at {:?}",
+                now - t0
+            );
+            now += WINDOW_FULLSCREEN_SETTLE_INTERVAL;
+        }
     }
 
     #[test]
-    fn settle_run_treats_an_unanswered_cached_read_as_unknown() {
+    fn settle_run_restarts_the_enumerated_hold_after_an_absence() {
         let t0 = Instant::now();
-        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(false));
-        let churn = cached_poll(
-            AttrProbe::Churn("invalidated".to_string()),
-            AttrProbe::Value(true),
-        );
+        let promise = settle_poll(true, true);
+        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(true));
         let mut run = SettleRun::default();
 
-        run.observe(cached.as_ref(), true, t0);
-        run.observe(churn.as_ref(), false, t0 + Duration::from_millis(50));
+        // Held while enumerated, then off the list, then back: neither the
+        // time before the absence nor the absence itself counts.
+        run.observe(promise.as_ref(), true, t0);
         run.observe(cached.as_ref(), true, t0 + Duration::from_millis(100));
-        assert!(!run.confirmed(
-            t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE
-                - Duration::from_millis(1)
-        ));
-        assert!(run.confirmed(t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE));
+        assert!(!run.confirmed(t0 + Duration::from_millis(100) + WINDOW_FULLSCREEN_SETTLE_GRACE));
+        let back = t0 + Duration::from_millis(1500);
+        run.observe(promise.as_ref(), true, back);
+        assert!(!run.confirmed(back + WINDOW_FULLSCREEN_SETTLE_GRACE - Duration::from_millis(1)));
+        assert!(run.confirmed(back + WINDOW_FULLSCREEN_SETTLE_GRACE));
+    }
+
+    #[test]
+    fn settle_run_diagnosis_names_the_missing_half() {
+        let t0 = Instant::now();
+        let cached = cached_poll(AttrProbe::Value(true), AttrProbe::Value(true));
+
+        // Never in the enumerated set.
+        let mut run = SettleRun::default();
+        run.observe(cached.as_ref(), true, t0);
+        let described = run.describe_failure(cached.as_ref(), t0);
+        assert!(described.contains("was never enumerated"), "{described}");
+        assert!(described.contains("reads AXFullScreen=true"), "{described}");
+        assert!(described.contains("ever enumerated: false"), "{described}");
+
+        // Listed and holding, then gone at the deadline.
+        let mut run = SettleRun::default();
+        run.observe(settle_poll(true, true).as_ref(), true, t0);
+        run.observe(cached.as_ref(), true, t0 + Duration::from_millis(50));
+        let deadline = t0 + Duration::from_millis(250);
+        let described = run.describe_failure(cached.as_ref(), deadline);
+        assert!(
+            described.contains("was not re-enumerated before the deadline"),
+            "{described}"
+        );
+        assert!(
+            described.contains("last off AXWindows 200 ms before the deadline"),
+            "{described}"
+        );
+        assert!(
+            described.contains("the target was off AXWindows"),
+            "{described}"
+        );
+        assert!(
+            described.contains("holds broken before the grace: 1"),
+            "{described}"
+        );
+
+        // Listed at the deadline, but the state is wrong there.
+        let wrong = settle_poll(false, true);
+        run.observe(wrong.as_ref(), false, deadline);
+        let described = run.describe_failure(wrong.as_ref(), deadline);
+        assert!(
+            described.contains("is enumerated, but the promised state did not hold"),
+            "{described}"
+        );
+        assert!(described.contains("AXFullScreen=false"), "{described}");
+        assert!(described.contains("away from the promise"), "{described}");
+
+        // A churned last sample keeps the run's history.
+        run.observe(None, false, deadline);
+        let described = run.describe_failure(None, deadline);
+        assert!(
+            described.contains("did not answer a readable sample"),
+            "{described}"
+        );
+        assert!(described.contains("ever enumerated: true"), "{described}");
+        assert!(described.contains("last off AXWindows"), "{described}");
+        assert!(described.contains("no readable sample"), "{described}");
     }
 
     #[test]
@@ -6112,6 +6664,56 @@ mod tests {
     }
 
     #[test]
+    fn screen_recording_gates_ax_from_macos_26_and_when_unknown() {
+        assert!(!screen_recording_gates_ax(15));
+        assert!(screen_recording_gates_ax(26));
+        assert!(screen_recording_gates_ax(27));
+        assert!(screen_recording_gates_ax(0));
+    }
+
+    #[test]
+    fn screen_recording_instructions_name_the_version_and_the_restart() {
+        let known = screen_recording_instructions(26);
+        assert!(known.contains("This is macOS 26"), "{known}");
+        assert!(known.contains("restart this process"), "{known}");
+        let unknown = screen_recording_instructions(0);
+        assert!(unknown.contains("could not be detected"), "{unknown}");
+        assert!(unknown.contains("restart this process"), "{unknown}");
+    }
+
+    #[test]
+    fn screen_recording_preflight_is_callable() {
+        // The answer depends on the host's grant; the call must not prompt,
+        // throw, or crash. Whatever it says, it agrees with itself.
+        let first = MacOSProvider::has_screen_recording_permission();
+        assert_eq!(first, MacOSProvider::has_screen_recording_permission());
+    }
+
+    #[test]
+    fn dedup_by_ax_identity_compares_objects_not_pointers() {
+        // Two refs to one application are distinct pointers but the same
+        // accessibility object; a ref to another process is not (issue #514).
+        // AXUIElementCreateApplication sends no message, so this needs no
+        // running app or permission.
+        let me = std::process::id() as i32;
+        let a = AXElement::from_owned(unsafe { safe_ax_create_application(me) });
+        let b = AXElement::from_owned(unsafe { safe_ax_create_application(me) });
+        let other = AXElement::from_owned(unsafe { safe_ax_create_application(1) });
+        assert_ne!(a.as_ptr(), b.as_ptr(), "fixture needs two distinct refs");
+
+        let items = vec![
+            (0, a.as_ptr(), "a"),
+            (1, other.as_ptr(), "other"),
+            (2, b.as_ptr(), "b"),
+        ];
+        assert_eq!(
+            dedup_by_ax_identity(items.clone(), None),
+            vec!["a", "other"]
+        );
+        assert_eq!(dedup_by_ax_identity(items, Some(1)), vec!["a"]);
+    }
+
+    #[test]
     fn safe_ax_set_messaging_timeout_is_callable_on_null_element() {
         // Exercises the wrapper: it must return an AXError rather than let an
         // ObjC exception unwind into Rust. The code Apple picks for a NULL
@@ -6129,6 +6731,15 @@ mod tests {
     fn ax_action_names_returns_empty_for_null_element() {
         let result = ax_action_names(std::ptr::null());
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn try_ax_action_names_reports_a_failed_read() {
+        // A null element is an AX error, not "no actions".
+        assert!(matches!(
+            try_ax_action_names(std::ptr::null()),
+            Err(Error::Platform { .. })
+        ));
     }
 
     #[test]
@@ -6189,6 +6800,20 @@ mod tests {
         assert_ne!(err, AX_ERROR_SUCCESS);
     }
 
+    /// Both spellings of a password field are flagged, and nothing else
+    /// is (#522). The role itself stays `TextField`; see `map_ax_role`.
+    #[test]
+    fn secure_text_field_is_flagged_as_role_or_subrole() {
+        assert!(is_secure_text_field("AXSecureTextField", None));
+        assert!(is_secure_text_field(
+            "AXTextField",
+            Some("AXSecureTextField")
+        ));
+        assert!(!is_secure_text_field("AXTextField", None));
+        assert!(!is_secure_text_field("AXTextField", Some("AXSearchField")));
+        assert!(!is_secure_text_field("AXTextArea", None));
+    }
+
     #[test]
     fn map_ax_role_covers_all_known_roles() {
         assert_eq!(map_ax_role("AXSortButton", None), Role::Button);
@@ -6223,6 +6848,10 @@ mod tests {
         assert_eq!(map_ax_role("AXCheckBox", None), Role::CheckBox);
         assert_eq!(map_ax_role("AXTextField", None), Role::TextField);
         assert_eq!(map_ax_role("AXSecureTextField", None), Role::TextField);
+        assert_eq!(
+            map_ax_role("AXTextField", Some("AXSecureTextField")),
+            Role::TextField
+        );
         assert_eq!(map_ax_role("AXTextArea", None), Role::TextArea);
         assert_eq!(map_ax_role("AXStaticText", None), Role::StaticText);
         assert_eq!(map_ax_role("AXComboBox", None), Role::ComboBox);
@@ -6275,6 +6904,22 @@ mod tests {
         assert_eq!(map_ax_role("AXValueIndicator", None), Role::ScrollThumb);
         // AXMenuButton with AXSegment subrole is a segmented control button
         assert_eq!(map_ax_role("AXMenuButton", Some("AXSegment")), Role::Button);
+    }
+
+    #[test]
+    fn press_dispatches_to_axopen_only_when_it_is_the_activation_action() {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(press_ax_action(&names(&["AXOpen"])), "AXOpen");
+        assert_eq!(press_ax_action(&names(&["AXShowMenu", "AXOpen"])), "AXOpen");
+        // AXPress wins whenever the element has it (issue #517 decision).
+        assert_eq!(press_ax_action(&names(&["AXOpen", "AXPress"])), "AXPress");
+        assert_eq!(press_ax_action(&names(&["AXPress"])), "AXPress");
+        // No AXOpen: unchanged from before.
+        assert_eq!(press_ax_action(&names(&["AXConfirm"])), "AXPress");
+        // AXConfirm does not count as AXPress: an element with AXConfirm and
+        // AXOpen but no AXPress opens.
+        assert_eq!(press_ax_action(&names(&["AXConfirm", "AXOpen"])), "AXOpen");
+        assert_eq!(press_ax_action(&[]), "AXPress");
     }
 
     #[test]

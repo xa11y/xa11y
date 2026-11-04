@@ -129,8 +129,12 @@ internal sealed class TestWindow : Window
         _usersTable = MakeUsersTable();
 
         // Wrap into a second column instead of scrolling, so every widget stays
-        // on screen (an offscreen widget is still in the UIA tree, but keeping
-        // it visible makes failures easier to reproduce by eye).
+        // in view. The vertical scroll bar is disabled rather than automatic:
+        // with it on, the ScrollViewer measures the WrapPanel at unbounded
+        // height, the panel never wraps, and WPF scrolls the page whenever a
+        // test focuses a control near the bottom. A control scrolled out of
+        // the page reports not visible (issue #502), and the suites' actions
+        // wait for visible.
         var page = new WrapPanel { Orientation = Orientation.Vertical, Margin = new Thickness(8) };
         page.Children.Add(BuildButtons());
         page.Children.Add(BuildCheckBoxes());
@@ -149,7 +153,7 @@ internal sealed class TestWindow : Window
         root.Children.Add(Dock(BuildStatusBar(), System.Windows.Controls.Dock.Bottom));
         root.Children.Add(new ScrollViewer
         {
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = page,
         });
@@ -245,7 +249,12 @@ internal sealed class TestWindow : Window
         var search = new TextBox { Text = "hello world", Width = 260 };
         AutomationProperties.SetName(search, "Search");
 
-        return MakeGroup("Input", Orientation.Vertical, search);
+        // Password entry (#522, #597): PasswordBoxAutomationPeer reports UIA
+        // `IsPassword` and withholds its text from ValuePattern.Value.
+        var password = new PasswordBox { Password = "hunter2", Width = 260 };
+        AutomationProperties.SetName(password, "Password");
+
+        return MakeGroup("Input", Orientation.Vertical, search, password);
     }
 
     private static GroupBox BuildText()
@@ -269,7 +278,20 @@ internal sealed class TestWindow : Window
         var list = new ListBox { ItemsSource = _items, Width = 260, Height = 100 };
         AutomationProperties.SetName(list, "Items");
 
-        return MakeGroup("List", Orientation.Vertical, list);
+        // A list longer than its viewport, so its last rows start scrolled out
+        // (issue #590). An auto-waiting action on one of them scrolls it into
+        // view through ScrollItem.ScrollIntoView before acting. Virtualization
+        // is off so every row exists in the UIA tree from the start: a
+        // virtualized row past the viewport has no element to find at all.
+        var longList = new ListBox { Width = 260, Height = 50 };
+        VirtualizingPanel.SetIsVirtualizing(longList, false);
+        for (int i = 1; i <= 12; i++)
+        {
+            longList.Items.Add($"Long Item {i}");
+        }
+        AutomationProperties.SetName(longList, "Long List");
+
+        return MakeGroup("List", Orientation.Vertical, list, longList);
     }
 
     private GroupBox BuildTable() => MakeGroup("Table", Orientation.Vertical, _usersTable);

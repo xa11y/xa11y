@@ -24,8 +24,9 @@ _GUIDANCE = {
     ),
     "AccessibilityNotEnabledError": (
         "The app is reachable but publishes an empty tree. Chromium and Electron apps only expose "
-        "their accessibility tree when launched with --force-renderer-accessibility (or with "
-        "ACCESSIBILITY_ENABLED=1 in the environment). Relaunch the app that way, or fall back to "
+        "their accessibility tree when launched with --force-renderer-accessibility; in a bare "
+        "session with no settings daemon (CI, Xvfb, a container) they also need "
+        "ACCESSIBILITY_ENABLED=1 in the environment. Relaunch the app that way, or fall back to "
         "screenshot plus point-targeted input."
     ),
     # xa11y maps three distinct core errors onto this one class, and `describe`
@@ -65,7 +66,22 @@ _GUIDANCE = {
 }
 
 # Fields carrying xa11y's structured diagnosis, in the order they read best.
-_DIAGNOSIS_FIELDS = ("condition", "selector", "last_observed", "elapsed")
+# `hidden_reason` says why a matched element read visible=False ("scrolled_out",
+# "window_minimized", ...), which is what tells the model whether to scroll or to
+# restore a window. `auto_scroll` says whether the action already tried scrolling
+# it into view ("refused", "no_effect", "revealed"), so the model does not try a
+# scroll that was just refused.
+# `delivery` says whether the failed action may already have taken effect, so
+# the model knows whether retrying is safe or could double-submit.
+_DIAGNOSIS_FIELDS = (
+    "condition",
+    "selector",
+    "last_observed",
+    "hidden_reason",
+    "auto_scroll",
+    "elapsed",
+    "delivery",
+)
 
 
 class ToolError(Exception):
