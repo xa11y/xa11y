@@ -9,7 +9,7 @@ from typing import Literal, TypedDict
 class _PointerTargetDiagnosis(TypedDict):
     """Typing-only shape of the plain pointer diagnostic dictionary.
 
-    Named anchors are strings; offsets are {"offset": {"dx": int, "dy": int}}.
+    Named anchors are strings; offsets are ``{"offset": {"dx": int, "dy": int}}``.
     Checked point/display geometry uses the named coordinate space.
     """
 

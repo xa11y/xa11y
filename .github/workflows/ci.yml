@@ -1088,7 +1088,9 @@ jobs:
         run: python docs/check_tables.py
 
       - name: Generate Python API docs
-        run: python docs/generate_python_api.py
+        run: |
+          python -m unittest docs.test_generate_python_api
+          python docs/generate_python_api.py
 
       - name: Generate JavaScript API docs
         run: python docs/generate_js_api.py
