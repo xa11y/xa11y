@@ -106,7 +106,7 @@ def test_type_text_line_break_is_one_break(app, typed):
     sys.platform != "win32" or APP not in ("winforms", "wpf"),
     reason="needs a native Windows multiline edit control (winforms / wpf test apps)",
 )
-@pytest.mark.parametrize("shape", ["plain", "newline", "unicode"])
+@pytest.mark.parametrize("shape", ["plain", "newline", "unicode", "composed"])
 def test_type_text_preserves_each_character_repeatedly(app, shape):
     """Queued Unicode packets used to substitute the final character (#620).
 
@@ -123,11 +123,19 @@ def test_type_text_preserves_each_character_repeatedly(app, shape):
             prefix = "abcdefghijklm"
             if shape == "newline":
                 prefix += "\r\n"
-            elif shape == "unicode":
+            elif shape in ("unicode", "composed"):
                 prefix += "hé😀漢字"
+                if shape == "composed":
+                    prefix += "\n"
             typed = prefix + suffix
             notes.set_value("")
-            sim.type_text(typed)
+            if shape == "composed":
+                # Consecutive one-scalar calls must preserve the same text,
+                # including the emoji and the real Enter between lines.
+                for character in typed:
+                    sim.type_text(character)
+            else:
+                sim.type_text(typed)
             _wait_for_lines(app, WINDOWS_NOTES, _lines(typed))
     finally:
         notes.set_value(WINDOWS_ORIGINAL_NOTES[APP])

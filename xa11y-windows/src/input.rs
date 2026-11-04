@@ -637,10 +637,7 @@ impl InputProvider for WindowsInputProvider {
         // distinct characters are queued too quickly, even in separate
         // SendInput calls (#620). Keep surrogate pairs in one submission.
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        for (index, event) in events.into_iter().enumerate() {
-            if index > 0 {
-                std::thread::sleep(TYPE_TEXT_INTERVAL);
-            }
+        for event in events {
             let mut inputs = Vec::with_capacity(4);
             match event {
                 Typed::Character(character) => {
@@ -656,6 +653,9 @@ impl InputProvider for WindowsInputProvider {
                 }
             }
             self.send_locked(&dpi, &inputs, Target::Keyboard)?;
+            // Include the final scalar: the next type_text call may start
+            // immediately, including a call that types just one character.
+            std::thread::sleep(TYPE_TEXT_INTERVAL);
         }
         Ok(())
     }

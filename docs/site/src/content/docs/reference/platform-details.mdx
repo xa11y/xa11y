@@ -251,9 +251,10 @@ When the provider is created, xa11y sets the process-wide accessibility messagin
 
 `InputSim.type_text` submits each Unicode character through `SendInput`,
 keeping UTF-16 surrogate pairs in the same submission. It waits at least
-10 ms between consecutive characters or Enter taps. Typing 100 letters
-adds at least 990 ms of delay. The pacing addresses queued Unicode packet
-corruption in WPF. The call blocks during these delays.
+10 ms after every character or Enter tap, including the last one, so
+consecutive calls retain the same pacing. Typing 100 letters adds at least
+one second of delay. The pacing addresses queued Unicode packet corruption
+in WPF. The call blocks during these delays.
 
 ### Coordinates
 
