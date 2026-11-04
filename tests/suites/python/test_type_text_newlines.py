@@ -103,6 +103,47 @@ def test_type_text_line_break_is_one_break(app, typed):
 
 
 @pytest.mark.skipif(
+    sys.platform != "win32" or APP not in ("winforms", "wpf"),
+    reason="needs a native Windows multiline edit control (winforms / wpf test apps)",
+)
+def test_type_text_clean_client_comparison(app, capsys):
+    """Measure unpaced packets and the API without prior event callbacks (#620).
+
+    The control posts native Unicode packets without pacing. Its mismatches
+    are reported separately; only paced production-API mismatches fail.
+    """
+    import json
+    import subprocess
+    from pathlib import Path
+
+    probe = Path(__file__).resolve().parents[2] / "harness" / "windows_typing_probe.py"
+    notes = app.locator(WINDOWS_NOTES)
+    original = notes.element().value or ""
+    try:
+        result = subprocess.run(
+            [sys.executable, str(probe), "--pid", str(app.pid), "--repeats", "60"],
+            capture_output=True,
+            text=True,
+            timeout=720,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            check=False,
+        )
+    finally:
+        notes.set_value(original)
+    assert result.stdout, f"typing probe produced no report: {result.stderr[:4000]}"
+    report = json.loads(result.stdout)
+    with capsys.disabled():
+        print("WINDOWS_TYPING_COMPARISON " + json.dumps(report), flush=True)
+    assert result.returncode == 0, (
+        f"paced typing failed in the clean client: {report}; stderr={result.stderr[:4000]}"
+    )
+    assert report["control"]["plain"]["attempts"] == 120
+    assert set(report["paced"]) == {"plain", "newline", "unicode", "composed"}
+    assert all(item["attempts"] == 60 for item in report["paced"].values())
+    assert all(item["bad"] == 0 for item in report["paced"].values())
+
+
+@pytest.mark.skipif(
     sys.platform != "darwin" or APP != "cocoa",
     reason="needs the Cocoa test app's multiline NSTextView",
 )

@@ -49,6 +49,11 @@ enum Target {
 /// One notch of a physical mouse wheel. Matches Win32's `WHEEL_DELTA` macro.
 const WHEEL_DELTA: i32 = 120;
 
+/// Separate Unicode characters so WPF can translate each VK_PACKET before
+/// another character is queued (#620). Per-tap SendInput calls without pacing
+/// still corrupted text in the native WPF stress test.
+const TYPE_TEXT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// `SendInput`-based [`InputProvider`] for Windows.
 ///
 /// All calls serialize through an internal mutex so concurrent threads don't
@@ -82,6 +87,16 @@ impl WindowsInputProvider {
 
     fn send(&self, dpi: &crate::dpi::DpiScope, inputs: &[INPUT], target: Target) -> Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.send_locked(dpi, inputs, target)
+    }
+
+    /// Caller holds `lock` for the entire gesture, including multi-batch typing.
+    fn send_locked(
+        &self,
+        dpi: &crate::dpi::DpiScope,
+        inputs: &[INPUT],
+        target: Target,
+    ) -> Result<()> {
         self.preflight(dpi, target)?;
         let sent = crate::coords::send_input(dpi, inputs);
         if sent as usize != inputs.len() {
@@ -156,8 +171,8 @@ fn key_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 /// One tap `type_text` sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Typed {
-    /// A UTF-16 code unit, as a `KEYEVENTF_UNICODE` tap.
-    Unit(u16),
+    /// One Unicode scalar, with its UTF-16 units submitted together.
+    Character(char),
     /// A line break, as a `VK_RETURN` tap.
     LineBreak,
 }
@@ -175,17 +190,17 @@ enum Typed {
 /// each, so `"\n\r"` and `"\r\r"` are two. The pairing is per call: a CR
 /// ending one `type_text` call and an LF starting the next are two breaks.
 fn typed_events(text: &str) -> Vec<Typed> {
-    const CR: u16 = b'\r' as u16;
-    const LF: u16 = b'\n' as u16;
+    const CR: char = '\r';
+    const LF: char = '\n';
     let mut out = Vec::with_capacity(text.len());
     let mut prev = None;
-    for unit in text.encode_utf16() {
-        match unit {
+    for character in text.chars() {
+        match character {
             LF if prev == Some(CR) => {}
             CR | LF => out.push(Typed::LineBreak),
-            _ => out.push(Typed::Unit(unit)),
+            _ => out.push(Typed::Character(character)),
         }
-        prev = Some(unit);
+        prev = Some(character);
     }
     out
 }
@@ -617,23 +632,32 @@ impl InputProvider for WindowsInputProvider {
         // the OS text-input path rather than by synthesising shift chords
         // against whatever keyboard layout happens to be active.
         let events = typed_events(text);
-        let mut inputs: Vec<INPUT> = Vec::with_capacity(events.len() * 2);
+        // Keep the whole call serialized across submissions and pacing.
+        // WPF can translate an earlier VK_PACKET as a later character when
+        // distinct characters are queued too quickly, even in separate
+        // SendInput calls (#620). Keep surrogate pairs in one submission.
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         for event in events {
+            let mut inputs = Vec::with_capacity(4);
             match event {
-                Typed::Unit(code_unit) => {
-                    inputs.push(unicode_input(code_unit, false));
-                    inputs.push(unicode_input(code_unit, true));
+                Typed::Character(character) => {
+                    let mut units = [0u16; 2];
+                    for &unit in character.encode_utf16(&mut units).iter() {
+                        inputs.push(unicode_input(unit, false));
+                        inputs.push(unicode_input(unit, true));
+                    }
                 }
                 Typed::LineBreak => {
                     inputs.push(key_input(VK_RETURN, KEYBD_EVENT_FLAGS(0)));
                     inputs.push(key_input(VK_RETURN, KEYEVENTF_KEYUP));
                 }
             }
+            self.send_locked(&dpi, &inputs, Target::Keyboard)?;
+            // Include the final scalar: the next type_text call may start
+            // immediately, including a call that types just one character.
+            std::thread::sleep(TYPE_TEXT_INTERVAL);
         }
-        if inputs.is_empty() {
-            return Ok(());
-        }
-        self.send(&dpi, &inputs, Target::Keyboard)
+        Ok(())
     }
 }
 
@@ -687,7 +711,7 @@ mod tests {
         typed_events(text)
             .into_iter()
             .map(|e| match e {
-                Typed::Unit(u) => String::from_utf16(&[u]).unwrap_or_else(|_| "?".into()),
+                Typed::Character(character) => character.to_string(),
                 Typed::LineBreak => "\u{23CE}".into(),
             })
             .collect()
@@ -718,10 +742,12 @@ mod tests {
     }
 
     #[test]
-    fn surrogate_pairs_pass_through_unit_by_unit() {
+    fn surrogate_pairs_stay_in_one_typed_character() {
         let events = typed_events("x\u{1F600}");
-        assert_eq!(events.len(), 3, "{events:?}");
-        assert!(events.iter().all(|e| matches!(e, Typed::Unit(_))));
+        assert_eq!(
+            events,
+            [Typed::Character('x'), Typed::Character('\u{1F600}')]
+        );
         assert!(typed_events("").is_empty());
     }
 }
