@@ -247,6 +247,15 @@ Text is inserted through the accessibility API. Keyboard events are never simula
 
 When the provider is created, xa11y sets the process-wide accessibility messaging timeout to 2 seconds per message, in place of the system default. The setting applies to every accessibility call the host process makes, including ones that don't go through xa11y. A read or action on an app that doesn't answer in time fails with `Error::Platform` carrying `kAXErrorCannotComplete` (-25204). The message names the app's PID, and for actions the app's name too. The message says whether the call ran out the timeout or was refused sooner. A timed-out action may still take effect once the app catches up.
 
+### Text input simulation (Windows)
+
+`InputSim.type_text` submits each Unicode character through `SendInput`,
+keeping UTF-16 surrogate pairs in the same submission. It waits at least
+10 ms after every character or Enter tap, including the last one, so
+consecutive calls retain the same pacing. Typing 100 letters adds at least
+one second of delay. The pacing addresses queued Unicode packet corruption
+in WPF. The call blocks during these delays.
+
 ### Coordinates
 
 Bounds use desktop coordinates with origin at the top-left of the primary display. Windows uses physical pixels. macOS and Linux use logical points where available. Use the screenshot coordinate methods to map bounds onto captured pixels. Note:
