@@ -126,17 +126,23 @@ pub fn anchor_point(rect: &Rect, anchor: Anchor) -> Point {
     // Rectangles are half-open. Named right/bottom anchors target the last
     // point inside the bounds, never the exclusive far edge (which can be on
     // a different display and is not part of the element).
-    let w = rect.width.saturating_sub(1).min(i32::MAX as u32) as i32;
-    let h = rect.height.saturating_sub(1).min(i32::MAX as u32) as i32;
+    // A large unsigned extent can still end at a representable signed point
+    // when its origin is negative. Narrow only the final coordinate.
+    let add_extent = |origin: i32, offset: u32| {
+        (i64::from(origin) + i64::from(offset)).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+            as i32
+    };
+    let right = add_extent(x, rect.width.saturating_sub(1));
+    let bottom = add_extent(y, rect.height.saturating_sub(1));
     match anchor {
         Anchor::Center => Point::new(
-            x.saturating_add((rect.width / 2).min(i32::MAX as u32) as i32),
-            y.saturating_add((rect.height / 2).min(i32::MAX as u32) as i32),
+            add_extent(x, rect.width / 2),
+            add_extent(y, rect.height / 2),
         ),
         Anchor::TopLeft => Point::new(x, y),
-        Anchor::TopRight => Point::new(x.saturating_add(w), y),
-        Anchor::BottomLeft => Point::new(x, y.saturating_add(h)),
-        Anchor::BottomRight => Point::new(x.saturating_add(w), y.saturating_add(h)),
+        Anchor::TopRight => Point::new(right, y),
+        Anchor::BottomLeft => Point::new(x, bottom),
+        Anchor::BottomRight => Point::new(right, bottom),
         Anchor::Offset { dx, dy } => Point::new(x.saturating_add(dx), y.saturating_add(dy)),
     }
 }
@@ -1633,6 +1639,73 @@ mod point_scale_tests {
         assert_eq!(
             anchor_point(&bounds, Anchor::BottomRight),
             Point::new(12, 21)
+        );
+    }
+
+    #[test]
+    fn wide_negative_origin_anchors_reach_representable_far_edges() {
+        let bounds = Rect {
+            x: i32::MIN,
+            y: i32::MIN,
+            width: u32::MAX,
+            height: u32::MAX,
+        };
+        let last = i32::MAX - 1;
+        assert_eq!(
+            anchor_point(&bounds, Anchor::TopRight),
+            Point::new(last, i32::MIN)
+        );
+        assert_eq!(
+            anchor_point(&bounds, Anchor::BottomLeft),
+            Point::new(i32::MIN, last)
+        );
+        assert_eq!(
+            anchor_point(&bounds, Anchor::BottomRight),
+            Point::new(last, last)
+        );
+        assert_eq!(anchor_point(&bounds, Anchor::Center), Point::new(-1, -1));
+    }
+
+    #[test]
+    fn far_anchors_saturate_only_after_adding_the_origin() {
+        let bounds = Rect {
+            x: -100,
+            y: -200,
+            width: u32::MAX,
+            height: u32::MAX,
+        };
+        assert_eq!(
+            anchor_point(&bounds, Anchor::BottomRight),
+            Point::new(i32::MAX, i32::MAX)
+        );
+    }
+
+    #[test]
+    fn empty_bounds_and_explicit_offsets_preserve_their_anchor_rules() {
+        let bounds = Rect {
+            x: -20,
+            y: 30,
+            width: 0,
+            height: 0,
+        };
+        for anchor in [
+            Anchor::Center,
+            Anchor::TopLeft,
+            Anchor::TopRight,
+            Anchor::BottomLeft,
+            Anchor::BottomRight,
+        ] {
+            assert_eq!(anchor_point(&bounds, anchor), Point::new(-20, 30));
+        }
+        assert_eq!(
+            anchor_point(
+                &bounds,
+                Anchor::Offset {
+                    dx: i32::MIN,
+                    dy: i32::MAX
+                }
+            ),
+            Point::new(i32::MIN, i32::MAX)
         );
     }
 }
