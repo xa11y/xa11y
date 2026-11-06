@@ -139,7 +139,10 @@ rebuild produces a new hash and a new, ungranted binary.
 
 Like Chromium on Linux, Chrome and Electron on macOS gate their renderer
 accessibility tree. Until something asks for it, the window holds an
-`AXWebArea` with no children. Chrome honors `--force-renderer-accessibility` at
+`AXWebArea` with no children. Chromium builds the tree lazily, so the empty
+state is a window of time, not a stable one: launching Electron without
+`force-renderer-accessibility` does not guarantee that the first assistive
+client to look finds it empty. Chrome honors `--force-renderer-accessibility` at
 launch. A running app builds the tree when an assistive client sets
 `AXManualAccessibility` (Electron) or `AXEnhancedUserInterface` (Chrome, and
 what VoiceOver sets) to true on the **application** element. Setting either on
@@ -158,6 +161,22 @@ timeout rather than `AccessibilityNotEnabledError`. The attribute is left set to
 true and xa11y does not restore it. `AXEnhancedUserInterface` is known to
 disable window animations and to confuse some window managers in apps that
 react to it, which is why the method is never called implicitly.
+
+### macOS: Chromium leaves AXTitle empty on text leaves and table cells
+
+Chromium (Electron, Chrome) answers `AXTitle` with an empty string on text
+leaves, not with a missing attribute. A name rule of "AXTitle, else the text's
+`AXValue`" therefore never reaches the value, and every `static_text` in a page
+reads `name=""`. The backend treats an empty `AXTitle` as no title, so a static
+text is named by its `AXValue`, and every other role by `AXDescription`.
+
+An HTML `<table>` arrives as `AXTable` with three kinds of child. The `AXRow`
+elements hold the cells. Each column also appears as an `AXColumn` (mapped to
+`group`) that lists the same `AXCell` elements again, plus a header container
+with a 1x1 frame. The `table_cell` count under a table is therefore larger than
+the number of cells on screen. The cells themselves carry no name or value: the
+text is in a child `AXStaticText`, so select it with `table_cell static_text`
+or `[name*="Alice"]`, not with `table_cell[name=...]`.
 
 ## Roles and the role enum disagree across platforms
 

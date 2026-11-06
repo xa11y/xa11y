@@ -3358,7 +3358,7 @@ fn matches_ax_with_role(
             "role" => role.map(|r| r.to_snake_case().to_string()),
             "name" => {
                 // Mirror build_element_data name logic.
-                let ax_title = ax_string(ax, "AXTitle");
+                let ax_title = ax_string(ax, "AXTitle").filter(|t| !t.is_empty());
                 ax_title.or_else(|| {
                     if role == Some(Role::StaticText) {
                         ax_value_string(ax)
@@ -3370,7 +3370,7 @@ fn matches_ax_with_role(
             "value" => ax_value_string(ax),
             "description" => {
                 // Mirror build_element_data description logic.
-                let ax_title = ax_string(ax, "AXTitle");
+                let ax_title = ax_string(ax, "AXTitle").filter(|t| !t.is_empty());
                 let ax_description = ax_string(ax, "AXDescription");
                 let name = ax_title.or_else(|| {
                     if role == Some(Role::StaticText) {
@@ -3788,14 +3788,19 @@ fn build_snapshot_data(
             raw.insert("AXValue".into(), serde_json::Value::String(v.clone()));
         }
 
-        // Name: prefer AXTitle, fall back to AXDescription only if no title
-        let name = attrs.ax_title.or_else(|| {
-            if role == Role::StaticText {
-                attrs.value_string.clone()
-            } else {
-                attrs.ax_description.clone()
-            }
-        });
+        // Name: AXTitle when it has text; otherwise the static text's own
+        // AXValue, or AXDescription for every other role. An empty AXTitle is
+        // "no title" (Chromium answers "" on its text leaves), not a name.
+        let name = attrs
+            .ax_title
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                if role == Role::StaticText {
+                    attrs.value_string.clone()
+                } else {
+                    attrs.ax_description.clone()
+                }
+            });
 
         // Description: AXHelp first, then AXDescription (if not already used as name)
         let description = attrs.ax_help.or_else(|| {
