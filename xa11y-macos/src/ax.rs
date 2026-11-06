@@ -3791,16 +3791,13 @@ fn build_snapshot_data(
         // Name: AXTitle when it has text; otherwise the static text's own
         // AXValue, or AXDescription for every other role. An empty AXTitle is
         // "no title" (Chromium answers "" on its text leaves), not a name.
-        let name = attrs
-            .ax_title
-            .filter(|t| !t.is_empty())
-            .or_else(|| {
-                if role == Role::StaticText {
-                    attrs.value_string.clone()
-                } else {
-                    attrs.ax_description.clone()
-                }
-            });
+        let name = attrs.ax_title.filter(|t| !t.is_empty()).or_else(|| {
+            if role == Role::StaticText {
+                attrs.value_string.clone()
+            } else {
+                attrs.ax_description.clone()
+            }
+        });
 
         // Description: AXHelp first, then AXDescription (if not already used as name)
         let description = attrs.ax_help.or_else(|| {
