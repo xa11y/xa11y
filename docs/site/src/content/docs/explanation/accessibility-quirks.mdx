@@ -139,10 +139,10 @@ rebuild produces a new hash and a new, ungranted binary.
 
 Like Chromium on Linux, Chrome and Electron on macOS gate their renderer
 accessibility tree. Until something asks for it, the window holds an
-`AXWebArea` with no children. Chromium builds the tree lazily, so the empty
-state is a window of time, not a stable one: launching Electron without
-`force-renderer-accessibility` does not guarantee that the first assistive
-client to look finds it empty. Chrome honors `--force-renderer-accessibility` at
+`AXWebArea` with no children. Chromium builds the tree lazily on the first AX
+query, so launching Electron without `force-renderer-accessibility` gives no
+deterministic empty pre-state on macOS: a client can find the tree already
+built, or empty for a few seconds on a cold launch. Chrome honors `--force-renderer-accessibility` at
 launch. A running app builds the tree when an assistive client sets
 `AXManualAccessibility` (Electron) or `AXEnhancedUserInterface` (Chrome, and
 what VoiceOver sets) to true on the **application** element. Setting either on

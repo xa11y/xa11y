@@ -3,8 +3,9 @@
 On macOS the method asks the app to build its web content's accessibility
 tree. The suite's own Electron instance is launched with that tree already on,
 so this test launches a second one with it off, the way a user's Electron app
-starts, and checks that the page's button is unreachable before the call and
-reachable after it.
+starts, calls the method, and checks that the page's button is reachable.
+It does not assert an empty tree beforehand: Chromium builds the tree lazily
+on the first AX query, so the off switch gives no deterministic pre-state.
 
 Linux and Windows have no such request: Chromium's tree there is a launch-time
 flag (Linux) or built on demand for any UI Automation client (Windows). The
@@ -16,7 +17,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -81,15 +81,8 @@ def test_enable_web_accessibility_makes_web_content_reachable(
     electron_only, electron_without_web_accessibility
 ):
     app = electron_without_web_accessibility
-    # Before the request the page's button is not in the tree, and the miss
-    # says why and what to call.
-    with pytest.raises(xa11y.SelectorNotMatchedError) as miss:
-        app.locator(OK_BUTTON).element()
-    assert "enable_web_accessibility" in (miss.value.last_observed or ""), (
-        f"the miss should suggest enable_web_accessibility; "
-        f"last_observed={miss.value.last_observed!r}; scope:\n{miss.value.scope}"
-    )
-
+    # No "empty before" check: Chromium builds its web tree lazily on the first
+    # AX query, so the off switch gives no deterministic empty pre-state.
     app.enable_web_accessibility(timeout=30)
 
     assert app.locator(OK_BUTTON).element().name == "OK"
@@ -114,27 +107,3 @@ def test_enable_web_accessibility_is_refused_with_guidance(electron_only, app):
         assert "ACCESSIBILITY_ENABLED=1" in message, message
     else:
         assert "UI Automation" in message, message
-
-
-# TEMPORARY CI diagnostic (PR #619); removed before merge.
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
-def test_diag_first_access(electron_only, electron_without_web_accessibility):
-    app = electron_without_web_accessibility
-    log = []
-    t0 = time.monotonic()
-    for _ in range(40):
-        try:
-            n_web = len(app.locator("web_area").elements())
-            n_kids = len(app.locator("web_area *").elements())
-            n_btn = len(app.locator('button[name="OK"]').elements())
-            log.append(f"t={time.monotonic()-t0:.2f}s web_area={n_web} descendants={n_kids} ok_buttons={n_btn}")
-        except Exception as e:  # noqa: BLE001
-            log.append(f"t={time.monotonic()-t0:.2f}s error {type(e).__name__}: {str(e)[:150]}")
-        time.sleep(0.1)
-    cells = app.locator('table[name="Users Table"] table_cell').elements()
-    dump = [f"cells={len(cells)}"]
-    for c in cells[:2]:
-        dump.append(f"cell raw={c.raw} name={c.name!r} value={c.value!r}")
-    for st in app.locator('table[name="Users Table"] static_text').elements()[:3]:
-        dump.append(f"static_text raw={st.raw} name={st.name!r} value={st.value!r}")
-    pytest.fail("DIAG\n" + "\n".join(log) + "\n" + "\n".join(dump))
