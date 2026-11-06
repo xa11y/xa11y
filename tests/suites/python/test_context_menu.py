@@ -191,7 +191,6 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
     scroll_bar = scroll_bars[0] if scroll_bars else None
     original_scroll = scroll_bar.numeric_value if scroll_bar is not None else None
     original_origin = None
-    menu_closed = False
     tried: list[str] = []
     try:
         target, bounds, win_bounds, cx, cy = _locate_target(app)
@@ -267,15 +266,25 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
         # Not a window, so App.windows() keeps leaving it out.
         assert all(w.role in ("window", "dialog") for w in app.windows())
         item.press()
-        menu_closed = True
     finally:
         # Dismiss the menu even when discovery regresses, so one failure
         # cannot poison the rest of the shared Cocoa app run.
-        if not menu_closed:
-            try:
+        # AXPress on the item runs its action but need not end the menu's
+        # tracking loop: the next left mouse-down in the shared app is then
+        # spent dismissing the menu and never reaches a view (the drag test,
+        # issue #515, saw dragged and up events but no down). So whether or
+        # not the press went through, close the menu if it is still open and
+        # wait for it to go.
+        try:
+            if app.locator(CONTEXT_ACTION).count():
                 xa11y.input_sim().press("Escape")
-            except xa11y.XA11yError:
-                pass  # Preserve the discovery failure if cleanup also fails.
+                deadline = time.monotonic() + 5.0
+                while (
+                    app.locator(CONTEXT_ACTION).count() and time.monotonic() < deadline
+                ):
+                    time.sleep(0.1)
+        except xa11y.XA11yError:
+            pass  # Preserve the test's own failure if the cleanup also fails.
         if scroll_bar is not None and original_scroll is not None:
             try:
                 scroll_bar.set_numeric_value(original_scroll)
