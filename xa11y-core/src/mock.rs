@@ -991,6 +991,42 @@ pub fn build_provider() -> Arc<MockProvider> {
     })
 }
 
+/// Build the test tree plus one `web_area` per entry of `filled` under the
+/// main window; an entry that is `true` holds a button, one that is `false`
+/// is the empty web area a Chromium app shows before its tree is built.
+pub fn build_web_area_provider(filled: &[bool]) -> Arc<MockProvider> {
+    let provider = build_provider();
+    {
+        let mut nodes = provider.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let window_index = 1;
+        for (i, has_content) in filled.iter().enumerate() {
+            let area_index = nodes.len();
+            let mut area = nodes[window_index].clone();
+            area.data = ElementData::for_role(Role::WebArea);
+            area.data.handle = area_index as u64;
+            area.data.pid = nodes[window_index].data.pid;
+            area.data.name = Some(format!("Page {i}"));
+            area.children = Vec::new();
+            area.parent = Some(window_index);
+            nodes.push(area);
+            nodes[window_index].children.push(area_index);
+            if *has_content {
+                let button_index = nodes.len();
+                let mut button = nodes[area_index].clone();
+                button.data = ElementData::for_role(Role::Button);
+                button.data.handle = button_index as u64;
+                button.data.pid = nodes[window_index].data.pid;
+                button.data.name = Some(format!("Inner {i}"));
+                button.children = Vec::new();
+                button.parent = Some(area_index);
+                nodes.push(button);
+                nodes[area_index].children.push(button_index);
+            }
+        }
+    }
+    provider
+}
+
 /// Build two native application roots for one process, each with a window.
 /// Exercises process scope through the actual Python and JavaScript bindings.
 pub fn build_split_provider() -> Arc<MockProvider> {

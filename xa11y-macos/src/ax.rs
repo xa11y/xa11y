@@ -315,6 +315,36 @@ fn ax_string(element: AXUIElementRef, attribute: &str) -> Option<String> {
     }
 }
 
+/// The accessible name of `ax` as `build_snapshot_data` derives it: a
+/// non-empty `AXTitle`, else the static text's `AXValue`, else `AXDescription`.
+/// An empty `AXTitle` is "no title" (Chromium answers "" on text leaves).
+/// The fast-path matcher and the window-chrome filter use this so they agree
+/// with the snapshot walk.
+fn derived_ax_name(ax: AXUIElementRef, role: Option<Role>) -> Option<String> {
+    ax_string(ax, "AXTitle")
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            if role == Some(Role::StaticText) {
+                ax_value_string(ax)
+            } else {
+                ax_string(ax, "AXDescription")
+            }
+        })
+}
+
+/// Whether `target` names itself from a non-empty `AXTitle`. A static text
+/// that does keeps a title-derived name, so a value change there is only a
+/// value change; an empty `AXTitle` (Chromium) is no title, and the name
+/// comes from `AXValue`.
+fn has_title_derived_name(target: Option<&ElementData>) -> bool {
+    target.is_some_and(|t| {
+        t.raw
+            .get("AXTitle")
+            .and_then(|v| v.as_str())
+            .is_some_and(|title| !title.is_empty())
+    })
+}
+
 fn ax_bool(element: AXUIElementRef, attribute: &str) -> Option<bool> {
     let value = ax_attr(element, attribute)?;
     unsafe {
@@ -3358,14 +3388,7 @@ fn matches_ax_with_role(
             "role" => role.map(|r| r.to_snake_case().to_string()),
             "name" => {
                 // Mirror build_element_data name logic.
-                let ax_title = ax_string(ax, "AXTitle").filter(|t| !t.is_empty());
-                ax_title.or_else(|| {
-                    if role == Some(Role::StaticText) {
-                        ax_value_string(ax)
-                    } else {
-                        ax_string(ax, "AXDescription")
-                    }
-                })
+                derived_ax_name(ax, role)
             }
             "value" => ax_value_string(ax),
             "description" => {
@@ -4252,7 +4275,7 @@ impl MacOSProvider {
                 }
 
                 // Recurse into subtree.
-                let child_name = ax_string(child.as_ptr(), "AXTitle");
+                let child_name = derived_ax_name(child.as_ptr(), Some(child_role));
                 let sub = self.collect_matching_ax_group(
                     child,
                     child_role,
@@ -5780,18 +5803,14 @@ unsafe extern "C" fn ax_observer_callback(
                 "AXTextField" | "AXTextArea" | "AXSearchField" => {
                     ks.push(EventKind::TextChanged);
                 }
-                // Static text has no AXTitle, so its name is derived from
+                // Static text has no (non-empty) AXTitle, so its name is derived from
                 // AXValue (see `build_snapshot_data`): a value change is also
                 // a name change, and the Linux (AT-SPI `accessible-name`) and
                 // Windows (UIA NameProperty) backends emit NameChanged for the
                 // same label update. A static text that carries an AXTitle
                 // keeps a title-derived name, so there a value change really is
                 // only a value change.
-                "AXStaticText"
-                    if !target
-                        .as_ref()
-                        .is_some_and(|t| t.raw.contains_key("AXTitle")) =>
-                {
+                "AXStaticText" if !has_title_derived_name(target.as_ref()) => {
                     ks.push(EventKind::NameChanged);
                 }
                 // Sliders, spinners, progress bars, etc.: just ValueChanged.
@@ -6661,6 +6680,21 @@ mod tests {
             );
             assert_eq!(restore_supported(&state), expected, "restore: {state:?}");
         }
+    }
+
+    #[test]
+    fn an_empty_ax_title_is_not_a_title_derived_name() {
+        let mut data = ElementData::for_role(Role::StaticText);
+        assert!(!has_title_derived_name(Some(&data)), "no AXTitle at all");
+        assert!(!has_title_derived_name(None), "no target");
+        data.raw.insert("AXTitle".into(), serde_json::json!(""));
+        assert!(
+            !has_title_derived_name(Some(&data)),
+            "Chromium text leaves answer an empty AXTitle"
+        );
+        data.raw
+            .insert("AXTitle".into(), serde_json::json!("Label"));
+        assert!(has_title_derived_name(Some(&data)));
     }
 
     #[test]
