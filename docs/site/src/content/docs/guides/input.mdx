@@ -321,6 +321,8 @@ On every platform, `type_text` types each line break as a press of the Enter key
 
 Drag-and-drop has no accessibility equivalent on most platforms. Resolve both endpoints via the a11y tree first, then synthesise the drag.
 
+On macOS a drag takes about 0.7 seconds longer than its `duration`. The pointer holds still for 200 ms after the button goes down, so the drag source can start its session. It holds still again for 500 ms at the drop point before release, so the target registers the drop.
+
 <Tabs syncKey="lang">
   <TabItem label="Rust">
     ```rust

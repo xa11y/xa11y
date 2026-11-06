@@ -756,6 +756,11 @@ impl InputProvider for MacOSInputProvider {
         // Use the gesture's explicit coordinates, rather than querying cursor
         // state that may not yet reflect the just-posted move.
         self.press_pointer_at(button, from)?;
+        // AppKit drag sources start an NSDraggingSession only once the button
+        // has been held briefly, and drop targets register the drop only if
+        // the pointer rests on them before release. Without these holds a
+        // synthesized drag moves the pointer but delivers no drop.
+        std::thread::sleep(DRAG_HOLD_AFTER_DOWN);
         let step_ms = STEP.as_millis().max(1);
         let steps = (duration.as_millis() / step_ms).max(1) as i32;
         let dragged_ty = cg_button_dragged(button);
@@ -775,6 +780,7 @@ impl InputProvider for MacOSInputProvider {
                     std::thread::sleep(STEP);
                 }
             }
+            std::thread::sleep(DRAG_HOLD_BEFORE_UP);
             Ok(())
         })();
         let released = self.release_pointer_at(button, last_posted);
@@ -822,6 +828,14 @@ fn plan_type_text(text: &str) -> Vec<TypeStep> {
     flush(&mut run, &mut steps);
     steps
 }
+
+/// Pause after the button goes down, before the first dragged event, so an
+/// AppKit drag source has time to start its dragging session.
+const DRAG_HOLD_AFTER_DOWN: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Pause at the end point before the button comes up, so the drop target
+/// under the pointer registers the drop.
+const DRAG_HOLD_BEFORE_UP: std::time::Duration = std::time::Duration::from_millis(500);
 
 fn modifier_flag_for(key: &Key) -> u64 {
     match key {

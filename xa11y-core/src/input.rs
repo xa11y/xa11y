@@ -454,8 +454,14 @@ pub struct DragOptions {
     pub button: MouseButton,
     /// Keys held for the duration of the drag.
     pub held: Vec<Key>,
-    /// Total time over which the drag is performed. Backends interpolate
-    /// pointer movement across this duration.
+    /// Time over which the pointer moves from start to end. Backends
+    /// interpolate pointer movement across this duration.
+    ///
+    /// On macOS the drag also holds still for 200 ms after the button goes
+    /// down and for 500 ms at the end point before it comes up, outside this
+    /// duration. AppKit drag sources need the first pause to start a
+    /// dragging session, and drop targets need the second to register the
+    /// drop.
     pub duration: Duration,
 }
 
@@ -1323,7 +1329,9 @@ impl Mouse<'_> {
     }
 
     /// Press the left button at `from`, move to `to`, release. Default
-    /// duration: 150 ms. Use [`drag_with`](Self::drag_with) to customise.
+    /// duration: 150 ms, plus macOS's hold pauses (see
+    /// [`DragOptions::duration`]). Use [`drag_with`](Self::drag_with) to
+    /// customise.
     pub fn drag(&self, from: impl IntoPoint, to: impl IntoPoint) -> Result<()> {
         let from_bounds = from.element_bounds();
         let to_bounds = to.element_bounds();

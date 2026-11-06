@@ -793,7 +793,9 @@ fn tool_definition(name: &str) -> Value {
             props.insert(
                 "duration_ms".into(),
                 DRAG_DURATION_MS.property(
-                    "How long the drag takes, in milliseconds. Default 150. Slower drags \
+                    "Time spent moving the pointer from start to end, in milliseconds. \
+                     Default 150. On macOS the drag also holds 200 ms after press and 500 ms \
+                     before release. Slower drags \
                      are more reliable in applications that animate."
                         .into(),
                 ),

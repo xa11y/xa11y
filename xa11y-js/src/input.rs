@@ -68,8 +68,9 @@ pub struct DragOptions {
     pub button: Option<String>,
     /// Keys held down for the duration of the drag.
     pub held: Option<Vec<String>>,
-    /// Total drag time in **milliseconds** (the unit every other JS timing
-    /// option uses). Default `150`.
+    /// Time spent moving the pointer from start to end, in **milliseconds**
+    /// (the unit every other JS timing option uses). Default `150`. On macOS
+    /// the drag also holds 200 ms after press and 500 ms before release.
     pub duration: Option<u32>,
 }
 
@@ -362,7 +363,9 @@ impl InputSim {
     ///
     /// `options` is core's `DragOptions`: `button` selects the button held
     /// during the drag, `held` lists keys held for its duration, and
-    /// `duration` is the total drag time in milliseconds (default `150`).
+    /// `duration` is the time spent moving the pointer from start to end, in
+    /// milliseconds (default `150`); on macOS the drag also holds 200 ms
+    /// after press and 500 ms before release.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn drag(
         &self,

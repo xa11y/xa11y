@@ -261,7 +261,14 @@ class DragAction(BaseModel):
     end: PointerTarget
     button: Literal["left", "right", "middle"] = Field(default="left", description="Button held during the drag.")
     modifiers: List[str] = Field(default_factory=list, description="Keys held during the drag.")
-    duration: float = Field(default=0.15, gt=0, description="Total drag time in seconds.")
+    duration: float = Field(
+        default=0.15,
+        gt=0,
+        description=(
+            "Time spent moving the pointer from start to end, in seconds. On macOS the drag also holds "
+            "200 ms after press and 500 ms before release."
+        ),
+    )
 
 
 class ScrollAction(BaseModel):

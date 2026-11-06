@@ -2082,8 +2082,9 @@ impl InputSim {
     ///
     /// The keyword arguments are core's `DragOptions`: `button` selects the
     /// button held during the drag, `held` lists keys held for its duration,
-    /// and `duration` is the total drag time **in seconds** (the unit every
-    /// other Python timing argument uses).
+    /// and `duration` is the time spent moving the pointer from start to end,
+    /// **in seconds** (the unit every other Python timing argument uses). On
+    /// macOS the drag also holds 200 ms after press and 500 ms before release.
     #[pyo3(signature = (start, end, *, button="left", held=None, duration=0.15))]
     fn drag(
         &self,
