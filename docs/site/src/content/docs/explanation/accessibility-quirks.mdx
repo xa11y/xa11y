@@ -562,6 +562,41 @@ things the others deliver:
   on in-app focus moves. Older/non-native apps (Java Swing, VB6, Adobe products,
   some browsers) have incomplete UIA providers and may not fire events at all.
 
+### macOS: no gap between `AXChildren` and the alternative child attributes, in the fixtures we tried
+
+AppKit also vends `AXChildrenInNavigationOrder`, `AXContents`, `AXRows`, and
+`AXColumns`, and it is fair to suspect `AXChildren` of omitting content that
+one of them carries. We checked on CI runners (macOS 15 and macOS 26, arm64):
+for each attribute, walk a window following `AXChildren` plus that attribute,
+and count the elements, compared by `CFEqual`, that a walk of `AXChildren`
+alone never reaches. The apps were Finder (icon, list, column, and cover-flow
+views), System Settings, Mail, a SwiftUI app (`List`, `Table`, `Form`, a lazy
+`ScrollView`, `NavigationSplitView`), and the Cocoa test app (`NSTableView`,
+`NSScrollView`). Walks stayed small (the largest reached 314 elements, far
+under the walk's 30000-element cap).
+
+We found no gap in these fixtures, so xa11y reads `AXChildren` for every role
+and keeps no per-role mapping to another attribute. These fixtures were
+stock or nearly empty: Mail had no account and so no message list, and Finder
+showed default folders. Long lazy tables, offscreen rows, and large outlines
+were not covered, so this is absence of evidence from small trees, not proof
+for every app.
+
+What the runs showed:
+
+- `AXChildrenInNavigationOrder`, `AXContents`, and `AXColumns` reached no
+  element that `AXChildren` did not. We did not check their order.
+- `AXRows` on an `AXColumn` (Finder list view) reached 3 extra `AXCell`
+  wrappers on both OS versions. All of their children were already reachable
+  through `AXChildren`.
+- Walking with a nonexistent attribute reported the same few extra elements as
+  the real attributes (Settings cells still loading, one SwiftUI group), so
+  those differences are tree churn between two walks, not content.
+
+Any walk that follows these attributes as well would see the same element
+through two paths, and each read vends fresh refs, so it would have to
+de-duplicate by `CFEqual` rather than by pointer.
+
 ## Performance: reading a tree is O(N) cross-process calls
 
 Two of the three platforms have no bulk-read API, so traversing a tree means a
