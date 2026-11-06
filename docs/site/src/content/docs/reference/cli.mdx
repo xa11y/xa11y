@@ -104,6 +104,26 @@ including the window verbs below. A window state the platform cannot report
 (`minimized`, `maximized`, `fullscreen`) is simply absent from the line
 rather than shown as a guessed `false`.
 
+### `xa11y enable-web-accessibility`
+
+Ask a Chromium or Electron application to build its web content's
+accessibility tree, then wait for that content to appear (macOS only).
+
+```bash
+xa11y enable-web-accessibility --app "Visual Studio Code"
+```
+
+```
+web accessibility enabled for "Visual Studio Code" (pid=4242)
+```
+
+The command sets the switch, then waits up to the default timeout until some
+web area in the app has at least one child, so it succeeds when any one web
+area is populated and says nothing about the others. It leaves the switch set
+on the app and does not restore it. Linux and Windows have no such request, so
+the command exits 1 with guidance for that platform. See
+[Platform Details](/reference/platform-details/#macos-electron-and-chromium-apps).
+
 ### `xa11y tree`
 
 Print the full accessibility tree for an application.
@@ -441,6 +461,7 @@ gives it selectors to resolve.
 | `apps` | none |
 | `shell` | none |
 | `windows` | `app`, `pid`, `limit` |
+| `enable_web_accessibility` | `app`, `pid` |
 | `tree` | `app`, `pid`, `shell`, `max_depth` |
 | `find` | `selector`, `app`, `pid`, `shell`, `limit` |
 | `action` | `action`, `selector`, `app`, `pid`, `shell`, `value`, `at`, `size` |

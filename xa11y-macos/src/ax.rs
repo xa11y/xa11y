@@ -315,6 +315,36 @@ fn ax_string(element: AXUIElementRef, attribute: &str) -> Option<String> {
     }
 }
 
+/// The accessible name of `ax` as `build_snapshot_data` derives it: a
+/// non-empty `AXTitle`, else the static text's `AXValue`, else `AXDescription`.
+/// An empty `AXTitle` is "no title" (Chromium answers "" on text leaves).
+/// The fast-path matcher and the window-chrome filter use this so they agree
+/// with the snapshot walk.
+fn derived_ax_name(ax: AXUIElementRef, role: Option<Role>) -> Option<String> {
+    ax_string(ax, "AXTitle")
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            if role == Some(Role::StaticText) {
+                ax_value_string(ax)
+            } else {
+                ax_string(ax, "AXDescription")
+            }
+        })
+}
+
+/// Whether `target` names itself from a non-empty `AXTitle`. A static text
+/// that does keeps a title-derived name, so a value change there is only a
+/// value change; an empty `AXTitle` (Chromium) is no title, and the name
+/// comes from `AXValue`.
+fn has_title_derived_name(target: Option<&ElementData>) -> bool {
+    target.is_some_and(|t| {
+        t.raw
+            .get("AXTitle")
+            .and_then(|v| v.as_str())
+            .is_some_and(|title| !title.is_empty())
+    })
+}
+
 fn ax_bool(element: AXUIElementRef, attribute: &str) -> Option<bool> {
     let value = ax_attr(element, attribute)?;
     unsafe {
@@ -1918,6 +1948,120 @@ fn activate_owning_app(el_ptr: AXUIElementRef, action: &str, role: Role) -> Resu
     set_bool_attr(app.as_ptr(), "AXFrontmost", true, action, role)
 }
 
+/// The application-element attributes that ask a Chromium-based app to build
+/// its web content's accessibility tree, in the order they are tried.
+/// Electron answers `AXManualAccessibility`, which has no side effects on the
+/// app's native UI. Chrome answers only `AXEnhancedUserInterface`, which is
+/// what VoiceOver sets, so it is tried second.
+const WEB_ACCESSIBILITY_ATTRS: [&str; 2] = ["AXManualAccessibility", "AXEnhancedUserInterface"];
+
+/// What reading a web-accessibility switch back returned.
+#[derive(Debug, PartialEq)]
+enum SwitchReadBack {
+    /// A boolean, or a number (0 is false).
+    Flag(bool),
+    /// The app has no such attribute.
+    Absent,
+    /// A value of another type.
+    Other,
+    /// The read failed with this AXError.
+    Unanswered(i32),
+}
+
+impl std::fmt::Display for SwitchReadBack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Flag(b) => write!(f, "{b}"),
+            Self::Absent => f.write_str("no such attribute"),
+            Self::Other => f.write_str("a non-boolean value"),
+            Self::Unanswered(code) => write!(f, "no answer (AXError {code})"),
+        }
+    }
+}
+
+fn read_switch(el_ptr: AXUIElementRef, attr_name: &str) -> SwitchReadBack {
+    match read_raw_attr(el_ptr, attr_name) {
+        RawAttr::Value(v) => unsafe {
+            let tid = safe_cf_get_type_id(v);
+            let read = if tid == safe_cf_boolean_get_type_id() {
+                SwitchReadBack::Flag(safe_cf_boolean_get_value(v))
+            } else if tid == safe_cf_number_get_type_id() {
+                let mut n: i64 = 0;
+                if safe_cf_number_get_value(v, CF_NUMBER_SINT64, &mut n as *mut _ as *mut c_void) {
+                    SwitchReadBack::Flag(n != 0)
+                } else {
+                    SwitchReadBack::Other
+                }
+            } else {
+                SwitchReadBack::Other
+            };
+            safe_cf_release(v);
+            read
+        },
+        RawAttr::Absent => SwitchReadBack::Absent,
+        RawAttr::Unanswered(code) => SwitchReadBack::Unanswered(code),
+    }
+}
+
+/// Ask the application `app` to build its web content's accessibility tree.
+///
+/// Each switch in [`WEB_ACCESSIBILITY_ATTRS`] is set and then read back, in
+/// order, and the first one that reads back `true` is the success; later
+/// switches are not touched. A switch that took stays set: it is not
+/// restored. The set call's return code is recorded but proves nothing: Chrome
+/// answers
+/// `kAXErrorNotImplemented` to a set it carried out. When neither
+/// takes, the error names what each returned.
+fn enable_web_accessibility_for(app: &ElementData) -> Result<()> {
+    const ACTION: &str = "enable_web_accessibility";
+    if app.role != Role::Application {
+        return Err(Error::ActionNotSupported {
+            action: ACTION.to_string(),
+            role: app.role,
+        });
+    }
+    let Some(pid) = app.pid else {
+        return Err(Error::Platform {
+            code: -1,
+            message: format!("{ACTION}: the application element has no pid"),
+        });
+    };
+    let app_el = AXElement::from_owned(unsafe { safe_ax_create_application(pid as i32) });
+    if app_el.is_null() {
+        return Err(Error::Platform {
+            code: -9999,
+            message: format!("AXUIElementCreateApplication({pid}) failed while running {ACTION}"),
+        });
+    }
+    let mut attempts = Vec::with_capacity(WEB_ACCESSIBILITY_ATTRS.len());
+    for attr_name in WEB_ACCESSIBILITY_ATTRS {
+        let attr = CFString::new(attr_name);
+        let set = do_set_attribute(
+            app_el.as_ptr(),
+            &attr,
+            core_foundation::boolean::CFBoolean::true_value().as_CFTypeRef(),
+        );
+        let read = read_switch(app_el.as_ptr(), attr_name);
+        if read == SwitchReadBack::Flag(true) {
+            return Ok(());
+        }
+        attempts.push(format!(
+            "{attr_name}: set returned AXError {}, read back {read}",
+            set.code
+        ));
+    }
+    let name = app.name.clone().unwrap_or_default();
+    Err(Error::AccessibilityNotEnabled {
+        app: format!("{name} (pid={pid})"),
+        instructions: format!(
+            "neither web accessibility switch read back as set ({}). Chromium-based \
+             apps (Electron, Chrome) honour them; other apps may ignore both or accept \
+             one without having web content.",
+            attempts.join("; ")
+        ),
+    })
+}
+
 /// Clear a boolean attribute when it currently reads `true`.
 ///
 /// The deminiaturize half of `activate` / `enter_fullscreen`: neither
@@ -3244,19 +3388,12 @@ fn matches_ax_with_role(
             "role" => role.map(|r| r.to_snake_case().to_string()),
             "name" => {
                 // Mirror build_element_data name logic.
-                let ax_title = ax_string(ax, "AXTitle");
-                ax_title.or_else(|| {
-                    if role == Some(Role::StaticText) {
-                        ax_value_string(ax)
-                    } else {
-                        ax_string(ax, "AXDescription")
-                    }
-                })
+                derived_ax_name(ax, role)
             }
             "value" => ax_value_string(ax),
             "description" => {
                 // Mirror build_element_data description logic.
-                let ax_title = ax_string(ax, "AXTitle");
+                let ax_title = ax_string(ax, "AXTitle").filter(|t| !t.is_empty());
                 let ax_description = ax_string(ax, "AXDescription");
                 let name = ax_title.or_else(|| {
                     if role == Some(Role::StaticText) {
@@ -3674,8 +3811,10 @@ fn build_snapshot_data(
             raw.insert("AXValue".into(), serde_json::Value::String(v.clone()));
         }
 
-        // Name: prefer AXTitle, fall back to AXDescription only if no title
-        let name = attrs.ax_title.or_else(|| {
+        // Name: AXTitle when it has text; otherwise the static text's own
+        // AXValue, or AXDescription for every other role. An empty AXTitle is
+        // "no title" (Chromium answers "" on its text leaves), not a name.
+        let name = attrs.ax_title.filter(|t| !t.is_empty()).or_else(|| {
             if role == Role::StaticText {
                 attrs.value_string.clone()
             } else {
@@ -4136,7 +4275,7 @@ impl MacOSProvider {
                 }
 
                 // Recurse into subtree.
-                let child_name = ax_string(child.as_ptr(), "AXTitle");
+                let child_name = derived_ax_name(child.as_ptr(), Some(child_role));
                 let sub = self.collect_matching_ax_group(
                     child,
                     child_role,
@@ -4768,6 +4907,10 @@ impl Provider for MacOSProvider {
             }
             None => Ok(None),
         }
+    }
+
+    fn enable_web_accessibility(&self, app: &ElementData) -> Result<()> {
+        enable_web_accessibility_for(app)
     }
 
     /// Enumerate the macOS shell surfaces: the frontmost application's menu
@@ -5660,18 +5803,14 @@ unsafe extern "C" fn ax_observer_callback(
                 "AXTextField" | "AXTextArea" | "AXSearchField" => {
                     ks.push(EventKind::TextChanged);
                 }
-                // Static text has no AXTitle, so its name is derived from
+                // Static text has no (non-empty) AXTitle, so its name is derived from
                 // AXValue (see `build_snapshot_data`): a value change is also
                 // a name change, and the Linux (AT-SPI `accessible-name`) and
                 // Windows (UIA NameProperty) backends emit NameChanged for the
                 // same label update. A static text that carries an AXTitle
                 // keeps a title-derived name, so there a value change really is
                 // only a value change.
-                "AXStaticText"
-                    if !target
-                        .as_ref()
-                        .is_some_and(|t| t.raw.contains_key("AXTitle")) =>
-                {
+                "AXStaticText" if !has_title_derived_name(target.as_ref()) => {
                     ks.push(EventKind::NameChanged);
                 }
                 // Sliders, spinners, progress bars, etc.: just ValueChanged.
@@ -6541,6 +6680,21 @@ mod tests {
             );
             assert_eq!(restore_supported(&state), expected, "restore: {state:?}");
         }
+    }
+
+    #[test]
+    fn an_empty_ax_title_is_not_a_title_derived_name() {
+        let mut data = ElementData::for_role(Role::StaticText);
+        assert!(!has_title_derived_name(Some(&data)), "no AXTitle at all");
+        assert!(!has_title_derived_name(None), "no target");
+        data.raw.insert("AXTitle".into(), serde_json::json!(""));
+        assert!(
+            !has_title_derived_name(Some(&data)),
+            "Chromium text leaves answer an empty AXTitle"
+        );
+        data.raw
+            .insert("AXTitle".into(), serde_json::json!("Label"));
+        assert!(has_title_derived_name(Some(&data)));
     }
 
     #[test]

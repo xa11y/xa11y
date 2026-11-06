@@ -53,7 +53,7 @@ UI Automation tree, not a fixture shaped to match the code.
 | `gtk` | GTK4 (PyGObject) | ✓ | ○ | ○ | compat, actions, events, errors, windows |
 | `cocoa` | Swift / AppKit | ○ | ✓ | ○ | compat, actions, events, errors, windows |
 | `tauri` | Rust + WebView | ✓ | ✓ | ✓ | compat, actions, events, errors, input_sim, screenshot, windows |
-| `electron` | Chromium / Node | ✓ | ○ | ○ | compat, actions, errors, input_sim, screenshot, windows |
+| `electron` | Chromium / Node | ✓ | ✓ | ○ | compat, actions, errors, input_sim, screenshot, windows |
 | `egui` | Rust immediate-mode (eframe) | ✓ | ✓ | ✓ | compat, actions, events, errors, windows |
 | `winforms` | .NET Windows Forms | ○ | ○ | ✓ | compat, actions, events, errors, windows |
 | `wpf` | .NET WPF | ○ | ○ | ✓ | compat, actions, events, errors, windows |
@@ -177,9 +177,9 @@ three.
 
 Every push runs the suites across operating systems and toolkits in GitHub
 Actions ([`.github/workflows/ci.yml`](https://github.com/xa11y/xa11y/blob/main/.github/workflows/ci.yml)).
-The `integ` job alone is a matrix of sixteen OS × app cells (e.g.
+The `integ` job alone is a matrix of seventeen OS × app cells (e.g.
 `ubuntu × {accesskit, qt, gtk, tauri, electron, egui}`,
-`macos × {cocoa, tauri, qt, egui}`, `windows × {tauri, qt, egui, winforms, wpf, uwp}`), each standing up
+`macos × {cocoa, electron, tauri, qt, egui}`, `windows × {tauri, qt, egui, winforms, wpf, uwp}`), each standing up
 a headless display, accessibility bus, and the app under test before running
 the Python, JS, and CLI suites against it. Alongside it run the Rust unit and
 integration jobs per OS, two wire-level input jobs (Linux `uinput` read back

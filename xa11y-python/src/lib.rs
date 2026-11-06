@@ -1678,6 +1678,38 @@ impl App {
             .collect()
     }
 
+    /// Turn on the accessibility tree for the app's web content, then wait
+    /// for that content to appear.
+    ///
+    /// Chromium and Electron build the accessibility tree for their web
+    /// content only when a client asks for it. Until then a selector for an
+    /// element on the page finds nothing. This makes that request; xa11y
+    /// never makes it implicitly.
+    ///
+    /// On macOS it sets ``AXManualAccessibility`` (Electron) on the
+    /// application element and reads it back, then does the same with
+    /// ``AXEnhancedUserInterface`` (Chrome) if that did not read back as
+    /// set, raising ``AccessibilityNotEnabledError`` when neither does. It
+    /// does not check that the app is Chromium-based: an app that keeps
+    /// either value counts as having taken the request, and the call then
+    /// raises ``TimeoutError`` because no web content appears. The attribute
+    /// stays set to true afterwards and is not restored; on an app that
+    /// reacts to ``AXEnhancedUserInterface`` that can disable window
+    /// animations or confuse a window manager. It then waits up to
+    /// ``timeout`` seconds (default: the
+    /// process-wide default timeout) until some ``web_area`` has a child,
+    /// raising ``TimeoutError`` with a diagnosis otherwise. On Linux and
+    /// Windows it raises ``ActionNotSupportedError`` saying what to do
+    /// instead: on Linux, launch the app with
+    /// ``--force-renderer-accessibility``.
+    #[pyo3(signature = (*, timeout=None))]
+    fn enable_web_accessibility(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<()> {
+        let timeout = effective_timeout(timeout)?;
+        let app = xa11y::App::from_data(self.provider.clone(), self.inner_data.clone());
+        py.detach(move || app.enable_web_accessibility(timeout))
+            .map_err(to_py_err)
+    }
+
     /// Get an :class:`Element` handle for the application root.
     ///
     /// Useful for invoking Element-level methods (``children()``,

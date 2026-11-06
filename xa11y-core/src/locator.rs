@@ -702,6 +702,60 @@ impl Locator {
         if d.scope.is_none() {
             d.scope = Some(self.scope_summary());
         }
+        if let Some(hint) = self.web_accessibility_hint() {
+            d.last_observed = Some(match d.last_observed.take() {
+                Some(observed) => format!("{observed}; {hint}"),
+                None => hint,
+            });
+        }
+    }
+
+    /// A hint for a miss inside a web view whose content the app has not
+    /// built an accessibility tree for. Chromium and Electron do that only on
+    /// request, and the symptom is a `web_area` with no children, which
+    /// reads like a wrong selector. Bounded by [`DIAG_CANDIDATE_LIMIT`].
+    ///
+    /// A scan that fails is reported in the hint rather than dropped, the
+    /// way [`role_candidates`](Self::role_candidates) records a failing
+    /// collection (tenet 1). The miss error being enriched keeps its own
+    /// variant, so the hint is the one place the failure can surface.
+    ///
+    /// The advice names the platforms where a client can act on it: macOS
+    /// has a request to make and Linux a launch flag. Windows Chromium builds
+    /// the tree itself, so the hint says nothing specific there.
+    fn web_accessibility_hint(&self) -> Option<String> {
+        let root = self.root.as_ref()?;
+        let selector = match Selector::parse("web_area") {
+            Ok(s) => s,
+            Err(e) => return Some(format!("web_area check failed: {e}")),
+        };
+        let areas =
+            match self
+                .provider
+                .find_elements(root, &selector, Some(DIAG_CANDIDATE_LIMIT), None)
+            {
+                Ok(areas) => areas,
+                Err(e) => return Some(format!("web_area check failed: {e}")),
+            };
+        // Fire only when every web area is empty: one that has children
+        // proves the app builds its tree, so an empty sibling (an iframe, a
+        // placeholder) is not the reason for the miss.
+        let mut all_empty = !areas.is_empty();
+        for area in &areas {
+            match self.provider.get_children(Some(area)) {
+                Ok(children) => all_empty &= children.is_empty(),
+                Err(e) => return Some(format!("web_area check failed: {e}")),
+            }
+        }
+        all_empty.then(|| {
+            "the scope has only web_areas with no children: a Chromium or Electron app builds \
+             its web content's accessibility tree only on request. On macOS, enable web \
+             accessibility for the app (App.enable_web_accessibility in Rust and Python, \
+             enableWebAccessibility in JS, `xa11y enable-web-accessibility`, or the \
+             `enable_web_accessibility` MCP tool). On Linux, relaunch the app with \
+             --force-renderer-accessibility"
+                .to_string()
+        })
     }
 
     /// Near-miss candidates: elements in scope whose role matches the
@@ -1613,6 +1667,40 @@ mod tests {
     fn group_exists_false_when_no_clause_matches() {
         let loc = root_locator(r#"button[name="Nope"], text_field[name="AlsoNope"]"#);
         assert!(!loc.exists().unwrap());
+    }
+
+    // ── Web accessibility hint ──────────────────────────────────────
+
+    fn miss_last_observed(filled: &[bool]) -> Option<String> {
+        let provider: Arc<dyn Provider> = crate::mock::build_web_area_provider(filled);
+        let root = provider
+            .get_children(None)
+            .expect("the mock lists its app")
+            .remove(0);
+        let err = Locator::new_for_app(provider, root, r#"button[name="Nope"]"#)
+            .with_timeout(Duration::ZERO)
+            .element()
+            .expect_err("the button does not exist");
+        err.diagnosis().and_then(|d| d.last_observed.clone())
+    }
+
+    #[test]
+    fn hint_fires_when_every_web_area_is_empty() {
+        let observed = miss_last_observed(&[false, false]).expect("a hint");
+        assert!(observed.contains("enable_web_accessibility"), "{observed}");
+    }
+
+    #[test]
+    fn hint_is_absent_when_any_web_area_has_content() {
+        // An iframe's empty web area beside a built page is not an unbuilt tree.
+        let observed = miss_last_observed(&[true, false]).unwrap_or_default();
+        assert!(!observed.contains("enable_web_accessibility"), "{observed}");
+    }
+
+    #[test]
+    fn hint_is_absent_without_web_areas() {
+        let observed = miss_last_observed(&[]).unwrap_or_default();
+        assert!(!observed.contains("enable_web_accessibility"), "{observed}");
     }
 
     // ── Auto-wait / wait timeout semantics ──────────────────────────

@@ -302,6 +302,7 @@ const TOOL_NAMES: &[&str] = &[
     "apps",
     "shell",
     "windows",
+    "enable_web_accessibility",
     "tree",
     "find",
     "action",
@@ -334,6 +335,7 @@ impl ToolHost for Xa11yTools {
             "apps" => tool_apps(),
             "shell" => tool_shell(),
             "windows" => tool_windows(args),
+            "enable_web_accessibility" => tool_enable_web_accessibility(args),
             "tree" => tool_tree(args),
             "find" => tool_find(args),
             "action" => tool_action(args),
@@ -523,6 +525,35 @@ fn tool_definition(name: &str) -> Value {
                 object_schema(props, &[]),
             )
         }
+        "enable_web_accessibility" => tool(
+            "enable_web_accessibility",
+            "Turn on web content accessibility",
+            &format!(
+                "Ask a Chromium or Electron application (give `app` or `pid`) to build \
+                 the accessibility tree for its web content, then wait for that content \
+                 to appear. The call does not check that the app is Chromium-based. Until an app is asked, `tree` shows its window and an empty \
+                 `web_area`, and `find` matches nothing on the page. A not-found failure \
+                 inside such an app says so in its `last_observed`.\n\n\
+                 macOS only. The request is never made implicitly. Linux and Windows \
+                 return an `unsupported` failure saying what to do instead (on Linux, \
+                 relaunch the app with `--force-renderer-accessibility`). On macOS it \
+                 sets `AXManualAccessibility`, then `AXEnhancedUserInterface`, on the \
+                 application and reads each back; an app where neither reads back as set \
+                 returns `accessibility_not_enabled` naming what each returned. An app \
+                 that keeps a value but has no web content, such as a native one, ends in \
+                 a `timeout` instead. The attribute stays set to true afterwards and is \
+                 not restored: `AXEnhancedUserInterface` can disable window animations \
+                 or confuse a window manager in an app that reacts to it, so call this \
+                 only for apps whose web content you need.\n\n\
+                 The wait runs up to the default timeout, currently {timeout}. Set \
+                 {timeout_env} (in seconds) in the environment the server is launched \
+                 with to change it. A `timeout` failure says how many web areas the app \
+                 had. `ok: true` means some web area has content; read it with `tree`.",
+                timeout = default_timeout_label(),
+                timeout_env = crate::DEFAULT_TIMEOUT_ENV_VAR,
+            ),
+            object_schema(app_properties(), &[]),
+        ),
         "tree" => {
             let mut props = app_target_properties();
             props.insert(
@@ -1689,6 +1720,26 @@ fn tool_windows(args: &Value) -> CliResult<ToolOutput> {
         App::list()?
     };
     tool_windows_with(&apps, limit)
+}
+
+/// `enable_web_accessibility` tool. Resolution and the wait are the CLI's
+/// value-producing half, so the two surfaces cannot drift.
+fn tool_enable_web_accessibility(args: &Value) -> CliResult<ToolOutput> {
+    // Only an application has a web content switch. The schema does not
+    // advertise `shell`, but a client may send it anyway; refuse it rather
+    // than ignore it (tenet 1).
+    if args.get("shell").is_some() {
+        return Err(usage(
+            "`enable_web_accessibility` takes an application (`app` or `pid`), \
+             not a shell surface",
+        ));
+    }
+    let app = cli::enable_web_accessibility(&target_opts(args)?)?;
+    Ok(ToolOutput::json(json!({
+        "ok": true,
+        "application": app.name,
+        "pid": app.pid,
+    })))
 }
 
 /// The window-listing half against an explicit app list — the unit-testable
@@ -3981,6 +4032,23 @@ mod tests {
         let err = tool_windows(&json!({ "shell": "taskbar" }))
             .expect_err("a shell target must be refused by `windows`");
         assert!(err.to_string().contains("shell"), "{err}");
+    }
+
+    #[test]
+    fn enable_web_accessibility_tool_takes_an_application_only() {
+        let schema = tool_definition("enable_web_accessibility")["inputSchema"].clone();
+        let props = &schema["properties"];
+        assert!(props.get("shell").is_none(), "{schema}");
+        assert!(
+            props.get("app").is_some() && props.get("pid").is_some(),
+            "{schema}"
+        );
+        let err = tool_enable_web_accessibility(&json!({ "shell": "taskbar" }))
+            .expect_err("a shell target must be refused");
+        assert!(err.to_string().contains("shell"), "{err}");
+        let err =
+            tool_enable_web_accessibility(&json!({})).expect_err("no target is a usage error");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
     }
 
     #[test]

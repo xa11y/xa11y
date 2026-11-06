@@ -137,10 +137,46 @@ rebuild produces a new hash and a new, ungranted binary.
 
 ### macOS: web content needs accessibility turned on per-process
 
-Like Chromium on Linux, Chrome/Electron on macOS gate their renderer
-accessibility tree. Chrome honors `--force-renderer-accessibility`; WebKit/Safari
-content is exposed lazily and may require the `AXManualAccessibility` attribute to
-be set on the web area before the DOM is reflected into the AX tree.
+Like Chromium on Linux, Chrome and Electron on macOS gate their renderer
+accessibility tree. Until something asks for it, the window holds an
+`AXWebArea` with no children. Chromium builds the tree lazily on the first AX
+query, so launching Electron without `force-renderer-accessibility` gives no
+deterministic empty pre-state on macOS: a client can find the tree already
+built, or empty for a few seconds on a cold launch. Chrome honors `--force-renderer-accessibility` at
+launch. A running app builds the tree when an assistive client sets
+`AXManualAccessibility` (Electron) or `AXEnhancedUserInterface` (Chrome, and
+what VoiceOver sets) to true on the **application** element. Setting either on
+the web area does nothing.
+
+`App.enable_web_accessibility()` sets `AXManualAccessibility` and reads it back.
+If that does not read back as set, it tries `AXEnhancedUserInterface` the same
+way, and it stops at the first one that does. It then waits for a web area to
+gain children. A lookup that misses beside an empty web area says so in its
+diagnosis and names the method. Linux and Windows have no such switch, so the
+method refuses there with the platform's own guidance.
+
+The method does not check that the app is Chromium-based. An app that retains
+either value counts as having taken the request, so a native app can end in a
+timeout rather than `AccessibilityNotEnabledError`. The attribute is left set to
+true and xa11y does not restore it. `AXEnhancedUserInterface` is known to
+disable window animations and to confuse some window managers in apps that
+react to it, which is why the method is never called implicitly.
+
+### macOS: Chromium leaves AXTitle empty on text leaves and table cells
+
+Chromium (Electron, Chrome) answers `AXTitle` with an empty string on text
+leaves, not with a missing attribute. A name rule of "AXTitle, else the text's
+`AXValue`" therefore never reaches the value, and every `static_text` in a page
+reads `name=""`. The backend treats an empty `AXTitle` as no title, so a static
+text is named by its `AXValue`, and every other role by `AXDescription`.
+
+An HTML `<table>` arrives as `AXTable` with three kinds of child. The `AXRow`
+elements hold the cells. Each column also appears as an `AXColumn` (mapped to
+`group`) that lists the same `AXCell` elements again, plus a header container
+with a 1x1 frame. The `table_cell` count under a table is therefore larger than
+the number of cells on screen. The cells themselves carry no name or value: the
+text is in a child `AXStaticText`, so select it with `table_cell static_text`
+or `[name*="Alice"]`, not with `table_cell[name=...]`.
 
 ## Roles and the role enum disagree across platforms
 

@@ -109,7 +109,7 @@ cargo xtask test-qt          # Qt/PySide6
 cargo xtask test-gtk         # GTK4
 cargo xtask test-cocoa       # Cocoa/AppKit (macOS only)
 cargo xtask test-tauri       # Tauri
-cargo xtask test-electron    # Electron (Linux only)
+cargo xtask test-electron    # Electron (Linux and macOS)
 cargo xtask test-egui        # egui/eframe
 cargo xtask test-winforms    # WinForms (Windows only)
 cargo xtask test-wpf         # WPF (Windows only)

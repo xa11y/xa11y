@@ -2726,6 +2726,19 @@ impl Provider for LinuxProvider {
         }
     }
 
+    // The switch is a launch flag on Linux, not something a client can ask
+    // a running app for, so there is nothing to request.
+    fn enable_web_accessibility(&self, _app: &ElementData) -> Result<()> {
+        Err(Error::Unsupported {
+            feature: "enable_web_accessibility on Linux: Chromium and Electron build \
+                their web accessibility tree only when launched for it. Relaunch the app \
+                with `--force-renderer-accessibility`, and in a session with no settings \
+                daemon (CI, Xvfb, a container) also set `ACCESSIBILITY_ENABLED=1` in its \
+                environment."
+                .to_string(),
+        })
+    }
+
     /// Enumerate desktop panels and docks.
     ///
     /// A Linux shell surface is a top-level AT-SPI frame whose attribute set

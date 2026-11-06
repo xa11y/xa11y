@@ -181,6 +181,26 @@ pub(crate) fn same_window_identity(a: &ElementData, b: &ElementData) -> bool {
     key(a) == key(b)
 }
 
+/// Most web areas [`App::enable_web_accessibility`] inspects per app root.
+/// One populated area is enough; the cap bounds a page of many frames.
+const WEB_AREA_SCAN_LIMIT: usize = 16;
+
+/// What one [`App::web_content`] scan saw.
+#[derive(Debug, Default)]
+struct WebContent {
+    areas: usize,
+    populated: usize,
+}
+
+impl WebContent {
+    fn describe(&self) -> String {
+        match self.areas {
+            0 => "no web_area in the app's tree".to_string(),
+            n => format!("{n} web_area(s), none with children"),
+        }
+    }
+}
+
 /// A running application, the entry point for accessibility queries.
 ///
 /// `App` is **not** an [`Element`] — it represents the application as a whole
@@ -625,6 +645,104 @@ impl App {
         let mut out = String::new();
         crate::element::write_tree_node(&self.tree(max_depth)?, 0, &mut out);
         Ok(out)
+    }
+
+    /// Turn on the accessibility tree for the app's web content, then wait
+    /// up to `timeout` for that content to appear.
+    ///
+    /// Chromium and Electron apps build the accessibility tree for their web
+    /// content only when a client asks for it. Until then a selector for a
+    /// button on the page finds nothing, though the button is on screen.
+    /// This method makes that request. It is never made implicitly, because
+    /// building the tree costs the app memory and CPU for as long as it runs.
+    ///
+    /// - **macOS**: sets `AXManualAccessibility` (Electron) on the
+    ///   application element and reads it back. If that does not read back
+    ///   as set, it does the same with `AXEnhancedUserInterface` (Chrome),
+    ///   and stops at the first attribute that reads back set. The
+    ///   read-back is the proof that the app took the request, since Chrome
+    ///   answers the set call with an error even when it succeeds. If
+    ///   neither attribute reads back as set, this returns
+    ///   [`Error::AccessibilityNotEnabled`] naming what each returned.
+    ///   The method does not check that the app is Chromium-based: an app
+    ///   that keeps the value of either attribute counts as having taken the
+    ///   request, and then this waits for web content that may never appear
+    ///   and returns [`Error::Timeout`].
+    ///
+    ///   **Side effect:** the attribute stays set to `true` on the app after
+    ///   this returns, and xa11y does not restore it. `AXEnhancedUserInterface`
+    ///   is known to disable window animations and to confuse some window
+    ///   managers in apps that react to it, so call this only on apps whose
+    ///   web content you need.
+    /// - **Linux and Windows**: return [`Error::Unsupported`] naming what to
+    ///   do instead. On Linux the switch is a launch-time flag
+    ///   (`--force-renderer-accessibility`, plus `ACCESSIBILITY_ENABLED=1` in
+    ///   a session without a settings daemon). On Windows Chromium builds the
+    ///   tree on its own when a UI Automation client connects.
+    ///
+    /// Once the request is accepted, this polls until some `web_area` in the
+    /// app has at least one child. When `timeout` runs out first, it returns
+    /// [`Error::Timeout`] whose diagnosis says how many web areas it saw.
+    /// `Duration::ZERO` checks once.
+    pub fn enable_web_accessibility(&self, timeout: Duration) -> Result<()> {
+        self.provider.enable_web_accessibility(&self.data)?;
+        let start = Instant::now();
+        loop {
+            let observed = self.web_content()?;
+            if observed.populated > 0 {
+                return Ok(());
+            }
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(Error::timeout(elapsed).diagnose(
+                    Diagnosis::new()
+                        .condition(format!(
+                            "web content of {} (a web_area with at least one child)",
+                            self.describe()
+                        ))
+                        .last_observed(observed.describe()),
+                ));
+            }
+            std::thread::sleep(LOOKUP_POLL_INTERVAL);
+        }
+    }
+
+    /// One look at the app's web areas: how many there are, and how many
+    /// have children. Bounded by [`WEB_AREA_SCAN_LIMIT`].
+    ///
+    /// A web area that goes stale mid-scan is the page rebuilding while the
+    /// tree fills, which is what this poll waits through, so
+    /// [`Error::ElementStale`] counts as "not yet" for that root or area.
+    /// Every other error propagates.
+    fn web_content(&self) -> Result<WebContent> {
+        let selector = crate::selector::Selector::parse("web_area")?;
+        let mut observed = WebContent::default();
+        for root in self.provider.app_roots(&self.data)? {
+            let areas =
+                match self
+                    .provider
+                    .find_elements(&root, &selector, Some(WEB_AREA_SCAN_LIMIT), None)
+                {
+                    Ok(areas) => areas,
+                    Err(Error::ElementStale { .. }) => continue,
+                    Err(e) => return Err(e),
+                };
+            for area in areas {
+                observed.areas += 1;
+                match self.provider.get_children(Some(&area)) {
+                    Ok(children) if !children.is_empty() => observed.populated += 1,
+                    Ok(_) | Err(Error::ElementStale { .. }) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(observed)
+    }
+
+    /// `application "Name" (pid=N)`, for diagnoses.
+    fn describe(&self) -> String {
+        let pid = self.pid.map(|p| format!(" (pid={p})")).unwrap_or_default();
+        format!("application \"{}\"{pid}", self.name)
     }
 
     /// Get an [`Element`] handle for the application root.
@@ -2210,6 +2328,296 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(1),
             "a real focus error must fail fast, not wait out the timeout"
+        );
+    }
+
+    /// A one-window app whose window holds one web area, for
+    /// `enable_web_accessibility`. `accept` is what the provider's request
+    /// returns; the web area gains a button once a request was accepted and
+    /// `fills` is set, the way Electron fills its tree after the switch.
+    struct WebProvider {
+        accept: Result<()>,
+        fills: bool,
+        requests: std::sync::Mutex<usize>,
+        /// How many reads of the web area's children fail as stale before
+        /// they answer, the way a page does while it rebuilds.
+        stale_reads: std::sync::Mutex<usize>,
+        /// A non-stale error to return from reading the web area's children.
+        children_error: Option<Error>,
+    }
+
+    impl WebProvider {
+        fn new(accept: Result<()>, fills: bool) -> Self {
+            Self {
+                accept,
+                fills,
+                requests: std::sync::Mutex::new(0),
+                stale_reads: std::sync::Mutex::new(0),
+                children_error: None,
+            }
+        }
+
+        fn stale_for(self, reads: usize) -> Self {
+            *self.stale_reads.lock().unwrap_or_else(|e| e.into_inner()) = reads;
+            self
+        }
+
+        fn failing_children(mut self, error: Error) -> Self {
+            self.children_error = Some(error);
+            self
+        }
+
+        fn node(role: Role, handle: u64, name: &str) -> ElementData {
+            let mut data = ElementData::for_role(role);
+            data.handle = handle;
+            data.pid = Some(77);
+            data.name = Some(name.to_string());
+            data
+        }
+
+        fn requests(&self) -> usize {
+            *self.requests.lock().unwrap_or_else(|e| e.into_inner())
+        }
+    }
+
+    fn unsupported() -> Error {
+        Error::Unsupported {
+            feature: "not part of this test provider".to_string(),
+        }
+    }
+
+    impl Provider for WebProvider {
+        fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
+            if e.map(|e| e.handle) == Some(3) {
+                if let Some(error) = &self.children_error {
+                    return Err(error.clone());
+                }
+                let mut stale = self.stale_reads.lock().unwrap_or_else(|e| e.into_inner());
+                if *stale > 0 {
+                    *stale -= 1;
+                    return Err(Error::ElementStale {
+                        selector: "web_area".to_string(),
+                    });
+                }
+            }
+            Ok(match e.map(|e| e.handle) {
+                None => vec![Self::node(Role::Application, 1, "Web")],
+                Some(1) => vec![Self::node(Role::Window, 2, "Main")],
+                Some(2) => vec![Self::node(Role::WebArea, 3, "Page")],
+                Some(3) if self.fills && self.requests() > 0 => {
+                    vec![Self::node(Role::Button, 4, "OK")]
+                }
+                Some(_) => Vec::new(),
+            })
+        }
+        fn get_parent(&self, _: &ElementData) -> Result<Option<ElementData>> {
+            Err(unsupported())
+        }
+        fn list_apps(&self) -> Result<Vec<ElementData>> {
+            self.get_children(None)
+        }
+        fn focused_app(&self) -> Result<ElementData> {
+            Err(unsupported())
+        }
+        fn list_shell_surfaces(
+            &self,
+        ) -> Result<Vec<(crate::shell::ShellSurfaceKind, ElementData)>> {
+            Ok(Vec::new())
+        }
+        fn enable_web_accessibility(&self, app: &ElementData) -> Result<()> {
+            assert_eq!(app.role, Role::Application, "the request goes to the app");
+            *self.requests.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            self.accept.clone()
+        }
+        fn press(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn focus(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn blur(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn toggle(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn select(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn expand(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn collapse(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn show_menu(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn increment(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn decrement(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn scroll_into_view(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn set_value(&self, _: &ElementData, _: &str) -> Result<()> {
+            Err(unsupported())
+        }
+        fn set_numeric_value(&self, _: &ElementData, _: f64) -> Result<()> {
+            Err(unsupported())
+        }
+        fn type_text(&self, _: &ElementData, _: &str) -> Result<()> {
+            Err(unsupported())
+        }
+        fn set_text_selection(&self, _: &ElementData, _: u32, _: u32) -> Result<()> {
+            Err(unsupported())
+        }
+        fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> {
+            Err(unsupported())
+        }
+        fn activate(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn minimize(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn maximize(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn enter_fullscreen(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn restore(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn close(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported())
+        }
+        fn move_to(&self, _: &ElementData, _: i32, _: i32) -> Result<()> {
+            Err(unsupported())
+        }
+        fn resize_to(&self, _: &ElementData, _: u32, _: u32) -> Result<()> {
+            Err(unsupported())
+        }
+        fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
+            Err(unsupported())
+        }
+    }
+
+    fn web_app(provider: &Arc<WebProvider>) -> App {
+        let dyn_provider: Arc<dyn Provider> = Arc::clone(provider) as Arc<dyn Provider>;
+        App::by_name_with(dyn_provider, "Web", Duration::ZERO).expect("the web app is listed")
+    }
+
+    #[test]
+    fn enable_web_accessibility_waits_for_web_content() {
+        let provider = Arc::new(WebProvider::new(Ok(()), true));
+        let app = web_app(&provider);
+        assert!(!app.locator(r#"button[name="OK"]"#).exists().unwrap());
+        app.enable_web_accessibility(Duration::from_secs(1))
+            .expect("the content appears once the request is taken");
+        assert_eq!(provider.requests(), 1, "the request is made exactly once");
+        assert!(app.locator(r#"button[name="OK"]"#).exists().unwrap());
+    }
+
+    #[test]
+    fn enable_web_accessibility_times_out_naming_the_empty_web_area() {
+        let provider = Arc::new(WebProvider::new(Ok(()), false));
+        let err = web_app(&provider)
+            .enable_web_accessibility(Duration::from_millis(250))
+            .expect_err("a web area that never fills must time out");
+        let Error::Timeout { .. } = err else {
+            panic!("expected a timeout, got {err:?}");
+        };
+        let d = err.diagnosis().expect("the timeout carries a diagnosis");
+        assert_eq!(
+            d.condition.as_deref(),
+            Some(
+                r#"web content of application "Web" (pid=77) (a web_area with at least one child)"#
+            )
+        );
+        assert_eq!(
+            d.last_observed.as_deref(),
+            Some("1 web_area(s), none with children")
+        );
+    }
+
+    #[test]
+    fn enable_web_accessibility_treats_a_stale_web_area_as_not_yet() {
+        // The first two reads of the web area's children fail as stale, the
+        // way a page does while it rebuilds. That is "not yet", so the poll
+        // goes on and finds the content on the third.
+        let provider = Arc::new(WebProvider::new(Ok(()), true).stale_for(2));
+        web_app(&provider)
+            .enable_web_accessibility(Duration::from_secs(2))
+            .expect("a stale read is retried, not reported");
+    }
+
+    #[test]
+    fn enable_web_accessibility_propagates_a_non_stale_scan_error() {
+        let provider = Arc::new(
+            WebProvider::new(Ok(()), true).failing_children(Error::Platform {
+                code: 42,
+                message: "scan broke".to_string(),
+            }),
+        );
+        let start = Instant::now();
+        let err = web_app(&provider)
+            .enable_web_accessibility(Duration::from_secs(30))
+            .expect_err("a real scan error must not read as 'not yet'");
+        assert!(matches!(err, Error::Platform { code: 42, .. }), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(1), "must fail fast");
+    }
+
+    #[test]
+    fn enable_web_accessibility_returns_the_providers_refusal_without_waiting() {
+        let provider = Arc::new(WebProvider::new(
+            Err(Error::AccessibilityNotEnabled {
+                app: "Web".to_string(),
+                instructions: "neither switch read back true".to_string(),
+            }),
+            true,
+        ));
+        let start = Instant::now();
+        let err = web_app(&provider)
+            .enable_web_accessibility(Duration::from_secs(5))
+            .expect_err("a refused request is the error");
+        assert!(
+            matches!(err, Error::AccessibilityNotEnabled { .. }),
+            "{err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "a refusal must not wait"
+        );
+    }
+
+    #[test]
+    fn enable_web_accessibility_is_unsupported_by_default() {
+        let provider: Arc<dyn Provider> = build_provider();
+        let app = App::by_name_with(provider, "TestApp", Duration::ZERO).unwrap();
+        let err = app
+            .enable_web_accessibility(Duration::ZERO)
+            .expect_err("the default provider method refuses");
+        assert!(matches!(err, Error::Unsupported { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_miss_beside_an_empty_web_area_suggests_enable_web_accessibility() {
+        let provider = Arc::new(WebProvider::new(Ok(()), true));
+        let err = web_app(&provider)
+            .locator(r#"button[name="OK"]"#)
+            .element()
+            .expect_err("the web area is empty before the request");
+        let observed = err
+            .diagnosis()
+            .and_then(|d| d.last_observed.clone())
+            .unwrap_or_default();
+        assert!(
+            observed.contains("App.enable_web_accessibility"),
+            "{observed:?}"
         );
     }
 }

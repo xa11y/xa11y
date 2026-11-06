@@ -46,6 +46,17 @@ pub struct AppLookupOptions {
     pub timeout: Option<u32>,
 }
 
+/// Options for `App.enableWebAccessibility`.
+#[napi(object)]
+pub struct WebAccessibilityOptions {
+    /// How many milliseconds to wait for the web content to appear once the
+    /// app has taken the request. When omitted, the process-wide default
+    /// applies: 5000ms (5 seconds) unless overridden via
+    /// `setDefaultTimeout()` or the `XA11Y_DEFAULT_TIMEOUT` environment
+    /// variable. Pass `0` to check once.
+    pub timeout: Option<u32>,
+}
+
 #[napi]
 impl App {
     /// Find an application by exact name.
@@ -185,6 +196,41 @@ impl App {
         AsyncTask::new(AppWindowsTask {
             data: self.data.clone(),
             provider: self.provider.clone(),
+        })
+    }
+
+    /// Turn on the accessibility tree for the app's web content, then wait
+    /// for that content to appear.
+    ///
+    /// Chromium and Electron build the accessibility tree for their web
+    /// content only when a client asks for it. Until then a selector for an
+    /// element on the page finds nothing. This makes that request; xa11y
+    /// never makes it implicitly.
+    ///
+    /// On macOS it sets `AXManualAccessibility` (Electron) on the
+    /// application element and reads it back, then does the same with
+    /// `AXEnhancedUserInterface` (Chrome) if that did not read back as set,
+    /// rejecting with `AccessibilityNotEnabledError` when neither does. It
+    /// does not check that the app is Chromium-based: an app that keeps
+    /// either value counts as having taken the request, and the call then
+    /// rejects with `TimeoutError` because no web content appears. The
+    /// attribute stays set to true afterwards and is not restored; on an app
+    /// that reacts to `AXEnhancedUserInterface` that can disable window
+    /// animations or confuse a window manager. It then waits up to
+    /// `options.timeout` ms until some
+    /// `web_area` has a child, rejecting with `TimeoutError` and a diagnosis
+    /// otherwise. On Linux and Windows it rejects with
+    /// `ActionNotSupportedError` saying what to do instead: on Linux, launch
+    /// the app with `--force-renderer-accessibility`.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn enable_web_accessibility(
+        &self,
+        options: Option<WebAccessibilityOptions>,
+    ) -> AsyncTask<EnableWebAccessibilityTask> {
+        AsyncTask::new(EnableWebAccessibilityTask {
+            data: self.data.clone(),
+            provider: self.provider.clone(),
+            timeout_ms: options.and_then(|o| o.timeout),
         })
     }
 
@@ -400,5 +446,27 @@ impl Task for AppSubscribeTask {
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(NativeSubscription::new(output, self.provider.clone()))
+    }
+}
+
+pub struct EnableWebAccessibilityTask {
+    data: xa11y::ElementData,
+    provider: Arc<dyn xa11y::Provider>,
+    timeout_ms: Option<u32>,
+}
+
+impl Task for EnableWebAccessibilityTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let timeout = effective_timeout_ms(self.timeout_ms)?;
+        xa11y::App::from_data(self.provider.clone(), self.data.clone())
+            .enable_web_accessibility(timeout)
+            .map_err(map_err)
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(())
     }
 }

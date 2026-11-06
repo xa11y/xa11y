@@ -219,6 +219,32 @@ pub trait Provider: Send + Sync {
     /// only emits descendants of its root, and `TreeNode` carries no `raw`.
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>>;
 
+    /// Ask the application `app` to build the accessibility tree for its web
+    /// content. Makes one attempt and does not wait.
+    ///
+    /// Chromium and Electron build the renderer tree only for a client that
+    /// asks for it. On macOS the request is an attribute on the
+    /// *application* element: `AXManualAccessibility` for Electron, then
+    /// `AXEnhancedUserInterface` for Chrome, stopping at the first that reads
+    /// back set. Reading the attribute back proves success, not the set
+    /// call's return code. The attribute is left set afterwards. The core's
+    /// `App::enable_web_accessibility` then waits for the web content to
+    /// appear.
+    ///
+    /// Returns [`Error::AccessibilityNotEnabled`] when neither attribute
+    /// reads back as set. Returns [`Error::Unsupported`], naming
+    /// what to do instead, on a platform where the switch is not a client
+    /// request; on Linux it is a launch-time flag.
+    ///
+    /// The default returns that `Unsupported` error, so a backend without
+    /// the capability says so instead of doing nothing (tenet 1). Every real
+    /// backend overrides it explicitly with its own guidance.
+    fn enable_web_accessibility(&self, _app: &ElementData) -> Result<()> {
+        Err(Error::Unsupported {
+            feature: "enable_web_accessibility on this provider".to_string(),
+        })
+    }
+
     /// Search for elements matching a selector.
     ///
     /// The selector is already parsed by the core — providers match against it
@@ -539,6 +565,11 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
         (**self).list_shell_surfaces()
+    }
+    // Delegated explicitly (despite having a default impl) so a backend's
+    // override isn't bypassed when it's used through a shared reference.
+    fn enable_web_accessibility(&self, app: &ElementData) -> Result<()> {
+        (**self).enable_web_accessibility(app)
     }
     fn find_elements(
         &self,
