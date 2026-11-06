@@ -447,6 +447,42 @@ whose native API has no failure channel. A success return from `set_value()`
 on an AccessKit-backed app means the request reached the app, so read the
 value back if you need to know it landed.
 
+### macOS `AXChildren` already reaches everything we measured
+
+AppKit also vends `AXChildrenInNavigationOrder`, `AXContents`, `AXRows`, and
+`AXColumns`, and it is fair to suspect `AXChildren` of omitting content that
+one of them carries. We measured that on CI runners (macOS 15 and macOS 26,
+arm64): for each of the four attributes, walk a window following `AXChildren`
+plus that attribute, and count the elements, compared by `CFEqual`, that a pure
+`AXChildren` walk never reaches. The apps were Finder (icon, list, column, and
+cover-flow views), System Settings, Mail, a SwiftUI app (`List`, `Table`,
+`Form`, a lazy `ScrollView`, `NavigationSplitView`), and the Cocoa test app
+(`NSTableView`, `NSScrollView`).
+
+No role loses content, so xa11y reads `AXChildren` for every role and keeps no
+per-role mapping to another attribute:
+
+- `AXChildrenInNavigationOrder` and `AXContents` add nothing. Their elements
+  are the `AXChildren` elements, in navigation order for the former.
+- An `AXTable` or `AXOutline` lists its rows and columns in `AXChildren`.
+  `AXRows` and `AXColumns` repeat them.
+- An `AXColumn` has an empty `AXChildren` but an `AXRows` that repeats the
+  table's rows. In Finder's list view three of those entries are extra `AXCell`
+  wrappers over rows already reachable from the table. Their children are
+  `CFEqual` to elements the `AXChildren` walk already found, so they add no
+  content, only a second path to it.
+- An `AXBrowser` (Finder column view) lists its `AXColumns`, but on both
+  runners those are elements `AXChildren` also reaches through the browser's
+  scroll area.
+- Running the walk with a nonexistent attribute reports the same few extra
+  elements as the real attributes do (Settings cells still loading, one SwiftUI
+  group), so those are tree churn between two walks, not content.
+
+Because every second path is a `CFEqual`-duplicate, a search that did follow
+these attributes would have to de-duplicate by `CFEqual` rather than by
+pointer, since each read vends fresh refs. Revisit this if an app turns up
+where `AXChildren` is short of what the window shows.
+
 ## Element references go stale, constantly
 
 ### All three backends mint a fresh handle on every read
