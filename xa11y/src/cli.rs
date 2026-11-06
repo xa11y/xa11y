@@ -222,7 +222,19 @@ pub fn run_main(args: &[String]) -> i32 {
 /// The commands that dispatch an action, and so owe their failures a
 /// delivery disposition. Read-only commands (`tree`, `find`, `apps`, ...)
 /// dispatch nothing, so the line would be noise there.
-const ACTION_COMMANDS: [&str; 7] = ["action", "click", "move", "drag", "scroll", "key", "type"];
+///
+/// `enable-web-accessibility` counts: it sets an attribute on the app, and a
+/// timeout while waiting for web content leaves that request applied.
+const ACTION_COMMANDS: [&str; 8] = [
+    "action",
+    "click",
+    "move",
+    "drag",
+    "scroll",
+    "key",
+    "type",
+    "enable-web-accessibility",
+];
 
 /// The stderr line that follows a failed action command's error, e.g.
 /// `delivery: unknown (the action may have been applied; re-read the state before retrying)`.
