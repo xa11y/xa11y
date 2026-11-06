@@ -447,42 +447,6 @@ whose native API has no failure channel. A success return from `set_value()`
 on an AccessKit-backed app means the request reached the app, so read the
 value back if you need to know it landed.
 
-### macOS `AXChildren` already reaches everything we measured
-
-AppKit also vends `AXChildrenInNavigationOrder`, `AXContents`, `AXRows`, and
-`AXColumns`, and it is fair to suspect `AXChildren` of omitting content that
-one of them carries. We measured that on CI runners (macOS 15 and macOS 26,
-arm64): for each of the four attributes, walk a window following `AXChildren`
-plus that attribute, and count the elements, compared by `CFEqual`, that a pure
-`AXChildren` walk never reaches. The apps were Finder (icon, list, column, and
-cover-flow views), System Settings, Mail, a SwiftUI app (`List`, `Table`,
-`Form`, a lazy `ScrollView`, `NavigationSplitView`), and the Cocoa test app
-(`NSTableView`, `NSScrollView`).
-
-No role loses content, so xa11y reads `AXChildren` for every role and keeps no
-per-role mapping to another attribute:
-
-- `AXChildrenInNavigationOrder` and `AXContents` add nothing. Their elements
-  are the `AXChildren` elements, in navigation order for the former.
-- An `AXTable` or `AXOutline` lists its rows and columns in `AXChildren`.
-  `AXRows` and `AXColumns` repeat them.
-- An `AXColumn` has an empty `AXChildren` but an `AXRows` that repeats the
-  table's rows. In Finder's list view three of those entries are extra `AXCell`
-  wrappers over rows already reachable from the table. Their children are
-  `CFEqual` to elements the `AXChildren` walk already found, so they add no
-  content, only a second path to it.
-- An `AXBrowser` (Finder column view) lists its `AXColumns`, but on both
-  runners those are elements `AXChildren` also reaches through the browser's
-  scroll area.
-- Running the walk with a nonexistent attribute reports the same few extra
-  elements as the real attributes do (Settings cells still loading, one SwiftUI
-  group), so those are tree churn between two walks, not content.
-
-Because every second path is a `CFEqual`-duplicate, a search that did follow
-these attributes would have to de-duplicate by `CFEqual` rather than by
-pointer, since each read vends fresh refs. Revisit this if an app turns up
-where `AXChildren` is short of what the window shows.
-
 ## Element references go stale, constantly
 
 ### All three backends mint a fresh handle on every read
@@ -597,6 +561,41 @@ things the others deliver:
   focus changes is lossy: it misses alt-tab and tool windows, and fires spuriously
   on in-app focus moves. Older/non-native apps (Java Swing, VB6, Adobe products,
   some browsers) have incomplete UIA providers and may not fire events at all.
+
+### macOS: no gap between `AXChildren` and the alternative child attributes, in the fixtures we tried
+
+AppKit also vends `AXChildrenInNavigationOrder`, `AXContents`, `AXRows`, and
+`AXColumns`, and it is fair to suspect `AXChildren` of omitting content that
+one of them carries. We checked on CI runners (macOS 15 and macOS 26, arm64):
+for each attribute, walk a window following `AXChildren` plus that attribute,
+and count the elements, compared by `CFEqual`, that a walk of `AXChildren`
+alone never reaches. The apps were Finder (icon, list, column, and cover-flow
+views), System Settings, Mail, a SwiftUI app (`List`, `Table`, `Form`, a lazy
+`ScrollView`, `NavigationSplitView`), and the Cocoa test app (`NSTableView`,
+`NSScrollView`). Walks stayed small (the largest reached 314 elements, far
+under the walk's 30000-element cap).
+
+We found no gap in these fixtures, so xa11y reads `AXChildren` for every role
+and keeps no per-role mapping to another attribute. These fixtures were
+stock or nearly empty: Mail had no account and so no message list, and Finder
+showed default folders. Long lazy tables, offscreen rows, and large outlines
+were not covered, so this is absence of evidence from small trees, not proof
+for every app.
+
+What the runs showed:
+
+- `AXChildrenInNavigationOrder`, `AXContents`, and `AXColumns` reached no
+  element that `AXChildren` did not. We did not check their order.
+- `AXRows` on an `AXColumn` (Finder list view) reached 3 extra `AXCell`
+  wrappers on both OS versions. All of their children were already reachable
+  through `AXChildren`.
+- Walking with a nonexistent attribute reported the same few extra elements as
+  the real attributes (Settings cells still loading, one SwiftUI group), so
+  those differences are tree churn between two walks, not content.
+
+Any walk that follows these attributes as well would see the same element
+through two paths, and each read vends fresh refs, so it would have to
+de-duplicate by `CFEqual` rather than by pointer.
 
 ## Performance: reading a tree is O(N) cross-process calls
 
