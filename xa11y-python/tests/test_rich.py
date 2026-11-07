@@ -8,7 +8,6 @@ counts as two.
 """
 
 import pytest
-
 import xa11y
 from xa11y import _native
 

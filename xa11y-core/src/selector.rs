@@ -1366,7 +1366,10 @@ mod numeric_attr_tests {
             }
             .into(),
         );
-        assert!(matches_simple(&h, &simple(r#"table_cell[header="column"]"#)));
+        assert!(matches_simple(
+            &h,
+            &simple(r#"table_cell[header="column"]"#)
+        ));
         // An unreported span matches no value.
         assert!(!matches_simple(&c, &simple(r#"table_cell[row_span="1"]"#)));
 
