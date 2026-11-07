@@ -398,6 +398,42 @@ Per-item selection (`selected` on rows, cells, list items) is read differently:
 
 Header exposure varies by toolkit as well as platform. Windows surfaces header cells as `HeaderItem` elements and per-cell header relationships via the `TableItem` pattern. AT-SPI exposes `column header` / `row header` roles. AppKit tables expose a header group whose sort buttons carry the column titles. One known toolkit gap: **Qt tables on macOS expose no header objects at all**. Qt's Cocoa bridge synthesizes `AXRow`/`AXColumn` children only and provides no `AXHeader` attribute, so column titles are absent from the AX tree and xa11y cannot surface them. This is an upstream Qt limitation. Use the platform-consistent `table table_cell` selectors for data, and avoid depending on header names for Qt apps on macOS.
 
+### Tables, collections and text
+
+Support for the [table and text APIs](/guides/tables-and-text/). macOS and Windows
+support is still to come: properties read `None` and methods
+raise `Unsupported` (`ActionNotSupportedError` in Python and JavaScript).
+
+| Capability | Linux (AT-SPI) | macOS | Windows |
+| --- | --- | --- | --- |
+| `table` (`row_count`, `column_count`) | `Table.NRows` / `NColumns`; a negative value reads `unknown` | `None` | `None` |
+| `cell` (`row`, `column`, spans) | `TableCell.GetRowColumnSpan` | `None` | `None` |
+| `cell.header` | The `column header` / `row header` roles | `None` | `None` |
+| `table_row` | Always `None`: AT-SPI has no row-index call for a row object, so read the row from a cell | `None` | `None` |
+| `collection` (`index`, `size`, `depth`) | Object attributes `posinset`, `setsize`, `level`, converted from 1-based; read for list items, tree items, tabs, radio buttons and rows | `None` | `None` |
+| `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `Unsupported` | `Unsupported` |
+| `column_headers()`, `row_headers()` | `Table.GetColumnHeader` / `GetRowHeader` per column or row; `Unsupported` above 1000 | `Unsupported` | `Unsupported` |
+| `column_header_cells()`, `row_header_cells()` | `TableCell.GetColumnHeaderCells` / `GetRowHeaderCells` | `Unsupported` | `Unsupported` |
+| `selected_items()` | `Selection.GetSelectedChild` | `Unsupported` | `Unsupported` |
+| `text()` and every `Text` read | The `Text` interface | `Unsupported` | `Unsupported` |
+| `Text.range_at()` units | `Text.GetStringAtOffset`; `Unsupported` when the toolkit reports no boundary for the unit (GTK 3 text view: `paragraph`) | `Unsupported` | `Unsupported` |
+| `Text.runs()` attributes | `Text.GetAttributeRun`; `script` is always `None` | `Unsupported` | `Unsupported` |
+| `Text.bounds()` | `Text.GetRangeExtents` per rendered line | `Unsupported` | `Unsupported` |
+| `select_text()` range check | `InvalidTextRange` past the end or inside a surrogate pair | No check | No check |
+
+On Linux, a property read that fails leaves its field `None` instead of
+failing the whole element. Table properties are read only for elements whose
+`GetInterfaces` lists `Table` or `TableCell`. GTK 3 tree-view column headers
+have the header role and no `TableCell` interface, so they carry `header` and
+no position.
+
+Offsets are UTF-16 code units everywhere. The AT-SPI specification counts code
+points, which GTK, Chromium, Gecko and LibreOffice follow, so for those apps
+xa11y reads the text before each offset to convert it, and a `caret()` or
+`selections()` poll costs a read of the text up to the caret. Qt's adaptor
+counts UTF-16 code units and needs no conversion. xa11y picks the unit from
+`Application.ToolkitName`.
+
 ### Linux: X11 vs Wayland
 
 xa11y supports both X11 and Wayland Linux sessions. Backends are selected at runtime, with no compile-time feature flag.

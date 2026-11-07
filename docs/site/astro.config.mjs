@@ -64,6 +64,7 @@ export default defineConfig({
             { label: "Find the right selector", slug: "guides/debug-selectors" },
             { label: "Test in CI", slug: "guides/ci" },
             { label: "Simulate input", slug: "guides/input" },
+            { label: "Read tables and text", slug: "guides/tables-and-text" },
             { label: "Capture screenshots", slug: "guides/screenshots" },
             { label: "Annotate a screenshot", slug: "guides/annotate-screenshots" },
             { label: "Drive a desktop from a Strands agent", slug: "guides/strands" },

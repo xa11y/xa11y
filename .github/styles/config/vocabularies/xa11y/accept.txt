@@ -114,5 +114,6 @@ unparsable
 unstripped
 upscaled
 viewport
+[Vv]irtualized
 toplevels?
 postconditions?
