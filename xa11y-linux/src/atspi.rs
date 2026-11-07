@@ -859,33 +859,40 @@ impl LinuxProvider {
 
     /// Screen position of the X11 client window holding a GTK 4 object, for
     /// turning its WINDOW coordinates into screen ones. `None` when the window
-    /// cannot be identified uniquely.
+    /// cannot be identified uniquely; the reason is logged at debug level.
     fn gtk4_window_origin(&self, aref: &AccessibleRef) -> Option<(i32, i32)> {
-        let toplevel = self.toplevel_of(aref)?;
-        let title = self.get_name(&toplevel).ok().filter(|t| !t.is_empty())?;
-        let pid = self.gtk4_pid(&aref.bus_name)?;
-        let (ox, oy) = match self.window_manager.x11_client_origin(pid, &title) {
-            Ok(Some(origin)) => origin,
-            Ok(None) => {
-                log::debug!(
-                    "no bounds for {}{}: no single X11 client window for pid {pid} titled \
-                     {title:?}",
-                    aref.bus_name,
-                    aref.path
-                );
-                return None;
-            }
-            Err(error) => {
-                log::debug!(
-                    "no bounds for {}{}: X11 client origin for pid {pid} titled {title:?}: \
-                     {error}",
-                    aref.bus_name,
-                    aref.path
-                );
-                return None;
-            }
+        self.gtk4_window_origin_or_reason(aref)
+            .map_err(|reason| {
+                log::debug!("no bounds for {}{}: {reason}", aref.bus_name, aref.path);
+            })
+            .ok()
+    }
+
+    /// [`Self::gtk4_window_origin`], saying why when there is none.
+    fn gtk4_window_origin_or_reason(
+        &self,
+        aref: &AccessibleRef,
+    ) -> std::result::Result<(i32, i32), String> {
+        let toplevel = self
+            .toplevel_of(aref)
+            .ok_or_else(|| "no top-level window above the object".to_string())?;
+        let title = match self.get_name(&toplevel) {
+            Ok(t) if !t.is_empty() => t,
+            Ok(_) => return Err("its top-level window has no title to match".to_string()),
+            Err(e) => return Err(format!("reading its top-level window's title: {e}")),
         };
-        Some((ox, oy))
+        let pid = self
+            .gtk4_pid(&aref.bus_name)
+            .ok_or_else(|| format!("no process id for {}", aref.bus_name))?;
+        match self.window_manager.x11_client_origin(pid, &title) {
+            Ok(Some(origin)) => Ok(origin),
+            Ok(None) => Err(format!(
+                "no single X11 client window for pid {pid} titled {title:?}"
+            )),
+            Err(error) => Err(format!(
+                "X11 client origin for pid {pid} titled {title:?}: {error}"
+            )),
+        }
     }
 
     /// Whether `bus`'s root object lists `org.a11y.atspi.Application` in
@@ -1337,10 +1344,10 @@ impl LinuxProvider {
         );
 
         // Fetch all independent properties in parallel.
-        // Left tree: (name+value, description)
+        // Left tree: (name+value, (description, table metadata))
         // Right tree: ((states, bounds), (actions, numeric_values))
         let (
-            ((mut name, value), description),
+            ((mut name, value), (description, meta)),
             (
                 ((states, state_bits, state_read_ok), bounds_read),
                 ((actions, action_index_map), (numeric_value, min_value, max_value)),
@@ -1357,7 +1364,17 @@ impl LinuxProvider {
                         };
                         (name, value)
                     },
-                    || self.get_description(aref).ok().filter(|s| !s.is_empty()),
+                    || {
+                        // Table, cell and collection metadata, gated on the
+                        // interfaces read above so a node without them costs
+                        // nothing (see `rich`). It runs here, beside the
+                        // other reads, because a table dump pays it once per
+                        // cell (issue #650).
+                        (
+                            self.get_description(aref).ok().filter(|s| !s.is_empty()),
+                            self.read_table_metadata(aref, role, role_num, &role_name, ifaces),
+                        )
+                    },
                 )
             },
             || {
@@ -1450,10 +1467,6 @@ impl LinuxProvider {
         // `false` reply or a D-Bus NotSupported error honestly as
         // ActionNotSupported (tenet 3; tenet 1 — no silent fallback — is
         // why there is no substitute mechanism to advertise instead).
-
-        // Table, cell and collection metadata, gated on the interfaces read
-        // above so a node without them costs nothing (see `rich`).
-        let meta = self.read_table_metadata(aref, role, role_num, &role_name, ifaces);
 
         let raw = {
             let raw_role = if role_name.is_empty() {
