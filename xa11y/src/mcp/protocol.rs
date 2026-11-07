@@ -108,7 +108,10 @@ To watch what an application does rather than poll its tree, \
 observe.
 
 The input and screenshot tools work in screen coordinates only. Get those from \
-`find`, which returns each match's `bounds` and `center`.
+`find`, which returns each match's `bounds` and `center`. On Wayland (the Linux \
+uinput input backend) element bounds are not screen coordinates: `find` then \
+omits `center`, says why in `center_unavailable`, and `action` is the way to \
+act on an element.
 
 Trees are depth-limited and match lists are capped; both say so in the result \
 when output was truncated.

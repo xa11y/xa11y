@@ -50,8 +50,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
-use super::tools::element_data_json;
-use crate::cli::{format_event_kind, format_state_flag, text_change_json, CliError, CliResult};
+use super::tools::{element_data_json, note_center};
+use crate::cli::{
+    format_event_kind, format_state_flag, text_change_json, CliError, CliResult, PointerCenter,
+};
 use crate::{Event, EventKind, RecvStatus, Subscription};
 
 /// Events held per subscription before the oldest are evicted.
@@ -281,8 +283,15 @@ impl Registry {
     }
 
     /// Hand over up to `max` buffered events, waiting up to `timeout` for the
-    /// first one.
-    pub(super) fn poll(&self, id: &str, max: usize, timeout: Duration) -> CliResult<Value> {
+    /// first one. `center` decides whether event targets carry a precomputed
+    /// `center`, as it does for every other element-returning tool.
+    pub(super) fn poll(
+        &self,
+        id: &str,
+        max: usize,
+        timeout: Duration,
+        center: &PointerCenter,
+    ) -> CliResult<Value> {
         self.sweep();
         let entry = self.lookup(id)?;
         entry.touch();
@@ -319,18 +328,27 @@ impl Registry {
         // charged for the time it spent blocking.
         entry.touch();
 
-        Ok(json!({
-            "subscription_id": entry.id,
-            "application": entry.app_name,
-            "pid": entry.app_pid,
-            "events": taken.iter().map(event_json).collect::<Vec<Value>>(),
-            "count": taken.len(),
-            "dropped": dropped,
-            "dropped_total": dropped_total,
-            "buffered": buffered,
-            "truncated": buffered > 0,
-            "live": live,
-        }))
+        let mut out = Map::new();
+        out.insert("subscription_id".into(), json!(entry.id));
+        out.insert("application".into(), json!(entry.app_name));
+        out.insert("pid".into(), json!(entry.app_pid));
+        out.insert(
+            "events".into(),
+            Value::Array(
+                taken
+                    .iter()
+                    .map(|b| event_json(b, center.is_usable()))
+                    .collect(),
+            ),
+        );
+        out.insert("count".into(), json!(taken.len()));
+        out.insert("dropped".into(), json!(dropped));
+        out.insert("dropped_total".into(), json!(dropped_total));
+        out.insert("buffered".into(), json!(buffered));
+        out.insert("truncated".into(), json!(buffered > 0));
+        out.insert("live".into(), json!(live));
+        note_center(&mut out, center);
+        Ok(Value::Object(out))
     }
 
     /// Close a subscription and report what it did.
@@ -531,7 +549,7 @@ fn spawn_drainer(
 }
 
 /// One event, in the shape the other element-returning tools use.
-fn event_json(buffered: &Buffered) -> Value {
+fn event_json(buffered: &Buffered, center: bool) -> Value {
     let event = &buffered.event;
     let mut out = Map::new();
     out.insert("sequence".into(), json!(buffered.sequence));
@@ -547,7 +565,7 @@ fn event_json(buffered: &Buffered) -> Value {
     out.insert("application".into(), json!(event.app_name));
     out.insert("pid".into(), json!(event.app_pid));
     if let Some(target) = &event.target {
-        out.insert("target".into(), element_data_json(target));
+        out.insert("target".into(), element_data_json(target, center));
     }
     Value::Object(out)
 }
@@ -682,7 +700,7 @@ mod tests {
         let start = Instant::now();
         while events.len() < want && start.elapsed() < DEADLINE {
             let result = registry
-                .poll(id, 500, Duration::from_millis(100))
+                .poll(id, 500, Duration::from_millis(100), &PointerCenter::Usable)
                 .expect("handle is open");
             events.extend(
                 result["events"]
@@ -742,7 +760,7 @@ mod tests {
             "an application with no reported pid says so rather than omitting it"
         );
         registry
-            .poll(&first, 1, Duration::ZERO)
+            .poll(&first, 1, Duration::ZERO, &PointerCenter::Usable)
             .expect("still open");
     }
 
@@ -829,7 +847,7 @@ mod tests {
         });
 
         let result = registry
-            .poll(&id, BUFFER_CAPACITY, Duration::ZERO)
+            .poll(&id, BUFFER_CAPACITY, Duration::ZERO, &PointerCenter::Usable)
             .expect("handle is open");
         assert_eq!(result["dropped"], json!(overflow));
         assert_eq!(result["dropped_total"], json!(overflow));
@@ -853,12 +871,12 @@ mod tests {
         });
 
         let first = registry
-            .poll(&id, BUFFER_CAPACITY, Duration::ZERO)
+            .poll(&id, BUFFER_CAPACITY, Duration::ZERO, &PointerCenter::Usable)
             .expect("handle is open");
         assert_eq!(first["dropped"], json!(3));
 
         let second = registry
-            .poll(&id, 10, Duration::ZERO)
+            .poll(&id, 10, Duration::ZERO, &PointerCenter::Usable)
             .expect("handle is open");
         assert_eq!(
             second["dropped"],
@@ -883,7 +901,7 @@ mod tests {
         });
 
         let result = registry
-            .poll(&id, 2, Duration::ZERO)
+            .poll(&id, 2, Duration::ZERO, &PointerCenter::Usable)
             .expect("handle is open");
         assert_eq!(result["count"], json!(2));
         assert_eq!(result["buffered"], json!(3));
@@ -898,7 +916,7 @@ mod tests {
     fn an_empty_poll_is_not_a_failure() {
         let (registry, _tx, id) = registry_with(None);
         let result = registry
-            .poll(&id, 10, Duration::ZERO)
+            .poll(&id, 10, Duration::ZERO, &PointerCenter::Usable)
             .expect("an idle subscription is not an error");
         assert_eq!(result["count"], json!(0));
         assert_eq!(result["truncated"], json!(false));
@@ -918,7 +936,7 @@ mod tests {
 
         let start = Instant::now();
         let result = registry
-            .poll(&id, 10, Duration::from_secs(10))
+            .poll(&id, 10, Duration::from_secs(10), &PointerCenter::Usable)
             .expect("handle is open");
         assert_eq!(result["count"], json!(1));
         assert!(
@@ -934,7 +952,7 @@ mod tests {
         let (registry, _tx, id) = registry_with(None);
         let start = Instant::now();
         let result = registry
-            .poll(&id, 10, Duration::from_millis(100))
+            .poll(&id, 10, Duration::from_millis(100), &PointerCenter::Usable)
             .expect("handle is open");
         assert_eq!(result["count"], json!(0));
         assert!(start.elapsed() >= Duration::from_millis(100));
@@ -953,12 +971,12 @@ mod tests {
         // The buffered event is still handed over: disconnect ends the stream,
         // it does not discard what already arrived.
         let result = registry
-            .poll(&id, 10, Duration::from_secs(1))
+            .poll(&id, 10, Duration::from_secs(1), &PointerCenter::Usable)
             .expect("handle is open");
         assert_eq!(result["count"], json!(1));
 
         let after = registry
-            .poll(&id, 10, Duration::from_secs(1))
+            .poll(&id, 10, Duration::from_secs(1), &PointerCenter::Usable)
             .expect("handle is open");
         assert_eq!(after["count"], json!(0));
         assert_eq!(
@@ -974,13 +992,13 @@ mod tests {
         drop(tx);
         until("the drainer to notice the disconnect", || {
             registry
-                .poll(&id, 10, Duration::ZERO)
+                .poll(&id, 10, Duration::ZERO, &PointerCenter::Usable)
                 .is_ok_and(|r| r["live"] == json!(false))
         });
 
         let start = Instant::now();
         let result = registry
-            .poll(&id, 10, Duration::from_secs(10))
+            .poll(&id, 10, Duration::from_secs(10), &PointerCenter::Usable)
             .expect("handle is open");
         assert_eq!(result["live"], json!(false));
         assert!(
@@ -1012,7 +1030,7 @@ mod tests {
     fn an_unknown_handle_names_the_ones_that_are_open() {
         let (registry, _tx, id) = registry_with(None);
         let err = registry
-            .poll("sub_999", 10, Duration::ZERO)
+            .poll("sub_999", 10, Duration::ZERO, &PointerCenter::Usable)
             .expect_err("an id this session never issued");
         match err {
             CliError::NoSubscription { expired, live, .. } => {
@@ -1030,7 +1048,7 @@ mod tests {
         let (registry, _tx, id) = registry_with(None);
         registry.stop(&id).expect("handle is open");
         let err = registry
-            .poll(&id, 10, Duration::ZERO)
+            .poll(&id, 10, Duration::ZERO, &PointerCenter::Usable)
             .expect_err("a stopped handle no longer resolves");
         match err {
             CliError::NoSubscription { expired, live, .. } => {
@@ -1051,7 +1069,7 @@ mod tests {
             matches!(registry.snapshot(&id), Some((3, _, _)))
         });
         let polled = registry
-            .poll(&id, 1, Duration::ZERO)
+            .poll(&id, 1, Duration::ZERO, &PointerCenter::Usable)
             .expect("handle is open");
         assert_eq!(polled["count"], json!(1));
 
@@ -1066,7 +1084,7 @@ mod tests {
         let (registry, _tx, id) = registry_with(None);
         registry.sweep_idle(Duration::ZERO);
         let err = registry
-            .poll(&id, 10, Duration::ZERO)
+            .poll(&id, 10, Duration::ZERO, &PointerCenter::Usable)
             .expect_err("a reclaimed handle no longer resolves");
         assert!(matches!(
             err,
@@ -1077,10 +1095,12 @@ mod tests {
     #[test]
     fn a_poll_keeps_the_subscription_alive() {
         let (registry, _tx, id) = registry_with(None);
-        registry.poll(&id, 10, Duration::ZERO).expect("open");
+        registry
+            .poll(&id, 10, Duration::ZERO, &PointerCenter::Usable)
+            .expect("open");
         registry.sweep_idle(Duration::from_secs(60));
         registry
-            .poll(&id, 10, Duration::ZERO)
+            .poll(&id, 10, Duration::ZERO, &PointerCenter::Usable)
             .expect("a polled subscription is not idle");
     }
 

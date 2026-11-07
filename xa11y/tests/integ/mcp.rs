@@ -138,4 +138,61 @@ mod tests {
             "the long text must be reported as cut: {label}"
         );
     }
+
+    /// `center` is precomputed only where it is a pointer target (#573).
+    ///
+    /// The expectation comes from the library's own signal — the one `Mouse`
+    /// refuses element targets by — so this runs unchanged in the X11 job
+    /// (center present, `-o center` prints) and the native Wayland job
+    /// (center omitted with a reason, `-o center` exits 1). In the Wayland
+    /// container there may be no `/dev/uinput`, in which case the input
+    /// backend cannot be built at all and the omission names that instead.
+    #[test]
+    #[ignore]
+    fn mcp_find_and_cli_center_follow_the_input_backend() {
+        let pid = h::app_root().pid.expect("the test app reports a pid");
+        let usable = matches!(
+            xa11y::input_sim().map(|sim| sim.backend().element_bounds_are_screen_coordinates()),
+            Ok(true)
+        );
+
+        let mut mcp = Session::start();
+        let result = mcp.call_tool("find", json!({"pid": pid, "selector": "button"}));
+        assert_eq!(result["isError"], json!(false), "{result}");
+        let structured = &result["structuredContent"];
+        let matches = structured["matches"]
+            .as_array()
+            .unwrap_or_else(|| panic!("find returned no matches array: {result}"));
+        assert!(!matches.is_empty(), "the test app has buttons: {result}");
+        if usable {
+            assert!(
+                structured.get("center_unavailable").is_none(),
+                "{structured}"
+            );
+            for m in matches {
+                assert_eq!(m.get("bounds").is_some(), m.get("center").is_some(), "{m}");
+            }
+        } else {
+            let reason = structured["center_unavailable"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a withheld center must say why: {structured}"));
+            assert!(!reason.is_empty());
+            for m in matches {
+                assert!(m.get("center").is_none(), "{m}");
+            }
+        }
+
+        let output = Command::new(env!("CARGO_BIN_EXE_xa11y"))
+            .args(["find", "button", "--pid", &pid.to_string(), "-o", "center"])
+            .output()
+            .expect("run `xa11y find -o center`");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if usable {
+            assert!(output.status.success(), "{stderr}");
+            assert!(!output.stdout.is_empty(), "{stderr}");
+        } else {
+            assert_eq!(output.status.code(), Some(1), "{stderr}");
+            assert!(output.stdout.is_empty(), "{stderr}");
+        }
+    }
 }
