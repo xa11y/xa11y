@@ -174,6 +174,33 @@ if [ "$RICH_READY" != "1" ]; then
     exit 1
 fi
 
+# 4c. Launch the stale-handle fixture: a GTK 3 window whose "Rebuild"
+#     button destroys a button, an entry, a spin button and a second
+#     window, for xa11y/tests/integ/stale.rs. GTK 3 keeps a destroyed
+#     widget's accessible answering for ~15-20 s (#491, #586); GTK 4 and
+#     AccessKit do not, so no other fixture can show it. Same interpreter,
+#     log treatment and fail-fast rule as the fixtures above.
+STALE_LOG="target/xa11y-test-stale.log"
+echo "Launching xa11y stale fixture ($PANEL_PY, log: $STALE_LOG)..."
+"$PANEL_PY" test-apps/stale/stale.py > "$STALE_LOG" 2>&1 &
+CLEANUP_PIDS+=($!)
+STALE_READY=0
+for _ in $(seq 1 20); do
+    if ./target/debug/xa11y apps 2>/dev/null | grep -q "xa11y-stale-fixture"; then
+        STALE_READY=1
+        break
+    fi
+    sleep 1
+done
+if [ "$STALE_READY" != "1" ]; then
+    echo "error: the stale fixture never registered with AT-SPI." >&2
+    echo "--- $STALE_LOG ---" >&2
+    cat "$STALE_LOG" >&2 || true
+    echo "--- xa11y apps ---" >&2
+    ./target/debug/xa11y apps >&2 || true
+    exit 1
+fi
+
 # 5. Launch the test application (run binary directly, not via cargo run,
 #    because cargo run changes the process owner name in AT-SPI)
 echo "Launching xa11y-test-app..."
