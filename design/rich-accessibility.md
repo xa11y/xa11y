@@ -198,11 +198,16 @@ seen = {toolbar_save, focused}          # hashable
 toolbar_save.check_alive()              # raises ElementStaleError, or returns None
 ```
 
+### Decided
+
+- Bounded cache now (65,536, insertion-order eviction, `evicted` reason).
+  Leases only if eviction shows up in practice.
+- The role guard is part of the contract on all three platforms: a re-read
+  role that differs from the captured one is `ElementStale(identity_changed)`.
+
 ### Open questions
 
-1. Role guard: accept it as part of the contract, or keep it Linux-only where
-   path reuse is known?
-2. MCP ref table size (8 captures × 2,000 nodes ≈ 16k handles): fine?
+1. MCP ref table size (8 captures × 2,000 nodes ≈ 16k handles): fine?
 
 ---
 
@@ -256,7 +261,7 @@ Same shape as the `table` / `cell` / `collection` sub-structs from #479:
 
 ```rust
 pub heading_level: Option<u32>,          // 1 = h1; a label, not an index
-pub landmark: Option<Landmark>,          // non_exhaustive enum
+pub landmark_type: Option<Landmark>,     // non_exhaustive enum
 pub web_role: Option<String>,            // raw ARIA role string where exposed
 pub link: Option<LinkInfo>,              // { url: Option<String> }
 pub live_region: Option<LiveRegionInfo>, // { politeness, atomic, relevant, container }
@@ -265,15 +270,41 @@ pub live_region: Option<LiveRegionInfo>, // { politeness, atomic, relevant, cont
 - `Landmark`: `Banner`, `Main`, `Navigation`, `Search`, `Region`,
   `Complementary`, `ContentInfo`, `Form`, `Other` (+ `Unknown` fallback).
   `#[non_exhaustive]` like `Role`: backends map platform → `Landmark`, never
-  the reverse.
+  the reverse. The field is named `landmark_type` (UIA's name) so it reads
+  cleanly next to the role, see 2a-bis.
 - `LiveRegionInfo.politeness`: `off` / `polite` / `assertive`.
   `container: bool` says whether it was inherited from an ancestor region
   (AT-SPI `container-live`, which the others don't distinguish → `None`).
-- `Role::Navigation` stays for compatibility. Other landmarks keep their
-  current role (`group`) and gain `landmark`. Selector:
-  `group[landmark="main"]`, `heading[level="2"]`.
-  *Alternative:* add `Role::Landmark` and deprecate `Role::Navigation`.
-  Cleaner, but changes what `group` selectors match today.
+
+#### 2a-bis. Landmarks get one role: `Role::Landmark` (recommended)
+
+Today the role is inconsistent across platforms:
+
+| | What `navigation` matches today |
+|---|---|
+| Linux | **every** landmark: `ROLE_LANDMARK` → `Navigation` (`atspi.rs:4102`), so main, banner and search too |
+| macOS | only `AXLandmarkNavigation`; other landmarks are `group` |
+| Windows | nothing; no code path produces it |
+
+So behaviour changes on at least one platform whatever we pick. Options:
+
+| | Find all landmarks | Find main | Cost |
+|---|---|---|---|
+| **A. `Role::Landmark` for every landmark + `landmark_type`** | `landmark` | `landmark[landmark_type="main"]` or `[landmark_type="main"]` | `navigation` role goes away |
+| B. Keep `group` (+ `Navigation`), add `landmark_type` | needs a new "attribute present" selector operator; the selector AST is exhaustive, so that is a change in every backend's fast path | `[landmark_type="main"]` | Linux bug still needs fixing; two ways to say "navigation" |
+| C. One role per landmark (`Main`, `Banner`, …) | no single selector | `main` | eight new roles, nothing gained over A |
+
+**Recommend A.** AT-SPI already has a single landmark role; UIA and AX model
+it as group plus a property, which is exactly role + `landmark_type`. No new
+selector operator is needed. `Role::Navigation` is removed (not left as a
+variant nothing emits, which would make `navigation` selectors silently match
+nothing): the selector parser rejects `navigation` with an `InvalidSelector`
+whose message gives the replacement, `landmark[landmark_type="navigation"]`.
+Python code comparing `el.role == "navigation"` does break silently; that
+goes in the changelog. Unnamed `region` and `form` are not landmarks
+(Core-AAM), so they keep `group`.
+
+Heading level selector: `heading[heading_level="2"]`.
 
 **Cost per node.** UIA (`HeadingLevel`, `LandmarkType`,
 `LocalizedLandmarkType`, `LiveSetting`, `AriaProperties`) and AX
@@ -322,11 +353,12 @@ where the answer actually lives.
 ```python
 doc = app.locator("web_area").element()
 
-for h in doc.locator("heading").elements():
+for h in doc.locator("heading").elements():   # or heading[heading_level="2"]
     print("  " * (h.heading_level - 1) + (h.name or ""))
 
-main = doc.locator('group[landmark="main"]').element()
-nav = doc.locator('[landmark="navigation"]').elements()
+main = doc.locator('landmark[landmark_type="main"]').element()
+landmarks = doc.locator("landmark").elements()
+print([l.landmark_type for l in landmarks])   # ["banner", "navigation", "main", "contentinfo"]
 
 link = doc.locator('link[name="Docs"]').element()
 print(link.link.url)                     # "https://example.com/docs" or None
@@ -345,10 +377,9 @@ except xa11y.UnsupportedError as e:
 
 ### Open questions
 
-1. `Role::Landmark` or keep `group` + `landmark` field?
-2. Linux `GetAttributes` gating list: accept a role list, or always fetch and
+1. Linux `GetAttributes` gating list: accept a role list, or always fetch and
    eat the cost?
-3. `web_role`: worth exposing raw, or is it a `raw` key?
+2. `web_role`: worth exposing raw, or is it a `raw` key?
 
 ---
 
@@ -464,7 +495,7 @@ for node in cap.nodes:
         print("could not read children of", node.name, node.error)
 
 # non-actionable document text is preserved
-article = next(n for n in cap.nodes if n.landmark == "main")
+article = next(n for n in cap.nodes if n.landmark_type == "main")
 print("".join(n.text.content for n in cap.subtree(article) if n.text))
 
 # relations resolved inside the capture
@@ -478,10 +509,11 @@ cap.find('button[name="Save"]')[0].element().press()
 
 ### Open questions
 
-1. Default `max_nodes` for the Python/JS `capture()` (MCP uses 2,000)?
-2. Should `tree()`'s dict gain `truncated` now, or stay frozen and point
+Decided: default `max_nodes` is 2,000 on every surface, the same as MCP.
+
+1. Should `tree()`'s dict gain `truncated` now, or stay frozen and point
    users at `capture()`?
-3. `Capture.find(selector)`: run the selector engine over captured data
+2. `Capture.find(selector)`: run the selector engine over captured data
    (cheap, offline), or leave querying to the caller?
 
 ---
@@ -524,17 +556,48 @@ Normalisation: AX `High` and UIA `ImportantAll`/`ImportantMostRecent` →
 `assertive`; the rest `polite`. The raw value is preserved. No
 screen-reader policy (queueing, interruption) is implied.
 
-**Linux `LiveRegionChanged`:** two options.
-- *Unsupported (recommended).* Subscribing to it on Linux fails (see 4c).
-  Consumers listen to `TextChanged` / `StructureChanged` and read
-  `live_region` on the target (section 2), which tells them it is inside one.
-- *Derive it* by reading `container-live` for every text/children event's
-  source. One extra D-Bus call per such event, and it is a synthesised event
-  the OS never sent. Not recommended.
+**Linux `LiveRegionChanged`: unsupported (decided).** Subscribing to it on
+Linux fails (see 4c). Consumers listen to `TextChanged` / `StructureChanged`
+and read `live_region` on the target (section 2), which tells them it is
+inside one. Deriving it from `container-live` was rejected: an extra D-Bus
+call per event, for an event the OS never sent.
 
-Behaviour change to call out: Windows `LiveRegionChanged` stops arriving as
-`Announcement`. The AccessKit `Live::Polite` test that passes on all three
-platforms today is really two different events; it splits into two tests.
+#### 4a-bis. What changes on Windows
+
+Today three UIA events all become `Announcement`
+(`UIA_NotificationEventId`, `UIA_LiveRegionChangedEventId`,
+`UIA_SystemAlertEventId`). After the split:
+
+| UIA event | Raised by | Today | After |
+|---|---|---|---|
+| Notification | an app calling `RaiseNotificationEvent` (WPF, WinForms `RaiseAutomationNotification`, UWP/WinUI, Windows Terminal) | `Announcement`, no text | `Announcement` **with** text, kind, processing, activity id |
+| LiveRegionChanged | a region with `LiveSetting` changed (WPF, WinUI, browsers for `aria-live`, AccessKit live nodes) | `Announcement` | `LiveRegionChanged` |
+| SystemAlert | an alert appeared (browsers for `role=alert`, Win32 alerts) | `Announcement` | `LiveRegionChanged`, target = the alert, its `live_region.politeness` reads `assertive` |
+
+Consequences:
+
+- **Code waiting for `announcement` after an `aria-live` update on Windows
+  times out.** That is the one real break. It needs a changelog entry with
+  the fix (wait for either kind), and the `Timeout` diagnosis for an
+  `announcement` wait on Windows should say a `live_region_changed` arrived
+  meanwhile, so the cause is in the error (tenet 6).
+- **The same app can produce different kinds on different platforms.**
+  AccessKit turns a live-node update into `AXAnnouncementRequested` on macOS
+  and `Object:Announcement` on Linux (text included), but into
+  `LiveRegionChanged` on Windows (no text). That reflects what each adapter
+  sends; xa11y reporting it faithfully is the point. A portable test waits for
+  `{announcement, live_region_changed}` and reads the target. The AccessKit
+  test that passes on all three today splits into two.
+- **Notification handlers need `IUIAutomation5`** (Windows 10 1709+). On
+  older systems `announcement` is unsupported rather than silently silent.
+  CI (`windows-latest`) has it.
+- **SystemAlert as `LiveRegionChanged`** is a judgment call: it carries no
+  text, and the consumer has to read the alert, which is the live-region
+  contract. The alternative is a separate `alert` kind; macOS and Linux have
+  no matching event, so it would be single-platform, which `events.md`
+  rules out.
+- Registration cost is unchanged: the same per-window subtree registration
+  with one more handler type.
 
 #### 4b. Event metadata
 
@@ -606,10 +669,11 @@ except xa11y.UnsupportedError as e:
 
 ### Open questions
 
-1. Linux `LiveRegionChanged`: unsupported, or derived?
-2. Default buffer size, and drop-oldest?
-3. Is moving UIA `LiveRegionChanged` out of `Announcement` acceptable in a
-   minor release?
+Decided: Linux `LiveRegionChanged` is unsupported.
+
+1. Default buffer size, and drop-oldest?
+2. Moving UIA `LiveRegionChanged` / `SystemAlert` out of `Announcement` in a
+   minor release (see 4a-bis)?
 
 ---
 
@@ -617,22 +681,116 @@ except xa11y.UnsupportedError as e:
 
 ### `xa11y.capabilities()`
 
-Sections 2 and 4 both need "can this backend ever report X". One static,
-per-backend table, exposed everywhere:
+#### The problem it solves
+
+Three questions have no answer today except "read the docs and hope they
+are current":
+
+1. A field is `None`. Does this element lack the property, or can this
+   backend never report it? (#476 requires these to be distinguishable.)
+2. Is an event kind I subscribed to silent because nothing happened, or
+   because this backend never sends it? (Today: `window_deactivated` on
+   Windows simply never arrives.)
+3. Which relation kinds can I ask for here?
+
+The docs already answer these in prose and tables, and they have drifted:
+the role table claims a Windows landmark mapping no code produces.
+
+#### What it is
+
+A per-backend description of what the backend can *ever* report, as data:
+
+```rust
+pub enum Support { Supported, ToolkitDependent, Unsupported }   // exhaustive: closed domain
+
+#[non_exhaustive]
+pub enum Feature {
+    // properties
+    HeadingLevel, LandmarkType, WebRole, LinkUrl, LiveRegion, ...
+    // methods
+    Relation(RelationKind), TextCaret, TextRuns, TableHeaders, ...
+    // events
+    Event(EventKindName),
+}
+
+pub struct Capabilities { backend: Backend, entries: BTreeMap<Feature, Entry> }
+pub struct Entry { support: Support, note: Option<&'static str> }   // note: why, or the version needed
+
+trait Provider { fn capabilities(&self) -> Capabilities; }
+```
+
+- **`Supported`**: the backend reads it whenever the app exposes it.
+  `None` on an element means *this element* has none.
+- **`ToolkitDependent`**: the backend reads it, but only some toolkits
+  publish it (UIA link URLs: browsers only; AT-SPI live attributes:
+  Chromium, Firefox and WebKitGTK, not GTK 4 widgets). `None` is ambiguous,
+  and the note says which toolkits are known to publish it.
+- **`Unsupported`**: never. Methods return `Error::Unsupported`; `subscribe`
+  with that kind fails; fields are always `None`.
+
+It is static per backend, with one runtime refinement: the provider may
+downgrade an entry for the running OS (no `IUIAutomation5` before Windows 10
+1709 → `announcement` unsupported; AT-SPI before 2.46 → no
+`Object:Announcement`). It never probes an app, so it is cheap and does not
+depend on what happens to be open.
+
+#### Surfaces
+
+| | |
+|---|---|
+| Rust | `xa11y::capabilities()` |
+| Python | `xa11y.capabilities()` → object with `.backend`, `.support(name)`, `.note(name)`, iterable |
+| JS | `capabilities()` |
+| CLI | `xa11y capabilities [--json]` |
+| MCP | a `capabilities` tool, so an agent can check before relying on a field instead of discovering by experiment (the rule in CLAUDE.md about descriptions as contracts) |
+
+Feature names are the snake_case spellings used elsewhere
+(`heading_level`, `relation:described_by`, `event:live_region_changed`), and
+`Feature` goes under `[[types.variant_coverage]]` like `EventKind`.
+
+#### What keeps it true
+
+A table nobody checks drifts like the docs did. Three guards:
+
+1. **Code consults it.** `subscribe(kinds=...)` and `relations(kind)` decide
+   "unsupported" by reading the table, not by a separate `match`. A wrong
+   entry produces a visible wrong error, not a quiet mismatch.
+2. **Integ tests iterate it.** One test per platform cell walks the table
+   against the fixtures: every `Unsupported` entry must produce
+   `Error::Unsupported` (or a `subscribe` failure); every `Supported` entry
+   must have a fixture that yields a non-`None` value or a delivered event.
+   This turns the table into coverage, and is what #475 asks for ("an empty
+   result or blanket skip must not masquerade as coverage").
+3. **Docs are generated.** `cargo xtask docs` renders the capability table
+   in `platform-details.mdx` from the three backends' tables (each backend's
+   table is plain data, so it compiles on every host the way the stubs do);
+   CI fails if the checked-in page differs. The prose caveats stay
+   hand-written.
+
+#### Costs and alternatives
+
+- Cost: every new property, relation or event kind needs an entry per
+  backend. That is deliberate, the same kind of forced per-platform decision
+  `ElementParts` makes for fields.
+- `ToolkitDependent` will cover a lot of the web semantics on Linux, which is
+  a weaker answer. It is the true one; the note names the tested toolkits.
+- *Alternative: docs only* (today). Drifts, and nothing a program can read.
+- *Alternative: probe at runtime* (ask the app). Answers "does this app
+  publish it", which a field read already does; slow and app-dependent.
+- *Alternative: per-field tri-state* (`Reported<T>`). Rejected in 2c.
 
 ```python
 caps = xa11y.capabilities()
-caps.backend                     # "uia"
-caps.properties["heading_level"] # "supported"
-caps.properties["link_url"]      # "toolkit_dependent"  (UIA: browsers only)
-caps.relations["described_by"]   # "unsupported"
-caps.events["live_region_changed"]  # "supported"
-```
+caps.backend                                  # "uia"
+caps.support("heading_level")                 # "supported"
+caps.support("link_url"), caps.note("link_url")
+# ("toolkit_dependent", "ValuePattern on Hyperlink; Chromium, Edge, Firefox")
+caps.support("relation:described_by")         # "unsupported"
+caps.support("event:live_region_changed")     # "supported"
 
-Values: `supported`, `toolkit_dependent`, `unsupported`. It is a backend
-fact, so it is honest without probing an app. The platform-details
-capability table should be **generated** from it, so docs and code cannot
-drift (they already have, for landmarks).
+if caps.support("event:live_region_changed") == "unsupported":   # Linux
+    kinds = [EventType.TEXT_CHANGED, EventType.STRUCTURE_CHANGED]
+```
 
 ### #531 Deadline
 
@@ -660,16 +818,23 @@ shared contracts without a Windows-shaped public API:
 
 ---
 
-## Decisions needed
+## Decisions
 
-Collected from the sections above, most consequential first:
+Made:
 
-1. **#481** Bounded cache + `evicted` stale reason now, leases later? Role
-   guard part of the contract?
-2. **#480** Split `LiveRegionChanged` from `Announcement` (behaviour change on
-   Windows); Linux live-region kind unsupported rather than derived?
-3. **#476** `Role::Landmark` vs `group` + `landmark` field; Linux
-   `GetAttributes` gating.
-4. **#482** Default node cap for library `capture()`; does `tree()` stay
-   frozen?
-5. **All** Add `xa11y.capabilities()` and generate the docs matrix from it?
+- **#481** Bounded handle cache now, leases later if needed. A role change on
+  re-read means stale, on all three platforms.
+- **#480** `LiveRegionChanged` is unsupported on Linux.
+- **#482** Default `max_nodes` is 2,000 everywhere.
+
+Recommended, awaiting sign-off:
+
+- **#476** `Role::Landmark` for every landmark plus `landmark_type`;
+  `Role::Navigation` removed with a loud selector error (2a-bis).
+- **#480** Split UIA `LiveRegionChanged` and `SystemAlert` out of
+  `Announcement` (4a-bis).
+- **All** `xa11y.capabilities()`, consulted by code, iterated by integ
+  tests, and used to generate the docs table (section 5).
+
+Still open: Linux `GetAttributes` gating (2), `web_role` exposure (2), MCP
+ref table size (1), event buffer default (4), `tree()` frozen or not (3).
