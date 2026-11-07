@@ -598,7 +598,7 @@ things the others deliver:
   on in-app focus moves. Older/non-native apps (Java Swing, VB6, Adobe products,
   some browsers) have incomplete UIA providers and may not fire events at all.
 
-### macOS: no gap between `AXChildren` and the alternative child attributes, in the fixtures we tried
+### macOS: no gap between `AXChildren` and the alternative child attributes, in the apps we measured
 
 AppKit also vends `AXChildrenInNavigationOrder`, `AXContents`, `AXRows`, and
 `AXColumns`, and it is fair to suspect `AXChildren` of omitting content that
@@ -628,6 +628,48 @@ What the runs showed:
 - Walking with a nonexistent attribute reported the same few extra elements as
   the real attributes (Settings cells still loading, one SwiftUI group), so
   those differences are tree churn between two walks, not content.
+
+#### Real-Mac measurement
+
+The CI fixtures above were small, so we repeated the check on a maintainer's
+real Mac (macOS 26, arm64, unlocked, Accessibility trusted, apps populated
+with real content). Two methods: (a) walk a window following `AXChildren` to
+get a baseline set (compared by `CFEqual`), then for every baseline node read
+`AXChildrenInNavigationOrder`, `AXContents`, `AXRows`, `AXColumns`,
+`AXVisibleChildren`, `AXVisibleRows`, and a nonexistent control attribute,
+counting children outside the baseline; (b) for each container, compare each
+alternative attribute against that container's own `AXChildren` (sampled up
+to about 1500 nodes, at most 40 children per node). Only roles and counts
+were recorded.
+
+- **Mail** (a real account; the message list is an `AXTable` with 1042 rows):
+  the table's `AXChildren` and `AXChildrenInNavigationOrder` both returned
+  1043 children, and all 1042 `AXRows` were in `AXChildren`. Nothing was
+  missing across tables, rows, cells, groups, and split groups.
+- **System Settings** (a 38-row `AXOutline`), **Safari** (tables, lists, web
+  landmarks, articles, code groups), and **Messages**: nothing missing for any
+  container type.
+- **Finder** (real windows, a 30-row sidebar `AXOutline`,
+  `AXCollectionList`/`AXSectionList`; 127 nodes, fully walked, not capped):
+  no new nodes for any alternative attribute; the control attribute also
+  reported 0.
+- One apparent exception: `AXRows` on an `AXColumn` lists cells (38 in System
+  Settings, 30 in Finder) that are not in that column's own `AXChildren`.
+  The same cells are reachable through each row's `AXChildren`, and the
+  full-window walk showed `AXRows` adding 0 new nodes in both apps, so this
+  is a duplicate view, not lost content.
+
+On this evidence xa11y needs no per-role mapping to an alternative child
+attribute, and reading `AXChildren` is sufficient for the apps measured.
+
+Caveats. Activity Monitor walks were capped and unstable (its window list
+changed between runs) and are excluded. An earlier single run showed 16
+extra `AXStaticText` under an `AXCell` in System Settings via
+`AXChildrenInNavigationOrder`; it did not reproduce in the later
+per-container comparison (the pane on screen had likely changed). Finder's
+windows held a small folder and sidebar, not a huge list. Live content
+changes between walks, so counts differ slightly; the control attribute is
+the baseline for that churn. This covers the apps listed, not every app.
 
 Any walk that follows these attributes as well would see the same element
 through two paths, and each read vends fresh refs, so it would have to
