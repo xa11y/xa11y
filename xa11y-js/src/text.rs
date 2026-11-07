@@ -59,14 +59,24 @@ where
 fn page_limit(limit: Option<f64>) -> napi::Result<usize> {
     match limit {
         None => Ok(DEFAULT_PAGE_LIMIT),
-        Some(n) => Ok(checked_offset(n, "limit")? as usize),
+        Some(n) => {
+            let n = checked_offset(n, "limit")?;
+            if n == 0 {
+                // A page that holds nothing never advances.
+                return Err(crate::map_err(xa11y::Error::InvalidActionData {
+                    message: "limit must be at least 1".to_string(),
+                }));
+            }
+            Ok(n as usize)
+        }
     }
 }
 
 /// The text of one element, read by range.
 ///
 /// Returned by `Element.text()` (bound to that element: a re-rendered
-/// control rejects with `SelectorNotMatchedError`) and `Locator.text()`
+/// control rejects with `SelectorNotMatchedError`, the class a stale element
+/// maps to) and `Locator.text()`
 /// (re-resolved on every call, waiting until the selector matches; reads do
 /// not require the element to be visible or enabled).
 ///

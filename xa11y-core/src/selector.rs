@@ -441,7 +441,7 @@ impl Selector {
         }
         let mut value: String = chars[val_start..pos].iter().collect();
         pos += 1; // skip closing quote
-        if NUMERIC_ATTRS.contains(&attr.as_str()) {
+        if is_typed_attr(&attr) {
             value = numeric_filter_value(&attr, &op, &value).map_err(|message| {
                 Error::InvalidSelector {
                     selector: input.to_string(),
@@ -516,6 +516,12 @@ pub const NUMERIC_ATTRS: &[&str] = &[
     "column_count",
 ];
 
+/// Attributes whose values are validated at parse time: the numeric ones
+/// and `header`, whose only values are `"column"` and `"row"`.
+fn is_typed_attr(attr: &str) -> bool {
+    attr == "header" || NUMERIC_ATTRS.contains(&attr)
+}
+
 /// Totals, which may also be `"unknown"` ([`crate::table::Count::Unknown`]).
 const COUNT_ATTRS: &[&str] = &["size", "row_count", "column_count"];
 
@@ -526,6 +532,19 @@ fn numeric_filter_value(
     op: &MatchOp,
     value: &str,
 ) -> std::result::Result<String, String> {
+    if attr == "header" {
+        if *op != MatchOp::Exact {
+            return Err(format!(
+                "attribute \"header\" only supports '=' (got {op:?})"
+            ));
+        }
+        return match value {
+            "column" | "row" => Ok(value.to_string()),
+            other => Err(format!(
+                "attribute \"header\" takes \"column\" or \"row\", got {other:?}"
+            )),
+        };
+    }
     if *op != MatchOp::Exact {
         return Err(format!(
             "attribute {attr:?} is numeric and only supports '=' (got {op:?})"
@@ -548,7 +567,7 @@ fn numeric_filter_value(
 /// Check that a numeric filter built in Rust holds a canonical value, as
 /// [`Selector::parse`] would have produced.
 fn check_numeric_filter(filter: &AttrFilter) -> std::result::Result<(), String> {
-    if !NUMERIC_ATTRS.contains(&filter.attr.as_str()) {
+    if !is_typed_attr(&filter.attr) {
         return Ok(());
     }
     let canonical = numeric_filter_value(&filter.attr, &filter.op, &filter.value)?;
@@ -1323,6 +1342,8 @@ mod numeric_attr_tests {
             r#"table_cell[row="-1"]"#,
             r#"table_cell[row*="1"]"#,
             r#"table_cell[column="unknown"]"#,
+            r#"table_cell[header="Column"]"#,
+            r#"table_cell[header*="col"]"#,
         ] {
             assert!(
                 matches!(Selector::parse(bad), Err(Error::InvalidSelector { .. })),

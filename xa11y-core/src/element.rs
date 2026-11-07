@@ -502,8 +502,9 @@ impl Element {
     ///
     /// [`Text`]: crate::text_api::Text
     pub fn text(&self) -> crate::error::Result<crate::text_api::Text> {
-        // One cheap call proves the interface exists, so a button fails here
-        // rather than on the first read.
+        // One call proves the interface exists, so a button fails here rather
+        // than on the first read. Where the platform counts code points it
+        // reads the text to measure it, so this is not free on GTK.
         self.provider.text_length(&self.data)?;
         Ok(crate::text_api::Text::for_element(self.clone()))
     }

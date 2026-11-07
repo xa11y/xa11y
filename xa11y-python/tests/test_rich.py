@@ -169,6 +169,11 @@ def test_lines_bounds_and_runs_page():
     assert isinstance(lines, xa11y.TextLines)
     assert lines.lines == [xa11y.TextRange(0, 15), xa11y.TextRange(15, 26)]
     assert not lines.truncated and lines.next_start is None
+    # A page that holds nothing would never advance a paging loop.
+    with pytest.raises(xa11y.InvalidActionDataError):
+        t.lines((0, 26), limit=0)
+    with pytest.raises(xa11y.InvalidActionDataError):
+        t.runs((0, 26), limit=0)
     page = t.lines((0, 26), limit=1)
     assert page.truncated and page.next_start == 15
     rects = t.bounds((9, 20))

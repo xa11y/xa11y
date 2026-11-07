@@ -217,7 +217,7 @@ One string attribute marks header cells:
 
 | Attribute | Values |
 | --- | --- |
-| `header` | `'column'`, `'row'`, read from `cell.header`. A data cell matches no value. |
+| `header` | `'column'`, `'row'`, read from `cell.header`. A data cell matches no value. Takes `=` only. Any other value raises `InvalidSelector`. |
 
 `table_cell[header="column"]` finds a table's column headers.
 

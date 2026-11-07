@@ -69,7 +69,8 @@ impl TextRange {
 
     /// Number of UTF-16 code units covered.
     pub fn len(&self) -> u32 {
-        self.end - self.start
+        // Saturating: the fields are public, so a reversed range can exist.
+        self.end.saturating_sub(self.start)
     }
 
     /// Whether the range covers nothing (a caret position).
@@ -412,7 +413,8 @@ impl Text {
         }
     }
 
-    /// Length of the text in UTF-16 code units. Does not read the text.
+    /// Length of the text in UTF-16 code units. Reads the text only where
+    /// the platform counts something else (GTK on Linux, Windows).
     pub fn length(&self) -> Result<u32> {
         let el = self.target()?;
         el.provider().text_length(el.data())
@@ -497,9 +499,12 @@ impl Text {
     }
 
     /// The rendered lines that cover `range`, each clipped to it, at most
-    /// `limit` per page.
+    /// `limit` per page. A `limit` of 0 fails with
+    /// [`Error::InvalidActionData`]: a page that can hold nothing never
+    /// advances.
     pub fn lines(&self, range: TextRange, limit: usize) -> Result<TextLines> {
         check_ordered(range)?;
+        check_limit(limit)?;
         let el = self.target()?;
         let p = el.provider();
         let data = el.data();
@@ -552,9 +557,10 @@ impl Text {
     }
 
     /// Formatting runs covering `range`, each clipped to it, at most `limit`
-    /// per page.
+    /// per page. A `limit` of 0 fails like it does for [`Self::lines`].
     pub fn runs(&self, range: TextRange, limit: usize) -> Result<TextRuns> {
         check_ordered(range)?;
+        check_limit(limit)?;
         let el = self.target()?;
         let p = el.provider();
         let data = el.data();
@@ -586,6 +592,15 @@ impl std::fmt::Debug for Text {
             Source::Locator(l) => write!(f, "Text(locator {:?})", l.selector()),
         }
     }
+}
+
+fn check_limit(limit: usize) -> Result<()> {
+    if limit == 0 {
+        return Err(Error::InvalidActionData {
+            message: "page limit must be at least 1".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn check_ordered(range: TextRange) -> Result<()> {
@@ -1102,6 +1117,14 @@ mod api_tests {
         let lines = t.lines(all, 10).unwrap();
         assert_eq!(lines.lines, vec![r(0, 15), r(15, 26)]);
         assert!(!lines.truncated);
+        assert!(matches!(
+            t.lines(all, 0),
+            Err(Error::InvalidActionData { .. })
+        ));
+        assert!(matches!(
+            t.runs(all, 0),
+            Err(Error::InvalidActionData { .. })
+        ));
         let page = t.lines(all, 1).unwrap();
         assert!(page.truncated);
         assert_eq!(page.next_start, Some(15));

@@ -215,6 +215,9 @@ test('lines pages rendered lines (default limit 200)', async () => {
     nextStart: 15,
   });
   assert.throws(() => text.lines(all, -1), InvalidActionDataError);
+  // A page that holds nothing would never advance a paging loop.
+  assert.throws(() => text.lines(all, 0), InvalidActionDataError);
+  assert.throws(() => text.runs(all, 0), InvalidActionDataError);
 });
 
 test('bounds returns one rect per line fragment', async () => {

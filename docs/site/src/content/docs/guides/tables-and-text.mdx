@@ -241,9 +241,11 @@ range, and JavaScript takes a plain `{ start, end }` object.
         editor.select_text(r.start, r.end)?;
     }
 
-    // The second match in the first half of the text.
-    let half = TextRange { start: 0, end: text.length()? / 2 };
-    let second = text.find_with("Total:", FindOptions::new().occurrence(1).within(half))?;
+    // The next "Total:" on the line holding the caret.
+    if let Some(caret) = text.caret()? {
+        let line = text.range_at(caret, TextUnit::Line)?;
+        let on_line = text.find_with("Total:", FindOptions::new().within(line))?;
+    }
     ```
   </TabItem>
   <TabItem label="Python">
@@ -261,8 +263,10 @@ range, and JavaScript takes a plain `{ start, end }` object.
         print(text.read(line))
         editor.select_text(r)  # or editor.select_text(r.start, r.end)
 
-    # The second match in the first half of the text.
-    second = text.find("Total:", occurrence=1, within=(0, text.length() // 2))
+    # The next "Total:" on the line holding the caret.
+    caret = text.caret()
+    if caret is not None:
+        on_line = text.find("Total:", within=text.range_at(caret, "line"))
     ```
   </TabItem>
   <TabItem label="JavaScript">
@@ -282,9 +286,12 @@ range, and JavaScript takes a plain `{ start, end }` object.
       await editor.selectText(r); // or editor.selectText(r.start, r.end)
     }
 
-    // The second match in the first half of the text.
-    const half = { start: 0, end: Math.floor((await text.length()) / 2) };
-    const second = await text.find('Total:', { occurrence: 1, within: half });
+    // The next "Total:" on the line holding the caret.
+    const caret = await text.caret();
+    if (caret !== null) {
+      const line = await text.rangeAt(caret, 'line');
+      const onLine = await text.find('Total:', { within: line });
+    }
     ```
   </TabItem>
 </Tabs>
@@ -299,6 +306,9 @@ What each call returns:
 - `find()` is an exact, case-sensitive match with no Unicode normalization.
   `occurrence` counts from 0 and matches don't overlap. An empty needle raises
   `InvalidActionDataError`.
+- `within` must not split a surrogate pair, or the search raises
+  `InvalidTextRange`. A range from `range_at` or `find` never does, so build
+  `within` from those rather than from arithmetic on offsets.
 - `range_at(offset, unit)` takes `"character"`, `"word"`, `"line"`, or
   `"paragraph"`. `"line"` is the rendered line, so a wrapped paragraph has
   several. Some toolkits report no boundaries for a unit, and the call then
