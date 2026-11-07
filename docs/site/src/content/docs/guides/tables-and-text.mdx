@@ -1,0 +1,460 @@
+---
+title: Read tables and text
+description: Find a table cell by row and column, read a list item's position, and read, search, and select text by range.
+pageType: how-to
+---
+
+{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows
+    what they want. Steps and decisions only. Concepts go to explanation/,
+    exhaustive option lists go to reference/. */}
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A role says what an element is. This page covers the APIs that say where it
+sits and what it contains: a cell's row and column, an item's place in its
+list, and an editor's text read range by range instead of as one `value`
+string.
+
+:::note[Platform support]
+Linux, macOS and Windows support the table and text APIs on this page when
+the application exposes the corresponding accessibility interfaces. See
+[Platform details](/reference/platform-details/#tables-collections-and-text)
+for the fields and methods each backend can report.
+:::
+
+## Every index starts at 0, except `nth`
+
+Rows, columns, list positions, tree depth, and text offsets all count from
+`0`, like `children()[i]` and `value[a:b]`. The first row is `row == 0`.
+
+`:nth(n)` in a selector and `Locator.nth(n)` are the one exception. They count
+matches from 1, as CSS `:nth-child` does. Neither converts into the other,
+so `table_cell[row="0"]:nth(1)` is the first matching cell of the first
+row.
+
+Counts and sizes are not indices: `row_count`, `column_count`, and `size` are
+plain totals.
+
+## Read where a cell sits
+
+`table`, `cell`, `table_row`, and `collection` are properties of every
+element. Each one is `None` when the element has no such semantics or the
+platform does not report them, and each field inside is `None` when the
+platform left it out. A missing span is never filled in as `1`. Qt reports
+`1` itself, even for a merged cell; see
+[Platform details](/reference/platform-details/#tables-collections-and-text).
+
+A total can also be the string `"unknown"`. Virtualized lists and grids report
+that when they do not know how many rows they hold.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    use std::time::Duration;
+    use xa11y::*;
+
+    fn main() -> Result<()> {
+        let app = App::by_name("Inventory", Duration::from_secs(5))?;
+        let table = app.locator("table[name='Stock']").element()?;
+        if let Some(info) = table.table {
+            // Count prints as a number or "unknown".
+            println!("{:?} rows", info.row_count.map(|c| c.to_string()));
+        }
+
+        let cell = app.locator("table_cell[name='Widget']").element()?;
+        if let Some(pos) = cell.cell {
+            println!("row {:?}, column {:?}", pos.row, pos.column);
+            println!("spans {:?} rows", pos.row_span); // None when not reported
+        }
+        Ok(())
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    app = xa11y.App.by_name("Inventory")
+    table = app.locator("table[name='Stock']").element()
+    if table.table is not None:
+        print(table.table.row_count)  # an int, "unknown", or None
+
+    cell = app.locator("table_cell[name='Widget']").element()
+    if cell.cell is not None:
+        print(cell.cell.row, cell.cell.column)  # 0-based
+        print(cell.cell.row_span)  # None when not reported
+        print(cell.cell.header)  # "column", "row", or None for a data cell
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    import { App } from '@crowecawcaw/xa11y';
+
+    const app = await App.byName('Inventory');
+    const table = await app.locator("table[name='Stock']").element();
+    console.log(table.table?.rowCount); // a number, 'unknown', or null
+
+    const cell = await app.locator("table_cell[name='Widget']").element();
+    console.log(cell.cell?.row, cell.cell?.column); // 0-based
+    console.log(cell.cell?.rowSpan); // null when not reported
+    ```
+  </TabItem>
+</Tabs>
+
+In virtualized content, `cell.row` is the row as currently laid out and can
+shift as the view scrolls, while `row_count` may be the size of the whole data
+set. Don't compare the two there. `children()` returns only the rows realized
+now.
+
+On Linux, `table_row` is always `None`, because AT-SPI has no row-index call
+for a row object. Read the row from any of its cells instead.
+
+## Select a cell by row and column
+
+The fields above are also selector attributes. Quote the number and use `=`:
+
+```
+table_cell[row="2"][column="0"]      # third row, first column
+table_cell[row="0"]:nth(1)           # first matching cell of the first row
+list_item[index="0"]                 # first item in its list
+tree_item[depth="1"]                 # one level below the top
+list_item[size="unknown"]            # items in a list of unknown length
+```
+
+A field the platform did not report matches no value. The full attribute list,
+including which ones accept `"unknown"`, is in
+[Selectors](/reference/selectors/#numeric-attributes).
+
+## Walk a table from the table element
+
+When you already hold the table, `cell_at(row, column)` returns the cell
+without building a selector. A slot covered by a merged cell returns the
+merged cell. A slot outside the table, or one the platform has not realized,
+returns `None`. xa11y never scrolls or realizes content to answer it.
+
+`column_headers()` and `row_headers()` on a table return its header cells.
+`column_header_cells()` and `row_header_cells()` on a cell return the headers
+that head that one cell.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    let table = app.locator("table[name='Stock']").element()?;
+    if let Some(cell) = table.cell_at(2, 1)? {
+        let headers: Vec<_> = cell
+            .column_header_cells()?
+            .into_iter()
+            .filter_map(|h| h.name.clone())
+            .collect();
+        println!("{:?} under {:?}", cell.name, headers);
+    }
+    let titles: Vec<_> = table.column_headers()?.into_iter().map(|h| h.name.clone()).collect();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    table = app.locator("table[name='Stock']").element()
+    cell = table.cell_at(2, 1)
+    if cell is not None:
+        headers = [h.name for h in cell.column_header_cells()]
+        print(cell.name, "under", headers)
+
+    titles = [h.name for h in table.column_headers()]
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const table = await app.locator("table[name='Stock']").element();
+    const cell = await table.cellAt(2, 1);
+    if (cell) {
+      const headers = (await cell.columnHeaderCells()).map((h) => h.name);
+      console.log(cell.name, 'under', headers);
+    }
+    const titles = (await table.columnHeaders()).map((h) => h.name);
+    ```
+  </TabItem>
+</Tabs>
+
+On Linux, a table with more than 1000 columns (or rows, for `row_headers()`)
+raises `ActionNotSupportedError` from the table-level header methods. Ask the
+individual cells with `column_header_cells()` instead.
+
+## Read a list or tree item's position
+
+`collection` carries an item's `index` in its set, the set's `size`, and the
+item's tree `depth`. On Linux, xa11y reads them for list items, tree items,
+tabs, radio buttons, and rows. Qt sets none of them, so its items read
+`collection` as `None`. `index` starts at 0, so add 1 for a "3 of 10" label.
+`depth` is 0 for a top-level tree item. Heading level is a separate concept
+and still reads `1` for an h1.
+
+```python
+item = app.locator("list_item[name='Drafts']").element()
+pos = item.collection
+if pos is not None and pos.index is not None:
+    print(f"{pos.index + 1} of {pos.size}")
+```
+
+## Read the selected items
+
+`selected_items()` on a list, tree, table, or tab list returns what is
+selected, as rows or cells depending on what the platform reports.
+
+```python
+selected = app.locator("table[name='Stock']").element().selected_items()
+print([el.name for el in selected])
+```
+
+## Read text by range
+
+`element.text()` and `locator.text()` return a `Text` object. Every method on
+it is a live platform read that caches nothing, so polling `caret()` sees the
+current caret without fetching the whole text.
+
+The two differ in what they hold on to:
+
+- `element.text()` stays bound to that element. It raises
+  `ActionNotSupportedError` straight away when the element has no text
+  interface, and later reads fail if the control is re-rendered.
+- `locator.text()` re-resolves the selector on every read, waiting until it
+  matches. It doesn't wait for the element to be visible or enabled.
+
+A range is a `TextRange` with `start` and `end`, half-open, so `(0, 5)` covers
+the first five units. Python accepts a `(start, end)` tuple anywhere it takes a
+range, and JavaScript takes a plain `{ start, end }` object.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    use xa11y::{FindOptions, TextRange, TextUnit};
+
+    let editor = app.locator("text_area[name='Notes']");
+    let text = editor.text();
+
+    println!("{} units, caret at {:?}", text.length()?, text.caret()?);
+    for sel in text.selections()? {
+        println!("selected: {:?}", text.read(sel)?);
+    }
+
+    if let Some(r) = text.find("Total:")? {
+        let line = text.range_at(r.start, TextUnit::Line)?;
+        println!("{}", text.read(line)?);
+        editor.select_text(r.start, r.end)?;
+    }
+
+    // The next "Total:" on the line holding the caret.
+    if let Some(caret) = text.caret()? {
+        let line = text.range_at(caret, TextUnit::Line)?;
+        let on_line = text.find_with("Total:", FindOptions::new().within(line))?;
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    editor = app.locator("text_area[name='Notes']")
+    text = editor.text()
+
+    print(text.length(), "units, caret at", text.caret())
+    for sel in text.selections():
+        print("selected:", text.read(sel))
+
+    r = text.find("Total:")
+    if r is not None:
+        line = text.range_at(r.start, "line")
+        print(text.read(line))
+        editor.select_text(r)  # or editor.select_text(r.start, r.end)
+
+    # The next "Total:" on the line holding the caret.
+    caret = text.caret()
+    if caret is not None:
+        on_line = text.find("Total:", within=text.range_at(caret, "line"))
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const editor = app.locator("text_area[name='Notes']");
+    const text = editor.text();
+
+    console.log(await text.length(), 'units, caret at', await text.caret());
+    for (const sel of await text.selections()) {
+      console.log('selected:', await text.read(sel));
+    }
+
+    const r = await text.find('Total:');
+    if (r) {
+      const line = await text.rangeAt(r.start, 'line');
+      console.log(await text.read(line));
+      await editor.selectText(r); // or editor.selectText(r.start, r.end)
+    }
+
+    // The next "Total:" on the line holding the caret.
+    const caret = await text.caret();
+    if (caret !== null) {
+      const line = await text.rangeAt(caret, 'line');
+      const onLine = await text.find('Total:', { within: line });
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+What each call returns:
+
+- `caret()` is `None` when the element has no caret, such as an unfocused or
+  read-only field.
+- `selections()` is empty when nothing is selected. A caret on its own is not
+  a selection. Most controls allow one range, and browsers and word
+  processors can report several.
+- `find()` is an exact, case-sensitive match with no Unicode normalization.
+  `occurrence` counts from 0 and matches don't overlap. An empty needle raises
+  `InvalidActionDataError`.
+- `within` must not split a surrogate pair, or the search raises
+  `InvalidTextRange`. A range from `range_at` or `find` never does, so build
+  `within` from those rather than from arithmetic on offsets.
+- `range_at(offset, unit)` takes `"character"`, `"word"`, `"line"`, or
+  `"paragraph"`. `"line"` is the rendered line, so a wrapped paragraph has
+  several. Some toolkits report no boundaries for a unit, and the call then
+  raises `ActionNotSupportedError`. GTK 3's text view does that for
+  `"paragraph"`.
+- `read()` returns the text as the platform reports it, including any Unicode
+  bidi controls that `value` strips.
+
+A `TextRange` is two numbers and does not follow edits. After the text
+changes, an old range can cover different text, or fall past the end and
+raise `InvalidTextRangeError`. Find it again after an edit.
+
+## Use `read()` instead of slicing `value`
+
+Every offset counts UTF-16 code units, on every surface. That matches
+JavaScript string indexing. Python strings index by code point instead, and a
+character outside the Basic Multilingual Plane, such as most emoji, is two
+UTF-16 units and one code point. Slicing `value` with an offset after such a
+character gives the wrong text:
+
+```python
+# The field contains "Hi 👋 there".
+field = app.locator("text_field[name='Greeting']").element()
+text = field.text()
+r = text.find("there")      # TextRange(start=6, end=11): the emoji is two units
+field.value[r.start:r.end]  # 'here': shifted by one code point
+text.read(r)                # 'there'
+```
+
+`value` also has bidi controls stripped, which shifts offsets in mixed-direction
+text. `read()` avoids both problems, and it reads only the range you ask for.
+
+On Linux, GTK, Chromium, Gecko, and LibreOffice count code points internally,
+so xa11y reads the text up to each offset to convert it. A `caret()` or
+`selections()` poll in those apps costs a read of the text before the caret.
+Qt counts UTF-16 natively and needs no conversion.
+
+## Page through lines and formatting runs
+
+`lines(range, limit)` returns the rendered lines covering a range, and
+`runs(range, limit)` returns runs of text that share formatting. Both return
+at most `limit` items (200 by default in Python and JavaScript). When a page
+stops early, `truncated` is true and `next_start` is the offset to continue
+from.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    let length = text.length()?;
+    let mut start = 0;
+    loop {
+        let page = text.lines(TextRange { start, end: length }, 200)?;
+        for line in &page.lines {
+            println!("{}", text.read(*line)?);
+        }
+        match page.next_start {
+            Some(next) => start = next,
+            None => break,
+        }
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    length = text.length()
+    start = 0
+    while True:
+        page = text.lines((start, length), limit=200)
+        for line in page.lines:
+            print(text.read(line))
+        if page.next_start is None:
+            break
+        start = page.next_start
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const length = await text.length();
+    let start = 0;
+    for (;;) {
+      const page = await text.lines({ start, end: length }, 200);
+      for (const line of page.lines) console.log(await text.read(line));
+      if (page.nextStart == null) break;
+      start = page.nextStart;
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+Each run has a `range` and `attributes`. Every attribute is `None` when the
+platform did not report it, so bold text in a toolkit that reports no weight
+reads `font_weight is None`, and never `400`:
+
+```python
+for run in text.runs((0, text.length())).runs:
+    a = run.attributes
+    if a.font_weight is not None and a.font_weight >= 700:
+        print("bold:", text.read(run.range))
+```
+
+Colors come back as `"#rrggbb"`, or `"#rrggbbaa"` when not fully opaque. On
+Linux, `script` (superscript or subscript) is always `None`, because AT-SPI
+reports the baseline shift with no reference to compare it against.
+
+## Get the on-screen position of a range
+
+`bounds(range)` returns one rectangle per rendered line the range covers, in
+the same desktop coordinates as `element.bounds`. Use it to point
+[input simulation](/guides/input/) or a [screenshot](/guides/screenshots/) at a
+word.
+
+```python
+r = text.find("Total:")
+rects = text.bounds(r)
+```
+
+A line with no geometry, because it is scrolled out or not laid out, is left
+out, so an empty list means no part of the range is on screen. A range
+covering more than 1000 rendered lines raises `InvalidTextRangeError`. Page it
+with `lines()` and ask for each page's bounds instead.
+
+## Handle the errors
+
+Four failures are worth handling in Python:
+
+- `ActionNotSupportedError` when the element has no text interface, when a
+  table method is called on something that is not a table, and for a text
+  unit the platform has no boundaries for (`word` and `paragraph` on macOS).
+- `InvalidTextRangeError` for a range past the end of the text, reversed, or
+  splitting a surrogate pair.
+- `InvalidActionDataError` for an empty `find()` needle or an unknown unit
+  name.
+- `SelectorNotMatchedError` from a `Text` bound to an element that went away.
+
+`InvalidTextRangeError` subclasses `InvalidActionDataError`. Its `length`
+attribute holds the current length of the text when the check knew it, which
+tells you how far an edit moved the end:
+
+```python
+try:
+    text.read(saved_range)
+except xa11y.InvalidTextRangeError as e:
+    print(f"{e.start}..{e.end} is out of date; the text is now {e.length} units")
+```
+
+The JavaScript error classes have the same names, and Rust reports
+`Error::InvalidTextRange`. The full mapping is in
+[Errors](/reference/errors/).

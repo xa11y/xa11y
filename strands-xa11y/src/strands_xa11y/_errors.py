@@ -48,6 +48,10 @@ _GUIDANCE = {
         "attribute values must be quoted (button[name='Save']); combinators are ' ' (descendant) "
         "and '>' (direct child); position is :nth(1), 1-based."
     ),
+    "InvalidTextRangeError": (
+        "The text range is past the end of the text, reversed, or splits an emoji in half. "
+        "Offsets are UTF-16 code units; get them from find() or range_at() instead of counting characters."
+    ),
     "InvalidActionDataError": "The action received an out-of-range value. Check offsets and numeric bounds.",
     "SelectorNotMatchedError": (
         "Nothing matched. The near misses above are the elements that came closest, and the search "

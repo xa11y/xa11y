@@ -27,21 +27,27 @@ export {
   InputSim,
   Locator,
   Screenshot,
+  Text,
   inputSim,
   locator,
   _makeTestApp,
   _makeTestInput,
   _makeTestLocator,
+  _makeTestTableLocator,
 } from './native.js';
 
 // Forward the narrowed types from native.d.ts.
 export type {
   AnchorName,
+  CellInfo,
   CheckedState,
   ClickOptions,
+  CollectionInfo,
+  CountValue,
   DragOptions,
   DeliveryName,
   EventTypeName,
+  HeaderKindName,
   HiddenReasonName,
   AutoScrollOutcomeName,
   LegendEntry,
@@ -49,7 +55,19 @@ export type {
   Omission,
   OmissionReasonName,
   Rect,
+  RowInfo,
   ShellSurfaceKindName,
+  TableInfo,
+  TextAttributes,
+  TextChange,
+  TextChangeKindName,
+  TextFindOptions,
+  TextLines,
+  TextRange,
+  TextRun,
+  TextRuns,
+  TextScriptName,
+  TextUnitName,
 } from './native.js';
 import type {
   AnchorName,
@@ -687,6 +705,25 @@ export class InvalidSelectorError extends XA11yError {}
 
 /** The data passed to an action method was rejected (e.g. out-of-range slider value). */
 export class InvalidActionDataError extends XA11yError {}
+
+/**
+ * A text range is out of bounds, reversed, or splits a surrogate pair.
+ *
+ * Offsets are UTF-16 code units. A subclass of {@link InvalidActionDataError}
+ * (as in Python), so existing checks for that class still catch it. The
+ * fields are always present on errors xa11y throws.
+ */
+export class InvalidTextRangeError extends InvalidActionDataError {
+  /** Start of the rejected range. */
+  start: number | null;
+  /** End of the rejected range. */
+  end: number | null;
+  /**
+   * The text's current length, when the check knew it — so a range made
+   * stale by an edit says how long the text is now. `null` otherwise.
+   */
+  length: number | null;
+}
 
 /** An OS-level accessibility error occurred. */
 export class PlatformError extends XA11yError {}

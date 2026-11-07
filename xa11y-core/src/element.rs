@@ -177,6 +177,24 @@ reader_writer_pair! {
         /// Maximum value for range controls.
         pub max_value: Option<f64>,
 
+        /// Size of a table, grid or tree grid. Set on the container.
+        /// `None` when the element has no table semantics or the platform
+        /// does not expose them. See [`crate::table`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub table: Option<crate::table::TableInfo>,
+
+        /// Row, column and spans of a table cell, including header cells.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cell: Option<crate::table::CellInfo>,
+
+        /// Row index of a table or tree-grid row.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub table_row: Option<crate::table::RowInfo>,
+
+        /// Position in a list, tree, tab list or radio group, and tree depth.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub collection: Option<crate::table::CollectionInfo>,
+
         /// Platform-assigned stable identifier for cross-snapshot correlation.
         /// - macOS: `AXIdentifier`
         /// - Windows: native window handle (`hwnd:0x…`) for top-level windows,
@@ -229,6 +247,10 @@ impl ElementData {
             numeric_value: None,
             min_value: None,
             max_value: None,
+            table: None,
+            cell: None,
+            table_row: None,
+            collection: None,
             stable_id: None,
             pid: None,
             raw: RawPlatformData::new(),
@@ -455,16 +477,86 @@ impl Element {
         self.provider.type_text(&self.data, text)
     }
 
-    /// Select the text range from `start` to `end` (0-based character offsets).
+    /// Select the text range from `start` to `end`: 0-based UTF-16 code-unit
+    /// offsets, the unit every text offset in xa11y uses.
     ///
-    /// Returns [`Error::InvalidActionData`] if `start > end`.
+    /// Returns [`Error::InvalidTextRange`] if `start > end`, past the end of
+    /// the text, or splitting a surrogate pair.
     pub fn select_text(&self, start: u32, end: u32) -> crate::error::Result<()> {
-        if start > end {
-            return Err(Error::InvalidActionData {
-                message: format!("select_text start ({}) must be <= end ({})", start, end),
-            });
-        }
+        crate::text_api::TextRange::new(start, end)?;
         self.provider.set_text_selection(&self.data, start, end)
+    }
+
+    /// Read this element's text by range: caret, selection, ranges, rendered
+    /// lines, geometry and formatting. Offsets are UTF-16 code units.
+    ///
+    /// Fails with [`Error::ActionNotSupported`] (action `"text"`) when the
+    /// element has no text interface. The returned [`Text`] stays bound to
+    /// this element; use [`crate::Locator::text`] to re-resolve on every read.
+    ///
+    /// [`Text`]: crate::text_api::Text
+    pub fn text(&self) -> crate::error::Result<crate::text_api::Text> {
+        // One call proves the interface exists, so a button fails here rather
+        // than on the first read. Where the platform counts code points it
+        // reads the text to measure it, so this is not free on GTK.
+        self.provider.text_length(&self.data)?;
+        Ok(crate::text_api::Text::for_element(self.clone()))
+    }
+
+    /// On a table: the cell at 0-based `row` / `column`. A slot covered by a
+    /// merged cell returns the merged cell. `None` when the slot is out of
+    /// range or not realized; content is never realized implicitly.
+    pub fn cell_at(&self, row: u32, column: u32) -> crate::error::Result<Option<Element>> {
+        Ok(self
+            .provider
+            .table_cell_at(&self.data, row, column)?
+            .map(|d| self.wrap(d)))
+    }
+
+    /// On a table: its column header cells.
+    pub fn column_headers(&self) -> crate::error::Result<Vec<Element>> {
+        self.wrap_all(
+            self.provider
+                .table_headers(&self.data, crate::table::HeaderKind::Column)?,
+        )
+    }
+
+    /// On a table: its row header cells.
+    pub fn row_headers(&self) -> crate::error::Result<Vec<Element>> {
+        self.wrap_all(
+            self.provider
+                .table_headers(&self.data, crate::table::HeaderKind::Row)?,
+        )
+    }
+
+    /// On a cell: the column header cells that head it.
+    pub fn column_header_cells(&self) -> crate::error::Result<Vec<Element>> {
+        self.wrap_all(
+            self.provider
+                .cell_headers(&self.data, crate::table::HeaderKind::Column)?,
+        )
+    }
+
+    /// On a cell: the row header cells that head it.
+    pub fn row_header_cells(&self) -> crate::error::Result<Vec<Element>> {
+        self.wrap_all(
+            self.provider
+                .cell_headers(&self.data, crate::table::HeaderKind::Row)?,
+        )
+    }
+
+    /// On a list, tree, table or tab list: the selected items (rows or cells,
+    /// whichever the platform reports).
+    pub fn selected_items(&self) -> crate::error::Result<Vec<Element>> {
+        self.wrap_all(self.provider.selected_items(&self.data)?)
+    }
+
+    fn wrap(&self, data: ElementData) -> Element {
+        Element::new(data, Arc::clone(&self.provider))
+    }
+
+    fn wrap_all(&self, data: Vec<ElementData>) -> crate::error::Result<Vec<Element>> {
+        Ok(data.into_iter().map(|d| self.wrap(d)).collect())
     }
 
     /// Perform an action by its `snake_case` name.
@@ -1222,7 +1314,7 @@ mod tests {
         let el = find_element(&provider, r#"text_field[name="Search"]"#);
         assert!(matches!(
             el.select_text(5, 2),
-            Err(Error::InvalidActionData { .. })
+            Err(Error::InvalidTextRange { .. })
         ));
         assert!(provider.actions().is_empty());
     }

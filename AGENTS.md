@@ -19,6 +19,21 @@ harness fails rather than running without it — a shell test that skips on an
 empty enumeration passes just as well when the classifier is broken, which is
 the hole issue #383 was about.
 
+`test-apps/rich/rich.py` follows the same precedent for a different reason:
+the platform adapter, not the app, is what is missing. `accesskit_unix`
+implements no AT-SPI `Table` / `TableCell` and reports no text attribute
+runs, so `xa11y/tests/integ/rich.rs` reads a GTK 3 table, tree view and
+tagged `GtkTextView` that the harness launches with the panel's interpreter
+(and fails without). Collection positions are the exception and come from
+the AccessKit app, because GTK 3 sets no `posinset` / `setsize`.
+
+On macOS the same coverage is `tests/suites/python/test_cocoa_rich.py`,
+against the Cocoa test app's "Rich" box (an attributed `NSTextView` and an
+`NSOutlineView`) and its "Users Table". It is a Python suite rather than a
+Rust integ module because the Rust integ tests do not run in macOS CI (see
+the `macos` job in `ci.yml`), while the `macos-latest × cocoa` integ cell
+does.
+
 ### Test helpers
 
 Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
@@ -456,6 +471,35 @@ reported like any other.
 `Role` and `Key` are deliberately **not** covered: `Role` converts
 mechanically via `to_snake_case`, and `Key` is parsed from a string by a
 binding-side parser that already rejects unknown names loudly.
+
+## Index Bases
+
+**Every index is 0-based, except `nth`.** Text offsets, ranges, grid row and
+column, position in a list, and tree depth all count from 0, like the
+host languages (`children()[i]`, `value[a:b]`) and every native grid API.
+Ranges are half-open, `[start, end)`.
+
+The one exception is `nth`: the selector's `:nth(n)` and `Locator.nth(n)` are
+1-based, following CSS `:nth-child`. Things defined as "the `nth` argument"
+follow it, which is why screenshot tags (`B7`) and `LegendEntry.index` count
+from 1. `LegendEntry.index` predates this rule and breaks the naming half of
+it; renaming it is a separate, breaking change.
+
+- **Names carry the base.** `index`, `row`, `column`, `depth`, `offset`,
+  `start` and `end` are 0-based; `nth` is 1-based. Do not give a new 1-based
+  number any of the 0-based names, or `position`.
+- **Values that are not indices stay as they are.** Counts and sizes, heading
+  level (`1` means h1, a label), `Key::F(1)`.
+- **A selector attribute compares a property exactly as the API reports
+  it.** `[row="0"]` matches `el.cell.row == 0`, so `table_cell[row="0"]:nth(1)`
+  is the first matching cell of the first row. Selectors never convert bases.
+- **Backends convert 1-based platform values** (UIA `PositionInSet` / `Level`,
+  AT-SPI `posinset` / `level`, ARIA) with `xa11y_core::table::index_from_one_based`,
+  which also treats UIA's unset `0` as not reported.
+- **Every doc comment for an index states its base.**
+
+Text offsets are additionally **UTF-16 code units** on every surface (Rust,
+Python, JS, CLI, MCP); see `xa11y_core::text_api`.
 
 ## Binding Shape Conventions
 

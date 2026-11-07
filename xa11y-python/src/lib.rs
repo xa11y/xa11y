@@ -5,6 +5,8 @@ use pyo3::exceptions::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+mod rich;
+
 // ── Singleton provider ─────────────────────────────────────────────────────
 
 fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
@@ -31,6 +33,7 @@ pyo3::create_exception!(_native, ActionNotSupportedError, XA11yError);
 pyo3::create_exception!(_native, TimeoutError, XA11yError);
 pyo3::create_exception!(_native, InvalidSelectorError, XA11yError);
 pyo3::create_exception!(_native, InvalidActionDataError, XA11yError);
+pyo3::create_exception!(_native, InvalidTextRangeError, InvalidActionDataError);
 pyo3::create_exception!(_native, PlatformError, XA11yError);
 
 /// Add an exception class to `m` and re-anchor its `__module__` to the
@@ -163,6 +166,30 @@ fn map_to_py_err(e: xa11y::Error) -> PyErr {
         }
         xa11y::Error::InvalidSelector { selector, message } => {
             InvalidSelectorError::new_err(format!("Invalid selector '{selector}': {message}"))
+        }
+        xa11y::Error::InvalidTextRange {
+            start,
+            end,
+            length,
+            message,
+        } => {
+            let err = xa11y::Error::InvalidTextRange {
+                start,
+                end,
+                length,
+                message,
+            };
+            let py_err = InvalidTextRangeError::new_err(err.to_string());
+            Python::attach(|py| {
+                let value = py_err.value(py);
+                // Best-effort like `attach_diagnosis_attrs`: the message already
+                // carries the same numbers, and a failed setattr must not
+                // replace the real error.
+                let _ = value.setattr("start", start);
+                let _ = value.setattr("end", end);
+                let _ = value.setattr("length", length);
+            });
+            py_err
         }
         xa11y::Error::InvalidActionData { message } => {
             InvalidActionDataError::new_err(format!("Invalid action data: {message}"))
@@ -319,6 +346,17 @@ struct Rect {
     width: u32,
     #[pyo3(get)]
     height: u32,
+}
+
+impl From<xa11y::Rect> for Rect {
+    fn from(r: xa11y::Rect) -> Self {
+        Self {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+        }
+    }
 }
 
 #[pymethods]
@@ -592,11 +630,103 @@ impl Element {
         py.detach(move || element.type_text(text))
             .map_err(to_py_err)
     }
-    /// Select the text range from `start` to `end` (0-based character offsets).
-    fn select_text(&self, py: Python<'_>, start: u32, end: u32) -> PyResult<()> {
+    /// Select a text range: ``select_text(start, end)``, or
+    /// ``select_text(range)`` with a ``TextRange`` or ``(start, end)`` tuple.
+    /// Offsets are 0-based UTF-16 code units.
+    #[pyo3(signature = (start, end=None))]
+    fn select_text(
+        &self,
+        py: Python<'_>,
+        start: &Bound<'_, PyAny>,
+        end: Option<u32>,
+    ) -> PyResult<()> {
+        let r = select_range(start, end)?;
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        py.detach(move || element.select_text(start, end))
+        py.detach(move || element.select_text(r.start, r.end))
             .map_err(to_py_err)
+    }
+
+    // ── Tables, collections, text ──
+
+    /// Size of a table, grid or tree grid; ``None`` when not a table or not
+    /// reported.
+    #[getter]
+    fn table(&self) -> Option<rich::TableInfo> {
+        rich::table_info(&self.inner_data)
+    }
+    /// Row, column and spans of a table cell (0-based); ``None`` otherwise.
+    #[getter]
+    fn cell(&self) -> Option<rich::CellInfo> {
+        rich::cell_info(&self.inner_data)
+    }
+    /// Row index of a table row (0-based); ``None`` otherwise.
+    #[getter]
+    fn table_row(&self) -> Option<rich::RowInfo> {
+        rich::row_info(&self.inner_data)
+    }
+    /// Position in a list, tree, tab list or radio group (0-based index and
+    /// depth); ``None`` otherwise.
+    #[getter]
+    fn collection(&self) -> Option<rich::CollectionInfo> {
+        rich::collection_info(&self.inner_data)
+    }
+    /// This element's text, read by range (UTF-16 offsets). Raises
+    /// ``ActionNotSupportedError`` when the element has no text interface.
+    fn text(&self, py: Python<'_>) -> PyResult<rich::Text> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let text = py.detach(move || element.text()).map_err(to_py_err)?;
+        Ok(rich::Text::new(text))
+    }
+    /// On a table: the cell at 0-based ``row`` / ``column`` (a merged cell
+    /// for a slot it covers), or ``None``.
+    fn cell_at(&self, py: Python<'_>, row: u32, column: u32) -> PyResult<Option<Py<Element>>> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let found = py
+            .detach(move || element.cell_at(row, column))
+            .map_err(to_py_err)?;
+        found
+            .map(|e| make_py_element(py, e.data(), self.provider.clone()))
+            .transpose()
+    }
+    /// On a table: its column header cells.
+    fn column_headers(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let found = py
+            .detach(move || element.column_headers())
+            .map_err(to_py_err)?;
+        rich::wrap_elements(py, found, &self.provider)
+    }
+    /// On a table: its row header cells.
+    fn row_headers(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let found = py
+            .detach(move || element.row_headers())
+            .map_err(to_py_err)?;
+        rich::wrap_elements(py, found, &self.provider)
+    }
+    /// On a cell: the column header cells that head it.
+    fn column_header_cells(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let found = py
+            .detach(move || element.column_header_cells())
+            .map_err(to_py_err)?;
+        rich::wrap_elements(py, found, &self.provider)
+    }
+    /// On a cell: the row header cells that head it.
+    fn row_header_cells(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let found = py
+            .detach(move || element.row_header_cells())
+            .map_err(to_py_err)?;
+        rich::wrap_elements(py, found, &self.provider)
+    }
+    /// On a list, tree, table or tab list: the selected items.
+    fn selected_items(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let found = py
+            .detach(move || element.selected_items())
+            .map_err(to_py_err)?;
+        rich::wrap_elements(py, found, &self.provider)
     }
     /// Perform an action by its ``snake_case`` name.
     fn perform_action(&self, py: Python<'_>, action: &str) -> PyResult<()> {
@@ -851,10 +981,22 @@ impl Locator {
         let inner = self.inner.clone();
         py.detach(move || inner.type_text(text)).map_err(to_py_err)
     }
-    fn select_text(&self, py: Python<'_>, start: u32, end: u32) -> PyResult<()> {
+    #[pyo3(signature = (start, end=None))]
+    fn select_text(
+        &self,
+        py: Python<'_>,
+        start: &Bound<'_, PyAny>,
+        end: Option<u32>,
+    ) -> PyResult<()> {
+        let r = select_range(start, end)?;
         let inner = self.inner.clone();
-        py.detach(move || inner.select_text(start, end))
+        py.detach(move || inner.select_text(r.start, r.end))
             .map_err(to_py_err)
+    }
+    /// The matched element's text, read by range. Re-resolves the locator on
+    /// every read, waiting only for the element to exist.
+    fn text(&self) -> rich::Text {
+        rich::Text::new(self.inner.text())
     }
     fn perform_action(&self, py: Python<'_>, action: &str) -> PyResult<()> {
         let inner = self.inner.clone();
@@ -1115,6 +1257,7 @@ fn event_kind_to_str(kind: &xa11y::EventKind) -> &'static str {
         xa11y::EventKind::MenuOpened => "menu_opened",
         xa11y::EventKind::MenuClosed => "menu_closed",
         xa11y::EventKind::TextChanged => "text_changed",
+        xa11y::EventKind::TextSelectionChanged => "text_selection_changed",
         xa11y::EventKind::Announcement => "announcement",
         // See the note on `to_py_err`: variant coverage is enforced by
         // `cargo xtask check-bindings-parity`, not by the compiler.
@@ -1176,6 +1319,8 @@ impl EventType {
     #[classattr]
     const TEXT_CHANGED: &'static str = "text_changed";
     #[classattr]
+    const TEXT_SELECTION_CHANGED: &'static str = "text_selection_changed";
+    #[classattr]
     const ANNOUNCEMENT: &'static str = "announcement";
 }
 
@@ -1199,6 +1344,10 @@ struct Event {
     /// For state_changed events: the new boolean value.
     #[pyo3(get)]
     state_value: Option<bool>,
+    /// For text_changed events: the inserted or deleted text, when the
+    /// platform reports it.
+    #[pyo3(get)]
+    text_change: Option<rich::TextChange>,
 }
 
 impl Event {
@@ -1217,6 +1366,7 @@ impl Event {
             provider,
             state_flag,
             state_value,
+            text_change: event.text_change.map(rich::TextChange::from),
         }
     }
 }
@@ -2838,6 +2988,17 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Screenshot>()?;
     m.add_class::<ShellSurface>()?;
     m.add_class::<Subscription>()?;
+    m.add_class::<rich::TableInfo>()?;
+    m.add_class::<rich::CellInfo>()?;
+    m.add_class::<rich::RowInfo>()?;
+    m.add_class::<rich::CollectionInfo>()?;
+    m.add_class::<rich::Text>()?;
+    m.add_class::<rich::TextRange>()?;
+    m.add_class::<rich::TextAttributes>()?;
+    m.add_class::<rich::TextRun>()?;
+    m.add_class::<rich::TextLines>()?;
+    m.add_class::<rich::TextRuns>()?;
+    m.add_class::<rich::TextChange>()?;
 
     register_exception::<XA11yError>(m, "XA11yError")?;
     register_exception::<PermissionDeniedError>(m, "PermissionDeniedError")?;
@@ -2847,6 +3008,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_exception::<TimeoutError>(m, "TimeoutError")?;
     register_exception::<InvalidSelectorError>(m, "InvalidSelectorError")?;
     register_exception::<InvalidActionDataError>(m, "InvalidActionDataError")?;
+    register_exception::<InvalidTextRangeError>(m, "InvalidTextRangeError")?;
     register_exception::<PlatformError>(m, "PlatformError")?;
 
     // Module-level locator function (registered as "locator" via #[pyo3(name)])
@@ -2867,11 +3029,13 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_table_locator, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_input, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_app, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_shell_surfaces, m)?)?;
     m.add_function(wrap_pyfunction!(_find_test_shell_surface, m)?)?;
     m.add_function(wrap_pyfunction!(_make_disconnected_subscription, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_text_event_subscription, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_action_probe, m)?)?;
 
     Ok(())
@@ -2898,11 +3062,40 @@ fn _cli_main(py: Python<'_>, args: Vec<String>) -> i32 {
     py.detach(move || xa11y::cli::run_main(&args))
 }
 
+/// `select_text`'s polymorphic arguments: `(start, end)` ints, or one range.
+fn select_range(start: &Bound<'_, PyAny>, end: Option<u32>) -> PyResult<xa11y::TextRange> {
+    match end {
+        Some(end) => {
+            let start: u32 = start.extract()?;
+            // Order is checked by core's `select_text`, as before.
+            Ok(xa11y::TextRange { start, end })
+        }
+        None => rich::extract_range(start),
+    }
+}
+
 // ── Test helpers ────────────────────────────────────────────────────────────
 //
 // The mock Provider, tree, and action log used by these helpers live in
 // `xa11y-core::mock` (gated by the `test-support` feature) so the JS
 // bindings can share the exact same fixture without a parallel copy.
+
+/// Create a test Locator over the mock's table / list / tree / text fixture
+/// (`xa11y_core::mock::build_table_provider`).
+#[pyfunction]
+fn _make_test_table_locator(selector: &str) -> PyResult<Locator> {
+    let provider = xa11y::mock::build_table_provider() as Arc<dyn xa11y::Provider>;
+    let root = provider
+        .list_apps()
+        .map_err(to_py_err)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| PyRuntimeError::new_err("mock has no application"))?;
+    Ok(Locator {
+        inner: xa11y::Locator::new_for_app(provider, root, selector)
+            .with_timeout(Duration::from_millis(0)),
+    })
+}
 
 /// Create a test Locator backed by the shared mock provider.
 #[pyfunction]
@@ -2976,6 +3169,18 @@ fn _find_test_shell_surface(
 fn _make_disconnected_subscription() -> Subscription {
     Subscription {
         inner: std::sync::Mutex::new(Some(xa11y::mock::disconnected_subscription())),
+        provider: xa11y::mock::build_provider(),
+    }
+}
+
+/// Create a Subscription that yields the mock's text events
+/// (`xa11y::mock::text_edit_events`) and then disconnects.
+#[pyfunction]
+fn _make_test_text_event_subscription() -> Subscription {
+    Subscription {
+        inner: std::sync::Mutex::new(Some(xa11y::mock::scripted_subscription(
+            xa11y::mock::text_edit_events(),
+        ))),
         provider: xa11y::mock::build_provider(),
     }
 }

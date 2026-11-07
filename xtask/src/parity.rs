@@ -1001,7 +1001,10 @@ pub fn check(root: &Path) -> bool {
         }
     };
 
-    let python = match binding_api::python_surface(&root.join("xa11y-python/src/lib.rs")) {
+    let python = match binding_api::python_surface(&[
+        &root.join("xa11y-python/src/lib.rs"),
+        &root.join("xa11y-python/src/rich.rs"),
+    ]) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("!! {e}");
@@ -1017,6 +1020,7 @@ pub fn check(root: &Path) -> bool {
         "xa11y-js/src/input.rs",
         "xa11y-js/src/screenshot.rs",
         "xa11y-js/src/types.rs",
+        "xa11y-js/src/text.rs",
     ]
     .iter()
     .map(|p| root.join(p))

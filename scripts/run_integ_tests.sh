@@ -146,6 +146,34 @@ if [ "$PANEL_READY" != "1" ]; then
 fi
 ./target/debug/xa11y shell
 
+# 4b. Launch the rich-content fixture: a GTK 3 window with a table, a tree,
+#     a list and a formatted multi-line text view, for
+#     xa11y/tests/integ/rich.rs. The AccessKit app's AT-SPI adapter has no
+#     Table / TableCell interface and no text attribute runs, so without it
+#     those backend paths would have nothing real to read. Same interpreter
+#     and same log treatment as the panel, and the same rule: a fixture that
+#     did not come up fails the harness here.
+RICH_LOG="target/xa11y-test-rich.log"
+echo "Launching xa11y rich fixture ($PANEL_PY, log: $RICH_LOG)..."
+"$PANEL_PY" test-apps/rich/rich.py > "$RICH_LOG" 2>&1 &
+CLEANUP_PIDS+=($!)
+RICH_READY=0
+for _ in $(seq 1 20); do
+    if ./target/debug/xa11y apps 2>/dev/null | grep -q "xa11y-rich-fixture"; then
+        RICH_READY=1
+        break
+    fi
+    sleep 1
+done
+if [ "$RICH_READY" != "1" ]; then
+    echo "error: the rich fixture never registered with AT-SPI." >&2
+    echo "--- $RICH_LOG ---" >&2
+    cat "$RICH_LOG" >&2 || true
+    echo "--- xa11y apps ---" >&2
+    ./target/debug/xa11y apps >&2 || true
+    exit 1
+fi
+
 # 5. Launch the test application (run binary directly, not via cargo run,
 #    because cargo run changes the process owner name in AT-SPI)
 echo "Launching xa11y-test-app..."

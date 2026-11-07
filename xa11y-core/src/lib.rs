@@ -11,7 +11,9 @@ pub mod role;
 pub mod screenshot;
 pub mod selector;
 pub mod shell;
+pub mod table;
 pub mod text;
+pub mod text_api;
 
 /// Shared in-memory mock Provider. Gated behind `test-support` so only the
 /// language bindings' test builds (and other explicit opt-ins) compile it.
@@ -31,9 +33,9 @@ pub use element::{
 #[doc(hidden)]
 pub use element::{ElementParts, StateParts};
 pub use error::{AutoScrollOutcome, Delivery, Diagnosis, Error, PointerTargetDiagnosis, Result};
+pub use event::{ElementState, Event, EventKind, StateFlag, TextChange, TextChangeKind};
 #[doc(hidden)]
-pub use event::EventParts;
-pub use event::{ElementState, Event, EventKind, StateFlag};
+pub use event::{EventParts, TextChangeParts};
 pub use event_provider::{CancelHandle, EventReceiver, RecvStatus, Subscription, SubscriptionIter};
 pub use input::{
     anchor_point, point_for, Anchor, ClickOptions, ClickTarget, DragOptions, InputProvider,
@@ -47,7 +49,16 @@ pub use screenshot::{CaptureMapping, CaptureMappingSegment};
 pub use screenshot::{Screenshot, ScreenshotProvider};
 pub use selector::{Selector, SelectorGroup};
 pub use shell::{ShellSurface, ShellSurfaceKind};
+pub use table::{CellInfo, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
+#[doc(hidden)]
+pub use table::{CellParts, CollectionParts, RowParts, TableParts};
 pub use text::{is_bidi_control, strip_bidi, strip_bidi_opt};
+#[doc(hidden)]
+pub use text_api::TextAttributeParts;
+pub use text_api::{
+    Color, FindOptions, Text, TextAttributes, TextLines, TextRange, TextRun, TextRuns, TextScript,
+    TextUnit,
+};
 
 /// Maximum tree traversal depth for providers. Prevents stack overflow from
 /// circular accessibility trees (e.g. Qt/PySide6 apps where the application

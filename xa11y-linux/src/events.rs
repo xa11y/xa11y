@@ -33,12 +33,14 @@ use zbus::MatchRule;
 
 use xa11y_core::{
     CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    Result, Role, StateFlag, StateParts, StateSet, Subscription, Toggled,
+    Result, Role, StateFlag, StateParts, StateSet, Subscription, TextChange, TextChangeKind,
+    TextChangeParts, TextRange, Toggled,
 };
 
 use crate::atspi::{
-    is_listable_top_level, is_password_role, read_interfaces, role_from_atspi,
-    try_map_atspi_role_number, AccessibleRef, Interfaces, LinuxProvider,
+    is_listable_top_level, is_password_role, read_interfaces, read_offset_unit_unless_gone,
+    role_from_atspi, try_map_atspi_role_number, AccessibleRef, Interfaces, LinuxProvider,
+    OffsetUnit,
 };
 
 /// AT-SPI2 event-interface names we subscribe to via match rules.
@@ -135,6 +137,18 @@ pub(crate) fn subscribe_for_pid(
     for bus in &sender_buses {
         seed_top_level_windows(&conn, bus, &sender_buses, &mut windows)?;
     }
+    // Each application's text offset unit, read once here so a
+    // `TextChanged` event can say whether its offsets are already UTF-16
+    // without a D-Bus round trip per keystroke. A failed read fails the
+    // subscription, as a failed window seed does: guessing a unit would
+    // report wrong ranges. An application that has already left the bus is
+    // skipped, as the window seed skips it; its events would carry no range.
+    let mut offset_units = HashMap::new();
+    for bus in &sender_buses {
+        if let Some(unit) = application_offset_unit(&conn, bus)? {
+            offset_units.insert(bus.clone(), unit);
+        }
+    }
     // Windows already open get a snapshot now, so their eventual
     // `WindowClosed` names them even when a destroyed window no longer
     // answers by then.
@@ -158,6 +172,7 @@ pub(crate) fn subscribe_for_pid(
         conn: conn.clone(),
         windows: Mutex::new(windows),
         window_snapshots: Mutex::new(window_snapshots),
+        offset_units,
     });
 
     // Activate the broadcast receiver *before* spawning the worker. If we
@@ -246,16 +261,28 @@ struct EventContext {
     /// `WindowClosed` target: a destroyed GTK 4 window no longer answers
     /// its role or name by the time `defunct` arrives.
     window_snapshots: Mutex<HashMap<String, ElementData>>,
+    /// Each sender bus's text offset unit (see [`text_change_from_signal`]).
+    offset_units: HashMap<String, OffsetUnit>,
 }
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
+        self.emit_with(kind, target, None);
+    }
+
+    fn emit_with(
+        &self,
+        kind: EventKind,
+        target: Option<ElementData>,
+        text_change: Option<TextChange>,
+    ) {
         let event: Event = EventParts {
             kind,
             target,
             app_name: self.app_name.clone(),
             app_pid: self.app_pid,
             timestamp: std::time::Instant::now(),
+            text_change,
         }
         .into();
         if let Ok(tx) = self.tx.lock() {
@@ -286,7 +313,13 @@ impl EventContext {
             return;
         };
 
-        let Some((detail, detail1)) = event_body_fields(msg) else {
+        let Some(EventBody {
+            detail,
+            detail1,
+            detail2,
+            any_data,
+        }) = event_body_fields(msg)
+        else {
             return;
         };
 
@@ -308,12 +341,27 @@ impl EventContext {
             target_role,
         );
 
+        // The delta rides only on the `TextChanged` that `Object:TextChanged`
+        // itself maps to, never on the one derived from a value change.
+        let text_change = text_change_from_signal(
+            iface.as_str(),
+            member.as_str(),
+            &detail,
+            detail1,
+            detail2,
+            any_data,
+            self.offset_units.get(sender.as_str()).copied(),
+        );
+
         for kind in kinds {
             match kind {
                 // `Window:Create` / `Window:Destroy`: deduplicated against
                 // the derived lifecycle below.
                 EventKind::WindowOpened => self.window_listed(&target_ref, true, target.clone()),
                 EventKind::WindowClosed => self.window_listed(&target_ref, false, target.clone()),
+                EventKind::TextChanged => {
+                    self.emit_with(EventKind::TextChanged, target.clone(), text_change.clone())
+                }
                 other => self.emit(other, target.clone()),
             }
         }
@@ -484,40 +532,125 @@ impl EventContext {
     }
 }
 
-/// The `(detail, detail1)` fields of an AT-SPI event signal.
+/// The fields of an AT-SPI event signal body that the mapping reads.
+struct EventBody {
+    detail: String,
+    detail1: i32,
+    detail2: i32,
+    /// `any_data` when it is a string (the text of `Object:TextChanged`);
+    /// `None` for any other variant.
+    any_data: Option<String>,
+}
+
+/// The fields of an AT-SPI event signal.
 ///
 /// The current body is `(siiva{sv})`; GTK 4 still sends some events,
 /// including `ChildrenChanged` on the application object, in the legacy
 /// `(siiv(so))` form, whose trailer is the application reference. Both are
 /// read by their signature. Any other body is not an AT-SPI event and is
 /// dropped, as before.
-fn event_body_fields(msg: &zbus::Message) -> Option<(String, i32)> {
+fn event_body_fields(msg: &zbus::Message) -> Option<EventBody> {
     let body = msg.body();
     let signature = body.signature().to_string_no_parens();
-    let (detail, detail1) = match signature.as_str() {
+    let (detail, detail1, detail2, any) = match signature.as_str() {
         "siiva{sv}" => {
-            let (d, d1, _d2, _any, _props): (
+            let (d, d1, d2, any, _props): (
                 String,
                 i32,
                 i32,
                 OwnedValue,
                 HashMap<String, OwnedValue>,
             ) = body.deserialize().ok()?;
-            (d, d1)
+            (d, d1, d2, any)
         }
         "siiv(so)" => {
-            let (d, d1, _d2, _any, _app): (
+            let (d, d1, d2, any, _app): (
                 String,
                 i32,
                 i32,
                 OwnedValue,
                 (String, zbus::zvariant::OwnedObjectPath),
             ) = body.deserialize().ok()?;
-            (d, d1)
+            (d, d1, d2, any)
         }
         _ => return None,
     };
-    Some((detail, detail1))
+    let any_data = match &*any {
+        zbus::zvariant::Value::Str(s) => Some(s.to_string()),
+        _ => None,
+    };
+    Some(EventBody {
+        detail,
+        detail1,
+        detail2,
+        any_data,
+    })
+}
+
+/// The offset unit of the application on `bus`, read from its
+/// `Application.ToolkitName`.
+fn application_offset_unit(conn: &Connection, bus: &str) -> Result<Option<OffsetUnit>> {
+    let proxy = zbus::blocking::proxy::Builder::<Proxy>::new(conn)
+        .destination(bus.to_owned())
+        .and_then(|b| b.path(APP_ROOT_PATH))
+        .and_then(|b| b.interface("org.a11y.atspi.Application"))
+        .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No))
+        .and_then(|b| b.build())
+        .map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Application proxy for {bus}: {e}"),
+        })?;
+    read_offset_unit_unless_gone(&proxy, bus)
+}
+
+/// The [`TextChange`] an `Object:TextChanged` signal reports, or `None` for
+/// any other signal (and for a `TextChanged` whose detail is neither insert
+/// nor delete).
+///
+/// `detail` is `insert` or `delete`, optionally suffixed (`insert:system`).
+/// `detail1` is the offset and `detail2` the length, both in the toolkit's
+/// own unit: the range is reported only when that unit is already UTF-16
+/// (Qt). For a code-point toolkit, converting would need the text before the
+/// offset, which may have changed again by the time it was read, so the
+/// range is `None` rather than a guess. `unit` is `None` when the sender's
+/// unit is unknown, which also leaves the range out.
+///
+/// `any_data` is the inserted or deleted text. An empty string for a
+/// non-empty change means the toolkit did not supply it, so it is `None`.
+pub(crate) fn text_change_from_signal(
+    iface: &str,
+    member: &str,
+    detail: &str,
+    detail1: i32,
+    detail2: i32,
+    any_data: Option<String>,
+    unit: Option<OffsetUnit>,
+) -> Option<TextChange> {
+    if (iface, member) != ("org.a11y.atspi.Event.Object", "TextChanged") {
+        return None;
+    }
+    let lower = detail.to_ascii_lowercase();
+    let op = lower.split(':').next().unwrap_or_default();
+    let kind = match op {
+        "insert" => TextChangeKind::Inserted,
+        "delete" => TextChangeKind::Deleted,
+        _ => return None,
+    };
+    let range = match unit {
+        Some(OffsetUnit::Utf16) => {
+            let start = u32::try_from(detail1).ok();
+            let len = u32::try_from(detail2).ok();
+            match (start, len) {
+                (Some(start), Some(len)) => {
+                    start.checked_add(len).map(|end| TextRange { start, end })
+                }
+                _ => None,
+            }
+        }
+        Some(OffsetUnit::CodePoints) | None => None,
+    };
+    let text = any_data.filter(|t| !(t.is_empty() && detail2 > 0));
+    Some(TextChangeParts { kind, range, text }.into())
 }
 
 /// The application object's path on every AT-SPI application connection.
@@ -1074,10 +1207,14 @@ pub(crate) fn signal_to_kinds(
         // Text changes. AT-SPI2 publishes text-change events on the Object
         // event bus (both "TextChanged" in newer specs and historical
         // "TextChanged" via an application-specific signal). `detail` is
-        // "insert" or "delete".
+        // "insert" or "delete"; the delta is built by
+        // `text_change_from_signal`.
         ("org.a11y.atspi.Event.Object", "TextChanged") => vec![EventKind::TextChanged],
-        ("org.a11y.atspi.Event.Object", "TextSelectionChanged") => {
-            vec![EventKind::SelectionChanged]
+        // The caret and the text selection share one kind, as UIA's
+        // TextSelectionChanged and AX's AXSelectedTextChanged already do.
+        // Item selection (`SelectionChanged` below) is a different kind.
+        ("org.a11y.atspi.Event.Object", "TextCaretMoved" | "TextSelectionChanged") => {
+            vec![EventKind::TextSelectionChanged]
         }
         ("org.a11y.atspi.Event.Object", "TextAttributesChanged") => vec![],
 
@@ -1224,6 +1361,10 @@ fn build_event_snapshot(
             numeric_value,
             min_value,
             max_value,
+            table: None,
+            cell: None,
+            table_row: None,
+            collection: None,
             stable_id: Some(aref.path.clone()),
             pid,
             raw,
@@ -1961,15 +2102,149 @@ mod tests {
             None,
         );
         assert_eq!(kinds, vec![EventKind::SelectionChanged]);
+    }
 
-        let kinds = signal_to_kinds(
-            "org.a11y.atspi.Event.Object",
-            "TextSelectionChanged",
-            "",
+    #[test]
+    fn caret_and_text_selection_map_to_text_selection_changed() {
+        // Text selection is not item selection: a subscriber filtering on
+        // `SelectionChanged` for a list must not see every caret move.
+        for member in ["TextSelectionChanged", "TextCaretMoved"] {
+            let kinds = signal_to_kinds(
+                "org.a11y.atspi.Event.Object",
+                member,
+                "",
+                3,
+                Some(Role::TextArea),
+            );
+            assert_eq!(kinds, vec![EventKind::TextSelectionChanged], "{member}");
+        }
+    }
+
+    const OBJ: &str = "org.a11y.atspi.Event.Object";
+
+    #[test]
+    fn text_insert_on_a_code_point_toolkit_has_text_but_no_range() {
+        let change = text_change_from_signal(
+            OBJ,
+            "TextChanged",
+            "insert",
+            4,
+            2,
+            Some("hé".into()),
+            Some(OffsetUnit::CodePoints),
+        )
+        .expect("an insert carries a change");
+        assert_eq!(change.kind, TextChangeKind::Inserted);
+        assert_eq!(change.range, None, "code points are never converted");
+        assert_eq!(change.text.as_deref(), Some("hé"));
+    }
+
+    #[test]
+    fn text_delete_on_qt_has_a_utf16_range() {
+        // Qt counts UTF-16 already: an emoji is two units, and the range is
+        // the signal's offset and length as given.
+        let change = text_change_from_signal(
+            OBJ,
+            "TextChanged",
+            "delete",
+            3,
+            2,
+            Some("😀".into()),
+            Some(OffsetUnit::Utf16),
+        )
+        .expect("a delete carries a change");
+        assert_eq!(change.kind, TextChangeKind::Deleted);
+        assert_eq!(change.range, Some(TextRange { start: 3, end: 5 }));
+        assert_eq!(change.text.as_deref(), Some("😀"));
+    }
+
+    #[test]
+    fn text_change_detail_suffix_and_case_are_ignored() {
+        let change = text_change_from_signal(
+            OBJ,
+            "TextChanged",
+            "Insert:system",
             0,
+            1,
+            Some("a".into()),
             None,
+        )
+        .expect("insert:system is an insert");
+        assert_eq!(change.kind, TextChangeKind::Inserted);
+        assert_eq!(change.range, None, "an unknown unit gives no range");
+    }
+
+    #[test]
+    fn text_change_rejects_bad_offsets_and_missing_text() {
+        let negative = text_change_from_signal(
+            OBJ,
+            "TextChanged",
+            "insert",
+            -1,
+            1,
+            None,
+            Some(OffsetUnit::Utf16),
+        )
+        .expect("still an insert");
+        assert_eq!(negative.range, None);
+        assert_eq!(negative.text, None);
+
+        let largest = text_change_from_signal(
+            OBJ,
+            "TextChanged",
+            "insert",
+            i32::MAX,
+            i32::MAX,
+            None,
+            Some(OffsetUnit::Utf16),
+        )
+        .expect("still an insert");
+        // The largest offset and length the signal can carry still add up
+        // within u32.
+        assert_eq!(
+            largest.range,
+            Some(TextRange {
+                start: i32::MAX as u32,
+                end: u32::MAX - 1
+            })
         );
-        assert_eq!(kinds, vec![EventKind::SelectionChanged]);
+
+        // An empty string for a non-empty change was not supplied.
+        let empty = text_change_from_signal(
+            OBJ,
+            "TextChanged",
+            "delete",
+            0,
+            3,
+            Some(String::new()),
+            Some(OffsetUnit::Utf16),
+        )
+        .expect("still a delete");
+        assert_eq!(empty.text, None);
+    }
+
+    #[test]
+    fn only_insert_and_delete_text_changed_signals_carry_a_change() {
+        assert_eq!(
+            text_change_from_signal(OBJ, "TextChanged", "", 0, 0, None, None),
+            None
+        );
+        assert_eq!(
+            text_change_from_signal(OBJ, "ValueChanged", "insert", 0, 1, Some("a".into()), None),
+            None
+        );
+        assert_eq!(
+            text_change_from_signal(
+                "org.a11y.atspi.Event.Window",
+                "TextChanged",
+                "insert",
+                0,
+                1,
+                Some("a".into()),
+                None
+            ),
+            None
+        );
     }
 
     #[test]

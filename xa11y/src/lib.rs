@@ -24,15 +24,15 @@ use std::sync::{Arc, Mutex};
 pub use xa11y_core::{
     App, AutoScrollOutcome, Delivery, Diagnosis, Element, ElementData, ElementState, Error, Event,
     EventKind, HiddenReason, Locator, PointerTargetDiagnosis, RawPlatformData, Rect, Result, Role,
-    ShellSurface, ShellSurfaceKind, StateFlag, StateSet, Subscription, SubscriptionIter, Toggled,
-    TreeNode,
+    ShellSurface, ShellSurfaceKind, StateFlag, StateSet, Subscription, SubscriptionIter,
+    TextChange, TextChangeKind, Toggled, TreeNode,
 };
 
 // `#[doc(hidden)]`: the provider-side construction contracts. Re-exported so
 // an out-of-tree `Provider` implementation can reach them — without this the
 // completeness guard stops at this repo's own backends. Not public API.
 #[doc(hidden)]
-pub use xa11y_core::{ElementParts, EventParts, StateParts};
+pub use xa11y_core::{ElementParts, EventParts, StateParts, TextChangeParts};
 
 // Re-export the process-wide default-timeout configuration (see
 // `xa11y_core::config`): the default for every auto-wait / `wait_*` call
@@ -55,6 +55,18 @@ pub use xa11y_core::{
 pub use xa11y_core::screenshot;
 pub use xa11y_core::screenshot::{Annotated, LegendEntry, Omission, OmissionReason};
 pub use xa11y_core::{Screenshot, ScreenshotProvider};
+
+// Re-export table/collection metadata and text-by-range (see
+// `xa11y_core::table` and `xa11y_core::text_api`).
+pub use xa11y_core::table;
+pub use xa11y_core::text_api;
+pub use xa11y_core::{CellInfo, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
+#[doc(hidden)]
+pub use xa11y_core::{CellParts, CollectionParts, RowParts, TableParts, TextAttributeParts};
+pub use xa11y_core::{
+    Color, FindOptions, Text, TextAttributes, TextLines, TextRange, TextRun, TextRuns, TextScript,
+    TextUnit,
+};
 
 // Re-export bidi text helpers (see `xa11y_core::text`). `name`, `value`, and
 // `description` on `ElementData` are stripped of bidi format controls; these

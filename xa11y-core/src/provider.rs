@@ -1,8 +1,17 @@
-use crate::element::ElementData;
+use crate::element::{ElementData, Rect};
 use crate::error::{Error, Result};
 use crate::event_provider::Subscription;
 use crate::selector::{matches_simple, Combinator, Selector, SelectorGroup, SelectorSegment};
 use crate::shell::ShellSurfaceKind;
+use crate::table::HeaderKind;
+use crate::text_api::{TextRange, TextRun, TextUnit};
+
+/// The default for capability methods a provider has not implemented.
+fn unsupported(method: &str) -> Error {
+    Error::Unsupported {
+        feature: format!("{method} is not implemented by this provider"),
+    }
+}
 
 /// Platform backend trait for accessibility tree access.
 ///
@@ -414,7 +423,7 @@ pub trait Provider: Send + Sync {
     /// Insert text at the current cursor position.
     fn type_text(&self, element: &ElementData, text: &str) -> Result<()>;
 
-    /// Select a text range (0-based character offsets).
+    /// Select a text range: 0-based UTF-16 code-unit offsets, `[start, end)`.
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()>;
 
     // ── Generic action escape hatch ─────────────────────────────────
@@ -507,6 +516,93 @@ pub trait Provider: Send + Sync {
 
     /// Resize the window in the units of [`ElementData::bounds`].
     fn resize_to(&self, element: &ElementData, width: u32, height: u32) -> Result<()>;
+
+    // ── Tables and collections ──────────────────────────────────────
+    //
+    // These and the text methods below default to `Error::Unsupported`, the
+    // honest answer for a provider that has not implemented them, so the many
+    // test providers need not repeat it. The Linux, macOS and Windows
+    // backends override every one; what each can report is in the
+    // capability matrix in the platform-details reference.
+
+    /// The cell at 0-based `row` / `column` of a table. A slot covered by a
+    /// merged cell returns the merged cell. `Ok(None)` when the slot is out of
+    /// range or the platform reports no cell there (for example a cell not
+    /// realized in virtualized content). Never realizes content implicitly.
+    fn table_cell_at(
+        &self,
+        _table: &ElementData,
+        _row: u32,
+        _column: u32,
+    ) -> Result<Option<ElementData>> {
+        Err(unsupported("table_cell_at"))
+    }
+
+    /// The header cells of a table, of the given kind. On a table element.
+    /// The order of multi-level headers is the platform's.
+    fn table_headers(&self, _table: &ElementData, _kind: HeaderKind) -> Result<Vec<ElementData>> {
+        Err(unsupported("table_headers"))
+    }
+
+    /// The header cells that head one cell, of the given kind. On a cell.
+    fn cell_headers(&self, _cell: &ElementData, _kind: HeaderKind) -> Result<Vec<ElementData>> {
+        Err(unsupported("cell_headers"))
+    }
+
+    /// The selected children of a container (list, tree, table, tab list):
+    /// rows or cells, whichever the platform reports as selected.
+    fn selected_items(&self, _container: &ElementData) -> Result<Vec<ElementData>> {
+        Err(unsupported("selected_items"))
+    }
+
+    // ── Text by range ───────────────────────────────────────────────
+    //
+    // Offsets are UTF-16 code units (see `crate::text_api`). An element with
+    // no text interface fails with `Error::ActionNotSupported { action:
+    // "text", .. }`; a range out of bounds or splitting a surrogate pair with
+    // `Error::InvalidTextRange`.
+
+    /// Length of the element's text, in UTF-16 code units.
+    fn text_length(&self, _element: &ElementData) -> Result<u32> {
+        Err(unsupported("text_length"))
+    }
+
+    /// The caret offset, `None` when the element has no caret.
+    fn text_caret(&self, _element: &ElementData) -> Result<Option<u32>> {
+        Err(unsupported("text_caret"))
+    }
+
+    /// The selected ranges, in document order.
+    fn text_selections(&self, _element: &ElementData) -> Result<Vec<TextRange>> {
+        Err(unsupported("text_selections"))
+    }
+
+    /// The text in `range`, unstripped.
+    fn text_read(&self, _element: &ElementData, _range: TextRange) -> Result<String> {
+        Err(unsupported("text_read"))
+    }
+
+    /// The `unit` containing `offset`.
+    fn text_range_at(
+        &self,
+        _element: &ElementData,
+        _offset: u32,
+        _unit: TextUnit,
+    ) -> Result<TextRange> {
+        Err(unsupported("text_range_at"))
+    }
+
+    /// Bounding rectangle of `range`, which the caller keeps within one
+    /// rendered line, in the coordinates of `ElementData::bounds`. `None`
+    /// when the platform reports no geometry for it.
+    fn text_range_bounds(&self, _element: &ElementData, _range: TextRange) -> Result<Option<Rect>> {
+        Err(unsupported("text_range_bounds"))
+    }
+
+    /// The formatting run containing `offset`, with the run's full range.
+    fn text_attributes_at(&self, _element: &ElementData, _offset: u32) -> Result<TextRun> {
+        Err(unsupported("text_attributes_at"))
+    }
 
     // ── Events ──────────────────────────────────────────────────────
 
@@ -669,6 +765,39 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn resize_to(&self, element: &ElementData, width: u32, height: u32) -> Result<()> {
         (**self).resize_to(element, width, height)
+    }
+    fn table_cell_at(&self, t: &ElementData, row: u32, column: u32) -> Result<Option<ElementData>> {
+        (**self).table_cell_at(t, row, column)
+    }
+    fn table_headers(&self, t: &ElementData, kind: HeaderKind) -> Result<Vec<ElementData>> {
+        (**self).table_headers(t, kind)
+    }
+    fn cell_headers(&self, c: &ElementData, kind: HeaderKind) -> Result<Vec<ElementData>> {
+        (**self).cell_headers(c, kind)
+    }
+    fn selected_items(&self, c: &ElementData) -> Result<Vec<ElementData>> {
+        (**self).selected_items(c)
+    }
+    fn text_length(&self, e: &ElementData) -> Result<u32> {
+        (**self).text_length(e)
+    }
+    fn text_caret(&self, e: &ElementData) -> Result<Option<u32>> {
+        (**self).text_caret(e)
+    }
+    fn text_selections(&self, e: &ElementData) -> Result<Vec<TextRange>> {
+        (**self).text_selections(e)
+    }
+    fn text_read(&self, e: &ElementData, r: TextRange) -> Result<String> {
+        (**self).text_read(e, r)
+    }
+    fn text_range_at(&self, e: &ElementData, offset: u32, unit: TextUnit) -> Result<TextRange> {
+        (**self).text_range_at(e, offset, unit)
+    }
+    fn text_range_bounds(&self, e: &ElementData, r: TextRange) -> Result<Option<Rect>> {
+        (**self).text_range_bounds(e, r)
+    }
+    fn text_attributes_at(&self, e: &ElementData, offset: u32) -> Result<TextRun> {
+        (**self).text_attributes_at(e, offset)
     }
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
         (**self).subscribe(element)

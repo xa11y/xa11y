@@ -14,10 +14,21 @@ import {
   XA11yError,
   SelectorNotMatchedError,
   TimeoutError,
+  InvalidActionDataError,
+  InvalidTextRangeError,
+  Text,
   inputSim,
   screenshot,
   type AppLookupOptions,
+  type CellInfo,
   type CheckedState,
+  type CountValue,
+  type HeaderKindName,
+  type TextChange,
+  type TextChangeKindName,
+  type TextRange,
+  type TextRuns,
+  type TextUnitName,
   type EventTypeName,
   type LegendEntry,
   type Omission,
@@ -96,6 +107,17 @@ async function checks() {
     kind === 'textChanged'
   ) {
     // OK -- literal narrowing works
+  }
+
+  // Text edits carry an optional delta; caret moves are their own kind.
+  sub.on('textSelectionChanged', (_ev: Event) => {});
+  const change: TextChange | null = ev.textChange;
+  if (change) {
+    const _kind: TextChangeKindName = change.kind;
+    const _range: TextRange | null = change.range;
+    const _text: string | null = change.text;
+    // @ts-expect-error -- the kind is a closed union
+    const _bad: TextChangeKindName = 'replaced';
   }
 
   // closed getter
@@ -227,4 +249,52 @@ async function checks() {
   void _shellDump;
 }
 
+async function tableAndTextChecks(el: Element, loc: Locator) {
+  // Metadata getters are nullable plain objects with narrowed unions.
+  const rows: CountValue | null | undefined = el.table?.rowCount;
+  const cell: CellInfo | null = el.cell;
+  const header: HeaderKindName | null | undefined = cell?.header;
+  const size: number | 'unknown' | null | undefined = el.collection?.size;
+  const _rowIndex: number | null | undefined = el.tableRow?.index;
+  // @ts-expect-error -- a header kind is 'column' or 'row'
+  const _badHeader: HeaderKindName = 'col';
+
+  // Table navigation.
+  const _at: Element | null = await el.cellAt(0, 1);
+  const _heads: Element[] = await el.columnHeaders();
+  const _selected: Element[] = await el.selectedItems();
+
+  // Text: `Element.text()` is async, `Locator.text()` is not.
+  const text: Text = await el.text();
+  const live: Text = loc.text();
+  const range: TextRange | null = await text.find('needle', { occurrence: 1, within: null });
+  const unit: TextUnitName = 'word';
+  const _word: TextRange = await text.rangeAt(0, unit);
+  // @ts-expect-error -- not a text unit
+  void text.rangeAt(0, 'sentence');
+  const runs: TextRuns = await live.runs({ start: 0, end: 10 }, 50);
+  const _script = runs.runs[0]?.attributes.script satisfies
+    | 'baseline'
+    | 'superscript'
+    | 'subscript'
+    | null
+    | undefined;
+  await el.selectText(0, 5);
+  await loc.selectText({ start: 0, end: 5 });
+
+  try {
+    await text.read({ start: 0, end: 99 });
+  } catch (err) {
+    if (err instanceof InvalidTextRangeError) {
+      const _len: number | null = err.length;
+      const _parent: InvalidActionDataError = err;
+    }
+  }
+  void rows;
+  void header;
+  void size;
+  void range;
+}
+
 void checks;
+void tableAndTextChecks;

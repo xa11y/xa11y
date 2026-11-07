@@ -143,6 +143,10 @@ A live handle returned by `app.children()`, `element.children()`,
 | `min_value` | Number, optional |
 | `max_value` | Number, optional |
 | `stable_id` | String, optional |
+| `table` | Table size (`row_count`, `column_count`), optional |
+| `cell` | Cell position (`row`, `column`, `row_span`, `column_span`, `header`), optional |
+| `table_row` | Row position (`index`), optional |
+| `collection` | Position in a list or tree (`index`, `size`, `depth`), optional |
 | `pid` | Process ID of the owning application |
 | `raw` | Platform-native key/value map |
 
@@ -150,8 +154,17 @@ A live handle returned by `app.children()`, `element.children()`,
 controls. `raw` holds the unstripped platform string under the platform-native
 key. Each of these properties except `raw`, `states`, and `actions` is also
 usable as a selector attribute, along with the individual state flags.
-`pid` is the exception, having no attribute of its own. See
+`pid` is the exception, having no attribute of its own. `table`, `cell`,
+`table_row`, and `collection` are matched through their fields, as
+[numeric attributes](/reference/selectors/#numeric-attributes). See
 [Selectors](/reference/selectors/#attributes).
+
+In `table`, `cell`, `table_row`, and `collection`, every index (`row`,
+`column`, `index`, `depth`) is 0-based. The whole property is absent when the
+element has no such semantics, and each field is absent when the platform did
+not report it. `row_count`, `column_count`, and `size` are an integer or the
+string `"unknown"`. Platform support is in
+[Platform Details](/reference/platform-details/#tables-collections-and-text).
 
 ### Navigation and snapshots
 
@@ -165,6 +178,48 @@ usable as a selector attribute, along with the individual state flags.
 `max_depth` of `0` returns the root node alone, `1` adds its direct children,
 and so on. Omit it for the full subtree. `tree()` and `dump()` are also
 available on `App` and `Locator`.
+
+### Tables and text
+
+| Method | On | Returns |
+| --- | --- | --- |
+| `text()` | Any element with a text interface | A `Text` bound to this element. Raises `ActionNotSupported` when there is no text interface. |
+| `cell_at(row, column)` | A table | The cell at that 0-based slot, the merged cell covering it, or none |
+| `column_headers()`, `row_headers()` | A table | Its header cells |
+| `column_header_cells()`, `row_header_cells()` | A cell | The header cells that head it |
+| `selected_items()` | A list, tree, table, or tab list | The selected rows or cells |
+
+`Locator.text()` returns a `Text` that re-resolves the selector on every read,
+waiting until it matches. It does not wait for visible or enabled.
+
+## Text
+
+Every `Text` method is a live platform read. Offsets are 0-based UTF-16 code
+units, and a range is half-open, `[start, end)`. Python also accepts a
+`(start, end)` tuple as a range, and JavaScript a `{ start, end }` object.
+
+| Method | Returns |
+| --- | --- |
+| `length()` | Length in UTF-16 code units |
+| `caret()` | The caret offset, or none when the element has no caret |
+| `selections()` | Selected ranges in document order; empty when nothing is selected |
+| `read(range)` | The text in `range`, with bidi controls kept |
+| `read_all()` | The whole text |
+| `find(needle, occurrence, within)` | The `occurrence`-th (0-based) exact, case-sensitive match, or none. Rust splits the options into `find_with(needle, FindOptions)`. |
+| `range_at(offset, unit)` | The `character`, `word`, `line` (rendered), or `paragraph` containing `offset` |
+| `lines(range, limit)` | A page of rendered lines: `lines`, `truncated`, `next_start` |
+| `runs(range, limit)` | A page of formatting runs: `runs`, `truncated`, `next_start`. Each run has a `range` and `attributes`. |
+| `bounds(range)` | One screen rectangle per rendered line fragment, in `bounds` coordinates. At most 1000 lines. |
+
+`limit` defaults to 200 in Python and JavaScript. Run attributes are
+`font_family`, `font_size` (points), `font_weight` (CSS scale), `italic`,
+`underline`, `strikethrough`, `foreground` and `background` (`"#rrggbb"` or
+`"#rrggbbaa"`), `script` (`baseline`, `superscript`, `subscript`), and
+`spelling_error`. Each is absent when the platform did not report it.
+
+`select_text(start, end)` on `Locator` and `Element` takes the same offsets.
+The bindings also accept a single range: `select_text(range)` in Python and
+`selectText(range)` in JavaScript.
 
 ### Actions
 

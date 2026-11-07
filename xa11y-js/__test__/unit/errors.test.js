@@ -38,6 +38,7 @@ const PUBLIC_ERROR_CLASSES = [
   'TimeoutError',
   'InvalidSelectorError',
   'InvalidActionDataError',
+  'InvalidTextRangeError',
   'PlatformError',
 ];
 

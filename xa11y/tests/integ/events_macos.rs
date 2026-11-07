@@ -21,7 +21,7 @@
 //!                                       for checkbox/radio roles)
 //!     AXTitleChanged                 → NameChanged
 //!     AXUIElementDestroyed           → StructureChanged
-//!     AXSelectedTextChanged          → SelectionChanged
+//!     AXSelectedTextChanged          → TextSelectionChanged
 //!     AXAnnouncementRequested        → Announcement (live-region updates)
 //!
 //! AccessKit's macOS bridge does NOT emit the following — they require

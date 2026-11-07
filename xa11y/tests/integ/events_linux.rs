@@ -21,7 +21,9 @@
 //!     Object:PropertyChange(accessible-name) → NameChanged
 //!     Object:ValueChanged (slider/range)    → ValueChanged
 //!     Object:ValueChanged (text role)       → ValueChanged + TextChanged
-//!     Object:TextChanged                    → TextChanged
+//!     Object:TextChanged(insert|delete)     → TextChanged (+ text_change)
+//!     Object:TextCaretMoved                 → TextSelectionChanged
+//!     Object:TextSelectionChanged           → TextSelectionChanged
 //!     Object:ChildrenChanged                → StructureChanged
 //!     Object:SelectionChanged               → SelectionChanged
 //!     Object:Announcement                   → Announcement

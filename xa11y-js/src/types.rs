@@ -73,6 +73,7 @@ pub fn event_kind_to_str(kind: &xa11y::EventKind) -> &'static str {
         xa11y::EventKind::MenuOpened => "menuOpened",
         xa11y::EventKind::MenuClosed => "menuClosed",
         xa11y::EventKind::TextChanged => "textChanged",
+        xa11y::EventKind::TextSelectionChanged => "textSelectionChanged",
         xa11y::EventKind::Announcement => "announcement",
         // `EventKind` is `#[non_exhaustive]`; coverage is enforced by
         // `cargo xtask check-bindings-parity`, not by the compiler.
@@ -109,5 +110,367 @@ pub fn toggled_to_str(t: xa11y::Toggled) -> &'static str {
         xa11y::Toggled::Off => "off",
         xa11y::Toggled::On => "on",
         xa11y::Toggled::Mixed => "mixed",
+    }
+}
+
+// ── Table, cell, row and collection metadata ───────────────────────────────
+
+/// A total the platform reported: a number, or `'unknown'` when the platform
+/// explicitly says it does not know (virtualized content). Spelled as in
+/// Python.
+pub type Count = napi::Either<u32, String>;
+
+fn count_to_js(c: xa11y::Count) -> Count {
+    match c {
+        xa11y::Count::Known(n) => napi::Either::A(n),
+        xa11y::Count::Unknown => napi::Either::B("unknown".to_string()),
+    }
+}
+
+/// Size of a table, grid or tree grid, on the container element
+/// (`Element.table`). A count is `null` when the platform did not report it.
+#[napi(object, use_nullable = true)]
+#[derive(Clone)]
+pub struct TableInfo {
+    /// Number of rows, `'unknown'`, or `null` when not reported.
+    pub row_count: Option<Count>,
+    /// Number of columns, `'unknown'`, or `null` when not reported.
+    pub column_count: Option<Count>,
+}
+
+impl From<xa11y::TableInfo> for TableInfo {
+    fn from(t: xa11y::TableInfo) -> Self {
+        Self {
+            row_count: t.row_count.map(count_to_js),
+            column_count: t.column_count.map(count_to_js),
+        }
+    }
+}
+
+/// Position of a table cell, including header cells (`Element.cell`). Every
+/// index is 0-based; a field is `null` when the platform did not report it
+/// (a missing span is never defaulted to `1`).
+#[napi(object, use_nullable = true)]
+#[derive(Clone)]
+pub struct CellInfo {
+    /// 0-based row index.
+    pub row: Option<u32>,
+    /// 0-based column index.
+    pub column: Option<u32>,
+    /// Rows this cell covers, at least 1.
+    pub row_span: Option<u32>,
+    /// Columns this cell covers, at least 1.
+    pub column_span: Option<u32>,
+    /// `'column'` or `'row'` for a header cell; `null` for a data cell or
+    /// when the platform does not say.
+    pub header: Option<String>,
+}
+
+impl From<xa11y::CellInfo> for CellInfo {
+    fn from(c: xa11y::CellInfo) -> Self {
+        Self {
+            row: c.row,
+            column: c.column,
+            row_span: c.row_span,
+            column_span: c.column_span,
+            header: c.header.map(header_kind_to_str).map(str::to_string),
+        }
+    }
+}
+
+/// The `snake_case` spelling of a header kind. Spelled out arm by arm (not via
+/// `to_snake_case`) so `[[types.variant_coverage]]` sees every variant here.
+pub fn header_kind_to_str(kind: xa11y::HeaderKind) -> &'static str {
+    match kind {
+        xa11y::HeaderKind::Column => "column",
+        xa11y::HeaderKind::Row => "row",
+    }
+}
+
+/// Position of a row in a table or tree grid (`Element.tableRow`).
+#[napi(object, use_nullable = true)]
+#[derive(Clone)]
+pub struct RowInfo {
+    /// 0-based row index in the table; header rows count. `null` when not
+    /// reported.
+    pub index: Option<u32>,
+}
+
+impl From<xa11y::RowInfo> for RowInfo {
+    fn from(r: xa11y::RowInfo) -> Self {
+        Self { index: r.index }
+    }
+}
+
+/// Position of an item in a list, tree, tab list or radio group
+/// (`Element.collection`).
+#[napi(object, use_nullable = true)]
+#[derive(Clone)]
+pub struct CollectionInfo {
+    /// 0-based position in the set (to show "3 of 10", add 1).
+    pub index: Option<u32>,
+    /// Number of items in the set, `'unknown'`, or `null` when not reported.
+    pub size: Option<Count>,
+    /// 0-based nesting depth: a top-level tree item is `0`.
+    pub depth: Option<u32>,
+}
+
+impl From<xa11y::CollectionInfo> for CollectionInfo {
+    fn from(c: xa11y::CollectionInfo) -> Self {
+        Self {
+            index: c.index,
+            size: c.size.map(count_to_js),
+            depth: c.depth,
+        }
+    }
+}
+
+// ── Text ranges ────────────────────────────────────────────────────────────
+
+/// A half-open range `[start, end)` of UTF-16 code units — the same unit JS
+/// string indices use, so `value.slice(r.start, r.end)` is the range's text.
+///
+/// Accepted wherever a range is a parameter, and returned as a plain object.
+/// Both offsets must be whole, non-negative numbers.
+#[napi(object)]
+#[derive(Clone, Copy)]
+pub struct TextRange {
+    /// 0-based offset of the first unit.
+    pub start: f64,
+    /// 0-based offset one past the last unit.
+    pub end: f64,
+}
+
+impl From<xa11y::TextRange> for TextRange {
+    fn from(r: xa11y::TextRange) -> Self {
+        Self {
+            start: f64::from(r.start),
+            end: f64::from(r.end),
+        }
+    }
+}
+
+impl TextRange {
+    /// Validate both offsets and build the core range. Ordering is left to
+    /// core, which reports a reversed range with its own error.
+    pub fn to_core(self, what: &str) -> napi::Result<xa11y::TextRange> {
+        Ok(xa11y::TextRange {
+            start: checked_offset(self.start, &format!("{what}.start"))?,
+            end: checked_offset(self.end, &format!("{what}.end"))?,
+        })
+    }
+}
+
+/// What a `textChanged` event inserted or deleted (`Event.textChange`).
+///
+/// Each field is what the platform supplied: `range` is `null` when it counts
+/// offsets in a unit other than UTF-16 (on Linux, every toolkit but Qt), and
+/// `text` is `null` when it does not send the text.
+#[napi(object, use_nullable = true)]
+#[derive(Clone)]
+pub struct TextChange {
+    /// `'inserted'` or `'deleted'`. Spelled as in Python.
+    pub kind: String,
+    /// Where, in UTF-16 code units: for an insertion the range the new text
+    /// now occupies, for a deletion the range it occupied. `null` when not
+    /// reported in UTF-16.
+    pub range: Option<TextRange>,
+    /// The inserted or deleted text, or `null` when not supplied.
+    pub text: Option<String>,
+}
+
+impl From<xa11y::TextChange> for TextChange {
+    fn from(c: xa11y::TextChange) -> Self {
+        Self {
+            kind: text_change_kind_to_str(c.kind).to_string(),
+            range: c.range.map(TextRange::from),
+            text: c.text,
+        }
+    }
+}
+
+/// The `snake_case` spelling of a text change kind. Spelled out arm by arm
+/// (not via `to_snake_case`) so `[[types.variant_coverage]]` sees every
+/// variant here.
+pub fn text_change_kind_to_str(kind: xa11y::TextChangeKind) -> &'static str {
+    match kind {
+        xa11y::TextChangeKind::Inserted => "inserted",
+        xa11y::TextChangeKind::Deleted => "deleted",
+    }
+}
+
+/// Validate a JS-supplied offset, index or count as a `u32`.
+///
+/// napi's own `u32` conversion applies `ToUint32`, so `-1` would arrive as
+/// `4294967295` and `1.5` as `1`. Taking the raw number and checking it here
+/// turns either into an `InvalidActionDataError` before any OS call.
+pub fn checked_offset(value: f64, what: &str) -> napi::Result<u32> {
+    if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= f64::from(u32::MAX) {
+        Ok(value as u32)
+    } else {
+        Err(crate::map_err(xa11y::Error::InvalidActionData {
+            message: format!("{what} must be a whole number in 0..=4294967295, got {value}"),
+        }))
+    }
+}
+
+/// Parse `selectText`'s polymorphic arguments: `(start, end)` or one range
+/// object. Shared by `Element.selectText` and `Locator.selectText`.
+pub fn parse_select_range(
+    start_or_range: napi::Either<f64, TextRange>,
+    end: Option<f64>,
+) -> napi::Result<(u32, u32)> {
+    match (start_or_range, end) {
+        (napi::Either::A(start), Some(end)) => {
+            Ok((checked_offset(start, "start")?, checked_offset(end, "end")?))
+        }
+        (napi::Either::B(range), None) => {
+            let r = range.to_core("range")?;
+            Ok((r.start, r.end))
+        }
+        (napi::Either::A(_), None) => Err(crate::map_err(xa11y::Error::InvalidActionData {
+            message: "selectText(start, end) needs an end offset, or pass one {start, end} range"
+                .to_string(),
+        })),
+        (napi::Either::B(_), Some(_)) => Err(crate::map_err(xa11y::Error::InvalidActionData {
+            message:
+                "selectText takes either (start, end) or a single {start, end} range, not both"
+                    .to_string(),
+        })),
+    }
+}
+
+/// Formatting of a run of text. Every field is `null` when the platform did
+/// not report it; a missing value is never defaulted.
+#[napi(object, use_nullable = true)]
+#[derive(Clone)]
+pub struct TextAttributes {
+    /// Font family name.
+    pub font_family: Option<String>,
+    /// Font size in points.
+    pub font_size: Option<f64>,
+    /// Font weight on the CSS scale: 400 is normal, 700 is bold.
+    pub font_weight: Option<u32>,
+    /// Italic or oblique.
+    pub italic: Option<bool>,
+    /// Underlined (any style).
+    pub underline: Option<bool>,
+    /// Struck through.
+    pub strikethrough: Option<bool>,
+    /// Text colour, `'#rrggbb'` (opaque) or `'#rrggbbaa'`.
+    pub foreground: Option<String>,
+    /// Background colour, `'#rrggbb'` (opaque) or `'#rrggbbaa'`.
+    pub background: Option<String>,
+    /// `'baseline'`, `'superscript'` or `'subscript'`.
+    pub script: Option<String>,
+    /// Marked as a spelling error.
+    pub spelling_error: Option<bool>,
+}
+
+/// The `snake_case` spelling of a text script position. Arm by arm so
+/// `[[types.variant_coverage]]` can see every variant.
+pub fn text_script_to_str(script: xa11y::TextScript) -> &'static str {
+    match script {
+        xa11y::TextScript::Baseline => "baseline",
+        xa11y::TextScript::Superscript => "superscript",
+        xa11y::TextScript::Subscript => "subscript",
+    }
+}
+
+impl From<xa11y::TextAttributes> for TextAttributes {
+    fn from(a: xa11y::TextAttributes) -> Self {
+        Self {
+            font_family: a.font_family,
+            font_size: a.font_size,
+            font_weight: a.font_weight.map(u32::from),
+            italic: a.italic,
+            underline: a.underline,
+            strikethrough: a.strikethrough,
+            foreground: a.foreground.map(|c| c.to_hex()),
+            background: a.background.map(|c| c.to_hex()),
+            script: a.script.map(text_script_to_str).map(str::to_string),
+            spelling_error: a.spelling_error,
+        }
+    }
+}
+
+/// A run of text sharing one set of attributes.
+#[napi(object)]
+#[derive(Clone)]
+pub struct TextRun {
+    /// The text the run covers.
+    pub range: TextRange,
+    /// Its formatting.
+    pub attributes: TextAttributes,
+}
+
+impl From<xa11y::TextRun> for TextRun {
+    fn from(r: xa11y::TextRun) -> Self {
+        Self {
+            range: r.range.into(),
+            attributes: r.attributes.into(),
+        }
+    }
+}
+
+/// One page of rendered lines, from `Text.lines`.
+#[napi(object, use_nullable = true)]
+#[derive(Clone)]
+pub struct TextLines {
+    /// The lines, each clipped to the requested range.
+    pub lines: Vec<TextRange>,
+    /// Whether the limit stopped the walk before the end of the range.
+    pub truncated: bool,
+    /// Where to start the next page; non-null exactly when `truncated`.
+    pub next_start: Option<u32>,
+}
+
+impl From<xa11y::TextLines> for TextLines {
+    fn from(l: xa11y::TextLines) -> Self {
+        Self {
+            lines: l.lines.into_iter().map(Into::into).collect(),
+            truncated: l.truncated,
+            next_start: l.next_start,
+        }
+    }
+}
+
+/// One page of formatting runs, from `Text.runs`.
+#[napi(object, use_nullable = true)]
+#[derive(Clone)]
+pub struct TextRuns {
+    /// The runs, each clipped to the requested range.
+    pub runs: Vec<TextRun>,
+    /// Whether the limit stopped the walk before the end of the range.
+    pub truncated: bool,
+    /// Where to start the next page; non-null exactly when `truncated`.
+    pub next_start: Option<u32>,
+}
+
+impl From<xa11y::TextRuns> for TextRuns {
+    fn from(r: xa11y::TextRuns) -> Self {
+        Self {
+            runs: r.runs.into_iter().map(Into::into).collect(),
+            truncated: r.truncated,
+            next_start: r.next_start,
+        }
+    }
+}
+
+/// Options for `Text.find`. Each field may be omitted, `undefined` or `null`.
+#[napi(object)]
+pub struct TextFindOptions {
+    /// Which match to return, 0-based: `0` (the default) is the first.
+    pub occurrence: Option<napi::Either<f64, napi::bindgen_prelude::Null>>,
+    /// Search only inside this range. Defaults to the whole text.
+    pub within: Option<napi::Either<TextRange, napi::bindgen_prelude::Null>>,
+}
+
+/// An optional object field that may also be `null`: napi's own `Option`
+/// field conversion accepts only `undefined` for an absent value.
+pub fn nullable<T>(v: Option<napi::Either<T, napi::bindgen_prelude::Null>>) -> Option<T> {
+    match v {
+        Some(napi::Either::A(t)) => Some(t),
+        Some(napi::Either::B(_)) | None => None,
     }
 }

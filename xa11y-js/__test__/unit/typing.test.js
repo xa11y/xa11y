@@ -246,6 +246,7 @@ test('the scan finds the declarations it is meant to check', () => {
     ['Locator', [], ['press', 'element', 'waitUntil']],
     ['ShellSurface', ['list', 'byKind'], ['locator', 'children', 'tree', 'dump', 'kind']],
     ['Subscription', [], ['close', 'waitForEvent']],
+    ['Text', [], ['length', 'caret', 'selections', 'read', 'readAll', 'find', 'rangeAt', 'lines', 'bounds', 'runs']],
   ]) {
     const decl = found.get(type);
     assert.ok(decl, `scanner did not find class ${type}: ${[...found.keys()]}`);
@@ -344,4 +345,31 @@ test('the shell-surface kind union survives the build', () => {
   // not what consumers import.
   const index = readFileSync(join(ROOT, 'index.d.ts'), 'utf8');
   assert.match(index, /^\s*ShellSurfaceKindName,$/m, 'index.d.ts must export ShellSurfaceKindName');
+});
+
+test('the table and text unions survive the build', () => {
+  // `Count`, the header kind, the script position and the text unit all
+  // cross as plain strings from Rust; patch-native-dts.mjs narrows them.
+  // `Count` in particular is a Rust type alias napi never emits, so without
+  // the narrowing the declaration names a type that does not exist.
+  const native = readFileSync(join(ROOT, 'native.d.ts'), 'utf8');
+  for (const decl of [
+    "export type CountValue = number | 'unknown';",
+    "export type HeaderKindName = 'column' | 'row';",
+    "export type TextUnitName = 'character' | 'word' | 'line' | 'paragraph';",
+    "export type TextScriptName = 'baseline' | 'superscript' | 'subscript';",
+    '  rowCount: CountValue | null',
+    '  size: CountValue | null',
+    '  header: HeaderKindName | null',
+    '  script: TextScriptName | null',
+    '  rangeAt(offset: number, unit: TextUnitName): Promise<TextRange>',
+    '  selectText(startOrRange: number | TextRange, end?: number | null): Promise<void>',
+  ]) {
+    assert.ok(native.includes(decl), `native.d.ts is missing: ${decl}`);
+  }
+  assert.doesNotMatch(native, /: Count \| null/, 'the dangling `Count` alias leaked through');
+  const index = readFileSync(join(ROOT, 'index.d.ts'), 'utf8');
+  for (const name of ['CountValue', 'HeaderKindName', 'TextUnitName', 'TextScriptName', 'TextRange']) {
+    assert.match(index, new RegExp(`^\\s*${name},$`, 'm'), `index.d.ts must export ${name}`);
+  }
 });

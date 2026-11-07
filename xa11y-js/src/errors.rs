@@ -3,7 +3,8 @@
 //! The JS wrapper (in `index.js`) re-throws these as typed `XA11yError`
 //! subclasses so users can `instanceof` them.
 //!
-//! Every error appends (`delivery`, plus the diagnosis for `SelectorNotMatched`/`Timeout`)
+//! Every error appends (`delivery`, plus the diagnosis for `SelectorNotMatched`/`Timeout`,
+//! and `start`/`end`/`length` for `InvalidTextRange`)
 //! a JSON payload after a U+001F unit separator; the wrapper parses
 //! it and assigns the structured fields (`selector`, `condition`,
 //! `lastObserved`, `candidates`, `scope`, `elapsedMs`, `delivery`) onto the typed error
@@ -23,6 +24,7 @@ pub mod codes {
     pub const TIMEOUT: &str = "XA11Y_TIMEOUT";
     pub const INVALID_SELECTOR: &str = "XA11Y_INVALID_SELECTOR";
     pub const INVALID_ACTION_DATA: &str = "XA11Y_INVALID_ACTION_DATA";
+    pub const INVALID_TEXT_RANGE: &str = "XA11Y_INVALID_TEXT_RANGE";
     pub const INVALID_CONFIG: &str = "XA11Y_INVALID_CONFIG";
     pub const PLATFORM: &str = "XA11Y_PLATFORM";
     pub const NO_ELEMENT_BOUNDS: &str = "XA11Y_NO_ELEMENT_BOUNDS";
@@ -110,6 +112,9 @@ pub fn map_err(e: xa11y::Error) -> Error {
             codes::INVALID_ACTION_DATA,
             format!("Invalid action data: {message}"),
         ),
+        // Core Display renders the range and length into the message; the
+        // payload below carries them as structured fields.
+        xa11y::Error::InvalidTextRange { .. } => (codes::INVALID_TEXT_RANGE, e.to_string()),
         xa11y::Error::InvalidConfig { message } => (
             codes::INVALID_CONFIG,
             format!("Invalid configuration: {message}"),
@@ -151,6 +156,17 @@ pub fn map_err(e: xa11y::Error) -> Error {
                 Some(elapsed.as_secs_f64() * 1000.0),
                 d,
             ))
+        }
+        xa11y::Error::InvalidTextRange {
+            start, end, length, ..
+        } => {
+            let mut p = diagnosis_json(delivery, None, None, None);
+            if let Some(obj) = p.as_object_mut() {
+                obj.insert("start".into(), (*start).into());
+                obj.insert("end".into(), (*end).into());
+                obj.insert("length".into(), (*length).into());
+            }
+            Some(p)
         }
         _ => Some(diagnosis_json(delivery, None, None, None)),
     };

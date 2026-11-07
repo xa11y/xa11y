@@ -13,6 +13,7 @@ import argparse
 import sys
 
 from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtGui import QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMainWindow,
+    QPlainTextEdit,
     QMenuBar,
     QProgressBar,
     QPushButton,
@@ -79,6 +81,7 @@ class TestWindow(QMainWindow):
         self._add_tree(layout)
         self._add_dynamic(layout)
         self._add_dialogs(layout)
+        self._add_rich(layout)
 
         layout.addStretch()
         scroll.setWidget(content)
@@ -429,6 +432,67 @@ class TestWindow(QMainWindow):
             self._sample_dialog = dlg
         self._sample_dialog.show()
         self._sample_dialog.raise_()
+
+
+    def _add_rich(self, parent_layout: QVBoxLayout) -> None:
+        """Text by range and merged table cells, read by test_qt_rich.py.
+
+        Qt's AT-SPI adaptor counts text offsets in UTF-16 code units, where
+        GTK counts code points, so the non-BMP characters here exercise the
+        provider's UTF-16 path end to end. The table merges cells, which the
+        GTK fixture cannot.
+        """
+        grp = QGroupBox("Rich")
+        grp.setAccessibleName("Rich")
+        lay = QVBoxLayout(grp)
+
+        self.unicode_notes = QTextEdit()
+        self.unicode_notes.setAccessibleName("Unicode Notes")
+        self.unicode_notes.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.unicode_notes.setPlainText(UNICODE_NOTES_TEXT)
+        self.unicode_notes.setMinimumHeight(90)
+        # Bold "wörld" (UTF-16 6..11) so a formatting run boundary exists.
+        cursor = QTextCursor(self.unicode_notes.document())
+        cursor.setPosition(6)
+        cursor.setPosition(11, QTextCursor.MoveMode.KeepAnchor)
+        bold = QTextCharFormat()
+        bold.setFontWeight(QFont.Weight.Bold)
+        cursor.mergeCharFormat(bold)
+        lay.addWidget(self.unicode_notes)
+
+        self.edit_pad = QPlainTextEdit()
+        self.edit_pad.setAccessibleName("Edit Pad")
+        self.edit_pad.setMaximumHeight(60)
+        lay.addWidget(self.edit_pad)
+
+        self.span_table = QTableWidget(3, 3)
+        self.span_table.setAccessibleName("Span Table")
+        self.span_table.setHorizontalHeaderLabels(["Fruit", "Colour", "Qty"])
+        rows = (
+            ("Apple", "", "10"),
+            ("Banana", "Yellow", "20"),
+            ("Cherry", "Red", ""),
+        )
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                if value:
+                    self.span_table.setItem(row, column, QTableWidgetItem(value))
+        # "Apple" covers Fruit and Colour; "20" covers rows 1 and 2 of Qty.
+        self.span_table.setSpan(0, 0, 1, 2)
+        self.span_table.setSpan(1, 2, 2, 1)
+        self.span_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        self.span_table.setCurrentCell(1, 1)
+        self.span_table.setMinimumHeight(140)
+        lay.addWidget(self.span_table)
+
+        parent_layout.addWidget(grp)
+
+
+# UTF-16 offsets: "😀" is 3..5, "wörld" 6..11, "𝄞" 12..14, the newline 14,
+# "second line" 15..26; 26 units in all (24 code points).
+UNICODE_NOTES_TEXT = "Hi \U0001F600 w\u00f6rld \U0001D11E\nsecond line"
 
 
 def main() -> None:

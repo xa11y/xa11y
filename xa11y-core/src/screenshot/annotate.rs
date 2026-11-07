@@ -113,8 +113,9 @@ impl Annotation {
 ///
 /// Both arguments are **1-based**. Groups past 26 continue `AA`, `AB`, … in
 /// the bijective base-26 everyone knows from spreadsheet columns. A `group`
-/// or `index` of `0` is read as `1`: this function has no failure channel,
-/// and every index in xa11y counts from one.
+/// or `index` of `0` is read as `1`: this function has no failure channel.
+/// Both follow `:nth`, the one 1-based number in xa11y (see "Index Bases" in
+/// `AGENTS.md`); every other index counts from zero.
 ///
 /// ```
 /// use xa11y_core::screenshot::tag_for;

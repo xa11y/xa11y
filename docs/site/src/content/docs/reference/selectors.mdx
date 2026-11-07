@@ -30,6 +30,7 @@ group > *                           # every direct child, whatever its role
 group > button                      # direct child combinator
 window button[name='OK']            # descendant (any depth)
 button:nth(2)                       # 2nd match (1-based)
+table_cell[row="2"][column="0"]     # numeric attribute (0-based)
 button[name='Play'], button[name='Pause']  # alternation
 ```
 
@@ -178,6 +179,53 @@ One tri-state flag:
 | --- | --- |
 | `checked` | `'on'`, `'off'`, `'mixed'` |
 
+### Numeric attributes
+
+Table and collection positions, read from the element's `cell`, `table_row`,
+`collection`, and `table` properties:
+
+| Attribute | Matches | Accepts `"unknown"` |
+| --- | --- | --- |
+| `row` | `cell.row`, or `table_row.index` on a row. 0-based. | No |
+| `column` | `cell.column`. 0-based. | No |
+| `row_span` | `cell.row_span` | No |
+| `column_span` | `cell.column_span` | No |
+| `index` | `collection.index`. 0-based. | No |
+| `depth` | `collection.depth`. 0-based. | No |
+| `size` | `collection.size` | Yes |
+| `row_count` | `table.row_count` | Yes |
+| `column_count` | `table.column_count` | Yes |
+
+Rules for these attributes:
+
+- The value is quoted like any other, and holds a non-negative integer:
+  `table_cell[row="2"][column="0"]`. Leading zeros are dropped, so `"02"`
+  matches `2`.
+- Only `=` is accepted. `*=`, `^=`, and `$=` on a numeric attribute raise
+  `InvalidSelector`, as does a value that is not an integer, such as `"two"` or
+  `"-1"`.
+- `"unknown"` matches a total the platform reported as unknown. It is valid
+  for the three count attributes only.
+- The comparison is against the value exactly as the element reports it.
+  Selectors never convert between bases, so `table_cell[row="0"]:nth(1)` is
+  the first matching cell of the first row: `row` is 0-based, `:nth` is
+  1-based.
+- An element that does not report the field matches no value.
+- These names are reserved. They are never looked up in `raw`.
+
+One string attribute marks header cells:
+
+| Attribute | Values |
+| --- | --- |
+| `header` | `'column'`, `'row'`, read from `cell.header`. A data cell matches no value. Takes `=` only. Any other value raises `InvalidSelector`. |
+
+`table_cell[header="column"]` finds a table's column headers.
+
+Platform support for the underlying properties is in
+[Platform Details](/reference/platform-details/#tables-collections-and-text).
+
+### Platform attributes
+
 Any other attribute name is looked up in the element's platform-specific `raw`
 map, so `[AXRoleDescription='slider']` on macOS or `[atspi_name='…']` on Linux
 matches against the untouched platform value. The keys available there are
@@ -194,7 +242,9 @@ platform-specific and listed under
 ## `:nth(n)`
 
 `button:nth(2)` selects the second match, 1-based, in document order. It
-applies to the segment it is attached to.
+applies to the segment it is attached to. `:nth` and `Locator.nth()` are the
+only 1-based indices in xa11y. Every numeric attribute, text offset, and
+position property counts from 0.
 
 Requesting an index past the end produces a diagnosis naming both numbers, for
 example `selector matched 2 element(s); nth(5) requested`.

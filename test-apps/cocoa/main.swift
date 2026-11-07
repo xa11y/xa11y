@@ -98,6 +98,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         scroll.documentView = docView
         window.contentView = container
 
+        // ── Rich (tables, collections and text by range) ──────────────────
+        // In the otherwise empty strip above the first section (y 1320-1480),
+        // so nothing below moves. tests/suites/python/test_cocoa_rich.py
+        // reads both widgets: attributed text with non-BMP characters for
+        // the text-range and formatting-run paths, and an outline for
+        // collection depth and selected_items. Named selectors keep the
+        // suites that find `text_area[name="Notes"]` unaffected.
+        let richBox = NSBox(frame: NSRect(x: 12, y: 1325, width: 656, height: 150))
+        richBox.title = "Rich"
+        docView.addSubview(richBox)
+
+        let richScroll = NSScrollView(frame: NSRect(x: 8, y: 8, width: 360, height: 112))
+        let richView = NSTextView(frame: richScroll.bounds)
+        richView.isEditable = false
+        richView.isSelectable = true
+        richView.isRichText = true
+        richView.setAccessibilityLabel("Rich Text")
+        richView.textStorage?.setAttributedString(AppDelegate.richAttributedText())
+        richScroll.documentView = richView
+        richBox.addSubview(richScroll)
+
+        let treeScroll = NSScrollView(frame: NSRect(x: 376, y: 8, width: 256, height: 112))
+        produceTree = NSOutlineView(frame: treeScroll.bounds)
+        produceTree.setAccessibilityLabel("Produce Tree")
+        produceTree.headerView = nil
+        let treeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("produce"))
+        treeColumn.width = 230
+        produceTree.addTableColumn(treeColumn)
+        produceTree.outlineTableColumn = treeColumn
+        produceTree.dataSource = self
+        produceTree.delegate = self
+        treeScroll.documentView = produceTree
+        richBox.addSubview(treeScroll)
+        produceTree.reloadData()
+        produceTree.expandItem(nil, expandChildren: true)
+        // "Carrot" (row 1) starts selected, for selected_items.
+        produceTree.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+
         var y: CGFloat = 1320
         func addSection(_ title: String) -> NSView {
             let box = NSBox(frame: NSRect(x: 12, y: y - 180, width: 656, height: 180))
@@ -498,6 +536,70 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusLabel: NSTextField!
     var rowCount: Int = 5
     let users = [["Alice", "Admin"], ["Bob", "User"]]
+    var produceTree: NSOutlineView!
+
+    /// The "Rich Text" view's content. 😀 and 𝄞 are outside the BMP (two
+    /// UTF-16 units each), so an offset after one is wrong if any layer
+    /// counts code points. Mirrored as TEXT in test_cocoa_rich.py.
+    static let richText = "Hello wörld 😀 bold italic\nSecond line under red 𝄞 end\n\nFinal paragraph"
+
+    static func richAttributedText() -> NSAttributedString {
+        let base = NSFont.systemFont(ofSize: 13)
+        let s = NSMutableAttributedString(
+            string: richText,
+            attributes: [.font: base, .foregroundColor: NSColor.black]
+        )
+        let ns = richText as NSString
+        s.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 13), range: ns.range(of: "bold"))
+        let italic = NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask)
+        s.addAttribute(.font, value: italic, range: ns.range(of: "italic"))
+        let red = ns.range(of: "red")
+        s.addAttribute(
+            .foregroundColor, value: NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1), range: red
+        )
+        s.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: red)
+        return s
+    }
+}
+
+// ── Produce tree (NSOutlineView) ──────────────────────────────────────────────
+
+final class ProduceNode: NSObject {
+    let name: String
+    let children: [ProduceNode]
+    init(_ name: String, _ children: [ProduceNode] = []) {
+        self.name = name
+        self.children = children
+    }
+}
+
+let produceRoots = [
+    ProduceNode("Vegetables", [ProduceNode("Carrot"), ProduceNode("Leek")]),
+    ProduceNode("Dairy", [ProduceNode("Milk")]),
+]
+
+extension AppDelegate: NSOutlineViewDataSource, NSOutlineViewDelegate {
+    func outlineView(_: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        (item as? ProduceNode)?.children.count ?? produceRoots.count
+    }
+
+    func outlineView(_: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        (item as? ProduceNode)?.children[index] ?? produceRoots[index]
+    }
+
+    func outlineView(_: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        !((item as? ProduceNode)?.children.isEmpty ?? true)
+    }
+
+    func outlineView(_: NSOutlineView, viewFor _: NSTableColumn?, item: Any) -> NSView? {
+        let text = NSTextField(labelWithString: (item as? ProduceNode)?.name ?? "")
+        let cell = NSTableCellView()
+        cell.addSubview(text)
+        cell.textField = text
+        text.frame = cell.bounds
+        text.autoresizingMask = [.width, .height]
+        return cell
+    }
 }
 
 // ── AXOpen-only element ───────────────────────────────────────────────────────

@@ -1,5 +1,7 @@
 //! Windows UI Automation accessibility provider.
 
+mod rich;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1095,6 +1097,11 @@ impl WindowsProvider {
             numeric_value: None,
             min_value: None,
             max_value: None,
+            // Table/collection metadata is not mapped on Windows yet (#479).
+            table: None,
+            cell: None,
+            table_row: None,
+            collection: None,
             stable_id: None,
             pid: Some(pid),
             raw,
@@ -3092,6 +3099,11 @@ fn build_snapshot_data(
         numeric_value,
         min_value,
         max_value,
+        table: rich::table_info(element)?,
+        cell: rich::cell_info(element, walker)?,
+        // UIA has no row-index property independent of GridItem.
+        table_row: rich::row_info(element, role)?,
+        collection: rich::collection_info(element)?,
         stable_id,
         pid,
         raw,
@@ -3181,6 +3193,15 @@ fn create_cache_request(
 /// Properties pre-fetched in every bulk query, besides the bounds that
 /// [`crate::coords::BoundsCacheRequest`] adds.
 const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
+    UIA_GridRowCountPropertyId,
+    UIA_GridColumnCountPropertyId,
+    UIA_GridItemRowPropertyId,
+    UIA_GridItemColumnPropertyId,
+    UIA_GridItemRowSpanPropertyId,
+    UIA_GridItemColumnSpanPropertyId,
+    UIA_PositionInSetPropertyId,
+    UIA_SizeOfSetPropertyId,
+    UIA_LevelPropertyId,
     UIA_ControlTypePropertyId,
     UIA_AriaRolePropertyId,
     UIA_IsDialogPropertyId,
@@ -5588,56 +5609,277 @@ impl Provider for WindowsProvider {
     }
 
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
-        let _dpi = &crate::dpi::DpiScope::enter()?;
-        if start > end {
-            return Err(Error::InvalidActionData {
-                message: format!("set_text_selection start ({start}) must be <= end ({end})"),
+        // Name the action the caller asked for, not the text read under it.
+        let doc = self.document(element).map_err(|e| match e {
+            Error::ActionNotSupported { role, .. } => Error::ActionNotSupported {
+                action: "set_text_selection".to_string(),
+                role,
+            },
+            e => e,
+        })?;
+        let range = rich::range(&doc, xa11y_core::text_api::TextRange { start, end })?;
+        uia_call(|| unsafe { range.Select() })
+    }
+
+    fn table_cell_at(&self, e: &ElementData, row: u32, column: u32) -> Result<Option<ElementData>> {
+        let dpi = crate::dpi::DpiScope::enter()?;
+        let p: IUIAutomationGridPattern = self.rich_pattern(e, UIA_GridPatternId, "cell_at")?;
+        let rows = uia_call(|| unsafe { p.CurrentRowCount() })?;
+        let columns = uia_call(|| unsafe { p.CurrentColumnCount() })?;
+        let (Ok(row), Ok(column)) = (i32::try_from(row), i32::try_from(column)) else {
+            return Ok(None);
+        };
+        if (rows >= 0 && row >= rows) || (columns >= 0 && column >= columns) {
+            return Ok(None);
+        }
+        match unsafe { p.GetItem(row, column) } {
+            Ok(item) => self.rich_element(&dpi, &item).map(Some),
+            Err(e)
+                if e.code() == E_INVALIDARG
+                    || e.code().0 == UIA_E_ELEMENTNOTAVAILABLE as i32
+                    || e.code().0 == 0 =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("Grid.GetItem({row}, {column}) failed: {e}"),
+            }),
+        }
+    }
+
+    fn table_headers(
+        &self,
+        e: &ElementData,
+        kind: xa11y_core::table::HeaderKind,
+    ) -> Result<Vec<ElementData>> {
+        let dpi = crate::dpi::DpiScope::enter()?;
+        let p: IUIAutomationTablePattern =
+            self.rich_pattern(e, UIA_TablePatternId, "table_headers")?;
+        let array = uia_call(|| unsafe {
+            match kind {
+                xa11y_core::table::HeaderKind::Column => p.GetCurrentColumnHeaders(),
+                xa11y_core::table::HeaderKind::Row => p.GetCurrentRowHeaders(),
+            }
+        })?;
+        self.rich_elements(&dpi, &array)
+    }
+
+    fn cell_headers(
+        &self,
+        e: &ElementData,
+        kind: xa11y_core::table::HeaderKind,
+    ) -> Result<Vec<ElementData>> {
+        let dpi = crate::dpi::DpiScope::enter()?;
+        let p: IUIAutomationTableItemPattern =
+            self.rich_pattern(e, UIA_TableItemPatternId, "cell_headers")?;
+        let array = uia_call(|| unsafe {
+            match kind {
+                xa11y_core::table::HeaderKind::Column => p.GetCurrentColumnHeaderItems(),
+                xa11y_core::table::HeaderKind::Row => p.GetCurrentRowHeaderItems(),
+            }
+        })?;
+        self.rich_elements(&dpi, &array)
+    }
+
+    fn selected_items(&self, e: &ElementData) -> Result<Vec<ElementData>> {
+        let dpi = crate::dpi::DpiScope::enter()?;
+        let p: IUIAutomationSelectionPattern =
+            self.rich_pattern(e, UIA_SelectionPatternId, "selected_items")?;
+        self.rich_elements(&dpi, &uia_call(|| unsafe { p.GetCurrentSelection() })?)
+    }
+
+    fn text_length(&self, e: &ElementData) -> Result<u32> {
+        Ok(xa11y_core::text_api::utf16_len(&rich::contents(
+            &self.document(e)?,
+        )?))
+    }
+
+    fn text_caret(&self, e: &ElementData) -> Result<Option<u32>> {
+        let el = self.get_cached(e.handle)?;
+        // TextPattern2 reports whether its caret is active, including the
+        // active endpoint of a backwards selection.
+        if let Some(p) =
+            current_pattern::<IUIAutomationTextPattern2>(&el, UIA_TextPattern2Id, "TextPattern2")?
+        {
+            let (active, caret) = uia_call(|| {
+                let mut active = BOOL(0);
+                let caret = unsafe { p.GetCaretRange(&mut active) }?;
+                Ok((active, caret))
+            })?;
+            if !active.as_bool() {
+                return Ok(None);
+            }
+            return Ok(Some(rich::offsets(&self.document(e)?, &caret)?.start));
+        }
+        let p: IUIAutomationTextPattern = self.rich_pattern(e, UIA_TextPatternId, "text")?;
+        // Older providers expose the caret as a degenerate TextPattern
+        // selection. Only use this documented representation while focused;
+        // an inactive selection is not a caret.
+        if !uia_call(|| unsafe { el.CurrentHasKeyboardFocus() })?.as_bool() {
+            return Ok(None);
+        }
+        let selected = uia_call(|| unsafe { p.GetSelection() })?;
+        if uia_call(|| unsafe { selected.Length() })? == 0 {
+            return Ok(None);
+        }
+        let selection = uia_call(|| unsafe { selected.GetElement(0) })?;
+        let offsets = rich::offsets(&self.document(e)?, &selection)?;
+        if offsets.is_empty() {
+            return Ok(Some(offsets.start));
+        }
+        let active =
+            uia_call(|| unsafe { selection.GetAttributeValue(UIA_SelectionActiveEndAttributeId) })?;
+        match variant_i32(&active) {
+            Some(n) if n == ActiveEnd_Start.0 => Ok(Some(offsets.start)),
+            Some(n) if n == ActiveEnd_End.0 => Ok(Some(offsets.end)),
+            _ => Err(Error::Unsupported {
+                feature: "UIA provider reports no active end for its text selection".into(),
+            }),
+        }
+    }
+
+    fn text_selections(&self, e: &ElementData) -> Result<Vec<xa11y_core::text_api::TextRange>> {
+        let p: IUIAutomationTextPattern = self.rich_pattern(e, UIA_TextPatternId, "text")?;
+        let doc = uia_call(|| unsafe { p.DocumentRange() })?;
+        let array = uia_call(|| unsafe { p.GetSelection() })?;
+        let mut ranges = Vec::new();
+        for i in 0..uia_call(|| unsafe { array.Length() })? {
+            let range = rich::offsets(&doc, &uia_call(|| unsafe { array.GetElement(i) })?)?;
+            if !range.is_empty() {
+                ranges.push(range);
+            }
+        }
+        ranges.sort_by_key(|r| (r.start, r.end));
+        Ok(ranges)
+    }
+
+    fn text_read(&self, e: &ElementData, r: xa11y_core::text_api::TextRange) -> Result<String> {
+        // UIA has no numeric offsets, so obtaining an endpoint already needs
+        // a text read. Slice that observation directly: this also permits
+        // scalar boundaries inside a provider's indivisible grapheme unit.
+        xa11y_core::text_api::slice_utf16(&rich::contents(&self.document(e)?)?, r)
+    }
+
+    fn text_range_at(
+        &self,
+        e: &ElementData,
+        offset: u32,
+        unit: xa11y_core::text_api::TextUnit,
+    ) -> Result<xa11y_core::text_api::TextRange> {
+        use xa11y_core::text_api::{slice_utf16, utf16_len, TextRange, TextUnit};
+        let doc = self.document(e)?;
+        let text = rich::contents(&doc)?;
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let length = units.len() as u32;
+        xa11y_core::text_api::check_in_bounds(
+            TextRange {
+                start: offset,
+                end: offset,
+            },
+            length,
+        )?;
+        if length == 0 {
+            return Ok(TextRange { start: 0, end: 0 });
+        }
+        // At the end, answer for the unit that ends there; inside a surrogate
+        // pair, for the pair. Both as on Linux and macOS.
+        let mut offset = offset.min(length - 1);
+        let is_low = |u: u16| (0xDC00..=0xDFFF).contains(&u);
+        let is_high = |u: u16| (0xD800..=0xDBFF).contains(&u);
+        if offset > 0 && is_low(units[offset as usize]) && is_high(units[offset as usize - 1]) {
+            offset -= 1;
+        }
+        if unit == TextUnit::Character {
+            let width = if is_high(units[offset as usize]) && offset + 1 < length {
+                2
+            } else {
+                1
+            };
+            return Ok(TextRange {
+                start: offset,
+                end: offset + width,
             });
         }
-        let uia_element = self.get_cached(element.handle)?;
-        if let Some(pattern) = current_pattern::<IUIAutomationTextPattern>(
-            &uia_element,
-            UIA_TextPatternId,
-            "TextPattern",
-        )? {
-            let range = unsafe { pattern.DocumentRange() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "DocumentRange failed".to_string(),
-            })?;
-            // Collapse and move to start position. If the move fails, the
-            // subsequent Select() would land on the wrong range — propagate
-            // rather than silently mis-selecting (tenet 1).
-            // Text-range Move counts characters, not pixels; spelled through
-            // the trait path so check-windows-dpi's `.Move(` rule (which
-            // guards TransformPattern) does not apply to it.
-            unsafe { IUIAutomationTextRange::Move(&range, TextUnit_Character, start as i32) }
-                .map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("TextRange::Move to {start} failed: {e}"),
-                })?;
-            // Extend end to selection length. `end >= start` is enforced
-            // above, so the u32 subtraction cannot underflow.
-            unsafe {
-                range.MoveEndpointByUnit(
-                    TextPatternRangeEndpoint_End,
-                    TextUnit_Character,
-                    (end - start) as i32,
-                )
+        let include_newline = matches!(unit, TextUnit::Line | TextUnit::Paragraph);
+        let unit = match unit {
+            TextUnit::Character => TextUnit_Character,
+            TextUnit::Word => TextUnit_Word,
+            TextUnit::Line => TextUnit_Line,
+            TextUnit::Paragraph => TextUnit_Paragraph,
+        };
+        let mut r = rich::offsets(&doc, &rich::unit_at(&doc, offset, unit)?)?;
+        // WPF excludes CR/LF from the enclosing line/paragraph. Include the
+        // reported separators so paging can resume at the next unit. A
+        // provider whose unit already ends in its terminator (RichEdit
+        // paragraphs end in CR) keeps it as it is: appending the *next*
+        // separator would swallow an empty line after it.
+        let ends_with_terminator =
+            r.end > r.start && r.end <= length && matches!(units[r.end as usize - 1], 0x0A | 0x0D);
+        if include_newline && !ends_with_terminator {
+            let tail = slice_utf16(
+                &text,
+                TextRange {
+                    start: r.end,
+                    end: utf16_len(&text),
+                },
+            )?;
+            if tail.starts_with("\r\n") {
+                r.end += 2;
+            } else if tail.starts_with(['\r', '\n']) {
+                r.end += 1;
             }
-            .map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("TextRange::MoveEndpointByUnit({start}..{end}) failed: {e}"),
-            })?;
-            unsafe { range.Select() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "Select range failed".to_string(),
-            })?;
-            return Ok(());
         }
-        Err(Error::ActionNotSupported {
-            action: "set_text_selection".to_string(),
-            role: element.role,
-        })
+        if r.end > utf16_len(&text) {
+            return Err(Error::Platform {
+                code: -1,
+                message: "UIA returned a range outside its document".into(),
+            });
+        }
+        Ok(r)
+    }
+
+    fn text_range_bounds(
+        &self,
+        e: &ElementData,
+        r: xa11y_core::text_api::TextRange,
+    ) -> Result<Option<xa11y_core::Rect>> {
+        let dpi = crate::dpi::DpiScope::enter()?;
+        let range = rich::range(&self.document(e)?, r)?;
+        crate::coords::text_range_bounds(&dpi, &range)
+    }
+
+    fn text_attributes_at(
+        &self,
+        e: &ElementData,
+        offset: u32,
+    ) -> Result<xa11y_core::text_api::TextRun> {
+        let doc = self.document(e)?;
+        let range = rich::unit_at(&doc, offset, TextUnit_Format)?;
+        // UIA format ranges can include zero-width markup at their edges
+        // (WPF reports MixedAttributeValue for that markup). Sample the
+        // insertion point just after the first scalar, inside the format.
+        let text = rich::contents(&doc)?;
+        let prefix = xa11y_core::text_api::slice_utf16(
+            &text,
+            xa11y_core::text_api::TextRange {
+                start: 0,
+                end: offset,
+            },
+        )?;
+        let end = offset
+            + text[prefix.len()..]
+                .chars()
+                .next()
+                .map_or(0, |c| c.len_utf16() as u32);
+        let sample = rich::range(&doc, xa11y_core::text_api::TextRange { start: end, end })?;
+        Ok(xa11y_core::text_api::TextRun::new(
+            rich::offsets(&doc, &range)?,
+            rich::attributes(
+                &sample,
+                e.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF"),
+            )?,
+        ))
     }
 
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
@@ -7133,6 +7375,9 @@ impl EventContext {
             app_name: self.app_name.clone(),
             app_pid: self.app_pid,
             timestamp: std::time::Instant::now(),
+            // UIA TextChanged has no insertion/deletion payload. Do not infer
+            // a delta by racing a fresh text read against subsequent edits.
+            text_change: None,
         }
         .into();
         if let Some(tx) = self
@@ -7372,6 +7617,7 @@ impl IUIAutomationEventHandler_Impl for AutomationHandler_Impl {
             UIA_MenuOpenedEventId => EventKind::MenuOpened,
             UIA_MenuClosedEventId => EventKind::MenuClosed,
             UIA_Text_TextChangedEventId => EventKind::TextChanged,
+            UIA_Text_TextSelectionChangedEventId => EventKind::TextSelectionChanged,
             UIA_SelectionItem_ElementSelectedEventId
             | UIA_SelectionItem_ElementAddedToSelectionEventId
             | UIA_SelectionItem_ElementRemovedFromSelectionEventId => EventKind::SelectionChanged,
@@ -7725,6 +7971,7 @@ impl IUIAutomationEventHandler_Impl for WatchHandler_Impl {
 // twice (once from its own subtree scope, once from the desktop root's
 // Subtree scope) — the open/close watch owns those two event IDs.
 const AUTOMATION_EVENT_IDS: &[UIA_EVENT_ID] = &[
+    UIA_Text_TextSelectionChangedEventId,
     UIA_MenuOpenedEventId,
     UIA_MenuClosedEventId,
     UIA_Text_TextChangedEventId,

@@ -398,6 +398,79 @@ Per-item selection (`selected` on rows, cells, list items) is read differently:
 
 Header exposure varies by toolkit as well as platform. Windows surfaces header cells as `HeaderItem` elements and per-cell header relationships via the `TableItem` pattern. AT-SPI exposes `column header` / `row header` roles. AppKit tables expose a header group whose sort buttons carry the column titles. One known toolkit gap: **Qt tables on macOS expose no header objects at all**. Qt's Cocoa bridge synthesizes `AXRow`/`AXColumn` children only and provides no `AXHeader` attribute, so column titles are absent from the AX tree and xa11y cannot surface them. This is an upstream Qt limitation. Use the platform-consistent `table table_cell` selectors for data, and avoid depending on header names for Qt apps on macOS.
 
+### Tables, collections and text
+
+Support for the [table and text APIs](/guides/tables-and-text/) on each
+platform. `Unsupported` raises `ActionNotSupportedError` in Python and
+JavaScript.
+
+| Capability | Linux (AT-SPI) | macOS | Windows (UIA) |
+| --- | --- | --- | --- |
+| `table` (`row_count`, `column_count`) | `Table.NRows` / `NColumns`; a negative value reads `unknown` | `AXRowCount` / `AXColumnCount`, or the length of `AXRows` / `AXColumns` where those are absent (AppKit) | Grid row and column counts |
+| `cell` (`row`, `column`, spans) | `TableCell.GetRowColumnSpan` | `AXRowIndexRange` / `AXColumnIndexRange` | GridItem properties |
+| `cell.header` | The `column header` / `row header` roles | Always `None`: AX marks no cell as a header | ARIA header role or membership in the owning Table header arrays |
+| `table_row` | Always `None`: AT-SPI has no row-index call for a row object, so read the row from a cell | `AXIndex` of an `AXRow`, including outline rows | GridItem row when the row object reports it |
+| `collection` (`index`, `size`, `depth`) | Object attributes `posinset`, `setsize`, `level`, converted from 1-based; read for list items, tree items, tabs, radio buttons and rows | `AXARIAPosInSet` / `AXARIASetSize` on rows, tabs and radio buttons, converted from 1-based. `depth` comes from `AXDisclosureLevel` on outline rows. Web list items are groups in AX, so they report none | PositionInSet, SizeOfSet and Level; indices converted from 1-based |
+| `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `AXCellForColumnAndRow`; for AppKit, the `AXCell` in row `AXRows[row]` whose index ranges cover the slot | Grid.GetItem; never realizes a virtual cell |
+| `column_headers()`, `row_headers()` | `Table.GetColumnHeader` / `GetRowHeader` per column or row; `Unsupported` above 1000 | `AXColumnHeaderUIElements` / `AXRowHeaderUIElements`; for AppKit, which answers neither, the `AXHeader` of each `AXColumn` | Table header arrays |
+| `column_header_cells()`, `row_header_cells()` | `TableCell.GetColumnHeaderCells` / `GetRowHeaderCells` | The cell's header attributes; for AppKit, the `AXHeader` of the cell's `AXColumn`, and no row headers | TableItem header arrays |
+| `selected_items()` | `Selection.GetSelectedChild` | `AXSelectedRows` on tables and outlines, `AXSelectedChildren` elsewhere | Selection.GetCurrentSelection |
+| `text()` and every `Text` read | The `Text` interface | `AXNumberOfCharacters`, `AXStringForRange`; caret is an empty `AXSelectedTextRange`, `None` while a range is selected | TextPattern ranges; caret from active TextPattern2 or focused TextPattern selection |
+| `Text.range_at()` units | `Text.GetStringAtOffset`; `Unsupported` when the toolkit reports no boundary for the unit (GTK 3 text view: `paragraph`) | Unicode scalars for characters; `AXLineForIndex` + `AXRangeForLine` for lines; `word` and `paragraph` are `Unsupported` | Unicode scalars for characters; UIA enclosing units for words, lines and paragraphs |
+| `Text.runs()` attributes | `Text.GetAttributeRun`; `script` is always `None` | `AXStyleRangeForIndex` runs, read from `AXAttributedStringForRange`; weight and italic from the run's font | TextRange format units and attributes; unsupported attributes stay `None` |
+| `Text.bounds()` | `Text.GetRangeExtents` per rendered line | `AXBoundsForRange` per rendered line | TextRange.GetBoundingRectangles in physical desktop pixels |
+| `select_text()` range check | `InvalidTextRange` past the end or inside a surrogate pair | `InvalidTextRange` past the end or inside a surrogate pair | `InvalidTextRange` past the end or inside a surrogate pair |
+
+Windows measures UIA range endpoints in UTF-16 units instead of assuming that
+a provider's character unit has that size. If a valid scalar boundary falls
+inside an indivisible UIA character cluster, the operation raises
+`Unsupported`. UIA text-change events have no inserted or deleted text, so
+`text_change` remains `None`. Text-selection events use
+`TextSelectionChanged`.
+
+macOS counts text in UTF-16 units natively, so no offset is converted. AX
+lists only the attributes applied to a run: once a run reports a font,
+xa11y reads a missing underline, strikethrough or spelling mark as `False`
+and a missing superscript as `baseline`, and a run with no font reports all
+of them as `None`. Colors are the components the app set. AX drops their color
+space in transit, so xa11y passes the components through unconverted. The table, cell, row and collection fields come from the
+same single batch read as the rest of the element, so a tree read pays no
+extra round trip for them. AppKit tables are the one exception: they report no
+row or column count attribute, so each `table` element costs two count reads.
+
+On Linux, a property read that fails leaves its field `None` instead of
+failing the whole element. Table properties are read only for elements whose
+`GetInterfaces` lists `Table` or `TableCell`. GTK 3 tree-view column headers
+have the header role and no `TableCell` interface, so they carry `header` and
+no position.
+
+Offsets are UTF-16 code units everywhere. The AT-SPI specification counts code
+points, which GTK, Chromium, Gecko and LibreOffice follow, so for those apps
+xa11y reads the text before each offset to convert it, and a `caret()` or
+`selections()` poll costs a read of the text up to the caret. Qt's adaptor
+counts UTF-16 code units and needs no conversion. xa11y picks the unit from
+`Application.ToolkitName`.
+
+Qt's adaptor differs from GTK in a few more places. These were measured on
+Qt 6.12, and `tests/suites/python/test_qt_rich.py` pins them:
+
+- **Merged cells.** Qt answers `1` for every row and column extent, and each
+  slot a merged cell covers is a cell of its own. So a cell merged with
+  `QTableView::setSpan` reads `row_span` and `column_span` as `1`,
+  and `cell_at()` on a covered slot returns the covered cell.
+- **Collections.** Qt sets no `posinset`, `setsize` or `level` attributes, so
+  `collection` is `None` on its list and tree items. A `QListWidget` or
+  `QTreeWidget` row is a table cell instead, and `cell.row` gives its
+  position among the visible rows.
+- **Line ends.** Qt leaves the newline out of each line and paragraph. xa11y
+  appends it, so `range_at(offset, "line")` contains the offset and `lines()`
+  reports the same lines as GTK.
+- **Font attributes.** Qt sends `weight` only for text that is not normal, so
+  plain text reads `font_weight` as `None`. For plain text it also sends no
+  underline, no line-through and no colors, so those read `None`.
+- **Text change events.** Because Qt counts UTF-16, `text_change.range` is
+  set on its `text_changed` events. It is `None` for the code-point toolkits.
+
 ### Linux: X11 vs Wayland
 
 xa11y supports both X11 and Wayland Linux sessions. Backends are selected at runtime, with no compile-time feature flag.

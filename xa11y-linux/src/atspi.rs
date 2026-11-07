@@ -14,6 +14,9 @@ use zbus::DBusError;
 
 use crate::window::WindowManager;
 
+mod rich;
+pub(crate) use rich::{read_offset_unit_unless_gone, OffsetUnit};
+
 /// Upper bound on a single AT-SPI D-Bus method call.
 ///
 /// zbus applies no method timeout of its own, so without this a call to an
@@ -83,6 +86,9 @@ struct Gtk4Geometry {
     /// [`GTK4_TOPLEVEL_CACHE_LIMIT`]: objects that go defunct are never
     /// removed one by one, so the map is cleared when it fills.
     toplevels: Mutex<HashMap<String, AccessibleRef>>,
+    /// Each application bus's text offset unit (see `rich::OffsetUnit`).
+    /// Kept here because it shares this cache's per-bus lifetime.
+    offset_units: Mutex<HashMap<String, rich::OffsetUnit>>,
 }
 
 /// Entries [`Gtk4Geometry::toplevels`] holds before it is cleared.
@@ -108,6 +114,9 @@ pub(crate) struct Interfaces {
     pub(crate) component: bool,
     pub(crate) text: bool,
     pub(crate) value: bool,
+    pub(crate) table: bool,
+    pub(crate) table_cell: bool,
+    pub(crate) selection: bool,
 }
 
 impl Interfaces {
@@ -117,6 +126,9 @@ impl Interfaces {
             component: has("org.a11y.atspi.Component"),
             text: has("org.a11y.atspi.Text"),
             value: has("org.a11y.atspi.Value"),
+            table: has("org.a11y.atspi.Table"),
+            table_cell: has("org.a11y.atspi.TableCell"),
+            selection: has("org.a11y.atspi.Selection"),
         }
     }
 }
@@ -841,6 +853,14 @@ impl LinuxProvider {
             .call_method("GetExtents", &(ATSPI_COORD_TYPE_WINDOW,))
             .ok()?;
         let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().ok()?;
+        let (ox, oy) = self.gtk4_window_origin(aref)?;
+        extents_to_rect(x.checked_add(ox)?, y.checked_add(oy)?, w, h)
+    }
+
+    /// Screen position of the X11 client window holding a GTK 4 object, for
+    /// turning its WINDOW coordinates into screen ones. `None` when the window
+    /// cannot be identified uniquely.
+    fn gtk4_window_origin(&self, aref: &AccessibleRef) -> Option<(i32, i32)> {
         let toplevel = self.toplevel_of(aref)?;
         let title = self.get_name(&toplevel).ok().filter(|t| !t.is_empty())?;
         let pid = self.gtk4_pid(&aref.bus_name)?;
@@ -865,7 +885,7 @@ impl LinuxProvider {
                 return None;
             }
         };
-        extents_to_rect(x.checked_add(ox)?, y.checked_add(oy)?, w, h)
+        Some((ox, oy))
     }
 
     /// Whether `bus`'s root object lists `org.a11y.atspi.Application` in
@@ -1431,6 +1451,10 @@ impl LinuxProvider {
         // ActionNotSupported (tenet 3; tenet 1 — no silent fallback — is
         // why there is no substitute mechanism to advertise instead).
 
+        // Table, cell and collection metadata, gated on the interfaces read
+        // above so a node without them costs nothing (see `rich`).
+        let meta = self.read_table_metadata(aref, role, role_num, &role_name, ifaces);
+
         let raw = {
             let raw_role = if role_name.is_empty() {
                 format!("role_num:{}", role_num)
@@ -1521,6 +1545,10 @@ impl LinuxProvider {
             numeric_value,
             min_value,
             max_value,
+            table: meta.table,
+            cell: meta.cell,
+            table_row: meta.table_row,
+            collection: meta.collection,
             stable_id: Some(aref.path.clone()),
             pid,
             raw,
@@ -3616,24 +3644,79 @@ impl Provider for LinuxProvider {
     }
 
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
-        // Units: `start`/`end` are passed through in whatever offset unit the
-        // toolkit uses (characters for GTK, UTF-16 code units for Qt). The
-        // public offset contract is #477; this only stops a FALSE reply from
-        // reading as success.
-        let target = self.get_cached(element.handle)?;
-        let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text")?;
-        let reply = proxy
-            .call_method("SetSelection", &(0i32, start as i32, end as i32))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Text.SetSelection failed: {}", e),
-            })?;
-        atspi_bool_reply(
-            reply,
-            &format!("Text.SetSelection({start}, {end})"),
-            &target,
-            element,
-        )
+        // UTF-16 offsets, converted to the toolkit's unit (see `rich`). A
+        // FALSE reply is still an error, not success.
+        self.rich_set_text_selection(element, start, end)
+    }
+
+    fn table_cell_at(
+        &self,
+        table: &ElementData,
+        row: u32,
+        column: u32,
+    ) -> Result<Option<ElementData>> {
+        self.rich_table_cell_at(table, row, column)
+    }
+
+    fn table_headers(
+        &self,
+        table: &ElementData,
+        kind: xa11y_core::HeaderKind,
+    ) -> Result<Vec<ElementData>> {
+        self.rich_table_headers(table, kind)
+    }
+
+    fn cell_headers(
+        &self,
+        cell: &ElementData,
+        kind: xa11y_core::HeaderKind,
+    ) -> Result<Vec<ElementData>> {
+        self.rich_cell_headers(cell, kind)
+    }
+
+    fn selected_items(&self, container: &ElementData) -> Result<Vec<ElementData>> {
+        self.rich_selected_items(container)
+    }
+
+    fn text_length(&self, element: &ElementData) -> Result<u32> {
+        self.rich_text_length(element)
+    }
+
+    fn text_caret(&self, element: &ElementData) -> Result<Option<u32>> {
+        self.rich_text_caret(element)
+    }
+
+    fn text_selections(&self, element: &ElementData) -> Result<Vec<xa11y_core::TextRange>> {
+        self.rich_text_selections(element)
+    }
+
+    fn text_read(&self, element: &ElementData, range: xa11y_core::TextRange) -> Result<String> {
+        self.rich_text_read(element, range)
+    }
+
+    fn text_range_at(
+        &self,
+        element: &ElementData,
+        offset: u32,
+        unit: xa11y_core::TextUnit,
+    ) -> Result<xa11y_core::TextRange> {
+        self.rich_text_range_at(element, offset, unit)
+    }
+
+    fn text_range_bounds(
+        &self,
+        element: &ElementData,
+        range: xa11y_core::TextRange,
+    ) -> Result<Option<Rect>> {
+        self.rich_text_range_bounds(element, range)
+    }
+
+    fn text_attributes_at(
+        &self,
+        element: &ElementData,
+        offset: u32,
+    ) -> Result<xa11y_core::TextRun> {
+        self.rich_text_attributes_at(element, offset)
     }
 
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {

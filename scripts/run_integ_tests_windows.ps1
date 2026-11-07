@@ -13,12 +13,14 @@ Write-Host "=== xa11y Windows integration test harness ==="
 
 # 1. Build everything
 Write-Host "Building workspace..."
-cargo build --workspace 2>&1 | Write-Host
+# xtask.exe can be the parent process; Windows locks running executables.
+cargo build --workspace --exclude xtask 2>&1 | Write-Host
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $testExit = 1
 $trayFixture = $null
 $testApp = $null
+$richFixture = $null
 try {
     # 2. Launch the background fixture before the test app. PowerShell can
     # briefly become the foreground process as it initializes WinForms; the
@@ -29,6 +31,8 @@ try {
     $trayFixture = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-File", ".\test-apps\windows-tray\app.ps1" -PassThru -WindowStyle Hidden
 
     Write-Host "Launching xa11y-test-app..."
+    $richFixture = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-STA", "-File", ".\test-apps\rich\windows.ps1" -PassThru -WindowStyle Hidden
+    $env:XA11Y_WINDOWS_RICH_PID = "$($richFixture.Id)"
     $testApp = Start-Process -FilePath ".\target\debug\xa11y-test-app.exe" -ArgumentList "--headless" -PassThru -WindowStyle Hidden
 
     # Wait for accessibility registration
@@ -79,6 +83,10 @@ try {
     if ($null -ne $trayFixture) {
         Stop-Process -Id $trayFixture.Id -Force -ErrorAction SilentlyContinue
         Wait-Process -Id $trayFixture.Id -Timeout 5 -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $richFixture) {
+        Stop-Process -Id $richFixture.Id -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $richFixture.Id -Timeout 5 -ErrorAction SilentlyContinue
     }
 }
 

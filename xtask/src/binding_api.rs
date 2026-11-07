@@ -84,23 +84,31 @@ fn impl_target_name(imp: &syn::ItemImpl) -> Option<String> {
 
 // ── PyO3 ────────────────────────────────────────────────────────────────
 
-/// Extract the Python binding surface from `xa11y-python/src/lib.rs`.
+/// Extract the Python binding surface from the binding's source files
+/// (`xa11y-python/src/lib.rs` and the modules it splits classes into).
 ///
 /// Collects, per `#[pyclass]` type:
 /// * every `fn` in a `#[pymethods]` impl (honouring `#[pyo3(name = "...")]`),
 /// * `#[classattr]` constants (e.g. the `EventType` string constants),
 /// * fields marked `#[pyo3(get)]`, which are Python attributes in all but name.
-pub fn python_surface(path: &Path) -> Result<ApiSurface, String> {
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    let file =
-        syn::parse_file(&src).map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+pub fn python_surface(paths: &[&Path]) -> Result<ApiSurface, String> {
+    // One combined item list: a `#[pymethods]` impl may sit in a different
+    // file from its `#[pyclass]` struct only within one crate, and every
+    // class name is unique across the crate, so merging is lossless.
+    let mut items = Vec::new();
+    for path in paths {
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        let parsed = syn::parse_file(&src)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+        items.extend(parsed.items);
+    }
 
     // Rust struct name -> Python-visible class name (`#[pyclass(name = "…")]`).
     let mut renames: BTreeMap<String, String> = BTreeMap::new();
     let mut surface: ApiSurface = ApiSurface::new();
 
-    for item in &file.items {
+    for item in &items {
         if let Item::Struct(s) = item {
             if has_attr(&s.attrs, "pyclass") {
                 let rust_name = s.ident.to_string();
@@ -130,7 +138,7 @@ pub fn python_surface(path: &Path) -> Result<ApiSurface, String> {
         }
     }
 
-    for item in &file.items {
+    for item in &items {
         let Item::Impl(imp) = item else { continue };
         if !has_attr(&imp.attrs, "pymethods") {
             continue;

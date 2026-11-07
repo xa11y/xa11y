@@ -226,6 +226,7 @@ mod tests {
             app_name: "test".into(),
             app_pid: 0,
             timestamp: std::time::Instant::now(),
+            text_change: None,
         }
     }
 

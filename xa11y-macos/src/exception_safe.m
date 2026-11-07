@@ -7,8 +7,10 @@
 
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <CoreText/CoreText.h>
 #import <Foundation/Foundation.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -671,6 +673,427 @@ int safe_cg_capture_rgba(
 void safe_cg_free_pixels(uint8_t *pixels) {
     if (pixels != NULL) {
         free(pixels);
+    }
+}
+
+// ── Tables and text ranges (ax/rich.rs) ─────────────────────────────────────
+
+// Safe wrapper for AXUIElementCopyParameterizedAttributeValue: the text range
+// reads (AXStringForRange, AXBoundsForRange, ...) and AXCellForColumnAndRow.
+// Returns the AX error code, or -9999 if an ObjC exception was thrown.
+int safe_ax_copy_parameterized_attribute_value(
+    AXUIElementRef element,
+    CFStringRef attribute,
+    CFTypeRef parameter,
+    CFTypeRef *value
+) {
+    @try {
+        return AXUIElementCopyParameterizedAttributeValue(element, attribute, parameter, value);
+    } @catch (NSException *e) {
+        *value = NULL;
+        return -9999;
+    }
+}
+
+// Safe wrapper for AXUIElementGetAttributeValueCount: the length of an array
+// attribute (AXRows) without copying every element in it.
+int safe_ax_get_attribute_value_count(
+    AXUIElementRef element,
+    CFStringRef attribute,
+    CFIndex *count
+) {
+    @try {
+        return AXUIElementGetAttributeValueCount(element, attribute, count);
+    } @catch (NSException *e) {
+        *count = 0;
+        return -9999;
+    }
+}
+
+// Safe wrapper for AXUIElementCopyAttributeValues: `max_values` elements of an
+// array attribute from `index`, so one row of a large table is one row's work.
+int safe_ax_copy_attribute_values(
+    AXUIElementRef element,
+    CFStringRef attribute,
+    CFIndex index,
+    CFIndex max_values,
+    CFArrayRef *values
+) {
+    @try {
+        return AXUIElementCopyAttributeValues(element, attribute, index, max_values, values);
+    } @catch (NSException *e) {
+        *values = NULL;
+        return -9999;
+    }
+}
+
+// Whether `value` is an AXUIElement. An app can answer an element-valued
+// attribute with any CF type, and AX calls on a non-element are undefined.
+bool safe_ax_is_element(CFTypeRef value) {
+    @try {
+        return value != NULL && CFGetTypeID(value) == AXUIElementGetTypeID();
+    } @catch (NSException *e) {
+        return false;
+    }
+}
+
+// Read a CFRange out of an AXValue. False when `value` is not an AXValue
+// holding a CFRange: `AXValueGetValue` is only defined for AXValues, and an
+// app can answer a range attribute with any CF type.
+bool safe_ax_value_get_range(CFTypeRef value, CFIndex *location, CFIndex *length) {
+    @try {
+        if (value == NULL || CFGetTypeID(value) != AXValueGetTypeID()) {
+            return false;
+        }
+        if (AXValueGetType((AXValueRef)value) != kAXValueCFRangeType) {
+            return false;
+        }
+        CFRange range;
+        if (!AXValueGetValue((AXValueRef)value, kAXValueCFRangeType, &range)) {
+            return false;
+        }
+        *location = range.location;
+        *length = range.length;
+        return true;
+    } @catch (NSException *e) {
+        return false;
+    }
+}
+
+// Read a CGRect out of an AXValue, with the same type checks.
+bool safe_ax_value_get_rect(CFTypeRef value, double *x, double *y, double *w, double *h) {
+    @try {
+        if (value == NULL || CFGetTypeID(value) != AXValueGetTypeID()) {
+            return false;
+        }
+        if (AXValueGetType((AXValueRef)value) != kAXValueCGRectType) {
+            return false;
+        }
+        CGRect rect;
+        if (!AXValueGetValue((AXValueRef)value, kAXValueCGRectType, &rect)) {
+            return false;
+        }
+        *x = rect.origin.x;
+        *y = rect.origin.y;
+        *w = rect.size.width;
+        *h = rect.size.height;
+        return true;
+    } @catch (NSException *e) {
+        return false;
+    }
+}
+
+// Copy a CFString's UTF-16 code units. Returns the string's length in units,
+// writing at most `capacity` of them to `buffer` (call with capacity 0 to
+// size the buffer). -1 when `value` is not a CFString or an exception was
+// thrown. Text offsets are UTF-16 units on every surface, and a decoded
+// Rust `String` cannot hold the lone surrogate a range check has to see.
+CFIndex safe_cf_string_copy_utf16(CFTypeRef value, uint16_t *buffer, CFIndex capacity) {
+    @try {
+        if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) {
+            return -1;
+        }
+        CFStringRef s = (CFStringRef)value;
+        CFIndex length = CFStringGetLength(s);
+        if (buffer != NULL && capacity > 0) {
+            CFIndex n = length < capacity ? length : capacity;
+            CFStringGetCharacters(s, CFRangeMake(0, n), (UniChar *)buffer);
+        }
+        return length;
+    } @catch (NSException *e) {
+        return -1;
+    }
+}
+
+// The formatting of one run of an AX attributed string, decoded from the AX
+// text attribute keys (AXFont, AXForegroundColor, AXUnderline, ...). Field
+// conventions: -1 means not reported, booleans are 0 / 1.
+typedef struct {
+    // +1 retained CFString, or NULL. The caller releases it.
+    CFStringRef family;
+    double size;          // < 0: not reported
+    int32_t weight;       // CSS-style 100..900, or -1
+    int32_t italic;       // -1, 0, 1
+    int32_t underline;    // -1, 0, 1
+    int32_t strikethrough;// -1, 0, 1
+    int32_t script;       // -2 not reported, -1 subscript, 0 baseline, 1 superscript
+    int32_t misspelled;   // -1, 0, 1
+    int32_t has_foreground;
+    uint8_t foreground[4];
+    int32_t has_background;
+    uint8_t background[4];
+} XA11yTextRun;
+
+// A text colour's components, as the app set them. The AX attributed string
+// carries a CGColor whose colour space does not survive the trip from the
+// app (sRGB red arrives as components (1, 0, 0) labelled generic RGB, and
+// converting that "back" to sRGB yields #ff2600), so the components are read
+// as they are, not matched to another space. Grey is one component.
+static bool xa11y_color_rgba(CFTypeRef value, uint8_t out[4]) {
+    if (value == NULL || CFGetTypeID(value) != CGColorGetTypeID()) {
+        return false;
+    }
+    CGColorRef color = (CGColorRef)value;
+    size_t n = CGColorGetNumberOfComponents(color);
+    const CGFloat *c = CGColorGetComponents(color);
+    CGColorSpaceRef space = CGColorGetColorSpace(color);
+    if (c == NULL || space == NULL) {
+        return false;
+    }
+    double rgba[4];
+    switch (CGColorSpaceGetModel(space)) {
+    case kCGColorSpaceModelRGB:
+        if (n != 4) {
+            return false;
+        }
+        rgba[0] = c[0];
+        rgba[1] = c[1];
+        rgba[2] = c[2];
+        rgba[3] = c[3];
+        break;
+    case kCGColorSpaceModelMonochrome:
+        if (n != 2) {
+            return false;
+        }
+        rgba[0] = rgba[1] = rgba[2] = c[0];
+        rgba[3] = c[1];
+        break;
+    default:
+        return false;
+    }
+    for (int i = 0; i < 4; i++) {
+        double v = rgba[i] < 0 ? 0 : (rgba[i] > 1 ? 1 : rgba[i]);
+        out[i] = (uint8_t)lround(v * 255.0);
+    }
+    return true;
+}
+
+// NSFontWeight's published constants, ultraLight .. black, against CSS
+// 100 .. 900.
+static const double xa11y_weight_marks[9] = {-0.8, -0.6, -0.4, 0.0, 0.23, 0.3, 0.4, 0.56, 0.62};
+
+static int32_t xa11y_css_weight(double normalized) {
+    int best = 0;
+    for (int i = 1; i < 9; i++) {
+        if (fabs(normalized - xa11y_weight_marks[i]) < fabs(normalized - xa11y_weight_marks[best])) {
+            best = i;
+        }
+    }
+    return (best + 1) * 100;
+}
+
+// Weight and italic of a resolved font, from its CoreText traits.
+static int32_t xa11y_traits_of(CTFontRef font, int32_t *italic) {
+    *italic = (CTFontGetSymbolicTraits(font) & kCTFontTraitItalic) ? 1 : 0;
+    int32_t weight = -1;
+    CFDictionaryRef traits = CTFontCopyTraits(font);
+    if (traits != NULL) {
+        CFNumberRef w = CFDictionaryGetValue(traits, kCTFontWeightTrait);
+        double normalized = 0;
+        if (w != NULL && CFNumberGetValue(w, kCFNumberDoubleType, &normalized)) {
+            weight = xa11y_css_weight(normalized);
+        }
+        CFRelease(traits);
+    }
+    return weight;
+}
+
+// The system UI font's variants by PostScript name (".SFNS-Bold", ...), each
+// with its CSS weight and italic flag. CoreText refuses to resolve these
+// names directly (it substitutes Times and logs a warning), so they are
+// built once from the UI font's descriptor and matched by exact name.
+static NSDictionary<NSString *, NSArray<NSNumber *> *> *xa11y_ui_font_variants(void) {
+    static NSDictionary *variants;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableDictionary *m = [NSMutableDictionary new];
+        // Nothing may unwind out of a dispatch_once block: the token would
+        // stay "in progress" and every later call would deadlock. A failure
+        // leaves the table partial, which reads as "weight not reported".
+        @try {
+        CTFontRef ui = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, 13.0, NULL);
+        if (ui != NULL) {
+            CTFontDescriptorRef base = CTFontCopyFontDescriptor(ui);
+            for (int i = 0; i < 9 && base != NULL; i++) {
+                for (int italic = 0; italic < 2; italic++) {
+                    NSMutableDictionary *traits = [NSMutableDictionary new];
+                    traits[(__bridge NSString *)kCTFontWeightTrait] = @(xa11y_weight_marks[i]);
+                    if (italic) {
+                        traits[(__bridge NSString *)kCTFontSymbolicTrait] = @(kCTFontTraitItalic);
+                    }
+                    NSDictionary *attrs = @{(__bridge NSString *)kCTFontTraitsAttribute : traits};
+                    CTFontDescriptorRef d =
+                        CTFontDescriptorCreateCopyWithAttributes(base, (__bridge CFDictionaryRef)attrs);
+                    if (d == NULL) {
+                        continue;
+                    }
+                    CTFontRef f = CTFontCreateWithFontDescriptor(d, 13.0, NULL);
+                    CFRelease(d);
+                    if (f == NULL) {
+                        continue;
+                    }
+                    NSString *ps = CFBridgingRelease(CTFontCopyPostScriptName(f));
+                    int32_t isItalic = 0;
+                    int32_t weight = xa11y_traits_of(f, &isItalic);
+                    CFRelease(f);
+                    if (ps != nil && m[ps] == nil) {
+                        m[ps] = @[ @(weight), @(isItalic) ];
+                    }
+                }
+            }
+            if (base != NULL) {
+                CFRelease(base);
+            }
+            CFRelease(ui);
+        }
+        } @catch (NSException *e) {
+        }
+        variants = m;
+    });
+    return variants;
+}
+
+// The CSS weight of the font AX names, and whether it is italic. -1 when the
+// name does not resolve to that exact font: CoreText substitutes a fallback
+// for an unknown name, and the fallback's weight is not the run's.
+static int32_t xa11y_font_traits(CFStringRef name, double size, int32_t *italic) {
+    *italic = -1;
+    if (name == NULL) {
+        return -1;
+    }
+    NSString *n = (__bridge NSString *)name;
+    if ([n hasPrefix:@"."]) {
+        // A system UI font. AppKit names the regular and bold faces by alias
+        // (".AppleSystemUIFont", ".AppleSystemUIFontBold"), which CoreText
+        // resolves to the face it stands for; the other faces by PostScript
+        // name (".SFNS-RegularItalic"), which only the variant table knows.
+        NSArray<NSNumber *> *variant = xa11y_ui_font_variants()[n];
+        if (variant != nil) {
+            *italic = variant[1].intValue;
+            return variant[0].intValue;
+        }
+        if (![n hasPrefix:@".AppleSystemUIFont"]) {
+            return -1;
+        }
+        CTFontRef font = CTFontCreateWithName(name, size > 0 ? size : 12.0, NULL);
+        if (font == NULL) {
+            return -1;
+        }
+        NSString *resolved = CFBridgingRelease(CTFontCopyPostScriptName(font));
+        int32_t weight = -1;
+        if ([resolved hasPrefix:@"."]) {
+            weight = xa11y_traits_of(font, italic);
+        }
+        CFRelease(font);
+        return weight;
+    }
+    CTFontRef font = CTFontCreateWithName(name, size > 0 ? size : 12.0, NULL);
+    if (font == NULL) {
+        return -1;
+    }
+    int32_t weight = -1;
+    CFStringRef resolved = CTFontCopyPostScriptName(font);
+    if (resolved != NULL && CFStringCompare(resolved, name, 0) == kCFCompareEqualTo) {
+        weight = xa11y_traits_of(font, italic);
+    }
+    if (resolved != NULL) {
+        CFRelease(resolved);
+    }
+    CFRelease(font);
+    return weight;
+}
+
+// Test hook for `xa11y_font_traits`: the weight / italic resolution is the
+// part of run decoding that does not need a running app.
+int32_t xa11y_test_font_traits(CFStringRef name, double size, int32_t *italic) {
+    @try {
+        return xa11y_font_traits(name, size, italic);
+    } @catch (NSException *e) {
+        *italic = -1;
+        return -1;
+    }
+}
+
+static int32_t xa11y_flag(NSDictionary *attrs, NSString *key, bool styled) {
+    id v = attrs[key];
+    if (v == nil) {
+        // AX lists only the attributes applied to a run. Once the run reports
+        // its styling at all (it has a font), a missing decoration is off.
+        return styled ? 0 : -1;
+    }
+    if ([v isKindOfClass:[NSNumber class]]) {
+        return [(NSNumber *)v intValue] != 0 ? 1 : 0;
+    }
+    return -1;
+}
+
+// Decode the attributes at index 0 of `attributed`, the answer to
+// AXAttributedStringForRange. Returns 0 on success, 1 when the value is not
+// an attributed string, -9999 on an exception.
+int safe_ax_decode_text_run(CFTypeRef attributed, XA11yTextRun *out) {
+    out->family = NULL;
+    out->size = -1;
+    out->weight = -1;
+    out->italic = -1;
+    out->underline = -1;
+    out->strikethrough = -1;
+    out->script = -2;
+    out->misspelled = -1;
+    out->has_foreground = 0;
+    out->has_background = 0;
+    @try {
+        if (attributed == NULL || CFGetTypeID(attributed) != CFAttributedStringGetTypeID()) {
+            return 1;
+        }
+        NSAttributedString *s = (__bridge NSAttributedString *)attributed;
+        if (s.length == 0) {
+            return 0;
+        }
+        NSDictionary *attrs = [s attributesAtIndex:0 effectiveRange:NULL];
+        id font = attrs[@"AXFont"];
+        bool styled = font != nil;
+        if ([font isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *f = font;
+            id family = f[@"AXFontFamily"];
+            if ([family isKindOfClass:[NSString class]]) {
+                out->family = (CFStringRef)CFBridgingRetain(family);
+            }
+            id size = f[@"AXFontSize"];
+            if ([size isKindOfClass:[NSNumber class]]) {
+                out->size = [(NSNumber *)size doubleValue];
+            }
+            id name = f[@"AXFontName"];
+            if ([name isKindOfClass:[NSString class]]) {
+                int32_t italic = -1;
+                out->weight = xa11y_font_traits((__bridge CFStringRef)name, out->size, &italic);
+                out->italic = italic;
+            }
+        }
+        out->underline = xa11y_flag(attrs, @"AXUnderline", styled);
+        out->strikethrough = xa11y_flag(attrs, @"AXStrikethrough", styled);
+        int32_t misspelled = xa11y_flag(attrs, @"AXMisspelled", styled);
+        int32_t marked = xa11y_flag(attrs, @"AXMarkedMisspelled", styled);
+        out->misspelled = (misspelled == 1 || marked == 1) ? 1 : misspelled;
+        id script = attrs[@"AXSuperscript"];
+        if ([script isKindOfClass:[NSNumber class]]) {
+            int v = [(NSNumber *)script intValue];
+            out->script = v > 0 ? 1 : (v < 0 ? -1 : 0);
+        } else if (script == nil && styled) {
+            out->script = 0;
+        }
+        if (xa11y_color_rgba((__bridge CFTypeRef)attrs[@"AXForegroundColor"], out->foreground)) {
+            out->has_foreground = 1;
+        }
+        if (xa11y_color_rgba((__bridge CFTypeRef)attrs[@"AXBackgroundColor"], out->background)) {
+            out->has_background = 1;
+        }
+        return 0;
+    } @catch (NSException *e) {
+        if (out->family != NULL) {
+            CFRelease(out->family);
+            out->family = NULL;
+        }
+        return -9999;
     }
 }
 

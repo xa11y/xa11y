@@ -31,7 +31,8 @@ variants onto a shared class, so the mapping columns are what you catch.
 | `TextValueNotSupported` | The platform cannot set a text value on this element. | `ActionNotSupportedError` | `ActionNotSupportedError` |
 | `Timeout` | A wait, or the auto-wait inside an action, exceeded its deadline. Always carries a diagnosis. | `TimeoutError` | `TimeoutError` |
 | `InvalidSelector` | The selector string could not be parsed. Raised before any platform call. | `InvalidSelectorError` | `InvalidSelectorError` |
-| `InvalidActionData` | An action argument failed validation. A text range with `start > end` does this, as does an uppercase `Char` key, a malformed key name, or a bad target tuple. | `InvalidActionDataError` | `InvalidActionDataError` |
+| `InvalidActionData` | An action argument failed validation. `select_text()` with `start > end` does this, as does an empty `Text.find()` needle, an unknown text unit name, an uppercase `Char` key, a malformed key name, or a bad target tuple. | `InvalidActionDataError` | `InvalidActionDataError` |
+| `InvalidTextRange` | A text range is past the end of the text, reversed, or splits a UTF-16 surrogate pair. Also raised by `Text.bounds()` for a range covering more than 1000 rendered lines. Carries `start`, `end`, and `length`. | `InvalidTextRangeError` (subclass of `InvalidActionDataError`) | `InvalidTextRangeError` (subclass of `InvalidActionDataError`) |
 | `InvalidConfig` | Process-wide configuration is invalid, such as an unparsable `XA11Y_DEFAULT_TIMEOUT`. | `ValueError` | `InvalidActionDataError` |
 | `NoElementBounds` | The element has no bounds, so no screen point can be computed for it. Off-screen and virtual nodes hit this. | `ValueError` | `InvalidActionDataError` |
 | `Unsupported` | No backend covers this operation on the current platform or session. A Linux session with neither `DISPLAY` nor `WAYLAND_DISPLAY` set hits this. | `ActionNotSupportedError` | `ActionNotSupportedError` |
@@ -54,6 +55,8 @@ surface:
 | [Screenshots](/guides/screenshots/) | `PermissionDenied` (macOS Screen Recording not granted, or the Wayland portal denied consent), `Unsupported` (no capture backend for the session), `NoElementBounds`, `Platform` (capture or PNG encode failure) |
 | [Selectors](/reference/selectors/) | `InvalidSelector` at parse time, `SelectorNotMatched` or `Timeout` at resolve time |
 | [Events](/reference/events/) | `Timeout` from `wait_for` |
+| [Text by range](/guides/tables-and-text/) | `ActionNotSupported` when the element has no text interface, `InvalidTextRange`, `InvalidActionData`, `ElementStale` from a `Text` bound to an element that went away, `Unsupported` for a text unit the toolkit has no boundaries for (`word` and `paragraph` on macOS) |
+| [Tables and collections](/guides/tables-and-text/) | `ActionNotSupported` when the element is not a table, cell, or selection container; `Unsupported` on Linux for table-level headers of a table with more than 1000 columns or rows |
 
 ## Structured fields
 
@@ -71,6 +74,15 @@ without parsing the message:
 | `candidates` | `candidates` | `candidates` |
 | `scope` | `scope` | `scope` |
 | `elapsed` (on `Timeout`) | `elapsed` (seconds) | `elapsedMs` |
+
+`InvalidTextRange` carries the refused range instead of a diagnosis. Offsets
+are UTF-16 code units:
+
+| Rust (`Error::InvalidTextRange`) | Python (`InvalidTextRangeError`) | JavaScript (`InvalidTextRangeError`) |
+| --- | --- | --- |
+| `start` | `start` | `start` |
+| `end` | `end` | `end` |
+| `length`, the text's length when the check knew it | `length`, or `None` | `length`, or `null` |
 
 In Python every attribute is always present, holding `None` or `[]` when it
 does not apply, so no `hasattr` guard is needed. On `SelectorNotMatchedError`,
@@ -94,7 +106,7 @@ failures only.
 
 | Rust variant | Disposition |
 | --- | --- |
-| `PermissionDenied`, `AccessibilityNotEnabled`, `SelectorNotMatched`, `ElementStale`, `ActionNotSupported`, `TextValueNotSupported`, `InvalidSelector`, `InvalidActionData`, `InvalidConfig`, `NoElementBounds`, `Unsupported` | `not_delivered` |
+| `PermissionDenied`, `AccessibilityNotEnabled`, `SelectorNotMatched`, `ElementStale`, `ActionNotSupported`, `TextValueNotSupported`, `InvalidSelector`, `InvalidActionData`, `InvalidTextRange`, `InvalidConfig`, `NoElementBounds`, `Unsupported` | `not_delivered` |
 | `Timeout`, `Platform` | `unknown` |
 
 A `Diagnosis` can override the variant default. The wait and not-found

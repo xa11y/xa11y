@@ -239,8 +239,14 @@ set +e
 # owned panels and menus, while this hermetic sway session is deliberately a
 # bare compositor. Everything owned by the app, including window discovery,
 # actions, and AT-SPI events, runs here under native Wayland.
+#
+# The rich-content tests are excluded for the same kind of reason: they read
+# test-apps/rich/rich.py, a GTK 3 fixture that scripts/run_integ_tests.sh
+# launches and this image does not carry (no PyGObject). What they cover is
+# AT-SPI's Table / Text interfaces, which do not depend on the display
+# protocol, and the X11 `Linux` job runs them.
 timeout 240 cargo test -p xa11y --test integ_test --features strict-roles \
-    -- --ignored --test-threads=1 --nocapture --skip integ::shell
+    -- --ignored --test-threads=1 --nocapture --skip integ::shell --skip integ::rich
 rc=$?
 set -e
 
