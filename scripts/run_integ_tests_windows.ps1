@@ -8,6 +8,10 @@
 $ErrorActionPreference = "Stop"
 
 $testFilter = $args[0]
+if ($testFilter -eq 'ia2') {
+    & "$PSScriptRoot/run_ia2_tests_windows.ps1"
+    exit $LASTEXITCODE
+}
 
 Write-Host "=== xa11y Windows integration test harness ==="
 

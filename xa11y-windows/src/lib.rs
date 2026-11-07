@@ -52,6 +52,11 @@ mod stub;
 #[cfg(not(target_os = "windows"))]
 pub use stub::{WindowsInputProvider, WindowsProvider};
 
+#[cfg(target_os = "windows")]
+mod ia2;
+#[cfg(target_os = "windows")]
+pub use ia2::Ia2Provider;
+
 #[cfg(test)]
 mod tests {
     use super::*;

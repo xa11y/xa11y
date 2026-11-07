@@ -192,7 +192,9 @@ def _remove_owned_directory(directory: Path, original: Path):
             # Native browser job exit can precede release of filesystem
             # handles. Retry only ERROR_SHARING_VIOLATION, on this exact
             # already-stopped fixture directory, for at most two seconds.
-            if getattr(exc, "winerror", None) != 32 or time.monotonic() >= deadline:
+            if isinstance(exc, FileNotFoundError) and not directory.exists():
+                return
+            if getattr(exc, "winerror", None) not in (2, 32) or time.monotonic() >= deadline:
                 raise
             time.sleep(0.1)
 

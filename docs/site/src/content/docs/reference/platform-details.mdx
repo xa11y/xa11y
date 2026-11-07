@@ -443,6 +443,65 @@ run need not address an endpoint inside the cluster. UIA text-change events have
 `text_change` remains `None`. Text-selection events use
 `TextSelectionChanged`.
 
+#### Explicit IA2 source on Windows
+
+Set `XA11Y_ACCESSIBILITY_SOURCE=ia2` before the first accessibility call to
+select the MSAA/IAccessible2 source. The setting applies to Rust's umbrella
+provider and the Python, JavaScript, CLI and MCP surfaces. Rust can also
+construct `xa11y_windows::Ia2Provider` directly. The default `native` source
+uses UIA on Windows, and `uia` selects that source explicitly. Other values
+fail. IA2 and UIA selections on other operating systems fail as unsupported.
+
+An IA2 result carries `raw.accessibility_backend = "ia2"`. Text fields also
+report the `ia2_text` and `ia2_text2` interface capability flags. This source never
+substitutes UIA operations. An absent native interface raises
+`ActionNotSupported` and an unavailable capability raises `Unsupported`.
+MSAA provides navigation and standard role/name/state properties. Additional
+IA2 document semantics, relationships and hypertext object mapping remain
+work under [#483](https://github.com/xa11y/xa11y/issues/483).
+
+| IA2 capability | Mapping and limits |
+| --- | --- |
+| Text length and reads | `IAccessibleText.nCharacters` / `text`, with native UTF-16 offsets and surrogate checks. A read accepts at most 1 Mi UTF-16 units |
+| Caret and selections | `caretOffset`, `nSelections`, `selection`, `addSelection`, `setSelection`, `removeSelection` and `setCaretOffset`. Changes may publish asynchronously |
+| Character, word and paragraph ranges | Unicode scalars for characters, `textAtOffset` for other units |
+| Lines | Native `textAtOffset(Line)` ranges, constrained at explicit line breaks. Soft wrapping remains unverified |
+| Formatting | `IAccessibleText2.attributeRange` when that interface exists. Otherwise `IAccessibleText.attributes`. Errors never switch mechanisms |
+| Geometry | Screen-relative `characterExtents`, united per rendered line in physical desktop pixels. At most 4096 UTF-16 units per line |
+| Table and cell metadata | `IAccessibleTable2.nRows` / `nColumns`, with the required `IAccessibleTableCell` index and extent methods |
+| Cell lookup | `Table2.cellAt`, including merged spans, without realizing content |
+| Cell headers | `TableCell.columnHeaderCells` / `rowHeaderCells`, preserving signed native identities |
+| Table headers | Collect the cell header relationships, keeping each native identity once. Requires a known table size of at most 256 cells |
+| Selected items | `Table2.selectedCells`, at most 4096. List selection enumeration remains unsupported |
+| Collection position and row metadata | Not mapped by this source. Table cell coordinates remain available |
+| Actions | MSAA default action for `press`, `accSelect` for `focus` / `select`, and `put_accValue` (at most 1 Mi UTF-16 units). Mutation requires a retained IA2 identity |
+| Events and window operations | Unsupported on this source |
+
+The owned browser fixture verifies Chrome 156 on Windows with
+`--force-renderer-accessibility=complete` and
+`--disable-backgrounding-occluded-windows`. It checks two active tabs
+separately, UTF-16 text and formatting, native parent/header identity,
+merged cells and removed objects. Firefox and older Chromium versions have
+not been verified. Chrome exposes Text, without Text2, in this fixture.
+The Text2 ABI and mapping have been reviewed but have no live fixture evidence.
+The existing UIA source remains available for those apps.
+
+IA2 interfaces live on one COM worker with a queue of 32 requests. Tree
+searches stop with an error above 4096 nodes or depth 32. The registry keeps
+at most 8192 handles, expiring them after five minutes. Expired or evicted
+handles fail as stale. Signed IDs are validated against their event window
+and owning process generation, without resolving a replacement by name.
+
+Each native request has a five-second caller deadline. Validation and loops
+check the deadline before issuing further native writes. A timeout disables
+the worker and requests COM cancellation. Cancellation is best effort, so
+native cleanup may continue after the caller returns. An in-flight action
+has unknown delivery. Restart the host before issuing further IA2 requests.
+An initialization failure also disables this process's IA2 source.
+Native range, attribute and array allocations occur inside the provider
+before their sizes can be checked. Oversized results are refused. Releasing
+native array references can also outlive the caller's deadline.
+
 macOS counts text in UTF-16 units natively, so no offset is converted. AX
 lists only the attributes applied to a run: once a run reports a font,
 xa11y reads a missing underline, strikethrough or spelling mark as `False`

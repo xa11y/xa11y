@@ -337,6 +337,63 @@ pub fn screen_dc(_scope: &DpiScope) -> HDC {
     unsafe { GetDC(None) }
 }
 
+/// MSAA coordinates read with the same physical desktop DPI scope as UIA.
+pub fn msaa_bounds(
+    _scope: &DpiScope,
+    object: &windows::Win32::UI::Accessibility::IAccessible,
+    child: &windows::Win32::System::Variant::VARIANT,
+) -> windows::core::Result<xa11y_core::Rect> {
+    assert_per_monitor();
+    let (mut x, mut y, mut width, mut height) = (0, 0, 0, 0);
+    unsafe {
+        object.accLocation(&mut x, &mut y, &mut width, &mut height, child)?;
+    }
+    if width < 0 || height < 0 {
+        return Err(windows::core::Error::from_hresult(
+            windows::Win32::Foundation::E_INVALIDARG,
+        ));
+    }
+    Ok(xa11y_core::Rect {
+        x,
+        y,
+        width: width as u32,
+        height: height as u32,
+    })
+}
+/// IA2 screen-relative extents in physical desktop pixels.
+pub fn ia2_character_bounds(
+    _scope: &DpiScope,
+    text: &crate::ia2::abi::AccessibleText,
+    offset: i32,
+) -> windows::core::Result<xa11y_core::Rect> {
+    use windows::core::Interface;
+    assert_per_monitor();
+    let (mut x, mut y, mut width, mut height) = (0, 0, 0, 0);
+    unsafe {
+        (text.vtable().characterExtents)(
+            text.as_raw(),
+            offset,
+            0,
+            &mut x,
+            &mut y,
+            &mut width,
+            &mut height,
+        )
+        .ok()?;
+    }
+    if width < 0 || height < 0 {
+        return Err(windows::core::Error::from_hresult(
+            windows::Win32::Foundation::E_INVALIDARG,
+        ));
+    }
+    Ok(xa11y_core::Rect {
+        x,
+        y,
+        width: width as u32,
+        height: height as u32,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

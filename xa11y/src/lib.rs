@@ -687,14 +687,76 @@ fn plan_annotations(
     (annotations, legend, omitted)
 }
 
+fn parse_accessibility_source(value: Option<std::ffi::OsString>) -> Result<String> {
+    let source = value.map_or_else(
+        || Ok("native".to_string()),
+        |value| {
+            value.into_string().map_err(|_| Error::InvalidActionData {
+                message: "XA11Y_ACCESSIBILITY_SOURCE must be UTF-8: native, uia, or ia2".into(),
+            })
+        },
+    )?;
+    if !matches!(source.as_str(), "native" | "uia" | "ia2") {
+        return Err(Error::InvalidActionData {
+            message: format!(
+                "unknown XA11Y_ACCESSIBILITY_SOURCE {source:?}; choose native, uia, or ia2"
+            ),
+        });
+    }
+    Ok(source)
+}
+
+#[cfg(test)]
+mod accessibility_source_tests {
+    use super::*;
+    #[test]
+    fn source_selection_is_explicit_and_rejects_unknown_values() {
+        assert_eq!(
+            parse_accessibility_source(None).expect("default source"),
+            "native"
+        );
+        for source in ["native", "uia", "ia2"] {
+            assert_eq!(
+                parse_accessibility_source(Some(source.into())).expect("known source"),
+                source
+            );
+        }
+        for source in ["", "IA2", "atspi", "typo"] {
+            assert!(matches!(
+                parse_accessibility_source(Some(source.into())),
+                Err(Error::InvalidActionData { .. })
+            ));
+        }
+    }
+}
+
 fn create_provider_boxed() -> Result<Box<dyn Provider>> {
+    let source = parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"))?;
+    #[cfg(not(target_os = "windows"))]
+    if source != "native" {
+        return Err(Error::Unsupported {
+            feature: format!(
+                "accessibility source {source:?} is unavailable on {}; use native",
+                std::env::consts::OS
+            ),
+        });
+    }
+
     #[cfg(target_os = "macos")]
     {
         Ok(Box::new(xa11y_macos::MacOSProvider::new()?))
     }
     #[cfg(target_os = "windows")]
     {
-        Ok(Box::new(xa11y_windows::WindowsProvider::new()?))
+        match source.as_str() {
+            "native" | "uia" => Ok(Box::new(xa11y_windows::WindowsProvider::new()?)),
+            "ia2" => Ok(Box::new(xa11y_windows::Ia2Provider::new()?)),
+            _ => Err(Error::InvalidActionData {
+                message: format!(
+                    "unknown XA11Y_ACCESSIBILITY_SOURCE {source:?}; choose native, uia, or ia2"
+                ),
+            }),
+        }
     }
     #[cfg(target_os = "linux")]
     {

@@ -354,3 +354,24 @@ def test_native_failure_context_uses_only_owned_browser_state(capsys):
     assert "155.0.0.0" in error and "job_active_processes" in error and "259" in error
     assert "owned chrome diagnostic" in error
     assert job.closed
+
+
+def test_owned_cleanup_retries_a_descendant_that_disappears(monkeypatch, tmp_path):
+    directory = tmp_path / "owned"
+    directory.mkdir()
+    (directory / "file").write_text("owned")
+    real_remove = fixture.shutil.rmtree
+    calls = []
+
+    def remove(path):
+        calls.append(path)
+        if len(calls) == 1:
+            error = FileNotFoundError("browser released its lockfile")
+            error.winerror = 2
+            raise error
+        real_remove(path)
+
+    monkeypatch.setattr(fixture.shutil, "rmtree", remove)
+    fixture._remove_owned_directory(directory, directory.resolve())
+    assert calls == [directory, directory]
+    assert not directory.exists()

@@ -6532,7 +6532,7 @@ fn map_uia_role(
 /// Returns `None` for MSAA roles with no clean xa11y equivalent (`Sound`,
 /// `Caret`, `Cursor`, `Animation`, …), leaving the element `unknown` rather
 /// than inventing a mapping.
-fn map_msaa_role(legacy_role: i32) -> Option<Role> {
+pub(super) fn map_msaa_role(legacy_role: i32) -> Option<Role> {
     let role = u32::try_from(legacy_role).ok()?;
     let mapped = match role {
         ROLE_SYSTEM_TITLEBAR => Role::Group,
