@@ -27,6 +27,25 @@ pub fn make_test_locator() -> Locator {
     ))
 }
 
+/// Create a mock `Locator` over the table fixture
+/// (`xa11y_core::mock::build_table_provider`): the shared tree plus a table,
+/// a virtualized list, a tree and a text area holding
+/// `"Hello 😀 world\nsecond line"`. Used only from the JS unit tests — not
+/// part of the public API.
+#[napi(js_name = "_makeTestTableLocator")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_table_locator() -> Locator {
+    let provider = xa11y::mock::build_table_provider();
+    Locator::from_inner(xa11y::Locator::new(
+        provider as Arc<dyn xa11y::Provider>,
+        None,
+        "application",
+    ))
+}
+
 /// Create a mock `App` resolved against the shared synthetic tree
 /// (`TestApp`). Used only from the JS unit tests — not part of the public API.
 #[napi(js_name = "_makeTestApp")]

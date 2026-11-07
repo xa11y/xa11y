@@ -65,6 +65,10 @@ class InvalidActionDataError(XA11yError):
     pass
 
 
+class InvalidTextRangeError(InvalidActionDataError):
+    pass
+
+
 class PlatformError(XA11yError):
     pass
 

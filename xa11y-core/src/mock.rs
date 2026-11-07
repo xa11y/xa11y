@@ -52,6 +52,10 @@ use crate::event_provider::Subscription;
 use crate::provider::Provider;
 use crate::role::Role;
 use crate::shell::ShellSurfaceKind;
+use crate::table::{CellParts, CollectionParts, Count, HeaderKind, RowParts, TableParts};
+use crate::text_api::{
+    check_in_bounds, slice_utf16, utf16_len, TextAttributeParts, TextRange, TextRun, TextUnit,
+};
 
 /// Pid the mock reports for its shell-surface roots and their subtrees.
 /// Distinct from the test app's 1234 so `ShellSurface::pid` is checkable and
@@ -98,6 +102,9 @@ pub struct MockProvider {
     actions: Mutex<Vec<ActionLogEntry>>,
     /// Scripted geometry per node index, consumed by [`MockProvider::animate`].
     frames: Mutex<HashMap<usize, VecDeque<MockFrame>>>,
+    /// Text selection per node handle, set by `set_text_selection`. A
+    /// selection with `start == end` is a caret.
+    selections: Mutex<HashMap<u64, TextRange>>,
 }
 
 /// One scripted observation of a node: its bounds and whether it is visible.
@@ -182,6 +189,37 @@ impl MockProvider {
             .unwrap_or_else(|e| e.into_inner())
             .push((el.handle, action.to_string(), data));
         Ok(())
+    }
+
+    /// The text of a node, which the mock takes to be its `value`. A node
+    /// with no value has no text interface.
+    fn text_of(&self, el: &ElementData) -> Result<String> {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes
+            .get(el.handle as usize)
+            .and_then(|n| n.data.value.clone())
+            .ok_or_else(|| Error::ActionNotSupported {
+                action: "text".into(),
+                role: el.role,
+            })
+    }
+
+    fn selection_of(&self, el: &ElementData) -> Option<TextRange> {
+        self.selections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&el.handle)
+            .copied()
+    }
+
+    fn require_table(&self, nodes: &[MockNode], table: &ElementData) -> Result<()> {
+        match nodes.get(table.handle as usize) {
+            Some(n) if n.data.table.is_some() => Ok(()),
+            _ => Err(Error::ActionNotSupported {
+                action: "table".into(),
+                role: table.role,
+            }),
+        }
     }
 
     /// Reject a stale or closed window handle before a window action.
@@ -348,7 +386,183 @@ impl Provider for MockProvider {
         self.record(el, "type_text", Some(text.to_string()))
     }
     fn set_text_selection(&self, el: &ElementData, start: u32, end: u32) -> Result<()> {
+        // Only nodes with text keep a selection; others just log, as before.
+        if let Ok(text) = self.text_of(el) {
+            check_in_bounds(TextRange { start, end }, utf16_len(&text))?;
+            self.selections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(el.handle, TextRange { start, end });
+        }
         self.record(el, "set_text_selection", Some(format!("{start}..{end}")))
+    }
+
+    fn table_cell_at(
+        &self,
+        table: &ElementData,
+        row: u32,
+        column: u32,
+    ) -> Result<Option<ElementData>> {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        self.require_table(&nodes, table)?;
+        Ok(descendants(&nodes, table.handle as usize)
+            .into_iter()
+            .map(|i| &nodes[i].data)
+            .find(|d| {
+                d.cell.is_some_and(|c| {
+                    let covers = |at: Option<u32>, span: Option<u32>, want: u32| {
+                        at.is_some_and(|a| want >= a && want < a + span.unwrap_or(1))
+                    };
+                    covers(c.row, c.row_span, row) && covers(c.column, c.column_span, column)
+                })
+            })
+            .cloned())
+    }
+
+    fn table_headers(&self, table: &ElementData, kind: HeaderKind) -> Result<Vec<ElementData>> {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        self.require_table(&nodes, table)?;
+        Ok(descendants(&nodes, table.handle as usize)
+            .into_iter()
+            .map(|i| &nodes[i].data)
+            .filter(|d| d.cell.and_then(|c| c.header) == Some(kind))
+            .cloned()
+            .collect())
+    }
+
+    fn cell_headers(&self, cell: &ElementData, kind: HeaderKind) -> Result<Vec<ElementData>> {
+        let info = cell.cell.ok_or_else(|| Error::ActionNotSupported {
+            action: "cell_headers".into(),
+            role: cell.role,
+        })?;
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        // The table is the nearest ancestor with table info.
+        let mut at = nodes.get(cell.handle as usize).and_then(|n| n.parent);
+        while let Some(i) = at {
+            if nodes[i].data.table.is_some() {
+                break;
+            }
+            at = nodes[i].parent;
+        }
+        let Some(table) = at else {
+            return Ok(Vec::new());
+        };
+        Ok(descendants(&nodes, table)
+            .into_iter()
+            .map(|i| &nodes[i].data)
+            .filter(|d| d.handle != cell.handle)
+            .filter(|d| {
+                let Some(h) = d.cell else { return false };
+                // A header heads every slot its span covers.
+                let covers =
+                    |at: Option<u32>, span: Option<u32>, want: Option<u32>| match (at, want) {
+                        (Some(a), Some(w)) => w >= a && w < a + span.unwrap_or(1),
+                        _ => false,
+                    };
+                h.header == Some(kind)
+                    && match kind {
+                        HeaderKind::Column => covers(h.column, h.column_span, info.column),
+                        HeaderKind::Row => covers(h.row, h.row_span, info.row),
+                    }
+            })
+            .cloned()
+            .collect())
+    }
+
+    fn selected_items(&self, container: &ElementData) -> Result<Vec<ElementData>> {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(descendants(&nodes, container.handle as usize)
+            .into_iter()
+            .map(|i| &nodes[i].data)
+            .filter(|d| d.states.selected)
+            .cloned()
+            .collect())
+    }
+
+    fn text_length(&self, el: &ElementData) -> Result<u32> {
+        Ok(utf16_len(&self.text_of(el)?))
+    }
+
+    fn text_caret(&self, el: &ElementData) -> Result<Option<u32>> {
+        self.text_of(el)?;
+        Ok(self.selection_of(el).map(|r| r.end))
+    }
+
+    fn text_selections(&self, el: &ElementData) -> Result<Vec<TextRange>> {
+        self.text_of(el)?;
+        Ok(self
+            .selection_of(el)
+            .filter(|r| !r.is_empty())
+            .into_iter()
+            .collect())
+    }
+
+    fn text_read(&self, el: &ElementData, range: TextRange) -> Result<String> {
+        slice_utf16(&self.text_of(el)?, range)
+    }
+
+    fn text_range_at(&self, el: &ElementData, offset: u32, unit: TextUnit) -> Result<TextRange> {
+        let text = self.text_of(el)?;
+        mock_unit_at(&text, offset, unit)
+    }
+
+    fn text_range_bounds(&self, el: &ElementData, range: TextRange) -> Result<Option<Rect>> {
+        let text = self.text_of(el)?;
+        check_in_bounds(range, utf16_len(&text))?;
+        // A fixed-pitch layout: 8 px per unit, 16 px per line, from the
+        // element's origin.
+        let Some(origin) = el.bounds else {
+            return Ok(None);
+        };
+        let line = mock_unit_at(&text, range.start, TextUnit::Line)?;
+        let line_no = text
+            .encode_utf16()
+            .take(line.start as usize)
+            .filter(|&u| u == u16::from(b'\n'))
+            .count() as i32;
+        Ok(Some(Rect {
+            x: origin.x + 8 * (range.start - line.start) as i32,
+            y: origin.y + 16 * line_no,
+            width: 8 * range.len(),
+            height: 16,
+        }))
+    }
+
+    fn text_attributes_at(&self, el: &ElementData, offset: u32) -> Result<TextRun> {
+        let text = self.text_of(el)?;
+        let length = utf16_len(&text);
+        check_in_bounds(
+            TextRange {
+                start: offset,
+                end: offset,
+            },
+            length,
+        )?;
+        // One run per word: words alternate bold / regular, so a multi-run
+        // walk has something to page through.
+        let word = mock_unit_at(&text, offset, TextUnit::Word)?;
+        let words_before = text
+            .encode_utf16()
+            .take(word.start as usize)
+            .filter(|&u| u == u16::from(b' '))
+            .count();
+        let bold = words_before % 2 == 0;
+        Ok(TextRun::new(
+            word,
+            TextAttributeParts {
+                font_family: Some("MockSans".into()),
+                font_size: Some(12.0),
+                font_weight: Some(if bold { 700 } else { 400 }),
+                italic: Some(false),
+                underline: None,
+                strikethrough: None,
+                foreground: None,
+                background: None,
+                script: None,
+                spelling_error: None,
+            }
+            .into(),
+        ))
     }
     fn perform_action(&self, el: &ElementData, action: &str) -> Result<()> {
         // Nullary window verbs delegate to the typed methods, which validate
@@ -971,6 +1185,10 @@ pub fn build_provider() -> Arc<MockProvider> {
             numeric_value: nv,
             min_value: minv,
             max_value: maxv,
+            table: None,
+            cell: None,
+            table_row: None,
+            collection: None,
             stable_id: sid.map(String::from),
             pid: Some(pid),
             raw: raw.unwrap_or_default(),
@@ -988,6 +1206,7 @@ pub fn build_provider() -> Arc<MockProvider> {
         nodes: Mutex::new(nodes),
         actions: Mutex::new(Vec::new()),
         frames: Mutex::new(HashMap::new()),
+        selections: Mutex::new(HashMap::new()),
     })
 }
 
@@ -1046,6 +1265,235 @@ pub fn build_split_provider() -> Arc<MockProvider> {
         window.children.clear();
         window.parent = Some(root_index);
         nodes.extend([root, window]);
+    }
+    provider
+}
+
+/// Every descendant of `root`, in tree order.
+fn descendants(nodes: &[MockNode], root: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut stack: Vec<usize> = nodes
+        .get(root)
+        .map(|n| n.children.iter().rev().copied().collect())
+        .unwrap_or_default();
+    while let Some(i) = stack.pop() {
+        out.push(i);
+        stack.extend(nodes[i].children.iter().rev().copied());
+    }
+    out
+}
+
+/// The mock's text units: words split on spaces, lines and paragraphs on
+/// `\n` (the mock does not wrap), characters as scalar values.
+fn mock_unit_at(text: &str, offset: u32, unit: TextUnit) -> Result<TextRange> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let length = units.len() as u32;
+    check_in_bounds(
+        TextRange {
+            start: offset,
+            end: offset,
+        },
+        length,
+    )?;
+    if length == 0 {
+        return Ok(TextRange { start: 0, end: 0 });
+    }
+    // At the end, answer for the unit that ends there.
+    let at = if offset == length { offset - 1 } else { offset } as usize;
+    let is_sep = |u: u16| match unit {
+        TextUnit::Word => u == u16::from(b' ') || u == u16::from(b'\n'),
+        TextUnit::Line | TextUnit::Paragraph => u == u16::from(b'\n'),
+        TextUnit::Character => false,
+    };
+    if unit == TextUnit::Character {
+        let start = if (0xDC00..=0xDFFF).contains(&units[at]) && at > 0 {
+            at - 1
+        } else {
+            at
+        };
+        let width = if (0xD800..=0xDBFF).contains(&units[start]) {
+            2
+        } else {
+            1
+        };
+        return Ok(TextRange {
+            start: start as u32,
+            end: (start + width).min(units.len()) as u32,
+        });
+    }
+    let mut start = at;
+    while start > 0 && !is_sep(units[start - 1]) {
+        start -= 1;
+    }
+    let mut end = at;
+    // A unit includes its trailing separator, so consecutive units tile.
+    while end < units.len() && !is_sep(units[end]) {
+        end += 1;
+    }
+    if end < units.len() {
+        end += 1;
+    }
+    Ok(TextRange {
+        start: start as u32,
+        end: end as u32,
+    })
+}
+
+/// Build the test tree plus a table, a virtualized list and a tree under the
+/// main window, for the table, collection and text APIs.
+///
+/// ```text
+/// table "Prices" (3 rows x 3 columns)
+/// ├── table_row (index 0)
+/// │   ├── table_cell "Product" (0,0, column header)
+/// │   └── table_cell "Price" (0,1, spans 2 columns, column header)
+/// ├── table_row (index 1)
+/// │   ├── table_cell "Widget" (1,0, row header)
+/// │   ├── table_cell "1.00" (1,1)
+/// │   └── table_cell "2.00" (1,2, selected)
+/// └── table_row (index 2)
+///     ├── table_cell "Gadget" (2,0, row header)
+///     ├── table_cell "3.00" (2,1, no spans reported)
+///     └── table_cell "4.00" (2,2)
+/// list "Results" (virtualized: size unknown)
+/// ├── list_item "First" (index 0)
+/// └── list_item "Second" (index 1)
+/// list "Folders" (a tree: xa11y maps tree containers to list)
+/// ├── tree_item "Root" (index 0 of 1, depth 0)
+/// └── tree_item "Child" (index 0 of 1, depth 1)
+/// text_area "Notes" (value "Hello 😀 world\nsecond line")
+/// ```
+pub fn build_table_provider() -> Arc<MockProvider> {
+    let provider = build_provider();
+    {
+        let mut nodes = provider.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let window = 1;
+        let pid = nodes[window].data.pid;
+        let add = |nodes: &mut Vec<MockNode>, parent: usize, data: ElementData| {
+            let i = nodes.len();
+            let mut data = data;
+            data.handle = i as u64;
+            data.pid = pid;
+            if data.bounds.is_none() {
+                data.bounds = Some(Rect {
+                    x: 10,
+                    y: 10 * i as i32,
+                    width: 100,
+                    height: 20,
+                });
+            }
+            nodes.push(MockNode {
+                data,
+                children: Vec::new(),
+                parent: Some(parent),
+                closed: false,
+            });
+            nodes[parent].children.push(i);
+            i
+        };
+        let named = |role: Role, name: &str| {
+            let mut d = ElementData::for_role(role);
+            d.name = Some(name.into());
+            d
+        };
+        let cell = |name: &str,
+                    row: u32,
+                    column: u32,
+                    spans: Option<(u32, u32)>,
+                    header: Option<HeaderKind>| {
+            let mut d = named(Role::TableCell, name);
+            d.cell = Some(
+                CellParts {
+                    row: Some(row),
+                    column: Some(column),
+                    row_span: spans.map(|s| s.0),
+                    column_span: spans.map(|s| s.1),
+                    header,
+                }
+                .into(),
+            );
+            d
+        };
+        let mut table = named(Role::Table, "Prices");
+        table.table = Some(
+            TableParts {
+                row_count: Some(Count::Known(3)),
+                column_count: Some(Count::Known(3)),
+            }
+            .into(),
+        );
+        let t = add(&mut nodes, window, table);
+        let rows: [Vec<ElementData>; 3] = [
+            vec![
+                cell("Product", 0, 0, Some((1, 1)), Some(HeaderKind::Column)),
+                cell("Price", 0, 1, Some((1, 2)), Some(HeaderKind::Column)),
+            ],
+            vec![
+                cell("Widget", 1, 0, Some((1, 1)), Some(HeaderKind::Row)),
+                cell("1.00", 1, 1, Some((1, 1)), None),
+                {
+                    let mut c = cell("2.00", 1, 2, Some((1, 1)), None);
+                    c.states.selected = true;
+                    c
+                },
+            ],
+            vec![
+                cell("Gadget", 2, 0, Some((1, 1)), Some(HeaderKind::Row)),
+                cell("3.00", 2, 1, None, None),
+                cell("4.00", 2, 2, Some((1, 1)), None),
+            ],
+        ];
+        for (index, cells) in rows.into_iter().enumerate() {
+            let mut row = ElementData::for_role(Role::TableRow);
+            row.table_row = Some(
+                RowParts {
+                    index: Some(index as u32),
+                }
+                .into(),
+            );
+            let r = add(&mut nodes, t, row);
+            for c in cells {
+                add(&mut nodes, r, c);
+            }
+        }
+        let item = |role: Role, name: &str, index: u32, size: Option<Count>, depth: Option<u32>| {
+            let mut d = named(role, name);
+            d.collection = Some(
+                CollectionParts {
+                    index: Some(index),
+                    size,
+                    depth,
+                }
+                .into(),
+            );
+            d
+        };
+        let list = add(&mut nodes, window, named(Role::List, "Results"));
+        add(
+            &mut nodes,
+            list,
+            item(Role::ListItem, "First", 0, Some(Count::Unknown), None),
+        );
+        add(
+            &mut nodes,
+            list,
+            item(Role::ListItem, "Second", 1, Some(Count::Unknown), None),
+        );
+        let tree = add(&mut nodes, window, named(Role::List, "Folders"));
+        let root = add(
+            &mut nodes,
+            tree,
+            item(Role::TreeItem, "Root", 0, Some(Count::Known(1)), Some(0)),
+        );
+        add(
+            &mut nodes,
+            root,
+            item(Role::TreeItem, "Child", 0, Some(Count::Known(1)), Some(1)),
+        );
+        let mut notes = named(Role::TextArea, "Notes");
+        notes.value = Some("Hello 😀 world\nsecond line".into());
+        notes.states.editable = true;
+        add(&mut nodes, window, notes);
     }
     provider
 }

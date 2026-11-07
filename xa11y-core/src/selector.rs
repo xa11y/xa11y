@@ -9,7 +9,7 @@
 //! simple_selector := (role_name | "*")? attr_filter* pseudo?
 //! role_name     := [a-z_]+     // snake_case role name
 //! attr_filter   := "[" attr_name op value "]"
-//! attr_name     := "name" | "value" | "description" | "role"
+//! attr_name     := [a-z0-9_]+  // see `resolve_attr`; unknown names read `raw`
 //! op            := "=" | "*=" | "^=" | "$="
 //! value         := '"' [^"]* '"' | "'" [^']* "'"
 //! pseudo        := ":nth(" integer ")"
@@ -19,6 +19,13 @@
 //! A top-level comma separates an *alternation group*: the result is the
 //! union of each clause's matches, deduplicated by element identity and
 //! returned in document order. See [`SelectorGroup`].
+//!
+//! Numeric attributes (`row`, `column`, `row_span`, `column_span`, `index`,
+//! `size`, `depth`, `row_count`, `column_count`) take a quoted non-negative
+//! integer and only `=`: `table_cell[row="2"][column="0"]`. The counts also
+//! accept `"unknown"`. Each compares the value exactly as the element reports
+//! it, 0-based like every index except `:nth`, so `table_cell[row="0"]:nth(1)`
+//! is the first matching cell of the first row.
 //!
 //! `*` is the universal selector and matches any element. It is equivalent to
 //! omitting the role, so `*[name="OK"]` and `[name="OK"]` are the same query;
@@ -235,6 +242,11 @@ impl Selector {
         if first.simple.nth == Some(0) {
             return invalid("segment 0 has :nth(0); :nth is 1-based".to_string());
         }
+        for filter in &first.simple.filters {
+            if let Err(message) = check_numeric_filter(filter) {
+                return invalid(format!("segment 0: {message}"));
+            }
+        }
         check_tail_segments(&self.segments[1..], "segment", 1).map_err(|message| {
             Error::InvalidSelector {
                 selector: format!("{self:?}"),
@@ -426,8 +438,16 @@ impl Selector {
                 message: "unterminated string in attribute value".to_string(),
             });
         }
-        let value: String = chars[val_start..pos].iter().collect();
+        let mut value: String = chars[val_start..pos].iter().collect();
         pos += 1; // skip closing quote
+        if NUMERIC_ATTRS.contains(&attr.as_str()) {
+            value = numeric_filter_value(&attr, &op, &value).map_err(|message| {
+                Error::InvalidSelector {
+                    selector: input.to_string(),
+                    message,
+                }
+            })?;
+        }
 
         // Skip ]
         if pos >= chars.len() || chars[pos] != ']' {
@@ -474,6 +494,68 @@ fn check_tail_segments(
         if segment.simple.nth == Some(0) {
             return Err(format!("{label} {i} has :nth(0); :nth is 1-based"));
         }
+        for filter in &segment.simple.filters {
+            check_numeric_filter(filter).map_err(|m| format!("{label} {i}: {m}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Attributes whose value is a number the element reports. See
+/// [`numeric_filter_value`].
+pub const NUMERIC_ATTRS: &[&str] = &[
+    "row",
+    "column",
+    "row_span",
+    "column_span",
+    "index",
+    "size",
+    "depth",
+    "row_count",
+    "column_count",
+];
+
+/// Totals, which may also be `"unknown"` ([`crate::table::Count::Unknown`]).
+const COUNT_ATTRS: &[&str] = &["size", "row_count", "column_count"];
+
+/// The canonical value for a numeric attribute filter: the integer without
+/// leading zeros, or `"unknown"` for a count. Errors name what was wrong.
+fn numeric_filter_value(
+    attr: &str,
+    op: &MatchOp,
+    value: &str,
+) -> std::result::Result<String, String> {
+    if *op != MatchOp::Exact {
+        return Err(format!(
+            "attribute {attr:?} is numeric and only supports '=' (got {op:?})"
+        ));
+    }
+    if COUNT_ATTRS.contains(&attr) && value == "unknown" {
+        return Ok(value.to_string());
+    }
+    let n: u32 = value.parse().map_err(|_| {
+        let also = if COUNT_ATTRS.contains(&attr) {
+            " or \"unknown\""
+        } else {
+            ""
+        };
+        format!("attribute {attr:?} takes a non-negative integer{also}, got {value:?}")
+    })?;
+    Ok(n.to_string())
+}
+
+/// Check that a numeric filter built in Rust holds a canonical value, as
+/// [`Selector::parse`] would have produced.
+fn check_numeric_filter(filter: &AttrFilter) -> std::result::Result<(), String> {
+    if !NUMERIC_ATTRS.contains(&filter.attr.as_str()) {
+        return Ok(());
+    }
+    let canonical = numeric_filter_value(&filter.attr, &filter.op, &filter.value)?;
+    if canonical != filter.value {
+        return Err(format!(
+            "attribute {:?} value {:?} is not canonical; use {canonical:?}",
+            filter.attr, filter.value
+        ));
     }
     Ok(())
 }
@@ -691,6 +773,39 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
         "min_value" => number_to_string(element.min_value),
         "max_value" => number_to_string(element.max_value),
         "stable_id" => element.stable_id.clone(),
+        // Table and collection positions. `row` is the grid row the element
+        // is in: a cell's row, or a row's own index.
+        "row" => element
+            .cell
+            .and_then(|c| c.row)
+            .or_else(|| element.table_row.and_then(|r| r.index))
+            .map(|n| n.to_string()),
+        "column" => element.cell.and_then(|c| c.column).map(|n| n.to_string()),
+        "row_span" => element.cell.and_then(|c| c.row_span).map(|n| n.to_string()),
+        "column_span" => element
+            .cell
+            .and_then(|c| c.column_span)
+            .map(|n| n.to_string()),
+        "index" => element
+            .collection
+            .and_then(|c| c.index)
+            .map(|n| n.to_string()),
+        "size" => element
+            .collection
+            .and_then(|c| c.size)
+            .map(|n| n.to_string()),
+        "depth" => element
+            .collection
+            .and_then(|c| c.depth)
+            .map(|n| n.to_string()),
+        "row_count" => element
+            .table
+            .and_then(|t| t.row_count)
+            .map(|n| n.to_string()),
+        "column_count" => element
+            .table
+            .and_then(|t| t.column_count)
+            .map(|n| n.to_string()),
         "enabled" => Some(element.states.enabled.to_string()),
         "visible" => Some(element.states.visible.to_string()),
         // `None` while visible, so `[hidden_reason=scrolled_out]` matches
@@ -1158,6 +1273,118 @@ fn collect_matching(
 }
 
 #[cfg(test)]
+mod numeric_attr_tests {
+    use super::*;
+    use crate::table::{CellParts, CollectionParts, Count, RowParts, TableParts};
+
+    fn simple(sel: &str) -> SimpleSelector {
+        Selector::parse(sel)
+            .expect("parses")
+            .segments
+            .remove(0)
+            .simple
+    }
+
+    fn cell(row: u32, column: u32) -> ElementData {
+        let mut d = ElementData::for_role(Role::TableCell);
+        d.cell = Some(
+            CellParts {
+                row: Some(row),
+                column: Some(column),
+                row_span: None,
+                column_span: Some(2),
+                header: None,
+            }
+            .into(),
+        );
+        d
+    }
+
+    #[test]
+    fn numeric_values_are_canonicalised() {
+        assert_eq!(simple(r#"table_cell[row="02"]"#).filters[0].value, "2");
+        assert_eq!(
+            simple(r#"list_item[size="unknown"]"#).filters[0].value,
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn numeric_attrs_refuse_bad_values_and_string_operators() {
+        for bad in [
+            r#"table_cell[row="two"]"#,
+            r#"table_cell[row="-1"]"#,
+            r#"table_cell[row*="1"]"#,
+            r#"table_cell[column="unknown"]"#,
+        ] {
+            assert!(
+                matches!(Selector::parse(bad), Err(Error::InvalidSelector { .. })),
+                "{bad} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_refuses_a_non_canonical_numeric_filter_built_in_rust() {
+        let mut sel = Selector::parse(r#"table_cell[row="2"]"#).unwrap();
+        sel.segments[0].simple.filters[0].value = "02".into();
+        assert!(matches!(sel.validate(), Err(Error::InvalidSelector { .. })));
+    }
+
+    #[test]
+    fn numeric_attrs_match_reported_values() {
+        let c = cell(2, 0);
+        assert!(matches_simple(
+            &c,
+            &simple(r#"table_cell[row="2"][column="0"]"#)
+        ));
+        assert!(!matches_simple(&c, &simple(r#"table_cell[row="1"]"#)));
+        assert!(matches_simple(
+            &c,
+            &simple(r#"table_cell[column_span="2"]"#)
+        ));
+        // An unreported span matches no value.
+        assert!(!matches_simple(&c, &simple(r#"table_cell[row_span="1"]"#)));
+
+        let mut row = ElementData::for_role(Role::TableRow);
+        row.table_row = Some(RowParts { index: Some(3) }.into());
+        assert!(matches_simple(&row, &simple(r#"table_row[row="3"]"#)));
+
+        let mut item = ElementData::for_role(Role::ListItem);
+        item.collection = Some(
+            CollectionParts {
+                index: Some(0),
+                size: Some(Count::Unknown),
+                depth: Some(1),
+            }
+            .into(),
+        );
+        assert!(matches_simple(
+            &item,
+            &simple(r#"list_item[index="0"][depth="1"]"#)
+        ));
+        assert!(matches_simple(
+            &item,
+            &simple(r#"list_item[size="unknown"]"#)
+        ));
+
+        let mut table = ElementData::for_role(Role::Table);
+        table.table = Some(
+            TableParts {
+                row_count: Some(Count::Known(40)),
+                column_count: None,
+            }
+            .into(),
+        );
+        assert!(matches_simple(&table, &simple(r#"table[row_count="40"]"#)));
+        assert!(!matches_simple(
+            &table,
+            &simple(r#"table[column_count="0"]"#)
+        ));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1392,6 +1619,10 @@ mod tests {
                 numeric_value: None,
                 min_value: None,
                 max_value: None,
+                table: None,
+                cell: None,
+                table_row: None,
+                collection: None,
                 stable_id: None,
                 pid: Some(1),
                 raw: std::collections::HashMap::new(),
@@ -1620,6 +1851,10 @@ mod tests {
             numeric_value: None,
             min_value: None,
             max_value: None,
+            table: None,
+            cell: None,
+            table_row: None,
+            collection: None,
             stable_id: None,
             pid: None,
             raw,
@@ -2277,6 +2512,10 @@ mod tests {
             numeric_value: None,
             min_value: None,
             max_value: None,
+            table: None,
+            cell: None,
+            table_row: None,
+            collection: None,
             stable_id: None,
             pid: Some(1),
             raw: std::collections::HashMap::new(),
@@ -2430,6 +2669,10 @@ mod tests {
                     numeric_value: None,
                     min_value: None,
                     max_value: None,
+                    table: None,
+                    cell: None,
+                    table_row: None,
+                    collection: None,
                     stable_id: None,
                     pid: Some(1),
                     raw: std::collections::HashMap::new(),
@@ -2721,6 +2964,10 @@ mod tests {
             numeric_value: None,
             min_value: None,
             max_value: None,
+            table: None,
+            cell: None,
+            table_row: None,
+            collection: None,
             stable_id: None,
             pid: Some(1),
             raw: std::collections::HashMap::new(),

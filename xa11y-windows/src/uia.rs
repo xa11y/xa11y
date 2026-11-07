@@ -1095,6 +1095,11 @@ impl WindowsProvider {
             numeric_value: None,
             min_value: None,
             max_value: None,
+            // Table/collection metadata is not mapped on Windows yet (#479).
+            table: None,
+            cell: None,
+            table_row: None,
+            collection: None,
             stable_id: None,
             pid: Some(pid),
             raw,
@@ -3092,6 +3097,11 @@ fn build_snapshot_data(
         numeric_value,
         min_value,
         max_value,
+        // Table/collection metadata is not mapped on Windows yet (#479).
+        table: None,
+        cell: None,
+        table_row: None,
+        collection: None,
         stable_id,
         pid,
         raw,

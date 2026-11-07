@@ -34,6 +34,7 @@ mirrored = [
     "Screenshot",
     "ShellSurface",
     "Subscription",
+    "Text",
 ]
 
 # Crosses the language boundary, but not as a class with mirrored members —
@@ -57,6 +58,20 @@ opaque = [
     { type = "HiddenReason", reason = "Reasons cross the boundary as identically-spelled snake_case strings (`scrolled_out`, `window_minimized`, ...) via HiddenReason::to_snake_case, as Element.hidden_reason and as the hidden_reason diagnosis field; the enum's variants are not mirrored as binding members. See [[types.variant_coverage]]." },
     { type = "Delivery", reason = "Dispositions cross the boundary as identically-spelled snake_case strings (`not_delivered`, `unknown`) via Delivery::to_snake_case, as the `delivery` attribute of every exception, the `delivery` field of an MCP failure, and the CLI's `delivery:` line; the enum's variants are not mirrored as binding members. See [[types.variant_coverage]]." },
     { type = "OmissionReason", reason = "Reasons cross the boundary as identically-spelled snake_case strings (`no_bounds`, `zero_area`, `outside_capture`); the enum's variants are not mirrored as binding members. See [[types.variant_coverage]]." },
+    { type = "TableInfo", reason = "Python exposes a frozen TableInfo class; JS returns a plain object. Same split as Rect: members are covered by the per-binding type tests (test_rich.py, the JS unit tests)." },
+    { type = "CellInfo", reason = "Python exposes a frozen CellInfo class; JS returns a plain object. Same split as Rect." },
+    { type = "RowInfo", reason = "Python exposes a frozen RowInfo class; JS returns a plain object. Same split as Rect." },
+    { type = "CollectionInfo", reason = "Python exposes a frozen CollectionInfo class; JS returns a plain object. Same split as Rect." },
+    { type = "Count", reason = "Crosses as an int (Python) / number (JS), or the string 'unknown' in both, matching its serde form." },
+    { type = "HeaderKind", reason = "Crosses as the identically-spelled strings 'column' | 'row' via HeaderKind::to_snake_case. See [[types.variant_coverage]]." },
+    { type = "TextRange", reason = "Python exposes a frozen, hashable TextRange class (and accepts (start, end) tuples); JS uses plain { start, end } objects. Same split as Rect." },
+    { type = "TextRun", reason = "Python exposes a frozen TextRun class; JS returns a plain object. Same split as Rect." },
+    { type = "TextLines", reason = "Python exposes a frozen TextLines class; JS returns a plain object. Same split as Rect." },
+    { type = "TextRuns", reason = "Python exposes a frozen TextRuns class; JS returns a plain object. Same split as Rect." },
+    { type = "TextAttributes", reason = "Python exposes a frozen TextAttributes class; JS returns a plain object. Same split as Rect." },
+    { type = "Color", reason = "Crosses as a '#rrggbb' / '#rrggbbaa' string via Color::to_hex, matching its serde form." },
+    { type = "TextScript", reason = "Crosses as the identically-spelled strings 'baseline' | 'superscript' | 'subscript' via TextScript::to_snake_case. See [[types.variant_coverage]]." },
+    { type = "TextUnit", reason = "Crosses as the identically-spelled strings 'character' | 'word' | 'line' | 'paragraph', parsed by TextUnit::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
     { type = "AutoScrollOutcome", reason = "Outcomes cross the boundary as identically-spelled snake_case strings (`refused`, `no_effect`, `revealed`) via AutoScrollOutcome::to_snake_case, as the auto_scroll diagnosis field (Python attribute, JS `autoScroll`); the enum's variants are not mirrored as binding members. See [[types.variant_coverage]]." },
 ]
 
@@ -96,6 +111,7 @@ internal = [
     { type = "ScrollDelta", reason = "Bindings take plain dx/dy numbers." },
     { type = "ClickOptions", reason = "Options struct for Mouse::click_with; its fields are the optional params of the bindings' click() (Python keywords, JS options object)." },
     { type = "DragOptions", reason = "Options struct for Mouse::drag_with; its fields are the optional params of the bindings' drag() (Python keywords, JS options object)." },
+    { type = "FindOptions", reason = "Options struct for Text::find_with; its fields are the optional params of the bindings' find() (Python keywords, JS options object)." },
     { type = "ClickTarget", reason = "Internal click-target discriminator for the input backends." },
 
     # ── Screenshot annotation: built by the umbrella crate, never by a caller ──
@@ -282,6 +298,36 @@ files = [
 # Types with no binding class of their own, whose members surface on another
 # type. Members listed here are REQUIRED on the target binding type — this
 # replaces what used to be dozens of per-member allowlist entries.
+# Header kinds, text scripts and text units cross as identically-spelled
+# snake_case strings. Each binding maps them in a hand-written match (Python
+# through `to_snake_case` / `TextUnit::parse` in core, JS in its own arms), and
+# the TypeScript unions are hand-maintained, so a new variant could reach users
+# as a string their type checker rejects.
+[[types.variant_coverage]]
+type = "HeaderKind"
+reason = "Crosses as 'column' | 'row'; the JS arms and the Python Literal / TypeScript union are hand-written."
+files = [
+    "xa11y-js/src/types.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "HeaderKindName" },
+]
+[[types.variant_coverage]]
+type = "TextScript"
+reason = "Crosses as 'baseline' | 'superscript' | 'subscript'; the JS arms and the Python Literal / TypeScript union are hand-written."
+files = [
+    "xa11y-js/src/types.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "TextScriptName" },
+]
+[[types.variant_coverage]]
+type = "TextUnit"
+reason = "Crosses as 'character' | 'word' | 'line' | 'paragraph'; the JS parser and the Python Literal / TypeScript union are hand-written."
+files = [
+    "xa11y-js/src/text.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "TextUnitName" },
+]
+
 [[types.flatten]]
 into = "Element"
 from = ["ElementData", "StateSet"]
@@ -322,6 +368,7 @@ reason = "Both bindings surface the annotation legend on their Screenshot class 
 [python]
 # Core members deliberately not exposed to Python. key = "Type::member".
 rust_only = [
+    { method = "Text::find_with", reason = "FindOptions folds into find()'s keyword-only occurrence / within parameters (AGENTS.md: options structs fold into the primary verb)." },
     # App: explicit-provider plumbing. The binding uses the global singleton
     # provider; `_with` variants exist for injection in Rust tests.
     { method = "App::by_name_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
@@ -415,6 +462,7 @@ python_only = [
 
 [js]
 rust_only = [
+    { method = "Text::find_with", reason = "FindOptions folds into find()'s options object ({ occurrence, within }) (AGENTS.md: options structs fold into the primary verb)." },
     { method = "App::by_name_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::by_pid_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::foreground_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },

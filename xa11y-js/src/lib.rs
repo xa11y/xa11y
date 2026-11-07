@@ -20,6 +20,7 @@ mod mock;
 mod screenshot;
 mod shell;
 mod subscription;
+mod text;
 mod types;
 
 pub(crate) use errors::map_err;

@@ -318,7 +318,13 @@ def test_stub_method_signatures_match_runtime():
         for item in node.body:
             if not isinstance(item, ast.FunctionDef) or _is_property(item):
                 continue
-            runtime_fn = getattr(runtime_cls, item.name, None)
+            # PyO3 renders a `#[new]` constructor's signature on the class
+            # (`__text_signature__`), not on `__new__`, which reports
+            # `(*args, **kwargs)`.
+            if item.name == "__new__":
+                runtime_fn = runtime_cls
+            else:
+                runtime_fn = getattr(runtime_cls, item.name, None)
             if runtime_fn is None:
                 continue
             compared += 1

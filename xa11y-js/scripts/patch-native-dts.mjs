@@ -15,6 +15,9 @@
 //      `ShellSurfaceKindName`.
 //   5b. Narrow `Omission.reason` -> `OmissionReasonName` and
 //      `LegendEntry.color` -> a three-element tuple.
+//   5c. Narrow the table / text plain objects: `Count` (number or
+//      'unknown'), `CellInfo.header`, `TextAttributes.script`, and
+//      `Text.rangeAt`'s unit parameter.
 //   6. Append a `;` to the napi-emitted `NativeSubscription` type alias
 //      (napi-rs omits terminators, which confuses the docs generator's
 //      multi-line type-alias parser).
@@ -95,6 +98,21 @@ export type ShellSurfaceKindName =
   | 'flyout'
   | 'unknown';
 
+/**
+ * A total the platform reported: a number, or \`'unknown'\` when it says it
+ * does not know (virtualized content). Spelled as in Python.
+ */
+export type CountValue = number | 'unknown';
+
+/** Which kind of header a header cell is. Spelled as in Python. */
+export type HeaderKindName = 'column' | 'row';
+
+/** Units accepted by \`Text.rangeAt\`. Spelled as in Python. */
+export type TextUnitName = 'character' | 'word' | 'line' | 'paragraph';
+
+/** Where a run of text sits relative to the baseline. Spelled as in Python. */
+export type TextScriptName = 'baseline' | 'superscript' | 'subscript';
+
 `;
 
 /**
@@ -173,6 +191,34 @@ const REPLACEMENTS = [
     name: 'ClickOptions.anchor -> AnchorName | [number, number]',
     from: '  anchor?: string | Array<number>\n',
     to: '  anchor?: AnchorName | [number, number]\n',
+  },
+  {
+    // The Rust side spells `Count` as `Either<u32, String>` behind a type
+    // alias napi does not emit, so the generated name dangles until it is
+    // replaced: `TableInfo.rowCount` / `columnCount` and
+    // `CollectionInfo.size`.
+    name: 'Count -> CountValue',
+    from: ': Count | null\n',
+    to: ': CountValue | null\n',
+    all: 3,
+  },
+  {
+    name: 'CellInfo.header -> HeaderKindName | null',
+    from: '  header: string | null\n',
+    to: '  header: HeaderKindName | null\n',
+    all: 1,
+  },
+  {
+    name: 'TextAttributes.script -> TextScriptName | null',
+    from: '  script: string | null\n',
+    to: '  script: TextScriptName | null\n',
+    all: 1,
+  },
+  {
+    name: 'Text.rangeAt unit -> TextUnitName',
+    from: '  rangeAt(offset: number, unit: string)',
+    to: '  rangeAt(offset: number, unit: TextUnitName)',
+    all: 1,
   },
   {
     // napi-rs emits this line without a trailing `;`. The docs generator

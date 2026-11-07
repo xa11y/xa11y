@@ -144,6 +144,8 @@ fn state_label(state: ElementState) -> &'static str {
 /// whole purpose (issue #350).
 #[derive(Clone, Copy)]
 struct Actionability {
+    /// Require `states.enabled`.
+    require_enabled: bool,
     /// Require `states.visible` in addition to `enabled`.
     require_visible: bool,
 }
@@ -151,24 +153,34 @@ struct Actionability {
 impl Actionability {
     /// The default gate: the target must be both visible and enabled.
     const VISIBLE_AND_ENABLED: Self = Self {
+        require_enabled: true,
         require_visible: true,
     };
     /// Gate for `scroll_into_view`: enabled only, no visibility requirement.
     const ENABLED: Self = Self {
+        require_enabled: true,
+        require_visible: false,
+    };
+    /// Gate for reads: the element only has to exist. A disabled or
+    /// read-only field, or text scrolled out of view, is still readable.
+    const ATTACHED: Self = Self {
+        require_enabled: false,
         require_visible: false,
     };
 
     /// Whether `data` satisfies this gate.
     fn is_met(self, data: &ElementData) -> bool {
-        data.states.enabled && (!self.require_visible || data.states.visible)
+        (!self.require_enabled || data.states.enabled)
+            && (!self.require_visible || data.states.visible)
     }
 
     /// Human label for the gate, used in timeout diagnoses.
     fn label(self) -> &'static str {
-        if self.require_visible {
-            "visible && enabled"
-        } else {
-            "enabled"
+        match (self.require_enabled, self.require_visible) {
+            (true, true) => "visible && enabled",
+            (true, false) => "enabled",
+            (false, true) => "visible",
+            (false, false) => "attached",
         }
     }
 
@@ -184,6 +196,8 @@ impl Actionability {
         Ok(match action {
             // Making an off-screen element visible is this verb's purpose.
             "scroll_into_view" => Self::ENABLED,
+            // Reading text needs no interaction, so only presence is waited for.
+            "read_text" => Self::ATTACHED,
             // A minimized window is legitimately invisible; see the window
             // management section below.
             "activate" | "minimize" | "maximize" | "enter_fullscreen" | "restore" | "close"
@@ -942,6 +956,22 @@ impl Locator {
     /// [`Element::dump`] for the output format.
     pub fn dump(&self, max_depth: Option<usize>) -> Result<String> {
         self.element()?.dump(max_depth)
+    }
+
+    /// Read the matched element's text by range. See
+    /// [`crate::text_api::Text`].
+    ///
+    /// The returned [`Text`](crate::text_api::Text) re-resolves this locator
+    /// on every read, waiting (up to the locator's timeout) until the selector
+    /// matches. Reads do not wait for the element to be visible or enabled.
+    pub fn text(&self) -> crate::text_api::Text {
+        crate::text_api::Text::for_locator(self.clone())
+    }
+
+    /// Auto-wait for `action`'s gate and return the element, for reads that
+    /// re-resolve per call ([`crate::text_api::Text`]).
+    pub(crate) fn resolve_for_read(&self, action: &str) -> Result<Element> {
+        self.auto_wait(action)
     }
 
     // ── Auto-wait ──────────────────────────────────────────────────

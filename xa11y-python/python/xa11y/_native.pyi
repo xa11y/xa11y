@@ -190,6 +190,20 @@ class InvalidActionDataError(XA11yError):
     """An action received invalid data (e.g. ``Locator.nth(0)``, or a
     text-selection range with ``start > end``)."""
 
+class InvalidTextRangeError(InvalidActionDataError):
+    """A text range is out of bounds, reversed, or splits a surrogate pair.
+
+    Offsets are UTF-16 code units. ``length`` is the text's current length when
+    the check knew it, so a range made stale by an edit says how long the text
+    is now."""
+
+    start: int
+    """Start of the refused range (UTF-16 code units)."""
+    end: int
+    """End of the refused range (UTF-16 code units)."""
+    length: int | None
+    """The text's length when the check knew it, else ``None``."""
+
 class PlatformError(XA11yError):
     """An OS-level accessibility error occurred."""
 
@@ -213,6 +227,209 @@ class Rect:
     def height(self) -> int: ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
+
+# ── Tables and collections ───────────────────────────────────────────────────
+
+CountValue = int | Literal["unknown"]
+"""A total: an ``int``, or ``"unknown"`` when the platform says it does not know."""
+
+class TableInfo:
+    """Size of a table, grid or tree grid. Each count is ``None`` when not
+    reported."""
+
+    @property
+    def row_count(self) -> CountValue | None:
+        """Number of rows: ``int``, ``"unknown"``, or ``None``."""
+    @property
+    def column_count(self) -> CountValue | None:
+        """Number of columns: ``int``, ``"unknown"``, or ``None``."""
+    def __repr__(self) -> str: ...
+
+class CellInfo:
+    """Row, column and spans of a table cell. Every index is 0-based; a field
+    the platform did not report is ``None``."""
+
+    @property
+    def row(self) -> int | None:
+        """0-based row index."""
+    @property
+    def column(self) -> int | None:
+        """0-based column index."""
+    @property
+    def row_span(self) -> int | None:
+        """Rows the cell covers (at least 1), or ``None`` when not reported."""
+    @property
+    def column_span(self) -> int | None:
+        """Columns the cell covers (at least 1), or ``None`` when not reported."""
+    @property
+    def header(self) -> Literal["column", "row"] | None:
+        """``"column"`` or ``"row"`` for a header cell, else ``None``."""
+    def __repr__(self) -> str: ...
+
+class RowInfo:
+    """Row index of a table or tree-grid row (0-based)."""
+
+    @property
+    def index(self) -> int | None:
+        """0-based row index in the table, or ``None`` when not reported."""
+    def __repr__(self) -> str: ...
+
+class CollectionInfo:
+    """Position of an item in a list, tree, tab list or radio group.
+
+    ``index`` and ``depth`` are 0-based: the first item is ``0``, a top-level
+    tree item has depth ``0``. To show "3 of 10", add 1 to ``index``."""
+
+    @property
+    def index(self) -> int | None:
+        """0-based position in the set."""
+    @property
+    def size(self) -> CountValue | None:
+        """Number of items in the set: ``int``, ``"unknown"``, or ``None``."""
+    @property
+    def depth(self) -> int | None:
+        """0-based nesting depth."""
+    def __repr__(self) -> str: ...
+
+# ── Text by range ────────────────────────────────────────────────────────────
+
+TextUnitName = Literal["character", "word", "line", "paragraph"]
+
+class TextRange:
+    """A half-open range ``[start, end)`` of UTF-16 code units.
+
+    Anywhere a range is accepted, a ``(start, end)`` tuple works too."""
+
+    def __new__(cls, start: int, end: int) -> TextRange:
+        """Raises ``InvalidTextRangeError`` when ``start > end``."""
+    @property
+    def start(self) -> int:
+        """0-based offset of the first unit."""
+    @property
+    def end(self) -> int:
+        """0-based offset one past the last unit."""
+    def len(self) -> int:
+        """Number of UTF-16 code units covered."""
+    def is_empty(self) -> bool:
+        """Whether the range covers nothing (a caret position)."""
+    def __len__(self) -> int: ...
+    def __repr__(self) -> str: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
+
+RangeLike = TextRange | tuple[int, int]
+
+class TextAttributes:
+    """Formatting of a run of text. Every attribute is ``None`` when the
+    platform did not report it; nothing is defaulted."""
+
+    @property
+    def font_family(self) -> str | None:
+        """Font family name."""
+    @property
+    def font_size(self) -> float | None:
+        """Font size in points."""
+    @property
+    def font_weight(self) -> int | None:
+        """Font weight on the CSS scale: 400 normal, 700 bold."""
+    @property
+    def italic(self) -> bool | None:
+        """Italic or oblique."""
+    @property
+    def underline(self) -> bool | None:
+        """Underlined."""
+    @property
+    def strikethrough(self) -> bool | None:
+        """Struck through."""
+    @property
+    def foreground(self) -> str | None:
+        """Text colour as ``"#rrggbb"`` or ``"#rrggbbaa"``."""
+    @property
+    def background(self) -> str | None:
+        """Background colour as ``"#rrggbb"`` or ``"#rrggbbaa"``."""
+    @property
+    def script(self) -> Literal["baseline", "superscript", "subscript"] | None:
+        """``"baseline"``, ``"superscript"`` or ``"subscript"``."""
+    @property
+    def spelling_error(self) -> bool | None:
+        """Marked as a spelling error."""
+    def __repr__(self) -> str: ...
+
+class TextRun:
+    """A run of text sharing one set of attributes."""
+
+    @property
+    def range(self) -> TextRange:
+        """The text the run covers."""
+    @property
+    def attributes(self) -> TextAttributes:
+        """Its formatting."""
+    def __repr__(self) -> str: ...
+
+class TextLines:
+    """One page of rendered lines from ``Text.lines``."""
+
+    @property
+    def lines(self) -> list[TextRange]:
+        """The lines, each clipped to the requested range."""
+    @property
+    def truncated(self) -> bool:
+        """Whether the limit stopped the walk before the end of the range."""
+    @property
+    def next_start(self) -> int | None:
+        """Where to start the next page; set exactly when ``truncated``."""
+    def __repr__(self) -> str: ...
+
+class TextRuns:
+    """One page of formatting runs from ``Text.runs``."""
+
+    @property
+    def runs(self) -> list[TextRun]:
+        """The runs, each clipped to the requested range."""
+    @property
+    def truncated(self) -> bool:
+        """Whether the limit stopped the walk before the end of the range."""
+    @property
+    def next_start(self) -> int | None:
+        """Where to start the next page; set exactly when ``truncated``."""
+    def __repr__(self) -> str: ...
+
+class Text:
+    """An element's text, read by range. Every method is a live platform
+    read; offsets are UTF-16 code units, so use ``read`` rather than slicing
+    ``Element.value`` when the text may contain emoji.
+
+    From ``Element.text()`` it stays bound to that element. From
+    ``Locator.text()`` it re-resolves the locator on every read."""
+
+    def length(self) -> int:
+        """Length in UTF-16 code units, without reading the text where the
+        platform allows."""
+    def caret(self) -> int | None:
+        """The caret offset, or ``None`` when the element has no caret."""
+    def selections(self) -> list[TextRange]:
+        """The selected ranges in document order; empty when nothing is selected."""
+    def read(self, range: RangeLike) -> str:
+        """The text in ``range`` (a ``TextRange`` or ``(start, end)``), exactly
+        as the platform reports it."""
+    def read_all(self) -> str:
+        """The whole text."""
+    def find(
+        self, needle: str, *, occurrence: int = 0, within: RangeLike | None = None
+    ) -> TextRange | None:
+        """The ``occurrence``-th (0-based) exact match of ``needle``, searching
+        ``within`` if given. Case-sensitive, no Unicode normalization."""
+    def range_at(self, offset: int, unit: TextUnitName) -> TextRange:
+        """The ``unit`` (``"character"``, ``"word"``, ``"line"``,
+        ``"paragraph"``) containing ``offset``. ``"line"`` is the rendered line."""
+    def lines(self, range: RangeLike, limit: int = 200) -> TextLines:
+        """Rendered lines covering ``range``, at most ``limit`` per page."""
+    def bounds(self, range: RangeLike) -> list[Rect]:
+        """Screen rectangles of ``range``, one per rendered line fragment, in the
+        same coordinates as ``Element.bounds``."""
+    def runs(self, range: RangeLike, limit: int = 200) -> TextRuns:
+        """Formatting runs covering ``range``, at most ``limit`` per page."""
+    def __repr__(self) -> str: ...
 
 # ── EventType ────────────────────────────────────────────────────────────────
 
@@ -722,8 +939,40 @@ class Element:
         """Set this element's numeric value."""
     def type_text(self, text: str) -> None:
         """Insert text at the current cursor position."""
-    def select_text(self, start: int, end: int) -> None:
-        """Select the text range from ``start`` to ``end`` (0-based offsets)."""
+    def select_text(self, start: int | RangeLike, end: int | None = None) -> None:
+        """Select a text range: ``select_text(start, end)``, or
+        ``select_text(range)`` with a ``TextRange`` or ``(start, end)`` tuple.
+        Offsets are 0-based UTF-16 code units."""
+    @property
+    def table(self) -> TableInfo | None:
+        """Size of a table, grid or tree grid; ``None`` when not a table or not
+        reported."""
+    @property
+    def cell(self) -> CellInfo | None:
+        """Row, column and spans of a table cell (0-based); ``None`` otherwise."""
+    @property
+    def table_row(self) -> RowInfo | None:
+        """Row index of a table row (0-based); ``None`` otherwise."""
+    @property
+    def collection(self) -> CollectionInfo | None:
+        """Position in a list, tree, tab list or radio group (0-based index and
+        depth); ``None`` otherwise."""
+    def text(self) -> Text:
+        """This element's text, read by range (UTF-16 offsets). Raises
+        ``ActionNotSupportedError`` when the element has no text interface."""
+    def cell_at(self, row: int, column: int) -> Element | None:
+        """On a table: the cell at 0-based ``row`` / ``column`` (a merged cell
+        for a slot it covers), or ``None``."""
+    def column_headers(self) -> list[Element]:
+        """On a table: its column header cells."""
+    def row_headers(self) -> list[Element]:
+        """On a table: its row header cells."""
+    def column_header_cells(self) -> list[Element]:
+        """On a cell: the column header cells that head it."""
+    def row_header_cells(self) -> list[Element]:
+        """On a cell: the row header cells that head it."""
+    def selected_items(self) -> list[Element]:
+        """On a list, tree, table or tab list: the selected items."""
     def perform_action(self, action: str) -> None:
         """Perform an action by ``snake_case`` name."""
     def activate(self) -> None:
@@ -838,8 +1087,12 @@ class Locator:
         """Set the numeric value of the matched element (slider, spinner)."""
     def type_text(self, text: str) -> None:
         """Type text at the current cursor position on the matched element."""
-    def select_text(self, start: int, end: int) -> None:
-        """Select a text range within the matched element (0-based offsets)."""
+    def select_text(self, start: int | RangeLike, end: int | None = None) -> None:
+        """Select a text range within the matched element: ``(start, end)`` or a
+        single range. Offsets are 0-based UTF-16 code units."""
+    def text(self) -> Text:
+        """The matched element's text, read by range. Re-resolves the locator on
+        every read, waiting only for the element to exist."""
     def perform_action(self, action: str) -> None:
         """Perform an action by snake_case name."""
     def activate(self) -> None:

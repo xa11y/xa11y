@@ -26,6 +26,9 @@
 //!   AT-SPI bus (Linux-only, gated the same way).
 //! * `unresponsive_windows` — enumeration with a hung window on the desktop
 //!   (Windows-only, gated the same way).
+//! * `rich` — tables, collections and text by range (Linux-only: most of it
+//!   drives the GTK 3 fixture `test-apps/rich/rich.py`, not the AccessKit
+//!   app).
 //!
 //! The helpers in this file (`app_root`, `one`, `named`, `act`, `try_act`)
 //! are reached from submodule tests via `use crate::integ as h;`.
@@ -57,6 +60,9 @@ pub mod events_linux;
 
 #[cfg(target_os = "linux")]
 pub mod unresponsive_linux;
+
+#[cfg(target_os = "linux")]
+pub mod rich;
 
 use xa11y::*;
 

@@ -485,6 +485,19 @@ pub enum Error {
     #[error("Invalid action data: {message}")]
     InvalidActionData { message: String },
 
+    /// A text range is out of bounds, reversed, or splits a surrogate pair.
+    ///
+    /// Offsets are UTF-16 code units. `length` is the text's current length
+    /// when the check knew it, so a range made stale by an edit says how long
+    /// the text is now.
+    #[error("Invalid text range {start}..{end}{}: {message}", length.map(|l| format!(" (text length {l})")).unwrap_or_default())]
+    InvalidTextRange {
+        start: u32,
+        end: u32,
+        length: Option<u32>,
+        message: String,
+    },
+
     /// Process-wide configuration is invalid (e.g. an unparsable
     /// `XA11Y_DEFAULT_TIMEOUT` environment variable).
     #[error("Invalid configuration: {message}")]
@@ -560,7 +573,7 @@ impl Error {
     /// - [`NotDelivered`](Delivery::NotDelivered): the failure is decided
     ///   before dispatch. These are `SelectorNotMatched`, `ElementStale`,
     ///   `ActionNotSupported`, `TextValueNotSupported`, `InvalidSelector`,
-    ///   `InvalidActionData`, `InvalidConfig`, `NoElementBounds`,
+    ///   `InvalidActionData`, `InvalidTextRange`, `InvalidConfig`, `NoElementBounds`,
     ///   `Unsupported`, `PermissionDenied` and `AccessibilityNotEnabled`.
     /// - [`Unknown`](Delivery::Unknown): `Timeout` and `Platform`, where the
     ///   platform call may have reached the application.
@@ -580,6 +593,7 @@ impl Error {
             | Self::TextValueNotSupported
             | Self::InvalidSelector { .. }
             | Self::InvalidActionData { .. }
+            | Self::InvalidTextRange { .. }
             | Self::InvalidConfig { .. }
             | Self::NoElementBounds
             | Self::Unsupported { .. } => Delivery::NotDelivered,

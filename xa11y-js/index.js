@@ -125,6 +125,25 @@ class InvalidActionDataError extends XA11yError {
   }
 }
 
+/**
+ * A text range is out of bounds, reversed, or splits a surrogate pair.
+ * Offsets are UTF-16 code units. A subclass of `InvalidActionDataError`, as
+ * in Python, so an existing `instanceof InvalidActionDataError` check still
+ * catches it.
+ */
+class InvalidTextRangeError extends InvalidActionDataError {
+  constructor(message) {
+    super(message);
+    this.name = 'InvalidTextRangeError';
+    // Structured range (tenet 6) — populated from the native payload in
+    // `toTypedError`. `length` is the text's current length when the check
+    // knew it, so a range made stale by an edit says how long the text is.
+    /** @type {number | null} */ this.start = null;
+    /** @type {number | null} */ this.end = null;
+    /** @type {number | null} */ this.length = null;
+  }
+}
+
 class PlatformError extends XA11yError {
   constructor(message) {
     super(message);
@@ -142,6 +161,7 @@ const CODE_TO_CLASS = {
   XA11Y_TIMEOUT: TimeoutError,
   XA11Y_INVALID_SELECTOR: InvalidSelectorError,
   XA11Y_INVALID_ACTION_DATA: InvalidActionDataError,
+  XA11Y_INVALID_TEXT_RANGE: InvalidTextRangeError,
   XA11Y_PLATFORM: PlatformError,
   XA11Y_NO_ELEMENT_BOUNDS: InvalidActionDataError,
   XA11Y_UNSUPPORTED: ActionNotSupportedError,
@@ -203,6 +223,11 @@ function toTypedError(err) {
     typed.candidates = Array.isArray(diagnosis.candidates) ? diagnosis.candidates : [];
     typed.scope = diagnosis.scope ?? null;
     typed.elapsedMs = diagnosis.elapsedMs ?? null;
+    if (typed instanceof InvalidTextRangeError) {
+      typed.start = diagnosis.start ?? null;
+      typed.end = diagnosis.end ?? null;
+      typed.length = diagnosis.length ?? null;
+    }
   }
   return typed;
 }
@@ -286,6 +311,7 @@ patchPrototypeMethods(native.Locator);
 patchPrototypeMethods(native.Event);
 patchPrototypeMethods(native.InputSim);
 patchPrototypeMethods(native.Screenshot);
+patchPrototypeMethods(native.Text);
 
 // ── Locator.waitUntil (JS-side polling loop) ───────────────────────────────
 //
@@ -866,8 +892,10 @@ const {
   InputSim,
   Locator,
   Screenshot,
+  Text,
   _makeTestInput,
   _makeTestLocator,
+  _makeTestTableLocator,
   _makeTestApp,
   _makeTestActionProbe,
   _makeDisconnectedSubscription,
@@ -889,6 +917,7 @@ module.exports = {
   Screenshot,
   ShellSurface,
   Subscription,
+  Text,
   getDefaultTimeout,
   inputSim,
   locator,
@@ -904,11 +933,13 @@ module.exports = {
   TimeoutError,
   InvalidSelectorError,
   InvalidActionDataError,
+  InvalidTextRangeError,
   PlatformError,
 
   // @internal -- used by unit tests
   _makeTestInput,
   _makeTestLocator,
+  _makeTestTableLocator,
   _makeTestApp,
   _makeTestActionProbe,
   _makeDisconnectedSubscription,

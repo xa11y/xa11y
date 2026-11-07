@@ -282,16 +282,38 @@ impl Locator {
         ))
     }
 
-    /// Select the text range from `start` to `end` (0-based character offsets).
-    /// Rejects with `InvalidActionDataError` if `start > end`.
-    #[napi(ts_return_type = "Promise<void>")]
-    pub fn select_text(&self, start: u32, end: u32) -> AsyncTask<ActionTask> {
-        AsyncTask::new(ActionTask::with_range(
+    /// Select a text range: `selectText(start, end)` or `selectText({ start,
+    /// end })`. Offsets are 0-based UTF-16 code units, the unit JS string
+    /// indices use. Rejects with `InvalidActionDataError` if `start > end`
+    /// and `InvalidTextRangeError` for a range past the end of the text or
+    /// splitting a surrogate pair (on backends that check; Linux does).
+    #[napi(
+        ts_args_type = "startOrRange: number | TextRange, end?: number | null",
+        ts_return_type = "Promise<void>"
+    )]
+    pub fn select_text(
+        &self,
+        start_or_range: napi::Either<f64, crate::types::TextRange>,
+        end: Option<f64>,
+    ) -> napi::Result<AsyncTask<ActionTask>> {
+        let (start, end) = crate::types::parse_select_range(start_or_range, end)?;
+        Ok(AsyncTask::new(ActionTask::with_range(
             self.inner.clone(),
             ActionKind::SelectText,
             start,
             end,
-        ))
+        )))
+    }
+
+    /// The matched element's text, read by range. See `Text`.
+    ///
+    /// Synchronous: it resolves nothing yet. The returned `Text` re-resolves
+    /// this locator on every read, waiting (up to the locator's timeout)
+    /// until the selector matches; reads do not wait for the element to be
+    /// visible or enabled.
+    #[napi]
+    pub fn text(&self) -> crate::text::Text {
+        crate::text::Text::from_core(self.inner.text())
     }
 
     /// Perform a custom action by its snake_case name.

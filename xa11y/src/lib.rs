@@ -56,6 +56,18 @@ pub use xa11y_core::screenshot;
 pub use xa11y_core::screenshot::{Annotated, LegendEntry, Omission, OmissionReason};
 pub use xa11y_core::{Screenshot, ScreenshotProvider};
 
+// Re-export table/collection metadata and text-by-range (see
+// `xa11y_core::table` and `xa11y_core::text_api`).
+pub use xa11y_core::table;
+pub use xa11y_core::text_api;
+pub use xa11y_core::{CellInfo, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
+#[doc(hidden)]
+pub use xa11y_core::{CellParts, CollectionParts, RowParts, TableParts, TextAttributeParts};
+pub use xa11y_core::{
+    Color, FindOptions, Text, TextAttributes, TextLines, TextRange, TextRun, TextRuns, TextScript,
+    TextUnit,
+};
+
 // Re-export bidi text helpers (see `xa11y_core::text`). `name`, `value`, and
 // `description` on `ElementData` are stripped of bidi format controls; these
 // helpers let callers strip ad-hoc strings or check membership.

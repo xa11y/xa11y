@@ -6,7 +6,11 @@ use napi::bindgen_prelude::{AsyncTask, Env, Task};
 
 use crate::map_err;
 use crate::subscription::NativeSubscription;
-use crate::types::{toggled_to_str, Rect, TreeNode};
+use crate::text::{Blocking, Text};
+use crate::types::{
+    checked_offset, parse_select_range, toggled_to_str, CellInfo, CollectionInfo, Rect, RowInfo,
+    TableInfo, TextRange, TreeNode,
+};
 
 /// A snapshot of a node in the accessibility tree.
 ///
@@ -27,6 +31,26 @@ pub struct Element {
 impl Element {
     pub(crate) fn new(data: xa11y::ElementData, provider: Arc<dyn xa11y::Provider>) -> Self {
         Self { data, provider }
+    }
+
+    pub(crate) fn from_core(el: xa11y::Element) -> Self {
+        Self::new(el.data().clone(), el.provider().clone())
+    }
+
+    /// The core element this snapshot wraps.
+    fn core(&self) -> xa11y::Element {
+        xa11y::Element::new(self.data.clone(), self.provider.clone())
+    }
+
+    /// Run a core call returning elements on the worker pool.
+    fn elements_task(
+        &self,
+        call: impl FnOnce(&xa11y::Element) -> xa11y::Result<Vec<xa11y::Element>> + Send + 'static,
+    ) -> AsyncTask<Blocking<Vec<Element>>> {
+        let el = self.core();
+        AsyncTask::new(Blocking::new(move || {
+            Ok(call(&el)?.into_iter().map(Element::from_core).collect())
+        }))
     }
 }
 
@@ -250,6 +274,39 @@ impl Element {
         self.data.states.fullscreen
     }
 
+    /// Size of a table, grid or tree grid, on the container: `{ rowCount,
+    /// columnCount }`, each a number, `'unknown'` (virtualized content), or
+    /// `null` when not reported. `null` when the element has no table
+    /// semantics.
+    #[napi(getter)]
+    pub fn table(&self) -> Option<TableInfo> {
+        self.data.table.map(Into::into)
+    }
+
+    /// Position of a table cell, including header cells: 0-based `row` /
+    /// `column`, `rowSpan` / `columnSpan`, and `header` (`'column'`, `'row'`
+    /// or `null`). Each field is `null` when not reported. `null` when the
+    /// element is not a cell.
+    #[napi(getter)]
+    pub fn cell(&self) -> Option<CellInfo> {
+        self.data.cell.map(Into::into)
+    }
+
+    /// Position of a table or tree-grid row: `{ index }`, 0-based (header
+    /// rows count). `null` when the element is not a row.
+    #[napi(getter)]
+    pub fn table_row(&self) -> Option<RowInfo> {
+        self.data.table_row.map(Into::into)
+    }
+
+    /// Position of an item in a list, tree, tab list or radio group: 0-based
+    /// `index`, `size` (a number, `'unknown'` or `null`) and 0-based tree
+    /// `depth`. `null` when the element is not a collection item.
+    #[napi(getter)]
+    pub fn collection(&self) -> Option<CollectionInfo> {
+        self.data.collection.map(Into::into)
+    }
+
     // ── Async navigation ────────────────────────────────────────────────
 
     /// Get direct children (lazy — each call re-queries the provider).
@@ -310,6 +367,72 @@ impl Element {
             max_depth: max_depth.map(|d| d as usize),
             process_scope: false,
         })
+    }
+
+    // ── Text, tables and selection (live reads) ─────────────────────────
+
+    /// This element's text, read by range: caret, selection, ranges,
+    /// rendered lines, geometry and formatting. Offsets are UTF-16 code
+    /// units.
+    ///
+    /// Rejects with `ActionNotSupportedError` when the element has no text
+    /// interface. The returned `Text` stays bound to this element; use
+    /// `Locator.text()` to re-resolve on every read.
+    #[napi(ts_return_type = "Promise<Text>")]
+    pub fn text(&self) -> AsyncTask<Blocking<Text>> {
+        let el = self.core();
+        AsyncTask::new(Blocking::new(move || Ok(Text::from_core(el.text()?))))
+    }
+
+    /// On a table: the cell at 0-based `row` / `column`. A slot covered by a
+    /// merged cell resolves to the merged cell. `null` when the slot is out
+    /// of range or not realized; content is never realized implicitly.
+    #[napi(
+        ts_args_type = "row: number, column: number",
+        ts_return_type = "Promise<Element | null>"
+    )]
+    pub fn cell_at(
+        &self,
+        row: f64,
+        column: f64,
+    ) -> napi::Result<AsyncTask<Blocking<Option<Element>>>> {
+        let row = checked_offset(row, "row")?;
+        let column = checked_offset(column, "column")?;
+        let el = self.core();
+        Ok(AsyncTask::new(Blocking::new(move || {
+            Ok(el.cell_at(row, column)?.map(Element::from_core))
+        })))
+    }
+
+    /// On a table: its column header cells.
+    #[napi(ts_return_type = "Promise<Element[]>")]
+    pub fn column_headers(&self) -> AsyncTask<Blocking<Vec<Element>>> {
+        self.elements_task(|el| el.column_headers())
+    }
+
+    /// On a table: its row header cells.
+    #[napi(ts_return_type = "Promise<Element[]>")]
+    pub fn row_headers(&self) -> AsyncTask<Blocking<Vec<Element>>> {
+        self.elements_task(|el| el.row_headers())
+    }
+
+    /// On a cell: the column header cells that head it.
+    #[napi(ts_return_type = "Promise<Element[]>")]
+    pub fn column_header_cells(&self) -> AsyncTask<Blocking<Vec<Element>>> {
+        self.elements_task(|el| el.column_header_cells())
+    }
+
+    /// On a cell: the row header cells that head it.
+    #[napi(ts_return_type = "Promise<Element[]>")]
+    pub fn row_header_cells(&self) -> AsyncTask<Blocking<Vec<Element>>> {
+        self.elements_task(|el| el.row_header_cells())
+    }
+
+    /// On a list, tree, table or tab list: the selected items (rows or
+    /// cells, whichever the platform reports).
+    #[napi(ts_return_type = "Promise<Element[]>")]
+    pub fn selected_items(&self) -> AsyncTask<Blocking<Vec<Element>>> {
+        self.elements_task(|el| el.selected_items())
     }
 
     // ── Actions (act on the captured snapshot — do not re-resolve) ──────
@@ -481,18 +604,29 @@ impl Element {
         ))
     }
 
-    /// Select the text range from `start` to `end` (0-based character
-    /// offsets). Rejects with `InvalidActionDataError` if `start > end`.
-    /// Acts on the captured snapshot.
-    #[napi(ts_return_type = "Promise<void>")]
-    pub fn select_text(&self, start: u32, end: u32) -> AsyncTask<ElementActionTask> {
-        AsyncTask::new(ElementActionTask::with_range(
+    /// Select a text range: `selectText(start, end)` or `selectText({ start,
+    /// end })`. Offsets are 0-based UTF-16 code units, the unit JS string
+    /// indices use. Rejects with `InvalidActionDataError` if `start > end`
+    /// and `InvalidTextRangeError` for a range past the end of the text or
+    /// splitting a surrogate pair (on backends that check; Linux does). Acts
+    /// on the captured snapshot.
+    #[napi(
+        ts_args_type = "startOrRange: number | TextRange, end?: number | null",
+        ts_return_type = "Promise<void>"
+    )]
+    pub fn select_text(
+        &self,
+        start_or_range: napi::Either<f64, TextRange>,
+        end: Option<f64>,
+    ) -> napi::Result<AsyncTask<ElementActionTask>> {
+        let (start, end) = parse_select_range(start_or_range, end)?;
+        Ok(AsyncTask::new(ElementActionTask::with_range(
             self.data.clone(),
             self.provider.clone(),
             ElementActionKind::SelectText,
             start,
             end,
-        ))
+        )))
     }
 
     /// Perform a custom action by its snake_case name. Acts on the captured

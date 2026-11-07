@@ -107,6 +107,7 @@ def test_auto_scroll_says_whether_scrolling_was_already_tried():
         (fake_xa11y.ActionNotSupportedError("no"), "'actions' list"),
         (fake_xa11y.InvalidSelectorError("bad"), "snake_case"),
         (fake_xa11y.InvalidActionDataError("range"), "out-of-range"),
+        (fake_xa11y.InvalidTextRangeError("range"), "UTF-16 code units"),
         (fake_xa11y.PlatformError("busy"), "modal"),
         (fake_xa11y.SelectorNotMatchedError("no match"), "near misses above"),
         (fake_xa11y.TimeoutError("timed out"), "last observed"),

@@ -669,6 +669,11 @@ fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     let mut fruit_list = Node::new(Role::List);
     fruit_list.set_label("Fruit List");
     fruit_list.set_children(vec![APPLE_ITEM, BANANA_ITEM, CHERRY_ITEM]);
+    // The set size lives on the container in AccessKit (it is per item in
+    // ARIA); the AT-SPI adapter reports it as each item's `setsize`, and the
+    // 0-based `position_in_set` below as the 1-based `posinset`.
+    // `xa11y/tests/integ/rich.rs` reads both back as `collection`.
+    fruit_list.set_size_of_set(3);
     nodes.push((FRUIT_LIST, fruit_list));
 
     let items = [
@@ -679,6 +684,7 @@ fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     for (idx, &(id, label)) in items.iter().enumerate() {
         let mut item = Node::new(Role::ListItem);
         item.set_label(label);
+        item.set_position_in_set(idx);
         item.add_action(Action::Click);
         item.add_action(Action::Focus);
         if id == CHERRY_ITEM {
