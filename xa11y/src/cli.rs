@@ -1994,18 +1994,15 @@ pub(crate) enum PointerCenter {
 }
 
 impl PointerCenter {
-    /// Build from the input backend's answer, or the failure to get one.
-    ///
-    /// A backend that cannot be constructed is not "usable": every pointer
-    /// command would fail with that same error, so a center offered as their
-    /// input would be a promise nothing keeps.
+    /// Build from [`element_bounds_are_pointer_targets`]'s answer, or the
+    /// failure to get one (an invalid `XA11Y_LINUX_INPUT_BACKEND`), which
+    /// leaves the coordinate space unknown.
     pub(crate) fn from_capability(capability: Result<bool>) -> Self {
         match capability {
             Ok(true) => Self::Usable,
             Ok(false) => Self::Unavailable(ELEMENT_BOUNDS_NOT_SCREEN.to_string()),
             Err(e) => Self::Unavailable(format!(
-                "input simulation is unavailable, so no pointer command can use an \
-                 element's coordinates: {e}"
+                "could not tell whether element bounds are screen coordinates: {e}"
             )),
         }
     }
@@ -2024,23 +2021,23 @@ pub(crate) const ELEMENT_BOUNDS_NOT_SCREEN: &str =
      so a point computed from an element's bounds would land somewhere else. Use \
      a semantic action (press, focus, ...) on the element instead";
 
-/// Ask the active input backend whether element bounds are screen coordinates.
+/// Whether element bounds are screen coordinates, so a center computed from
+/// them is a pointer target.
 ///
-/// This is the same signal [`Mouse`](crate::input::Mouse) uses to refuse an
-/// element-targeted pointer action, not a second detection. The answer is
-/// fixed for the process (the backend is chosen from the environment when it
-/// is built), so a success is memoized: on Wayland, building the backend
-/// creates a uinput device, which a long MCP session should not repeat on
-/// every `find`. A failure is not memoized and is retried on the next call.
+/// The same decision [`Mouse`](crate::input::Mouse) refuses element targets
+/// by, read without building an input backend: on macOS and Windows bounds
+/// are always screen coordinates, and on Linux it is the session the input
+/// backend is chosen from (X11 yes, Wayland no). A machine that cannot
+/// simulate input still reports correct centers; only the session decides.
 pub(crate) fn element_bounds_are_pointer_targets() -> Result<bool> {
-    static ANSWER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if let Some(answer) = ANSWER.get() {
-        return Ok(*answer);
+    #[cfg(target_os = "linux")]
+    {
+        xa11y_linux::LinuxInputProvider::selected_backend_uses_screen_coordinates()
     }
-    let answer = crate::input_sim()?
-        .backend()
-        .element_bounds_are_screen_coordinates();
-    Ok(*ANSWER.get_or_init(|| answer))
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(true)
+    }
 }
 
 /// The [`PointerCenter`] for this process's input backend.
@@ -5468,13 +5465,13 @@ mod tests {
         };
         assert!(reason.contains("not screen coordinates"), "{reason}");
         let PointerCenter::Unavailable(reason) =
-            PointerCenter::from_capability(Err(Error::Unsupported {
-                feature: "uinput module not loaded".into(),
+            PointerCenter::from_capability(Err(Error::InvalidActionData {
+                message: "invalid XA11Y_LINUX_INPUT_BACKEND value \"xyz\"".into(),
             }))
         else {
-            panic!("an unavailable input backend must withhold the center");
+            panic!("an unknown coordinate space must withhold the center");
         };
-        assert!(reason.contains("uinput module not loaded"), "{reason}");
+        assert!(reason.contains("XA11Y_LINUX_INPUT_BACKEND"), "{reason}");
     }
 
     #[test]

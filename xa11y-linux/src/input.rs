@@ -432,6 +432,21 @@ enum InputBackend {
 }
 
 impl LinuxInputProvider {
+    /// Whether element bounds are screen coordinates for the backend
+    /// [`Self::new`] would build: the answer
+    /// [`InputProvider::element_bounds_are_screen_coordinates`] gives on the
+    /// built provider, read from the session alone. It opens no X connection
+    /// and creates no uinput device, so it works where the backend itself
+    /// cannot be built (no XTest, no `/dev/uinput`). Fails only on an invalid
+    /// `XA11Y_LINUX_INPUT_BACKEND`.
+    pub fn selected_backend_uses_screen_coordinates() -> Result<bool> {
+        Ok(bounds_are_screen_coordinates_on(Self::selected_backend()?))
+    }
+
+    fn selected_backend() -> Result<DesktopBackend> {
+        select_backend("XA11Y_LINUX_INPUT_BACKEND", "input simulation")
+    }
+
     /// Choose a backend based on the session environment.
     ///
     /// - X11 session → X11 (XTest).
@@ -441,7 +456,7 @@ impl LinuxInputProvider {
     ///   `input` group, or [`Error::Unsupported`] if the kernel `uinput`
     ///   module isn't loaded.
     pub fn new() -> Result<Self> {
-        match select_backend("XA11Y_LINUX_INPUT_BACKEND", "input simulation")? {
+        match Self::selected_backend()? {
             DesktopBackend::X11 => {
                 let x11 = X11InputBackend::new()?;
                 Ok(Self {
@@ -526,6 +541,15 @@ impl LinuxInputProvider {
     }
 }
 
+/// X11 clients know their screen position, so AT-SPI bounds are screen
+/// coordinates; Wayland clients do not (issue #495).
+fn bounds_are_screen_coordinates_on(backend: DesktopBackend) -> bool {
+    match backend {
+        DesktopBackend::X11 => true,
+        DesktopBackend::Wayland => false,
+    }
+}
+
 impl InputProvider for LinuxInputProvider {
     fn validate_pointer_target(&self, point: Point) -> Result<()> {
         let checked = self.to_physical(point);
@@ -541,10 +565,10 @@ impl InputProvider for LinuxInputProvider {
     /// bounds AT-SPI reports are not screen coordinates and an
     /// element-targeted click would land somewhere else (issue #495).
     fn element_bounds_are_screen_coordinates(&self) -> bool {
-        match self.backend {
-            InputBackend::X11(_) => true,
-            InputBackend::Wayland(_) => false,
-        }
+        bounds_are_screen_coordinates_on(match self.backend {
+            InputBackend::X11(_) => DesktopBackend::X11,
+            InputBackend::Wayland(_) => DesktopBackend::Wayland,
+        })
     }
 
     fn pointer_move(&self, to: Point) -> Result<()> {

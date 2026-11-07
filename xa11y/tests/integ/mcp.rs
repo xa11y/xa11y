@@ -144,17 +144,27 @@ mod tests {
     /// The expectation comes from the library's own signal — the one `Mouse`
     /// refuses element targets by — so this runs unchanged in the X11 job
     /// (center present, `-o center` prints) and the native Wayland job
-    /// (center omitted with a reason, `-o center` exits 1). In the Wayland
-    /// container there may be no `/dev/uinput`, in which case the input
-    /// backend cannot be built at all and the omission names that instead.
+    /// (center omitted with a reason, `-o center` exits 1). The signal is
+    /// read from the session, so it holds whether or not the input backend
+    /// can be built (the Wayland container may have no `/dev/uinput`); where
+    /// the backend does build, it must agree.
     #[test]
     #[ignore]
     fn mcp_find_and_cli_center_follow_the_input_backend() {
         let pid = h::app_root().pid.expect("the test app reports a pid");
-        let usable = matches!(
-            xa11y::input_sim().map(|sim| sim.backend().element_bounds_are_screen_coordinates()),
-            Ok(true)
-        );
+        // macOS and Windows bounds are always screen coordinates.
+        #[cfg(target_os = "linux")]
+        let usable = xa11y_linux::LinuxInputProvider::selected_backend_uses_screen_coordinates()
+            .expect("the session names an input backend");
+        #[cfg(not(target_os = "linux"))]
+        let usable = true;
+        if let Ok(sim) = xa11y::input_sim() {
+            assert_eq!(
+                sim.backend().element_bounds_are_screen_coordinates(),
+                usable,
+                "the session answer must match the built backend's"
+            );
+        }
 
         let mut mcp = Session::start();
         let result = mcp.call_tool("find", json!({"pid": pid, "selector": "button"}));
