@@ -342,6 +342,10 @@ fn range_at_maps_words_lines_and_characters() {
     // Lines include their newline.
     assert_eq!(text.range_at(0, TextUnit::Line).expect("line"), r(0, 27));
     assert_eq!(text.range_at(30, TextUnit::Line).expect("line"), r(27, 56));
+    // Inside a surrogate pair, every unit answers for the pair's start, as
+    // on Qt (whose offsets are UTF-16 and need no conversion).
+    assert_eq!(text.range_at(13, TextUnit::Line).expect("line"), r(0, 27));
+    assert_eq!(text.range_at(13, TextUnit::Word).expect("word"), r(6, 15));
     // At the end: the line that ends there.
     assert_eq!(text.range_at(72, TextUnit::Line).expect("line"), r(57, 72));
     assert!(matches!(

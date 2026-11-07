@@ -10,7 +10,10 @@ What AX shows, and so what is pinned here:
   converted; what the provider adds is refusing a range that splits a
   surrogate pair, which AX would happily serve.
 - **No word or paragraph unit.** AX has parameterized attributes for a
-  composed character and a rendered line only.
+  rendered line only. A character is one Unicode scalar, as on every
+  platform, not AX's composed character sequence.
+- **Colours are the app's components.** AX drops the colour space in transit,
+  so ``#ff0000`` set in sRGB arrives as those components.
 - **Header cells are AppKit sort buttons**, not cells, so they carry no
   ``cell`` metadata; the header queries still return them.
 - **Cells have no name.** The text is the static text inside each cell.
@@ -86,8 +89,15 @@ def test_length_and_reads_count_utf16_units(rich):
 
 @pytest.mark.parametrize(
     "bad",
-    [(13, 15), (12, 13), (50, 52), (70, LENGTH + 1), (5, 2)],
-    ids=["starts-mid-emoji", "ends-mid-emoji", "starts-mid-clef", "past-end", "reversed"],
+    [(13, 15), (12, 13), (50, 52), (13, 13), (70, LENGTH + 1), (5, 2)],
+    ids=[
+        "starts-mid-emoji",
+        "ends-mid-emoji",
+        "starts-mid-clef",
+        "empty-mid-emoji",
+        "past-end",
+        "reversed",
+    ],
 )
 def test_reads_that_split_a_pair_or_overrun_are_refused(rich, bad):
     with pytest.raises(xa11y.InvalidTextRangeError):

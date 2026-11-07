@@ -5609,7 +5609,14 @@ impl Provider for WindowsProvider {
     }
 
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
-        let doc = self.document(element)?;
+        // Name the action the caller asked for, not the text read under it.
+        let doc = self.document(element).map_err(|e| match e {
+            Error::ActionNotSupported { role, .. } => Error::ActionNotSupported {
+                action: "set_text_selection".to_string(),
+                role,
+            },
+            e => e,
+        })?;
         let range = rich::range(&doc, xa11y_core::text_api::TextRange { start, end })?;
         uia_call(|| unsafe { range.Select() })
     }
@@ -5763,25 +5770,35 @@ impl Provider for WindowsProvider {
         use xa11y_core::text_api::{slice_utf16, utf16_len, TextRange, TextUnit};
         let doc = self.document(e)?;
         let text = rich::contents(&doc)?;
-        slice_utf16(
-            &text,
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let length = units.len() as u32;
+        xa11y_core::text_api::check_in_bounds(
             TextRange {
                 start: offset,
                 end: offset,
             },
+            length,
         )?;
+        if length == 0 {
+            return Ok(TextRange { start: 0, end: 0 });
+        }
+        // At the end, answer for the unit that ends there; inside a surrogate
+        // pair, for the pair. Both as on Linux and macOS.
+        let mut offset = offset.min(length - 1);
+        let is_low = |u: u16| (0xDC00..=0xDFFF).contains(&u);
+        let is_high = |u: u16| (0xD800..=0xDBFF).contains(&u);
+        if offset > 0 && is_low(units[offset as usize]) && is_high(units[offset as usize - 1]) {
+            offset -= 1;
+        }
         if unit == TextUnit::Character {
-            let prefix = slice_utf16(
-                &text,
-                TextRange {
-                    start: 0,
-                    end: offset,
-                },
-            )?;
-            let c = text[prefix.len()..].chars().next();
+            let width = if is_high(units[offset as usize]) && offset + 1 < length {
+                2
+            } else {
+                1
+            };
             return Ok(TextRange {
                 start: offset,
-                end: offset + c.map_or(0, |c| c.len_utf16() as u32),
+                end: offset + width,
             });
         }
         let include_newline = matches!(unit, TextUnit::Line | TextUnit::Paragraph);
@@ -5793,8 +5810,13 @@ impl Provider for WindowsProvider {
         };
         let mut r = rich::offsets(&doc, &rich::unit_at(&doc, offset, unit)?)?;
         // WPF excludes CR/LF from the enclosing line/paragraph. Include the
-        // reported separators so paging can resume at the next unit.
-        if include_newline {
+        // reported separators so paging can resume at the next unit. A
+        // provider whose unit already ends in its terminator (RichEdit
+        // paragraphs end in CR) keeps it as it is: appending the *next*
+        // separator would swallow an empty line after it.
+        let ends_with_terminator =
+            r.end > r.start && r.end <= length && matches!(units[r.end as usize - 1], 0x0A | 0x0D);
+        if include_newline && !ends_with_terminator {
             let tail = slice_utf16(
                 &text,
                 TextRange {

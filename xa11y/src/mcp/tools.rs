@@ -1096,7 +1096,8 @@ fn tool_definition(name: &str) -> Value {
                      `find` answers `found: false` and `match: null` when there is no \
                      match. Where `find` names the range of another operation, a miss \
                      fails with `no_match` saying where it looked and the text length. \
-                     A range that is reversed, past the end, or splits a surrogate pair \
+                     A reversed range fails with `invalid_arguments` before any read. \
+                     A range past the end, or one that splits a surrogate pair, \
                      fails with `invalid_text_range`, whose `text_range` gives `start`, \
                      `end` and the text's current `length`. Ranges do not follow edits: \
                      re-read after the text changes.\n\n\

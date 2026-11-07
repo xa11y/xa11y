@@ -727,6 +727,16 @@ int safe_ax_copy_attribute_values(
     }
 }
 
+// Whether `value` is an AXUIElement. An app can answer an element-valued
+// attribute with any CF type, and AX calls on a non-element are undefined.
+bool safe_ax_is_element(CFTypeRef value) {
+    @try {
+        return value != NULL && CFGetTypeID(value) == AXUIElementGetTypeID();
+    } @catch (NSException *e) {
+        return false;
+    }
+}
+
 // Read a CFRange out of an AXValue. False when `value` is not an AXValue
 // holding a CFRange: `AXValueGetValue` is only defined for AXValues, and an
 // app can answer a range attribute with any CF type.
@@ -814,31 +824,48 @@ typedef struct {
     uint8_t background[4];
 } XA11yTextRun;
 
+// A text colour's components, as the app set them. The AX attributed string
+// carries a CGColor whose colour space does not survive the trip from the
+// app (sRGB red arrives as components (1, 0, 0) labelled generic RGB, and
+// converting that "back" to sRGB yields #ff2600), so the components are read
+// as they are, not matched to another space. Grey is one component.
 static bool xa11y_color_rgba(CFTypeRef value, uint8_t out[4]) {
     if (value == NULL || CFGetTypeID(value) != CGColorGetTypeID()) {
         return false;
     }
-    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    if (srgb == NULL) {
+    CGColorRef color = (CGColorRef)value;
+    size_t n = CGColorGetNumberOfComponents(color);
+    const CGFloat *c = CGColorGetComponents(color);
+    CGColorSpaceRef space = CGColorGetColorSpace(color);
+    if (c == NULL || space == NULL) {
         return false;
     }
-    CGColorRef converted =
-        CGColorCreateCopyByMatchingToColorSpace(srgb, kCGRenderingIntentDefault, (CGColorRef)value, NULL);
-    CGColorSpaceRelease(srgb);
-    if (converted == NULL) {
-        return false;
-    }
-    bool ok = false;
-    if (CGColorGetNumberOfComponents(converted) == 4) {
-        const CGFloat *c = CGColorGetComponents(converted);
-        for (int i = 0; i < 4; i++) {
-            double v = c[i] < 0 ? 0 : (c[i] > 1 ? 1 : c[i]);
-            out[i] = (uint8_t)lround(v * 255.0);
+    double rgba[4];
+    switch (CGColorSpaceGetModel(space)) {
+    case kCGColorSpaceModelRGB:
+        if (n != 4) {
+            return false;
         }
-        ok = true;
+        rgba[0] = c[0];
+        rgba[1] = c[1];
+        rgba[2] = c[2];
+        rgba[3] = c[3];
+        break;
+    case kCGColorSpaceModelMonochrome:
+        if (n != 2) {
+            return false;
+        }
+        rgba[0] = rgba[1] = rgba[2] = c[0];
+        rgba[3] = c[1];
+        break;
+    default:
+        return false;
     }
-    CGColorRelease(converted);
-    return ok;
+    for (int i = 0; i < 4; i++) {
+        double v = rgba[i] < 0 ? 0 : (rgba[i] > 1 ? 1 : rgba[i]);
+        out[i] = (uint8_t)lround(v * 255.0);
+    }
+    return true;
 }
 
 // NSFontWeight's published constants, ultraLight .. black, against CSS
@@ -880,6 +907,10 @@ static NSDictionary<NSString *, NSArray<NSNumber *> *> *xa11y_ui_font_variants(v
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSMutableDictionary *m = [NSMutableDictionary new];
+        // Nothing may unwind out of a dispatch_once block: the token would
+        // stay "in progress" and every later call would deadlock. A failure
+        // leaves the table partial, which reads as "weight not reported".
+        @try {
         CTFontRef ui = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, 13.0, NULL);
         if (ui != NULL) {
             CTFontDescriptorRef base = CTFontCopyFontDescriptor(ui);
@@ -914,6 +945,8 @@ static NSDictionary<NSString *, NSArray<NSNumber *> *> *xa11y_ui_font_variants(v
                 CFRelease(base);
             }
             CFRelease(ui);
+        }
+        } @catch (NSException *e) {
         }
         variants = m;
     });

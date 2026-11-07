@@ -702,6 +702,19 @@ pub(crate) fn find_in_chunks(
             }
             Err(e) => return Err(e),
         };
+        // Match offsets are computed from the requested range, so a read that
+        // came back a different length (a backend that stripped or replaced
+        // units) would shift every later match silently. Refuse it instead.
+        let got = utf16_len(&text);
+        if got != end - read_pos {
+            return Err(Error::Platform {
+                code: -1,
+                message: format!(
+                    "reading {read_pos}..{end} returned {got} UTF-16 units, expected {}",
+                    end - read_pos
+                ),
+            });
+        }
         buf.extend(text.encode_utf16());
         read_pos = end;
         let mut i = (min_start - buf_start) as usize;

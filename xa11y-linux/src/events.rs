@@ -38,8 +38,9 @@ use xa11y_core::{
 };
 
 use crate::atspi::{
-    is_listable_top_level, is_password_role, read_interfaces, read_offset_unit, role_from_atspi,
-    try_map_atspi_role_number, AccessibleRef, Interfaces, LinuxProvider, OffsetUnit,
+    is_listable_top_level, is_password_role, read_interfaces, read_offset_unit_unless_gone,
+    role_from_atspi, try_map_atspi_role_number, AccessibleRef, Interfaces, LinuxProvider,
+    OffsetUnit,
 };
 
 /// AT-SPI2 event-interface names we subscribe to via match rules.
@@ -140,11 +141,14 @@ pub(crate) fn subscribe_for_pid(
     // `TextChanged` event can say whether its offsets are already UTF-16
     // without a D-Bus round trip per keystroke. A failed read fails the
     // subscription, as a failed window seed does: guessing a unit would
-    // report wrong ranges.
-    let offset_units = sender_buses
-        .iter()
-        .map(|bus| application_offset_unit(&conn, bus).map(|unit| (bus.clone(), unit)))
-        .collect::<Result<HashMap<_, _>>>()?;
+    // report wrong ranges. An application that has already left the bus is
+    // skipped, as the window seed skips it; its events would carry no range.
+    let mut offset_units = HashMap::new();
+    for bus in &sender_buses {
+        if let Some(unit) = application_offset_unit(&conn, bus)? {
+            offset_units.insert(bus.clone(), unit);
+        }
+    }
     // Windows already open get a snapshot now, so their eventual
     // `WindowClosed` names them even when a destroyed window no longer
     // answers by then.
@@ -585,7 +589,7 @@ fn event_body_fields(msg: &zbus::Message) -> Option<EventBody> {
 
 /// The offset unit of the application on `bus`, read from its
 /// `Application.ToolkitName`.
-fn application_offset_unit(conn: &Connection, bus: &str) -> Result<OffsetUnit> {
+fn application_offset_unit(conn: &Connection, bus: &str) -> Result<Option<OffsetUnit>> {
     let proxy = zbus::blocking::proxy::Builder::<Proxy>::new(conn)
         .destination(bus.to_owned())
         .and_then(|b| b.path(APP_ROOT_PATH))
@@ -596,7 +600,7 @@ fn application_offset_unit(conn: &Connection, bus: &str) -> Result<OffsetUnit> {
             code: -1,
             message: format!("Application proxy for {bus}: {e}"),
         })?;
-    read_offset_unit(&proxy, bus)
+    read_offset_unit_unless_gone(&proxy, bus)
 }
 
 /// The [`TextChange`] an `Object:TextChanged` signal reports, or `None` for

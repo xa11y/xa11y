@@ -3119,8 +3119,13 @@ mod wait_stable_tests {
     fn browser_publication_plateaus_do_not_finish_a_moving_wait() {
         // Chromium publishes nonfocused location changes at 500 ms intervals.
         // Several equal fresh queries in each interval must not return early.
-        let mut frames = vec![(Some(rect(0)), true); 5];
-        frames.extend(vec![(Some(rect(40)), true); 5]);
+        // Three polls per plateau, not five: a plateau's wall time is its poll
+        // count times the 100 ms interval *as the host schedules it*, and
+        // five polls left only 250 ms of slack under the 750 ms window, which
+        // a loaded CI runner (macos-latest) used up, ending the wait on the
+        // plateau. Three still repeat the same fresh bounds.
+        let mut frames = vec![(Some(rect(0)), true); 3];
+        frames.extend(vec![(Some(rect(40)), true); 3]);
         frames.push((Some(rect(80)), true));
         let (_p, loc) = animated(frames);
         let el = loc.wait_stable(Duration::from_secs(5)).expect("settles");

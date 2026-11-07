@@ -104,7 +104,8 @@ impl Text {
 
 #[napi]
 impl Text {
-    /// Length of the text in UTF-16 code units. Does not read the text.
+    /// Length of the text in UTF-16 code units. Reads the text only where
+    /// the platform counts something else (GTK on Linux, Windows).
     #[napi(ts_return_type = "Promise<number>")]
     pub fn length(&self) -> AsyncTask<Blocking<u32>> {
         let t = self.inner.clone();

@@ -2442,6 +2442,8 @@ fn capped_read(text: &Text, range: TextRange, cap: u32) -> CliResult<(String, u3
     };
     match text.read(cut) {
         Ok(s) => Ok((s, end)),
+        // A cut strictly inside a range already checked against the length
+        // can only fail by splitting a surrogate pair (see `resolve_range`).
         Err(Error::InvalidTextRange { .. }) if end < range.end => {
             // The cut split a surrogate pair. Back off one unit, or, when
             // that would read nothing (a cap of 1), take the whole pair.
@@ -2482,7 +2484,13 @@ fn resolve_range(text: &Text, spec: &RangeSpec) -> CliResult<TextRange> {
             start: 0,
             end: text.length()?,
         }),
-        RangeSpec::Offsets(r) => Ok(*r),
+        RangeSpec::Offsets(r) => {
+            // Checked against the length up front so a range past the end is
+            // refused with the caller's own offsets, not with whatever page of
+            // it a capped read happened to ask for.
+            crate::text_api::check_in_bounds(*r, text.length()?)?;
+            Ok(*r)
+        }
         RangeSpec::Find {
             needle,
             occurrence,

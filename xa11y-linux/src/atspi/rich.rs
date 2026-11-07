@@ -82,9 +82,27 @@ pub(crate) fn offset_unit_for(toolkit: Option<&str>) -> OffsetUnit {
 /// the provider's per-bus cache and the event subscription, which resolves
 /// each application's unit once when it subscribes.
 pub(crate) fn read_offset_unit(proxy: &Proxy<'_>, bus: &str) -> Result<OffsetUnit> {
+    read_offset_unit_unless_gone(proxy, bus)?.ok_or_else(|| Error::Platform {
+        code: -1,
+        message: format!(
+            "reading Application.ToolkitName of {bus} to choose the text offset unit failed: \
+             the application has gone"
+        ),
+    })
+}
+
+/// [`read_offset_unit`], answering `None` when the application has left the
+/// bus. The event subscription reads every sender's unit; an application
+/// that exits between being found and being asked has no events to
+/// interpret, and must not fail the whole subscription.
+pub(crate) fn read_offset_unit_unless_gone(
+    proxy: &Proxy<'_>,
+    bus: &str,
+) -> Result<Option<OffsetUnit>> {
     let toolkit = match proxy.get_property::<String>("ToolkitName") {
         Ok(name) => Some(name),
         Err(e) if is_property_absent(&e) => None,
+        Err(e) if crate::atspi::is_gone(&e) => return Ok(None),
         Err(e) => {
             return Err(Error::Platform {
                 code: -1,
@@ -95,7 +113,7 @@ pub(crate) fn read_offset_unit(proxy: &Proxy<'_>, bus: &str) -> Result<OffsetUni
             })
         }
     };
-    Ok(offset_unit_for(toolkit.as_deref()))
+    Ok(Some(offset_unit_for(toolkit.as_deref())))
 }
 
 /// The header kind an AT-SPI role names, if any.
@@ -528,6 +546,16 @@ impl LinuxProvider {
         let n: i32 = proxy
             .get_property(count_prop)
             .map_err(|e| call_failed(count_prop, e))?;
+        // A negative count is "unknown" (virtualized content): there is no
+        // range to probe, and an empty answer would read as "no headers".
+        if n < 0 {
+            return Err(Error::Unsupported {
+                feature: format!(
+                    "{method} on a table whose {count_prop} is unknown ({n}); read the headers \
+                     of individual cells with column_header_cells / row_header_cells"
+                ),
+            });
+        }
         if n > MAX_HEADER_PROBES {
             return Err(Error::Unsupported {
                 feature: format!(
@@ -587,6 +615,15 @@ impl LinuxProvider {
         let n: i32 = proxy
             .get_property("NSelectedChildren")
             .map_err(|e| call_failed("Selection.NSelectedChildren", e))?;
+        // Each item is a full element build (about ten round trips), so a
+        // select-all over a large view is refused rather than walked.
+        if n > MAX_HEADER_PROBES {
+            return Err(Error::Unsupported {
+                feature: format!(
+                    "selected_items over {n} selected children: more than {MAX_HEADER_PROBES}"
+                ),
+            });
+        }
         let mut refs = Vec::new();
         for i in 0..n.max(0) {
             let reply = proxy
@@ -726,14 +763,18 @@ impl LinuxProvider {
         } else {
             offset
         };
+        // An offset on the second half of a surrogate pair answers for the
+        // pair, for every unit and toolkit: GTK's code-point conversion would
+        // otherwise refuse it while Qt's UTF-16 offsets pass it through.
+        let units: Vec<u16> = full.encode_utf16().collect();
+        let at = if at > 0 && (0xDC00..=0xDFFF).contains(&units[at as usize]) {
+            at - 1
+        } else {
+            at
+        };
         if unit == TextUnit::Character {
             // The scalar value at `at` is known from the text itself.
-            let units: Vec<u16> = full.encode_utf16().collect();
-            let start = if at > 0 && (0xDC00..=0xDFFF).contains(&units[at as usize]) {
-                at - 1
-            } else {
-                at
-            };
+            let start = at;
             let width = if (0xD800..=0xDBFF).contains(&units[start as usize]) {
                 2
             } else {
@@ -798,10 +839,7 @@ impl LinuxProvider {
             end: to16(end)?,
         };
         Ok(match unit {
-            TextUnit::Line | TextUnit::Paragraph => {
-                let units: Vec<u16> = full.encode_utf16().collect();
-                include_line_terminator(&units, range)
-            }
+            TextUnit::Line | TextUnit::Paragraph => include_line_terminator(&units, range),
             TextUnit::Word | TextUnit::Character => range,
         })
     }

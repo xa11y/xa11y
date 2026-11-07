@@ -72,7 +72,8 @@ impl Count {
     }
 
     /// Map a platform total where a negative value means "unknown" (UIA,
-    /// AT-SPI and ARIA all use `-1`).
+    /// AT-SPI and ARIA all use `-1`). A total above `u32::MAX` does not fit
+    /// a `Known` count and also reads as `Unknown`.
     pub fn from_signed(n: i64) -> Self {
         match u32::try_from(n) {
             Ok(n) => Self::Known(n),
