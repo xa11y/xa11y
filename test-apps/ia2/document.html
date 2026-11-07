@@ -6,5 +6,20 @@
 <p>Before <a href="#target">embedded link</a> after.</p>
 <label>Fixture text <input value="alpha beta"></label>
 <button type="button">Fixture action</button>
+<button type="button" onclick="this.remove()">Remove once</button>
 <p id="target">Stable document target.</p>
+
+<label>IA2 editor <textarea aria-label="IA2 editor">Hello &#x1f600; world
+Second line</textarea></label>
+<div contenteditable="true" role="textbox" aria-label="IA2 rich editor">Hello <b>bold</b><i> italic</i><span style="color:rgb(255,0,0);text-decoration:underline"> red</span></div>
+<table aria-label="IA2 fixture table">
+<thead><tr><th scope="col">Row</th><th scope="col">Name</th><th scope="col">Role</th></tr></thead>
+<tbody><tr><th scope="row">Row A</th><td colspan="2">Merged value</td></tr>
+<tr><th scope="row">Row B</th><td>Bob</td><td>User</td></tr></tbody>
+</table>
+<div role="group" aria-label="Original parent"><button id="moving-control">Moving control</button></div>
+<div role="group" aria-label="New parent" id="new-parent"></div>
+<button onclick="document.getElementById('new-parent').appendChild(document.getElementById('moving-control'))">Reparent control</button>
+<button onclick="let p=document.createElement('div');p.id='deep-root';document.body.appendChild(p);for(let i=0;i&lt;40;i++){const c=document.createElement('div');c.setAttribute('role','group');c.setAttribute('aria-label','Deep group '+i);p.appendChild(c);p=c;}const b=document.createElement('button');b.textContent='Deep target';p.appendChild(b);">Add deep tree</button>
+<button onclick="document.getElementById('deep-root')?.remove()">Remove deep tree</button>
 </html>
