@@ -1257,6 +1257,7 @@ fn event_kind_to_str(kind: &xa11y::EventKind) -> &'static str {
         xa11y::EventKind::MenuOpened => "menu_opened",
         xa11y::EventKind::MenuClosed => "menu_closed",
         xa11y::EventKind::TextChanged => "text_changed",
+        xa11y::EventKind::TextSelectionChanged => "text_selection_changed",
         xa11y::EventKind::Announcement => "announcement",
         // See the note on `to_py_err`: variant coverage is enforced by
         // `cargo xtask check-bindings-parity`, not by the compiler.
@@ -1318,6 +1319,8 @@ impl EventType {
     #[classattr]
     const TEXT_CHANGED: &'static str = "text_changed";
     #[classattr]
+    const TEXT_SELECTION_CHANGED: &'static str = "text_selection_changed";
+    #[classattr]
     const ANNOUNCEMENT: &'static str = "announcement";
 }
 
@@ -1341,6 +1344,10 @@ struct Event {
     /// For state_changed events: the new boolean value.
     #[pyo3(get)]
     state_value: Option<bool>,
+    /// For text_changed events: the inserted or deleted text, when the
+    /// platform reports it.
+    #[pyo3(get)]
+    text_change: Option<rich::TextChange>,
 }
 
 impl Event {
@@ -1359,6 +1366,7 @@ impl Event {
             provider,
             state_flag,
             state_value,
+            text_change: event.text_change.map(rich::TextChange::from),
         }
     }
 }
@@ -2990,6 +2998,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<rich::TextRun>()?;
     m.add_class::<rich::TextLines>()?;
     m.add_class::<rich::TextRuns>()?;
+    m.add_class::<rich::TextChange>()?;
 
     register_exception::<XA11yError>(m, "XA11yError")?;
     register_exception::<PermissionDeniedError>(m, "PermissionDeniedError")?;
@@ -3026,6 +3035,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_make_test_shell_surfaces, m)?)?;
     m.add_function(wrap_pyfunction!(_find_test_shell_surface, m)?)?;
     m.add_function(wrap_pyfunction!(_make_disconnected_subscription, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_text_event_subscription, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_action_probe, m)?)?;
 
     Ok(())
@@ -3159,6 +3169,18 @@ fn _find_test_shell_surface(
 fn _make_disconnected_subscription() -> Subscription {
     Subscription {
         inner: std::sync::Mutex::new(Some(xa11y::mock::disconnected_subscription())),
+        provider: xa11y::mock::build_provider(),
+    }
+}
+
+/// Create a Subscription that yields the mock's text events
+/// (`xa11y::mock::text_edit_events`) and then disconnects.
+#[pyfunction]
+fn _make_test_text_event_subscription() -> Subscription {
+    Subscription {
+        inner: std::sync::Mutex::new(Some(xa11y::mock::scripted_subscription(
+            xa11y::mock::text_edit_events(),
+        ))),
         provider: xa11y::mock::build_provider(),
     }
 }

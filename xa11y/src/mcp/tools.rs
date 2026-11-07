@@ -1301,7 +1301,8 @@ fn subscription_id_property() -> Map<String, Value> {
 fn events_start_description() -> String {
     format!(
         "Start watching an application's accessibility events — focus moves, value \
-         and state changes, windows opening, selections, announcements. Returns a \
+         and state changes, text edits and caret moves, windows opening, selections, \
+         announcements. Returns a \
          `subscription_id` to pass to `events_poll` and `events_stop`.\n\n\
          Watching is per application: there is no `shell` argument, because \
          accessibility events are delivered by an application's own \
@@ -1333,7 +1334,13 @@ fn events_poll_description() -> String {
          Each event carries a `kind`, a `sequence` (monotonic, so a gap is exactly \
          what was dropped), `at_ms` since the subscription started, and the `target` \
          element in the same shape `find` returns — bounds, states and all. A \
-         `state_changed` event also carries `state_flag` and `state_value`.\n\n\
+         `state_changed` event also carries `state_flag` and `state_value`. A \
+         `text_changed` event carries `text_change` when the platform reports the \
+         edit (Linux only): `kind` (`inserted` / `deleted`), `range` in UTF-16 units \
+         or null when the platform counts in another unit, and `text` or null, cut \
+         to {range_cap} units with `text_truncated` and `text_length` \
+         when longer. `text_selection_changed` means the caret or text selection \
+         moved; it carries no offsets, so read them with the `text` tool.\n\n\
          Two fields say what the events alone cannot. `dropped` counts events lost \
          to buffer eviction since the previous poll — poll more often, narrow \
          `kinds`, or accept the gap. `live: false` means the platform dropped the \
@@ -1346,6 +1353,7 @@ fn events_poll_description() -> String {
          UI as it is now.\n\n\
          {field_cap}",
         field_cap = field_cap_note(),
+        range_cap = cli::RANGE_TEXT_MAX_UNITS,
     )
 }
 

@@ -318,3 +318,18 @@ pub fn make_disconnected_subscription() -> NativeSubscription {
         provider as Arc<dyn xa11y::Provider>,
     )
 }
+
+/// Create a `_NativeSubscription` that yields the mock's text events
+/// (`xa11y::mock::text_edit_events`) and then disconnects.
+#[napi(js_name = "_makeTestTextEventSubscription")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_text_event_subscription() -> NativeSubscription {
+    let provider = xa11y::mock::build_provider();
+    NativeSubscription::new(
+        xa11y::mock::scripted_subscription(xa11y::mock::text_edit_events()),
+        provider as Arc<dyn xa11y::Provider>,
+    )
+}

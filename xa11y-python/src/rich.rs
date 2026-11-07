@@ -338,6 +338,54 @@ impl TextRun {
     }
 }
 
+/// What a ``text_changed`` event inserted or deleted (``Event.text_change``).
+///
+/// Each field is what the platform supplied: ``range`` is ``None`` when it
+/// counts offsets in a unit other than UTF-16 (on Linux, every toolkit but
+/// Qt), and ``text`` is ``None`` when it does not send the text.
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+pub(crate) struct TextChange {
+    /// ``"inserted"`` or ``"deleted"``.
+    #[pyo3(get)]
+    kind: &'static str,
+    /// Where, in UTF-16 code units: for an insertion the range the new text
+    /// now occupies, for a deletion the range it occupied. ``None`` when not
+    /// reported in UTF-16.
+    #[pyo3(get)]
+    range: Option<TextRange>,
+    /// The inserted or deleted text, or ``None`` when not supplied.
+    #[pyo3(get)]
+    text: Option<String>,
+}
+
+#[pymethods]
+impl TextChange {
+    fn __repr__(&self) -> String {
+        format!(
+            "TextChange(kind='{}', range={}, text={})",
+            self.kind,
+            self.range
+                .map(|r| r.__repr__())
+                .unwrap_or_else(|| "None".to_string()),
+            self.text
+                .as_ref()
+                .map(|t| format!("{t:?}"))
+                .unwrap_or_else(|| "None".to_string()),
+        )
+    }
+}
+
+impl From<xa11y::TextChange> for TextChange {
+    fn from(c: xa11y::TextChange) -> Self {
+        Self {
+            kind: c.kind.to_snake_case(),
+            range: c.range.map(TextRange::from),
+            text: c.text,
+        }
+    }
+}
+
 /// One page of rendered lines from ``Text.lines``.
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]

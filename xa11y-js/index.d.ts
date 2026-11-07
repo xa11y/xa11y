@@ -59,6 +59,8 @@ export type {
   ShellSurfaceKindName,
   TableInfo,
   TextAttributes,
+  TextChange,
+  TextChangeKindName,
   TextFindOptions,
   TextLines,
   TextRange,

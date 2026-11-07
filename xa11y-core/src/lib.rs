@@ -33,9 +33,9 @@ pub use element::{
 #[doc(hidden)]
 pub use element::{ElementParts, StateParts};
 pub use error::{AutoScrollOutcome, Delivery, Diagnosis, Error, PointerTargetDiagnosis, Result};
+pub use event::{ElementState, Event, EventKind, StateFlag, TextChange, TextChangeKind};
 #[doc(hidden)]
-pub use event::EventParts;
-pub use event::{ElementState, Event, EventKind, StateFlag};
+pub use event::{EventParts, TextChangeParts};
 pub use event_provider::{CancelHandle, EventReceiver, RecvStatus, Subscription, SubscriptionIter};
 pub use input::{
     anchor_point, point_for, Anchor, ClickOptions, ClickTarget, DragOptions, InputProvider,

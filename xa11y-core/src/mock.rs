@@ -1511,6 +1511,59 @@ pub fn disconnected_subscription() -> Subscription {
     Subscription::new(EventReceiver::new(rx), CancelHandle::noop())
 }
 
+/// Build a [`Subscription`] that yields `events` in order and then reports
+/// a disconnect.
+///
+/// Lets binding tests drive their event conversion with real core events,
+/// without a platform event source.
+pub fn scripted_subscription(events: Vec<crate::event::Event>) -> Subscription {
+    use crate::event_provider::{CancelHandle, EventReceiver};
+
+    let (tx, rx) = std::sync::mpsc::channel::<crate::event::Event>();
+    for event in events {
+        // The receiver is alive in this scope, so the send cannot fail.
+        let _ = tx.send(event);
+    }
+    drop(tx);
+    Subscription::new(EventReceiver::new(rx), CancelHandle::noop())
+}
+
+/// The text events the binding tests convert, in order:
+///
+/// 1. `TextChanged` inserting `"hé😀"` at `3..7` (UTF-16, as Qt reports it).
+/// 2. `TextChanged` deleting `"x"` with no range (a code-point toolkit).
+/// 3. `TextChanged` with no delta (macOS, Windows).
+/// 4. `TextSelectionChanged`.
+pub fn text_edit_events() -> Vec<crate::event::Event> {
+    use crate::event::{Event, EventKind, TextChangeKind, TextChangeParts};
+    use crate::text_api::TextRange;
+
+    let mut inserted = Event::new(EventKind::TextChanged, "Mock", 1);
+    inserted.text_change = Some(
+        TextChangeParts {
+            kind: TextChangeKind::Inserted,
+            range: Some(TextRange { start: 3, end: 7 }),
+            text: Some("hé😀".to_string()),
+        }
+        .into(),
+    );
+    let mut deleted = Event::new(EventKind::TextChanged, "Mock", 1);
+    deleted.text_change = Some(
+        TextChangeParts {
+            kind: TextChangeKind::Deleted,
+            range: None,
+            text: Some("x".to_string()),
+        }
+        .into(),
+    );
+    vec![
+        inserted,
+        deleted,
+        Event::new(EventKind::TextChanged, "Mock", 1),
+        Event::new(EventKind::TextSelectionChanged, "Mock", 1),
+    ]
+}
+
 /// Display-free input backend for binding geometry and host-thread tests.
 #[doc(hidden)]
 pub struct MockInputProvider {

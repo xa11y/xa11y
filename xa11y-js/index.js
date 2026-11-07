@@ -899,6 +899,7 @@ const {
   _makeTestApp,
   _makeTestActionProbe,
   _makeDisconnectedSubscription,
+  _makeTestTextEventSubscription,
 } = native;
 // Wrapped, unlike the helpers above: these lookups fail on purpose in the
 // shell tests (no such surface / an ambiguous shell), and a test asserting
@@ -943,6 +944,7 @@ module.exports = {
   _makeTestApp,
   _makeTestActionProbe,
   _makeDisconnectedSubscription,
+  _makeTestTextEventSubscription,
   _makeTestShellSurfaces,
   _makeTestShellSurfaceByKind,
   _makeTestAmbiguousShellSurfaceByKind,

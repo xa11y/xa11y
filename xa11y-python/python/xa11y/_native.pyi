@@ -394,6 +394,28 @@ class TextRuns:
         """Where to start the next page; set exactly when ``truncated``."""
     def __repr__(self) -> str: ...
 
+TextChangeKindName = Literal["inserted", "deleted"]
+
+class TextChange:
+    """What a ``text_changed`` event inserted or deleted (``Event.text_change``).
+
+    Each field is what the platform supplied: ``range`` is ``None`` when it
+    counts offsets in a unit other than UTF-16 (on Linux, every toolkit but
+    Qt), and ``text`` is ``None`` when it does not send the text."""
+
+    @property
+    def kind(self) -> TextChangeKindName:
+        """``"inserted"`` or ``"deleted"``."""
+    @property
+    def range(self) -> TextRange | None:
+        """Where, in UTF-16 code units: for an insertion the range the new text
+        now occupies, for a deletion the range it occupied. ``None`` when not
+        reported in UTF-16."""
+    @property
+    def text(self) -> str | None:
+        """The inserted or deleted text, or ``None`` when not supplied."""
+    def __repr__(self) -> str: ...
+
 class Text:
     """An element's text, read by range. Every method is a live platform
     read; offsets are UTF-16 code units, so use ``read`` rather than slicing
@@ -454,6 +476,7 @@ class EventType:
     MENU_OPENED: str = "menu_opened"
     MENU_CLOSED: str = "menu_closed"
     TEXT_CHANGED: str = "text_changed"
+    TEXT_SELECTION_CHANGED: str = "text_selection_changed"
     ANNOUNCEMENT: str = "announcement"
 
 # ── Event ────────────────────────────────────────────────────────────────────
@@ -480,6 +503,15 @@ class Event:
         """For ``state_changed`` events: the new boolean value of the flag.
 
         ``None`` for other event types.
+        """
+    @property
+    def text_change(self) -> TextChange | None:
+        """For ``text_changed`` events: what was inserted or deleted, when the
+        platform reports it (Linux only for now).
+
+        ``None`` for other event types, and for a ``text_changed`` with no
+        delta. A ``text_selection_changed`` event carries no offsets: read
+        ``Text.caret()`` / ``Text.selections()`` on the target.
         """
     def __repr__(self) -> str: ...
 
@@ -1489,6 +1521,7 @@ def _find_test_shell_surface(
     kind: ShellSurfaceKindName, *, timeout: float | None = None
 ) -> ShellSurface: ...
 def _make_disconnected_subscription() -> Subscription: ...
+def _make_test_text_event_subscription() -> Subscription: ...
 
 class _TestActionProbe:
     def locator(self, selector: str) -> Locator: ...

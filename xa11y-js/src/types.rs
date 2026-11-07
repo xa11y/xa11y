@@ -73,6 +73,7 @@ pub fn event_kind_to_str(kind: &xa11y::EventKind) -> &'static str {
         xa11y::EventKind::MenuOpened => "menuOpened",
         xa11y::EventKind::MenuClosed => "menuClosed",
         xa11y::EventKind::TextChanged => "textChanged",
+        xa11y::EventKind::TextSelectionChanged => "textSelectionChanged",
         xa11y::EventKind::Announcement => "announcement",
         // `EventKind` is `#[non_exhaustive]`; coverage is enforced by
         // `cargo xtask check-bindings-parity`, not by the compiler.
@@ -257,6 +258,44 @@ impl TextRange {
             start: checked_offset(self.start, &format!("{what}.start"))?,
             end: checked_offset(self.end, &format!("{what}.end"))?,
         })
+    }
+}
+
+/// What a `textChanged` event inserted or deleted (`Event.textChange`).
+///
+/// Each field is what the platform supplied: `range` is `null` when it counts
+/// offsets in a unit other than UTF-16 (on Linux, every toolkit but Qt), and
+/// `text` is `null` when it does not send the text.
+#[napi(object, use_nullable = true)]
+#[derive(Clone)]
+pub struct TextChange {
+    /// `'inserted'` or `'deleted'`. Spelled as in Python.
+    pub kind: String,
+    /// Where, in UTF-16 code units: for an insertion the range the new text
+    /// now occupies, for a deletion the range it occupied. `null` when not
+    /// reported in UTF-16.
+    pub range: Option<TextRange>,
+    /// The inserted or deleted text, or `null` when not supplied.
+    pub text: Option<String>,
+}
+
+impl From<xa11y::TextChange> for TextChange {
+    fn from(c: xa11y::TextChange) -> Self {
+        Self {
+            kind: text_change_kind_to_str(c.kind).to_string(),
+            range: c.range.map(TextRange::from),
+            text: c.text,
+        }
+    }
+}
+
+/// The `snake_case` spelling of a text change kind. Spelled out arm by arm
+/// (not via `to_snake_case`) so `[[types.variant_coverage]]` sees every
+/// variant here.
+pub fn text_change_kind_to_str(kind: xa11y::TextChangeKind) -> &'static str {
+    match kind {
+        xa11y::TextChangeKind::Inserted => "inserted",
+        xa11y::TextChangeKind::Deleted => "deleted",
     }
 }
 

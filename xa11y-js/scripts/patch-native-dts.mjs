@@ -16,8 +16,8 @@
 //   5b. Narrow `Omission.reason` -> `OmissionReasonName` and
 //      `LegendEntry.color` -> a three-element tuple.
 //   5c. Narrow the table / text plain objects: `Count` (number or
-//      'unknown'), `CellInfo.header`, `TextAttributes.script`, and
-//      `Text.rangeAt`'s unit parameter.
+//      'unknown'), `CellInfo.header`, `TextAttributes.script`,
+//      `TextChange.kind`, and `Text.rangeAt`'s unit parameter.
 //   6. Append a `;` to the napi-emitted `NativeSubscription` type alias
 //      (napi-rs omits terminators, which confuses the docs generator's
 //      multi-line type-alias parser).
@@ -55,6 +55,7 @@ export type EventTypeName =
   | 'menuOpened'
   | 'menuClosed'
   | 'textChanged'
+  | 'textSelectionChanged'
   | 'announcement';
 
 /** Mouse buttons accepted by the input-simulation API. */
@@ -112,6 +113,9 @@ export type TextUnitName = 'character' | 'word' | 'line' | 'paragraph';
 
 /** Where a run of text sits relative to the baseline. Spelled as in Python. */
 export type TextScriptName = 'baseline' | 'superscript' | 'subscript';
+
+/** Whether a \`TextChange\` inserted or deleted text. Spelled as in Python. */
+export type TextChangeKindName = 'inserted' | 'deleted';
 
 `;
 
@@ -212,6 +216,12 @@ const REPLACEMENTS = [
     name: 'TextAttributes.script -> TextScriptName | null',
     from: '  script: string | null\n',
     to: '  script: TextScriptName | null\n',
+    all: 1,
+  },
+  {
+    name: 'TextChange.kind -> TextChangeKindName',
+    from: '  kind: string\n',
+    to: '  kind: TextChangeKindName\n',
     all: 1,
   },
   {

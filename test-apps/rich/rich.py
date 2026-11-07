@@ -14,6 +14,8 @@ per feature that `xa11y/tests/integ/rich.rs` asserts against:
 * a `GtkTextView` with tagged (bold, italic, underlined, coloured) text,
   several paragraphs, and non-BMP characters, so code-point and UTF-16
   offsets differ;
+* a second, plain `GtkTextView` ("Edit text") that the text-event test
+  edits, so the rich text view's content stays fixed for the read tests;
 * a `GtkButton`, which has no `Text` interface, for the refusal path.
 
 GTK 3 has no merged cells: `GtkTreeView` reports a span of 1 for every cell.
@@ -121,6 +123,13 @@ def text_view() -> Gtk.TextView:
     return view
 
 
+def edit_view() -> Gtk.TextView:
+    view = Gtk.TextView()
+    view.get_buffer().set_text("ab")
+    view.get_accessible().set_name("Edit text")
+    return view
+
+
 def main() -> int:
     GLib.set_prgname(APP_NAME)
     GLib.set_application_name(APP_NAME)
@@ -133,6 +142,7 @@ def main() -> int:
     column.pack_start(tree_view(), False, False, 0)
     column.pack_start(list_box(), False, False, 0)
     column.pack_start(text_view(), True, True, 0)
+    column.pack_start(edit_view(), False, False, 0)
     column.pack_start(Gtk.Button(label="Plain button"), False, False, 0)
     window.add(column)
 

@@ -22,7 +22,7 @@ use std::time::Duration;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
 use crate::element::Element;
-use crate::types::{event_kind_to_str, state_flag_to_str};
+use crate::types::{event_kind_to_str, state_flag_to_str, TextChange};
 
 // ── Event ──────────────────────────────────────────────────────────────────
 
@@ -39,6 +39,7 @@ pub struct Event {
     state_flag: Option<String>,
     /// For `stateChanged` events: the new boolean value of the flag.
     state_value: Option<bool>,
+    text_change: Option<TextChange>,
     app_name: String,
     app_pid: u32,
     target_data: Option<xa11y::ElementData>,
@@ -58,6 +59,7 @@ impl Event {
             kind: kind_str,
             state_flag,
             state_value,
+            text_change: event.text_change.map(TextChange::from),
             app_name: event.app_name,
             app_pid: event.app_pid,
             target_data: event.target,
@@ -86,6 +88,16 @@ impl Event {
     #[napi(getter)]
     pub fn state_value(&self) -> Option<bool> {
         self.state_value
+    }
+
+    /// For `textChanged` events: what was inserted or deleted, when the
+    /// platform reports it (Linux only for now). `null` for other event
+    /// kinds and for a `textChanged` with no delta. A `textSelectionChanged`
+    /// event carries no offsets: read `text().caret()` / `selections()` on
+    /// the target.
+    #[napi(getter)]
+    pub fn text_change(&self) -> Option<TextChange> {
+        self.text_change.clone()
     }
 
     /// Name of the application that emitted this event.

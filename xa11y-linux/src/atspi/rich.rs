@@ -52,7 +52,7 @@ pub(super) struct TableMeta {
 
 /// The offset unit a toolkit's `org.a11y.atspi.Text` speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OffsetUnit {
+pub(crate) enum OffsetUnit {
     /// The AT-SPI specification's unit: code points.
     CodePoints,
     /// Qt's adaptor: UTF-16 code units (issue #493).
@@ -61,11 +61,32 @@ pub(super) enum OffsetUnit {
 
 /// The offset unit for a toolkit name. `None` (no `ToolkitName` at all) is
 /// the specification's code points.
-pub(super) fn offset_unit_for(toolkit: Option<&str>) -> OffsetUnit {
+pub(crate) fn offset_unit_for(toolkit: Option<&str>) -> OffsetUnit {
     match toolkit {
         Some(t) if t.eq_ignore_ascii_case("Qt") => OffsetUnit::Utf16,
         _ => OffsetUnit::CodePoints,
     }
+}
+
+/// Read `bus`'s offset unit from `proxy`, which must address the
+/// application object's `org.a11y.atspi.Application` interface. Shared by
+/// the provider's per-bus cache and the event subscription, which resolves
+/// each application's unit once when it subscribes.
+pub(crate) fn read_offset_unit(proxy: &Proxy<'_>, bus: &str) -> Result<OffsetUnit> {
+    let toolkit = match proxy.get_property::<String>("ToolkitName") {
+        Ok(name) => Some(name),
+        Err(e) if is_property_absent(&e) => None,
+        Err(e) => {
+            return Err(Error::Platform {
+                code: -1,
+                message: format!(
+                    "reading Application.ToolkitName of {bus} to choose the text offset \
+                     unit failed: {e}"
+                ),
+            })
+        }
+    };
+    Ok(offset_unit_for(toolkit.as_deref()))
 }
 
 /// The header kind an AT-SPI role names, if any.
@@ -203,6 +224,46 @@ impl TextAccess<'_> {
     fn full(&self) -> Result<String> {
         let count = self.native_count()?;
         self.prefix(count.max(0))
+    }
+
+    /// The text from 0 to at least UTF-16 offset `end` (to the end of the
+    /// text if it is shorter), so a read near the start does not fetch the
+    /// whole document. A code point is one or two UTF-16 units, so `end`
+    /// code points always cover `end` units.
+    fn prefix_covering(&self, end: u32) -> Result<String> {
+        let count = self.native_count()?.max(0);
+        let want = i32::try_from(end).unwrap_or(i32::MAX).min(count);
+        let text = self.prefix(want)?;
+        if utf16_len(&text) >= end || want == count {
+            Ok(text)
+        } else {
+            // Only reachable if the toolkit's count disagrees with its text.
+            self.prefix(count)
+        }
+    }
+
+    /// The text of `range`, validated: past the end or splitting a surrogate
+    /// pair fails with `InvalidTextRange`. Reads only up to `range.end`
+    /// (plus one unit, to tell whether the end splits a pair).
+    fn read_range(&self, range: TextRange) -> Result<String> {
+        let text = self.prefix_covering(range.end.saturating_add(1))?;
+        // A prefix no longer than `end` is the whole text, so only then is
+        // its length the text's length.
+        let whole = utf16_len(&text) <= range.end;
+        slice_utf16(&text, range).map_err(|e| match e {
+            Error::InvalidTextRange {
+                start,
+                end,
+                length,
+                message,
+            } => Error::InvalidTextRange {
+                start,
+                end,
+                length: if whole { length } else { None },
+                message,
+            },
+            other => other,
+        })
     }
 
     /// Convert native offsets to UTF-16, reading the text before the largest
@@ -378,7 +439,10 @@ impl LinuxProvider {
         let (Ok(r), Ok(c)) = (i32::try_from(row), i32::try_from(column)) else {
             return Ok(None);
         };
-        if r >= rows || c >= cols {
+        // A negative count is "unknown" (virtualized content): that axis has
+        // no known bound, so the platform is asked rather than every slot
+        // being answered as out of range.
+        if (rows >= 0 && r >= rows) || (cols >= 0 && c >= cols) {
             return Ok(None);
         }
         let reply = proxy
@@ -487,25 +551,18 @@ impl LinuxProvider {
             return Ok(*unit);
         }
         let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application")?;
-        let toolkit = match proxy.get_property::<String>("ToolkitName") {
-            Ok(name) => Some(name),
-            Err(e) if is_property_absent(&e) => None,
-            Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
-                        "reading Application.ToolkitName of {bus} to choose the text offset \
-                         unit failed: {e}"
-                    ),
-                })
-            }
-        };
-        let unit = offset_unit_for(toolkit.as_deref());
-        self.gtk4
+        let unit = read_offset_unit(&proxy, bus)?;
+        let mut units = self
+            .gtk4
             .offset_units
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(bus.to_owned(), unit);
+            .unwrap_or_else(|e| e.into_inner());
+        // Bus names are never reused, so entries for exited apps would pile
+        // up in a long-running process; bound the map like `toplevels`.
+        if units.len() >= GTK4_TOPLEVEL_CACHE_LIMIT {
+            units.clear();
+        }
+        units.insert(bus.to_owned(), unit);
         Ok(unit)
     }
 
@@ -579,7 +636,7 @@ impl LinuxProvider {
 
     pub(super) fn rich_text_read(&self, element: &ElementData, range: TextRange) -> Result<String> {
         let t = self.text_access(element)?;
-        slice_utf16(&t.full()?, range)
+        t.read_range(range)
     }
 
     pub(super) fn rich_text_range_at(
@@ -754,7 +811,15 @@ impl LinuxProvider {
                 code: -1,
                 message: format!("Text.GetAttributeRun deserialize failed: {e}"),
             })?;
-        let mut ends = t.to_utf16(&[start.max(0), end.max(0)])?;
+        if start < 0 || end < start {
+            return Err(Error::Platform {
+                code: -1,
+                message: format!(
+                    "Text.GetAttributeRun at {native} reported the run {start}..{end}"
+                ),
+            });
+        }
+        let mut ends = t.to_utf16(&[start, end])?;
         let (end16, start16) = (ends.pop(), ends.pop());
         let (Some(start16), Some(end16)) = (start16, end16) else {
             return Err(Error::Platform {

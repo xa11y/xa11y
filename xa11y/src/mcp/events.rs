@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value};
 
 use super::tools::element_data_json;
-use crate::cli::{format_event_kind, format_state_flag, CliError, CliResult};
+use crate::cli::{format_event_kind, format_state_flag, text_change_json, CliError, CliResult};
 use crate::{Event, EventKind, RecvStatus, Subscription};
 
 /// Events held per subscription before the oldest are evicted.
@@ -541,6 +541,9 @@ fn event_json(buffered: &Buffered) -> Value {
         out.insert("state_flag".into(), json!(format_state_flag(flag)));
         out.insert("state_value".into(), json!(value));
     }
+    if let Some(change) = &event.text_change {
+        out.insert("text_change".into(), text_change_json(change));
+    }
     out.insert("application".into(), json!(event.app_name));
     out.insert("pid".into(), json!(event.app_pid));
     if let Some(target) = &event.target {
@@ -785,6 +788,33 @@ mod tests {
         assert_eq!(events[0]["kind"], json!("state_changed"));
         assert_eq!(events[0]["state_flag"], json!("checked"));
         assert_eq!(events[0]["state_value"], json!(true));
+    }
+
+    #[test]
+    fn a_text_change_carries_its_delta_and_other_events_do_not() {
+        let (registry, tx, id) = registry_with(None);
+        let mut edit = Event::new(EventKind::TextChanged, "Test App", 4321);
+        edit.text_change = Some(
+            crate::TextChangeParts {
+                kind: crate::TextChangeKind::Deleted,
+                range: None,
+                text: Some("abc".into()),
+            }
+            .into(),
+        );
+        tx.send(edit).expect("the drainer is listening");
+        send(&tx, EventKind::TextSelectionChanged);
+        let events = collect(&registry, &id, 2);
+        assert_eq!(events[0]["kind"], json!("text_changed"));
+        assert_eq!(
+            events[0]["text_change"],
+            json!({"kind": "deleted", "range": null, "text": "abc"})
+        );
+        assert_eq!(events[1]["kind"], json!("text_selection_changed"));
+        assert!(
+            events[1].get("text_change").is_none(),
+            "only an event with a delta carries one"
+        );
     }
 
     #[test]

@@ -66,6 +66,8 @@ opaque = [
     { type = "HeaderKind", reason = "Crosses as the identically-spelled strings 'column' | 'row' via HeaderKind::to_snake_case. See [[types.variant_coverage]]." },
     { type = "TextRange", reason = "Python exposes a frozen, hashable TextRange class (and accepts (start, end) tuples); JS uses plain { start, end } objects. Same split as Rect." },
     { type = "TextRun", reason = "Python exposes a frozen TextRun class; JS returns a plain object. Same split as Rect." },
+    { type = "TextChange", reason = "Event.text_change: Python exposes a frozen TextChange class; JS returns a plain { kind, range, text } object. Same split as TextRun." },
+    { type = "TextChangeKind", reason = "Crosses as the identically-spelled strings 'inserted' | 'deleted' (TextChange.kind). See [[types.variant_coverage]]." },
     { type = "TextLines", reason = "Python exposes a frozen TextLines class; JS returns a plain object. Same split as Rect." },
     { type = "TextRuns", reason = "Python exposes a frozen TextRuns class; JS returns a plain object. Same split as Rect." },
     { type = "TextAttributes", reason = "Python exposes a frozen TextAttributes class; JS returns a plain object. Same split as Rect." },
@@ -319,6 +321,15 @@ files = [
     "xa11y-js/src/types.rs",
     { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "TextScriptName" },
+]
+[[types.variant_coverage]]
+type = "TextChangeKind"
+reason = "Crosses as 'inserted' | 'deleted' on Event.text_change; the JS arms, the CLI/MCP formatter and the Python Literal / TypeScript union are hand-written."
+files = [
+    "xa11y-js/src/types.rs",
+    "xa11y/src/cli.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "TextChangeKindName" },
 ]
 [[types.variant_coverage]]
 type = "TextUnit"

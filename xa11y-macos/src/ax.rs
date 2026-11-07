@@ -5888,6 +5888,8 @@ unsafe extern "C" fn ax_observer_callback(
             app_name: ctx.app_name.clone(),
             app_pid: ctx.app_pid,
             timestamp: std::time::Instant::now(),
+            // AXValueChanged carries no delta (#480).
+            text_change: None,
         }
         .into();
         let _ = ctx.sender.send(event);

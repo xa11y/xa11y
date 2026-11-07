@@ -24,6 +24,8 @@ import {
   type CheckedState,
   type CountValue,
   type HeaderKindName,
+  type TextChange,
+  type TextChangeKindName,
   type TextRange,
   type TextRuns,
   type TextUnitName,
@@ -105,6 +107,17 @@ async function checks() {
     kind === 'textChanged'
   ) {
     // OK -- literal narrowing works
+  }
+
+  // Text edits carry an optional delta; caret moves are their own kind.
+  sub.on('textSelectionChanged', (_ev: Event) => {});
+  const change: TextChange | null = ev.textChange;
+  if (change) {
+    const _kind: TextChangeKindName = change.kind;
+    const _range: TextRange | null = change.range;
+    const _text: string | null = change.text;
+    // @ts-expect-error -- the kind is a closed union
+    const _bad: TextChangeKindName = 'replaced';
   }
 
   // closed getter

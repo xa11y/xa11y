@@ -2442,8 +2442,14 @@ fn capped_read(text: &Text, range: TextRange, cap: u32) -> CliResult<(String, u3
     };
     match text.read(cut) {
         Ok(s) => Ok((s, end)),
-        Err(Error::InvalidTextRange { .. }) if end < range.end && end > range.start + 1 => {
-            let end = end - 1;
+        Err(Error::InvalidTextRange { .. }) if end < range.end => {
+            // The cut split a surrogate pair. Back off one unit, or, when
+            // that would read nothing (a cap of 1), take the whole pair.
+            let end = if end > range.start + 1 {
+                end - 1
+            } else {
+                end + 1
+            };
             let s = text.read(TextRange {
                 start: range.start,
                 end,
@@ -2946,6 +2952,7 @@ pub(crate) fn format_event_kind(kind: &EventKind) -> &'static str {
         EventKind::MenuOpened => "menu_opened",
         EventKind::MenuClosed => "menu_closed",
         EventKind::TextChanged => "text_changed",
+        EventKind::TextSelectionChanged => "text_selection_changed",
         EventKind::Announcement => "announcement",
         // `EventKind` is `#[non_exhaustive]`. A kind this build predates is
         // still worth printing as a line — the CLI is a debugging tool, and
@@ -2990,6 +2997,7 @@ pub(crate) fn event_kind_names() -> &'static [&'static str] {
         EventKind::MenuOpened,
         EventKind::MenuClosed,
         EventKind::TextChanged,
+        EventKind::TextSelectionChanged,
         EventKind::Announcement,
     ];
     static NAMES: std::sync::LazyLock<Vec<&'static str>> =
@@ -3029,10 +3037,83 @@ pub(crate) fn format_state_flag(flag: StateFlag) -> &'static str {
 
 pub(crate) fn format_event_detail(event: &Event) -> String {
     if let EventKind::StateChanged { flag, value } = event.kind {
-        format!(" {flag:?}={value}")
-    } else {
-        String::new()
+        return format!(" {flag:?}={value}");
     }
+    let Some(change) = &event.text_change else {
+        return String::new();
+    };
+    let mut out = format!(" {}", format_text_change_kind(change.kind));
+    if let Some(range) = change.range {
+        out.push_str(&format!(" {range}"));
+    }
+    if let Some(text) = &change.text {
+        let (shown, truncated) = clip_utf16(text, RANGE_TEXT_MAX_UNITS);
+        out.push_str(&format!(" {shown:?}"));
+        if truncated {
+            out.push_str(&format!(" (truncated, {} units)", utf16_units(text)));
+        }
+    }
+    out
+}
+
+/// The `snake_case` spelling of a text change kind, as both bindings and
+/// MCP report it. Spelled out arm by arm (rather than through
+/// `to_snake_case`) so `[[types.variant_coverage]]` sees every variant here.
+pub(crate) fn format_text_change_kind(kind: TextChangeKind) -> &'static str {
+    match kind {
+        TextChangeKind::Inserted => "inserted",
+        TextChangeKind::Deleted => "deleted",
+    }
+}
+
+/// Length of `s` in UTF-16 code units, the unit every offset uses.
+fn utf16_units(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// The longest prefix of `s` that fits in `max` UTF-16 code units without
+/// splitting a character, and whether anything was cut.
+pub(crate) fn clip_utf16(s: &str, max: u32) -> (&str, bool) {
+    let max = max as usize;
+    let mut units = 0;
+    for (at, ch) in s.char_indices() {
+        units += ch.len_utf16();
+        if units > max {
+            return (&s[..at], true);
+        }
+    }
+    (s, false)
+}
+
+/// An event's [`TextChange`] as `events_poll` reports it: `kind`, `range`
+/// (`null` when the platform reported none), and `text` (`null` when not
+/// supplied), cut to [`RANGE_TEXT_MAX_UNITS`] UTF-16 units. A cut text says so
+/// with `text_truncated: true` and the full `text_length`, so a shortened
+/// string never reads as the whole edit.
+pub(crate) fn text_change_json(change: &TextChange) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    out.insert("kind".into(), format_text_change_kind(change.kind).into());
+    out.insert(
+        "range".into(),
+        match change.range {
+            Some(r) => serde_json::json!({ "start": r.start, "end": r.end }),
+            None => serde_json::Value::Null,
+        },
+    );
+    match &change.text {
+        Some(text) => {
+            let (shown, truncated) = clip_utf16(text, RANGE_TEXT_MAX_UNITS);
+            out.insert("text".into(), shown.into());
+            if truncated {
+                out.insert("text_truncated".into(), true.into());
+                out.insert("text_length".into(), utf16_units(text).into());
+            }
+        }
+        None => {
+            out.insert("text".into(), serde_json::Value::Null);
+        }
+    }
+    serde_json::Value::Object(out)
 }
 
 // ── Input simulation ────────────────────────────────────────────────────────
@@ -4550,6 +4631,81 @@ mod tests {
         );
     }
 
+    fn text_change_event(text: Option<&str>, range: Option<TextRange>) -> Event {
+        let mut event = Event::new(EventKind::TextChanged, "App", 1);
+        event.text_change = Some(
+            TextChangeParts {
+                kind: TextChangeKind::Inserted,
+                range,
+                text: text.map(str::to_string),
+            }
+            .into(),
+        );
+        event
+    }
+
+    #[test]
+    fn format_event_detail_text_change() {
+        let event = text_change_event(Some("hi"), Some(TextRange { start: 3, end: 5 }));
+        assert_eq!(format_event_detail(&event), " inserted 3..5 \"hi\"");
+        let event = text_change_event(Some("hi"), None);
+        assert_eq!(format_event_detail(&event), " inserted \"hi\"");
+        let event = text_change_event(None, None);
+        assert_eq!(format_event_detail(&event), " inserted");
+        // A TextChanged with no delta (macOS, Windows) prints like before.
+        let event = Event::new(EventKind::TextChanged, "App", 1);
+        assert!(format_event_detail(&event).is_empty());
+    }
+
+    #[test]
+    fn text_change_json_is_bounded_and_says_so() {
+        let event = text_change_event(Some("abc"), Some(TextRange { start: 0, end: 3 }));
+        let json = text_change_json(event.text_change.as_ref().expect("set"));
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "inserted", "range": {"start": 0, "end": 3}, "text": "abc"})
+        );
+
+        let event = text_change_event(None, None);
+        let json = text_change_json(event.text_change.as_ref().expect("set"));
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "inserted", "range": null, "text": null})
+        );
+
+        // 300 emoji are 600 UTF-16 units; the cut lands on a character
+        // boundary at or under the cap and reports the full length.
+        let long = "😀".repeat(300);
+        let event = text_change_event(Some(&long), None);
+        let json = text_change_json(event.text_change.as_ref().expect("set"));
+        let shown = json["text"].as_str().expect("text");
+        assert_eq!(shown.encode_utf16().count(), RANGE_TEXT_MAX_UNITS as usize);
+        assert_eq!(json["text_truncated"], true);
+        assert_eq!(json["text_length"], 600);
+        let line = format_event_detail(&event);
+        assert!(line.ends_with("(truncated, 600 units)"), "{line}");
+    }
+
+    #[test]
+    fn clip_utf16_never_splits_a_surrogate_pair() {
+        assert_eq!(clip_utf16("a😀", 2), ("a", true));
+        assert_eq!(clip_utf16("a😀", 3), ("a😀", false));
+        assert_eq!(clip_utf16("", 0), ("", false));
+    }
+
+    #[test]
+    fn text_change_kinds_have_snake_case_spellings() {
+        assert_eq!(
+            format_text_change_kind(TextChangeKind::Inserted),
+            "inserted"
+        );
+        assert_eq!(format_text_change_kind(TextChangeKind::Deleted), "deleted");
+        assert_eq!(
+            format_event_kind(&EventKind::TextSelectionChanged),
+            "text_selection_changed"
+        );
+    }
+
     #[test]
     fn format_event_detail_empty() {
         let event = Event::new(EventKind::FocusChanged, "App", 1);
@@ -5701,6 +5857,23 @@ mod tests {
         let out = run_text_op(&element.text().expect("has text"), &op).expect("reads");
         assert_eq!(out["match"]["text"], "line");
         assert_eq!(out["match"]["start"], 22);
+    }
+
+    #[test]
+    fn capped_read_with_a_one_unit_cap_takes_a_whole_surrogate_pair() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let target = Target::App(mock_app(&provider));
+        let element = resolve_text_element(&target, r#"text_area[name="Notes"]"#)
+            .expect("resolves")
+            .expect("one match");
+        let text = element.text().expect("text");
+        // "Hello 😀 world...": the emoji is units 6..8. A 1-unit cap at 6
+        // would split it; backing off would read nothing, so it takes both.
+        let (s, end) = capped_read(&text, TextRange { start: 6, end: 14 }, 1).expect("reads");
+        assert_eq!((s.as_str(), end), ("😀", 8));
+        // A cap that splits the pair further in backs off instead.
+        let (s, end) = capped_read(&text, TextRange { start: 5, end: 14 }, 2).expect("reads");
+        assert_eq!((s.as_str(), end), (" ", 6));
     }
 
     #[test]

@@ -502,6 +502,90 @@ fn select_text_takes_utf16_offsets() {
     }
 }
 
+/// The fixture's second text view, which this test is the only one to edit.
+fn edit_text(app: &App) -> Element {
+    one(app, r#"text_area[name="Edit text"]"#)
+}
+
+/// Wait for an event on the "Edit text" view matching `want`, naming what
+/// arrived instead when none does.
+fn wait_on_edit_view(sub: &Subscription, what: &str, want: impl Fn(&Event) -> bool) -> Event {
+    let seen = std::sync::Mutex::new(Vec::new());
+    sub.wait_for(
+        |e| {
+            let on_view = e
+                .target
+                .as_ref()
+                .is_some_and(|t| t.name.as_deref() == Some("Edit text"));
+            seen.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(format!("{:?} {:?}", e.kind, e.text_change));
+            on_view && want(e)
+        },
+        Duration::from_secs(5),
+    )
+    .unwrap_or_else(|err| {
+        panic!(
+            "no {what} event on the edit view: {err}; received: {:?}",
+            seen.lock().unwrap_or_else(|p| p.into_inner())
+        )
+    })
+}
+
+#[test]
+#[ignore]
+fn text_edits_and_caret_moves_arrive_as_text_events() {
+    let app = fixture();
+    let view = edit_text(&app);
+    // Reset first, so a rerun against the same fixture starts from "ab".
+    view.set_value("ab").expect("reset the edit view");
+
+    let sub = app.subscribe().expect("subscribe to the fixture");
+    std::thread::sleep(Duration::from_millis(300));
+    while sub.try_recv().is_some() {}
+
+    // A caret move is a text selection event, not an item selection one.
+    // Replacing the contents left the caret at the end, so move it to the
+    // start: a no-op move raises nothing.
+    view.select_text(0, 0)
+        .expect("place the caret at the start");
+    let caret = wait_on_edit_view(&sub, "caret", |e| e.kind == EventKind::TextSelectionChanged);
+    assert!(caret.text_change.is_none(), "{caret:?}");
+    assert_eq!(
+        view.text().expect("text").caret().expect("caret"),
+        Some(0),
+        "the event carries no offset; the caret is read from the element"
+    );
+
+    // An insertion carries its text. GTK counts code points, so the range is
+    // left out rather than converted against text that may have moved on.
+    view.type_text("😀x").expect("insert at the caret");
+    let inserted = wait_on_edit_view(&sub, "insertion", |e| {
+        e.kind == EventKind::TextChanged && e.text_change.is_some()
+    });
+    let change = inserted.text_change.expect("checked by the predicate");
+    assert_eq!(change.kind, TextChangeKind::Inserted, "{change:?}");
+    assert_eq!(change.text.as_deref(), Some("😀x"), "{change:?}");
+    assert_eq!(change.range, None, "GTK reports code points: {change:?}");
+
+    // A selection change is the same kind as a caret move.
+    view.select_text(0, 2).expect("select the first two units");
+    wait_on_edit_view(&sub, "selection", |e| {
+        e.kind == EventKind::TextSelectionChanged
+    });
+
+    // Replacing the contents deletes what was there.
+    view.set_value("").expect("clear the edit view");
+    let deleted = wait_on_edit_view(&sub, "deletion", |e| {
+        e.text_change
+            .as_ref()
+            .is_some_and(|c| c.kind == TextChangeKind::Deleted)
+    });
+    let change = deleted.text_change.expect("checked by the predicate");
+    assert_eq!(change.text.as_deref(), Some("😀xab"), "{change:?}");
+    assert_eq!(change.range, None, "{change:?}");
+}
+
 #[test]
 #[ignore]
 fn text_on_a_button_is_refused() {

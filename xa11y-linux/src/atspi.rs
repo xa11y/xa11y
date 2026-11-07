@@ -15,6 +15,7 @@ use zbus::DBusError;
 use crate::window::WindowManager;
 
 mod rich;
+pub(crate) use rich::{read_offset_unit, OffsetUnit};
 
 /// Upper bound on a single AT-SPI D-Bus method call.
 ///

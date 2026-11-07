@@ -7143,6 +7143,8 @@ impl EventContext {
             app_name: self.app_name.clone(),
             app_pid: self.app_pid,
             timestamp: std::time::Instant::now(),
+            // Not populated yet: UIA TextEditTextChanged is not subscribed (#480).
+            text_change: None,
         }
         .into();
         if let Some(tx) = self
