@@ -1544,6 +1544,8 @@ fn do_check_macos_ffi() -> bool {
         "AXIsProcessTrusted",
         "AXUIElementSetMessagingTimeout",
         "AXUIElementCopyAttributeValue",
+        "AXUIElementCopyParameterizedAttributeValue",
+        "AXUIElementGetAttributeValueCount",
         "AXUIElementCopyAttributeNames",
         "AXUIElementSetAttributeValue",
         "AXUIElementPerformAction",
@@ -1560,52 +1562,57 @@ fn do_check_macos_ffi() -> bool {
     // Statics don't use `(`; match as whole identifiers.
     const FORBIDDEN_STATICS: &[&str] = &["kCFTypeArrayCallBacks"];
 
-    let path = project_root().join("xa11y-macos/src/ax.rs");
-    let src = match fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to read {}: {e}", path.display());
-            return false;
-        }
-    };
-
-    let mut violations: Vec<(usize, String, String)> = Vec::new();
-    // Scanned with strings and comments blanked, so a symbol named in an error
-    // message is not mistaken for a call to it.
-    let scannable = blank_strings_and_comments(&src);
-    let raw: Vec<&str> = src.lines().collect();
-
-    for (lineno, code) in scannable.lines().enumerate() {
-        let line = raw.get(lineno).copied().unwrap_or(code);
-        if code.trim().is_empty() {
-            continue;
-        }
-
-        for &sym in FORBIDDEN_CALLS {
-            if contains_ident_followed_by(code, sym, b'(') {
-                violations.push((lineno + 1, sym.to_string(), line.to_string()));
+    // `ax.rs` and its submodules: `ax/rich.rs` holds the table and text
+    // range reads, which make the same kind of AX calls.
+    const FILES: &[&str] = &["xa11y-macos/src/ax.rs", "xa11y-macos/src/ax/rich.rs"];
+    let mut violations: Vec<(std::path::PathBuf, usize, String, String)> = Vec::new();
+    for file in FILES {
+        let path = project_root().join(file);
+        let src = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to read {}: {e}", path.display());
+                return false;
             }
-        }
-        for &sym in FORBIDDEN_STATICS {
-            if contains_ident(code, sym) {
-                violations.push((lineno + 1, sym.to_string(), line.to_string()));
+        };
+
+        // Scanned with strings and comments blanked, so a symbol named in an error
+        // message is not mistaken for a call to it.
+        let scannable = blank_strings_and_comments(&src);
+        let raw: Vec<&str> = src.lines().collect();
+
+        for (lineno, code) in scannable.lines().enumerate() {
+            let line = raw.get(lineno).copied().unwrap_or(code);
+            if code.trim().is_empty() {
+                continue;
+            }
+
+            for &sym in FORBIDDEN_CALLS {
+                if contains_ident_followed_by(code, sym, b'(') {
+                    violations.push((path.clone(), lineno + 1, sym.to_string(), line.to_string()));
+                }
+            }
+            for &sym in FORBIDDEN_STATICS {
+                if contains_ident(code, sym) {
+                    violations.push((path.clone(), lineno + 1, sym.to_string(), line.to_string()));
+                }
             }
         }
     }
 
     if violations.is_empty() {
         eprintln!(
-            "OK: xa11y-macos/src/ax.rs uses only safe_* CF/AX wrappers ({} forbidden symbols checked).",
+            "OK: xa11y-macos/src/ax.rs and ax/rich.rs use only safe_* CF/AX wrappers ({} forbidden symbols checked).",
             FORBIDDEN_CALLS.len() + FORBIDDEN_STATICS.len(),
         );
         return true;
     }
 
     eprintln!(
-        "!! {} raw CF/AX call site(s) found in xa11y-macos/src/ax.rs:",
+        "!! {} raw CF/AX call site(s) found in xa11y-macos/src/ax.rs or ax/rich.rs:",
         violations.len()
     );
-    for (lineno, sym, line) in &violations {
+    for (path, lineno, sym, line) in &violations {
         eprintln!(
             "  {}:{}: {}  ->  {}",
             path.display(),

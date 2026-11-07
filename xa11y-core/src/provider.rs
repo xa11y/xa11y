@@ -521,9 +521,9 @@ pub trait Provider: Send + Sync {
     //
     // These and the text methods below default to `Error::Unsupported`, the
     // honest answer for a provider that has not implemented them, so the many
-    // test providers need not repeat it. Linux overrides every one; macOS and
-    // Windows use the default until they are implemented (issues #477, #479),
-    // which their capability-matrix rows record.
+    // test providers need not repeat it. The Linux, macOS and Windows
+    // backends override every one; what each can report is in the
+    // capability matrix in the platform-details reference.
 
     /// The cell at 0-based `row` / `column` of a table. A slot covered by a
     /// merged cell returns the merged cell. `Ok(None)` when the slot is out of

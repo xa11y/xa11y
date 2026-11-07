@@ -480,10 +480,8 @@ impl Element {
     /// Select the text range from `start` to `end`: 0-based UTF-16 code-unit
     /// offsets, the unit every text offset in xa11y uses.
     ///
-    /// Returns [`Error::InvalidTextRange`] if `start > end`. A backend that
-    /// has adopted the shared offset contract also fails with
-    /// [`Error::InvalidTextRange`] for a range past the end or splitting a
-    /// surrogate pair (Linux and Windows do; see issue #646 for macOS).
+    /// Returns [`Error::InvalidTextRange`] if `start > end`, past the end of
+    /// the text, or splitting a surrogate pair.
     pub fn select_text(&self, start: u32, end: u32) -> crate::error::Result<()> {
         crate::text_api::TextRange::new(start, end)?;
         self.provider.set_text_selection(&self.data, start, end)

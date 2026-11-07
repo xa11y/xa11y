@@ -186,6 +186,8 @@ impl Drop for AXElement {
     }
 }
 
+mod rich;
+
 // ── AX Call Counters (test-only) ──────────────────────────────────────────────
 
 /// Atomic counters tracking AX IPC calls. Only compiled in test builds.
@@ -1209,7 +1211,18 @@ mod attr_idx {
     pub const IDENTIFIER: usize = 14;
     pub const MINIMIZED: usize = 15;
     pub const FULLSCREEN: usize = 16;
-    pub const COUNT: usize = 17;
+    // Table / collection position (#479). In the one batch so a tree read
+    // pays no extra round trip for them; an element without one gets an
+    // error object in its slot, which reads as absent.
+    pub const ROW_COUNT: usize = 17;
+    pub const COLUMN_COUNT: usize = 18;
+    pub const ROW_INDEX_RANGE: usize = 19;
+    pub const COLUMN_INDEX_RANGE: usize = 20;
+    pub const INDEX: usize = 21;
+    pub const DISCLOSURE_LEVEL: usize = 22;
+    pub const ARIA_POS_IN_SET: usize = 23;
+    pub const ARIA_SET_SIZE: usize = 24;
+    pub const COUNT: usize = 25;
 }
 
 /// Raw values returned by a single batch AX fetch. Values are borrowed
@@ -1244,6 +1257,14 @@ impl BatchAttrs {
             CFString::new("AXIdentifier"),
             CFString::new("AXMinimized"),
             CFString::new("AXFullScreen"),
+            CFString::new("AXRowCount"),
+            CFString::new("AXColumnCount"),
+            CFString::new("AXRowIndexRange"),
+            CFString::new("AXColumnIndexRange"),
+            CFString::new("AXIndex"),
+            CFString::new("AXDisclosureLevel"),
+            CFString::new("AXARIAPosInSet"),
+            CFString::new("AXARIASetSize"),
         ];
         let ptrs: Vec<CFTypeRef> = attr_names
             .iter()
@@ -1313,6 +1334,16 @@ impl BatchAttrs {
                 None
             }
         }
+    }
+
+    /// Read an integer-valued slot (a CFNumber).
+    fn integer(&self, idx: usize) -> Option<i64> {
+        rich::cf_i64(self.vals[idx])
+    }
+
+    /// Read a CFRange-valued slot (an AXValue).
+    fn range(&self, idx: usize) -> Option<(i64, i64)> {
+        rich::cf_range(self.vals[idx])
     }
 
     /// Read AXValue as a string (handles CFString and CFNumber).
@@ -1447,6 +1478,8 @@ struct ResolvedAttrs {
     position: Option<(f64, f64)>,
     size: Option<(f64, f64)>,
     identifier: Option<String>,
+    /// Table / collection position attributes (#479).
+    rich: rich::PositionAttrs,
 }
 
 impl ResolvedAttrs {
@@ -1498,6 +1531,16 @@ impl ResolvedAttrs {
             position: batch.position(),
             size: batch.size(),
             identifier: batch.string(attr_idx::IDENTIFIER),
+            rich: rich::PositionAttrs {
+                row_count: batch.integer(attr_idx::ROW_COUNT),
+                column_count: batch.integer(attr_idx::COLUMN_COUNT),
+                row_range: batch.range(attr_idx::ROW_INDEX_RANGE),
+                column_range: batch.range(attr_idx::COLUMN_INDEX_RANGE),
+                index: batch.integer(attr_idx::INDEX),
+                disclosure_level: batch.integer(attr_idx::DISCLOSURE_LEVEL),
+                pos_in_set: batch.integer(attr_idx::ARIA_POS_IN_SET),
+                set_size: batch.integer(attr_idx::ARIA_SET_SIZE),
+            },
         })
     }
 
@@ -1563,6 +1606,7 @@ impl ResolvedAttrs {
                 });
             }
         };
+        let rich = rich::PositionAttrs::read_individually(element, &role_str);
         Ok(Self {
             role_str,
             subrole_str: ax_string(element, "AXSubrole"),
@@ -1584,6 +1628,7 @@ impl ResolvedAttrs {
             position: ax_position(element),
             size: ax_size(element),
             identifier: ax_string(element, "AXIdentifier"),
+            rich,
         })
     }
 }
@@ -3721,7 +3766,6 @@ fn build_snapshot_data(
             numeric_value: None,
             min_value: None,
             max_value: None,
-            // Table/collection metadata is not mapped on macOS yet (#479).
             table: None,
             cell: None,
             table_row: None,
@@ -4078,6 +4122,11 @@ fn build_snapshot_data(
             }
         }
 
+        let (table, cell, table_row, collection) =
+            attrs
+                .rich
+                .to_metadata(element, role, &attrs.role_str, attrs.subrole_str.as_deref());
+
         let numeric_value = match role {
             Role::Slider | Role::ProgressBar | Role::SpinButton | Role::ScrollBar => {
                 attrs.value_number
@@ -4120,11 +4169,10 @@ fn build_snapshot_data(
             numeric_value,
             min_value,
             max_value,
-            // Table/collection metadata is not mapped on macOS yet (#479).
-            table: None,
-            cell: None,
-            table_row: None,
-            collection: None,
+            table,
+            cell,
+            table_row,
+            collection,
             stable_id: attrs.identifier,
             pid,
             raw,
@@ -5627,6 +5675,10 @@ impl Provider for MacOSProvider {
     }
 
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
+        // Out of bounds or splitting a surrogate pair is refused before the
+        // set: AX would clamp the first and select half a character for the
+        // second (#646).
+        self.rich_validate_selection(element, start, end)?;
         let ax = self.get_cached(element.handle)?;
         let location = start as isize;
         let length = (end as isize) - (start as isize);
@@ -5650,6 +5702,78 @@ impl Provider for MacOSProvider {
             ));
         }
         Ok(())
+    }
+
+    // ── Tables, collections and text by range (ax/rich.rs) ─────────
+
+    fn table_cell_at(
+        &self,
+        table: &ElementData,
+        row: u32,
+        column: u32,
+    ) -> Result<Option<ElementData>> {
+        self.rich_table_cell_at(table, row, column)
+    }
+
+    fn table_headers(
+        &self,
+        table: &ElementData,
+        kind: xa11y_core::table::HeaderKind,
+    ) -> Result<Vec<ElementData>> {
+        self.rich_table_headers(table, kind)
+    }
+
+    fn cell_headers(
+        &self,
+        cell: &ElementData,
+        kind: xa11y_core::table::HeaderKind,
+    ) -> Result<Vec<ElementData>> {
+        self.rich_cell_headers(cell, kind)
+    }
+
+    fn selected_items(&self, container: &ElementData) -> Result<Vec<ElementData>> {
+        self.rich_selected_items(container)
+    }
+
+    fn text_length(&self, element: &ElementData) -> Result<u32> {
+        self.rich_text_length(element)
+    }
+
+    fn text_caret(&self, element: &ElementData) -> Result<Option<u32>> {
+        self.rich_text_caret(element)
+    }
+
+    fn text_selections(&self, element: &ElementData) -> Result<Vec<xa11y_core::TextRange>> {
+        self.rich_text_selections(element)
+    }
+
+    fn text_read(&self, element: &ElementData, range: xa11y_core::TextRange) -> Result<String> {
+        self.rich_text_read(element, range)
+    }
+
+    fn text_range_at(
+        &self,
+        element: &ElementData,
+        offset: u32,
+        unit: xa11y_core::text_api::TextUnit,
+    ) -> Result<xa11y_core::TextRange> {
+        self.rich_text_range_at(element, offset, unit)
+    }
+
+    fn text_range_bounds(
+        &self,
+        element: &ElementData,
+        range: xa11y_core::TextRange,
+    ) -> Result<Option<Rect>> {
+        self.rich_text_range_bounds(element, range)
+    }
+
+    fn text_attributes_at(
+        &self,
+        element: &ElementData,
+        offset: u32,
+    ) -> Result<xa11y_core::text_api::TextRun> {
+        self.rich_text_attributes_at(element, offset)
     }
 
     // ── Generic action escape hatch ─────────────────────────────────
@@ -5868,10 +5992,13 @@ unsafe extern "C" fn ax_observer_callback(
             value: false,
         }],
 
-        "AXSelectedTextChanged"
-        | "AXSelectedRowsChanged"
-        | "AXSelectedCellsChanged"
-        | "AXSelectedChildrenChanged" => vec![EventKind::SelectionChanged],
+        // The caret moved or the text selection changed: its own kind, as on
+        // Linux and Windows, not the container-selection one below.
+        "AXSelectedTextChanged" => vec![EventKind::TextSelectionChanged],
+
+        "AXSelectedRowsChanged" | "AXSelectedCellsChanged" | "AXSelectedChildrenChanged" => {
+            vec![EventKind::SelectionChanged]
+        }
 
         "AXMenuOpened" => vec![EventKind::MenuOpened],
         "AXMenuClosed" => vec![EventKind::MenuClosed],

@@ -55,8 +55,8 @@ surface:
 | [Screenshots](/guides/screenshots/) | `PermissionDenied` (macOS Screen Recording not granted, or the Wayland portal denied consent), `Unsupported` (no capture backend for the session), `NoElementBounds`, `Platform` (capture or PNG encode failure) |
 | [Selectors](/reference/selectors/) | `InvalidSelector` at parse time, `SelectorNotMatched` or `Timeout` at resolve time |
 | [Events](/reference/events/) | `Timeout` from `wait_for` |
-| [Text by range](/guides/tables-and-text/) | `ActionNotSupported` when the element has no text interface, `InvalidTextRange`, `InvalidActionData`, `ElementStale` from a `Text` bound to an element that went away, `Unsupported` on macOS and Windows and for a text unit the toolkit has no boundaries for |
-| [Tables and collections](/guides/tables-and-text/) | `ActionNotSupported` when the element is not a table, cell, or selection container; `Unsupported` on macOS and Windows, and on Linux for table-level headers of a table with more than 1000 columns or rows |
+| [Text by range](/guides/tables-and-text/) | `ActionNotSupported` when the element has no text interface, `InvalidTextRange`, `InvalidActionData`, `ElementStale` from a `Text` bound to an element that went away, `Unsupported` for a text unit the toolkit has no boundaries for (`word` and `paragraph` on macOS) |
+| [Tables and collections](/guides/tables-and-text/) | `ActionNotSupported` when the element is not a table, cell, or selection container; `Unsupported` on Linux for table-level headers of a table with more than 1000 columns or rows |
 
 ## Structured fields
 

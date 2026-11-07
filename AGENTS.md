@@ -27,6 +27,13 @@ tagged `GtkTextView` that the harness launches with the panel's interpreter
 (and fails without). Collection positions are the exception and come from
 the AccessKit app, because GTK 3 sets no `posinset` / `setsize`.
 
+On macOS the same coverage is `tests/suites/python/test_cocoa_rich.py`,
+against the Cocoa test app's "Rich" box (an attributed `NSTextView` and an
+`NSOutlineView`) and its "Users Table". It is a Python suite rather than a
+Rust integ module because the Rust integ tests do not run in macOS CI (see
+the `macos` job in `ci.yml`), while the `macos-latest × cocoa` integ cell
+does.
+
 ### Test helpers
 
 Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
