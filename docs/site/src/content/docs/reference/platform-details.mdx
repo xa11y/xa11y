@@ -432,9 +432,8 @@ macOS counts text in UTF-16 units natively, so no offset is converted. AX
 lists only the attributes applied to a run: once a run reports a font,
 xa11y reads a missing underline, strikethrough or spelling mark as `False`
 and a missing superscript as `baseline`, and a run with no font reports all
-of them as `None`. Colors are the components the app set: AX does not carry
-their color space across, so xa11y reports them as they arrive, without
-converting to sRGB. The table, cell, row and collection fields come from the
+of them as `None`. Colors are the components the app set. AX drops their color
+space in transit, so xa11y passes the components through unconverted. The table, cell, row and collection fields come from the
 same single batch read as the rest of the element, so a tree read pays no
 extra round trip for them. AppKit tables are the one exception: they report no
 row or column count attribute, so each `table` element costs two count reads.
