@@ -257,7 +257,7 @@ separate exit-fullscreen action — on macOS the only absolute exit is the same
 | `set-value` | Set text value (requires `--value`) |
 | `set-numeric-value` | Set numeric value, for sliders and spin buttons (requires `--value N`) |
 | `type-text` | Type text as keystrokes (requires `--value`) |
-| `select-text` | Select a text range (requires `--value START,END`) |
+| `select-text` | Select a text range (requires `--value START,END`, in UTF-16 code units) |
 | `activate` | Bring the window to the foreground and focus it |
 | `minimize` | Minimize the window (leaves fullscreen first on macOS) |
 | `maximize` | Maximize the window (Windows `WindowVisualState_Maximized`; unsupported on macOS) |
@@ -266,6 +266,62 @@ separate exit-fullscreen action — on macOS the only absolute exit is the same
 | `close` | Close the window |
 | `move-to` | Move the window (requires `--at X,Y`) |
 | `resize-to` | Resize the window (requires `--size W,H`) |
+
+### `xa11y text`
+
+Read an element's text by range and print the result as JSON.
+
+```bash
+xa11y text info "text_area[name='Notes']" --app TextEdit
+xa11y text read "text_area[name='Notes']" --app TextEdit --range 0,200
+xa11y text bounds "text_area[name='Notes']" --app TextEdit --find Total
+xa11y text range-at "text_area[name='Notes']" --app TextEdit --offset 12 --unit word
+```
+
+Offsets are UTF-16 code units, so an emoji outside the Basic Multilingual
+Plane counts as two. Every range in the output carries `start`, `end`, and the
+`text` it covers. Copy those numbers into `select-text` instead of counting
+characters.
+
+| Operation | Returns | Flags |
+| --- | --- | --- |
+| `info` | `length`, `caret`, and the selected ranges | none |
+| `read` | The text of the range, at most `--limit` units (default 4096) | `--range` or `--find`, `--limit` |
+| `find` | The `--occurrence`-th match of `--find`, or `found: false` | `--find`, `--occurrence`, `--range` to search within |
+| `range-at` | The `--unit` at `--offset`: `character`, `word`, `line`, or `paragraph` | `--offset`, `--unit` |
+| `lines` | The rendered lines of the range, `--limit` per page (default 100) | `--range` or `--find`, `--limit` |
+| `bounds` | One screen rectangle per rendered line of the range | `--range` or `--find` |
+| `runs` | Formatting runs of the range, `--limit` per page (default 100) | `--range` or `--find`, `--limit` |
+
+`--range START,END` defaults to the whole text. `--find TEXT` names the range
+by its text instead: the match, counted from 0 by `--occurrence`, is the range.
+A page that stops early reports `truncated: true` and a `next_start` to resume
+from. A flag the operation does not use is a usage error.
+
+The selector must match exactly one element. The command waits up to the
+default timeout for it to be present, and does not require it to be visible.
+
+### `xa11y table`
+
+Ask a table about its structure. Each match prints on one line, as `find`
+prints it.
+
+```bash
+xa11y table cell-at "table[name='Prices']" --app Numbers --row 2 --column 0
+xa11y table column-header-cells "table_cell[row='2'][column='1']" --app Numbers
+```
+
+| Operation | Acts on | Returns |
+| --- | --- | --- |
+| `cell-at` | a table | The cell covering `--row` and `--column`, including a merged cell |
+| `column-headers`, `row-headers` | a table | Its header cells |
+| `column-header-cells`, `row-header-cells` | a cell | The headers that head it |
+| `selected-items` | a list, tree, table, or tab list | The selected items |
+
+Indices count from 0. A cell by position is also a selector,
+`table_cell[row="2"][column="0"]`, and `find` and `tree` show each element's
+`row`, `column`, `index`, `size`, and related positions under the same names
+the selector uses.
 
 ### `xa11y events`
 
@@ -465,6 +521,8 @@ gives it selectors to resolve.
 | `tree` | `app`, `pid`, `shell`, `max_depth` |
 | `find` | `selector`, `app`, `pid`, `shell`, `limit` |
 | `action` | `action`, `selector`, `app`, `pid`, `shell`, `value`, `at`, `size` |
+| `text` | `op`, `selector`, `app`, `pid`, `shell`, `start`, `end`, `find`, `occurrence`, `offset`, `unit`, `limit` |
+| `table` | `op`, `selector`, `app`, `pid`, `shell`, `row`, `column`, `limit` |
 | `click` | `x`, `y`, `button`, `count`, `held` |
 | `move` | `x`, `y` |
 | `drag` | `from_x`, `from_y`, `to_x`, `to_y`, `button`, `duration_ms`, `held` |
@@ -475,6 +533,10 @@ gives it selectors to resolve.
 | `events_start` | `app`, `pid`, `kinds` |
 | `events_poll` | `subscription_id`, `max`, `timeout_ms` |
 | `events_stop` | `subscription_id` |
+
+`text` and `table` take the operations of [`xa11y text`](#xa11y-text) and
+[`xa11y table`](#xa11y-table) as `op`. `text` spells `--range` as `start` and
+`end`.
 
 `action` accepts the same verbs as [`xa11y action`](#xa11y-action). `key`
 accepts the same key names as [`xa11y key`](#input-simulation). Selectors are
@@ -562,8 +624,9 @@ waits for its one match to stop moving, the same as `find --stable`.
 
 Results are bounded, because each one lands in a model's context window.
 `tree` walks 12 levels by default and never returns more than 2000 nodes;
-`find` returns 50 matches by default and never more than 500. Both report
-whether they truncated.
+`find` returns 50 matches by default and never more than 500. `text` reads
+4096 UTF-16 code units by default and never more than 65536, and caps the text
+on each listed range at 256 units. All of them report whether they truncated.
 
 ### Errors
 

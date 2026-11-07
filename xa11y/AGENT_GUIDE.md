@@ -48,6 +48,9 @@ These are the rules agents get wrong most often:
   error; write `[checked="on"]`.
 - `:nth(n)` is the only pseudo-class, and it counts from 1. `:first-child`,
   `:checked` and similar forms fail to parse.
+- Table and list positions are numeric attributes that take a quoted integer
+  and only `=`: `table_cell[row="2"][column="0"]`, `list_item[index="0"]`.
+  They count from 0, like every index except `:nth`.
 
 ## Actions
 
@@ -90,6 +93,23 @@ anything whose `states` include `editable`. `toggle` applies to anything with a
 `checked` state, `expand` and `collapse` to anything with `expanded`, and
 `press` to any control.
 
+## Text and tables
+
+`text` reads an element's text by range. Its `op` is `info` (length, caret,
+selections), `read`, `find`, `range-at`, `lines`, `bounds` or `runs`. Offsets
+are UTF-16 code units, so an emoji outside the Basic Multilingual Plane counts
+as two. Every range in a result carries its `start`, `end` and `text`. Copy
+those numbers into `select-text` or the next `text` call instead of counting
+characters yourself. A range can also be named by its text: `find` with an
+optional 0-based `occurrence` selects the match, so `bounds` of
+`find: "Total"` returns that word's rectangle.
+
+`table` answers structure questions a selector cannot: `cell-at` returns the
+merged cell covering a slot, and the header operations return the headers of a
+table or of one cell. Elements from `tree`, `find` and `table` carry `cell`,
+`table_row`, `table` and `collection` objects when the platform reports
+positions.
+
 ## Results
 
 Every result is bounded and reports what it dropped.
@@ -98,8 +118,11 @@ Every result is bounded and reports what it dropped.
   `truncated` field says which limit cut the result.
 - `find` returns at most `limit` matches (default 50). `match_count` gives the
   real total and `truncated` says whether any were dropped.
-- `windows`, `events_poll` and the `annotate` legend of `screenshot` carry
-  their own `truncated` fields.
+- `text` pages its reads. `read` returns at most `limit` code units, and
+  `lines` and `runs` at most `limit` entries, each with `truncated` and
+  `next_start` for the next page.
+- `windows`, `table`, `events_poll` and the `annotate` legend of `screenshot`
+  carry their own `truncated` fields.
 
 `tree` also marks each place it cut. A node whose children were dropped by
 `max_depth` or the node cap carries `subtree_truncated: true` and
@@ -140,6 +163,7 @@ diagnosis before retrying.
 | `text_value_not_supported` | The platform cannot set text on this element. | Use `type-text`, or the `type` tool after focusing the element. |
 | `invalid_selector` | The selector failed to parse. | Fix the syntax the message points to. |
 | `invalid_action_data` | An action payload failed validation. | Fix the value, point, size or range. |
+| `invalid_text_range` | A text range is reversed, past the end of the text, or splits a surrogate pair. | Read `text_range.length`, the text's current length, and take offsets from a fresh `text` result. |
 | `invalid_config` | Process configuration is invalid, such as a malformed `XA11Y_DEFAULT_TIMEOUT`. | Fix the server's environment and restart it. |
 | `no_element_bounds` | The element has no screen bounds. | Use `action`, which needs none, or scroll the element into view first. |
 | `unsupported` | No backend covers this operation on this platform or session. | Use another approach. Retrying cannot succeed. |

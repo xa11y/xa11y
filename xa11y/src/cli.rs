@@ -267,6 +267,8 @@ pub fn run(args: &[String]) -> CliResult<()> {
         Some("tree") => cmd_tree(&args[1..]),
         Some("find") => cmd_find(&args[1..]),
         Some("action") => cmd_action(&args[1..]),
+        Some("text") => cmd_text(&args[1..]),
+        Some("table") => cmd_table(&args[1..]),
         Some("events") => cmd_events(&args[1..]),
         Some("click") => cmd_click(&args[1..]),
         Some("move") => cmd_move(&args[1..]),
@@ -312,6 +314,12 @@ Accessibility tree:
   xa11y action ACTION SELECTOR [TARGET] [--value V]
                                             [--at X,Y] [--size W,H]
                                             Perform an action on an element
+  xa11y text   OP SELECTOR [TARGET] [--range START,END]
+                   [--find TEXT [--occurrence N]] [--offset N --unit U]
+                   [--limit N]              Read an element's text by range;
+                                            prints JSON; see Text below
+  xa11y table  OP SELECTOR [TARGET] [--row N --column N]
+                                            Table lookups: {table_ops}
   xa11y events [--app NAME | --pid PID]     Stream accessibility events
   xa11y enable-web-accessibility (--app NAME | --pid PID)
                                             Turn on a Chromium/Electron app's
@@ -333,6 +341,33 @@ TARGET — what tree/find/action search (--shell and --app are exclusive):
       status_items and dock are macOS only, taskbar is Windows only,
       panel is Linux only, desktop and flyout are macOS and Windows.
       `xa11y shell` lists what this machine actually has.
+
+Text (offsets are UTF-16 code units: an emoji outside the BMP is two):
+  OP is one of {text_ops}.
+  info       length, caret, and the selected ranges
+  read       the text of --range (default: all of it), at most --limit units
+             (default {read_default}, max {read_max}); `next_start` pages on
+  find       the --occurrence-th (0-based) exact match of --find, searched
+             within --range when given; `found: false` when there is none
+  range-at   the --unit (character, word, line, paragraph) at --offset
+  lines      rendered lines of --range, --limit per page (default {page})
+  bounds     screen rectangles of --range, one per rendered line
+  runs       formatting runs of --range, --limit per page (default {page})
+  read/lines/bounds/runs take their range as --range START,END or as
+  --find TEXT [--occurrence N]: the match is the range. Every range in the
+  output carries its `text`, so copy the numbers rather than computing them.
+  The selector must match exactly one element; it waits (up to the default
+  timeout) for one to be present, not for it to be visible.
+
+Table (indices are 0-based; the selector must match exactly one element):
+  cell-at              on a table: the cell covering --row/--column (a merged
+                       cell answers for every slot it spans)
+  column-headers       on a table: its column header cells
+  row-headers          on a table: its row header cells
+  column-header-cells  on a cell: the column headers that head it
+  row-header-cells     on a cell: the row headers that head it
+  selected-items       on a list, tree, table or tab list: what is selected
+  A cell by position is also a selector: table_cell[row=\"2\"][column=\"0\"].
 
 Input simulation (coords only — no selectors, no a11y):
   xa11y click  --at X,Y [--button left|right|middle] [--count N] [--held K,K]
@@ -375,7 +410,8 @@ Compose a11y + input/screenshot via `find -o bounds|center`:
 Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
   scroll-into-view, increment, decrement,
   set-value (requires --value), type-text (requires --value),
-  set-numeric-value (requires --value), select-text (requires --value START,END),
+  set-numeric-value (requires --value),
+  select-text (requires --value START,END, in UTF-16 code units),
   minimize, maximize, enter-fullscreen, restore, close, activate,
   move-to (requires --at X,Y), resize-to (requires --size W,H)
 
@@ -384,7 +420,12 @@ Exit codes:
   1  operation failed (app not found, no selector match, platform error)
   2  usage error (unknown flag value, missing or invalid argument)",
         // Derived, not spelled out: see `shell_kind_names`.
-        kinds = shell_kind_names().join(", ")
+        kinds = shell_kind_names().join(", "),
+        text_ops = TEXT_OPS.join(", "),
+        table_ops = TABLE_OPS.join(", "),
+        read_default = TEXT_READ_DEFAULT_UNITS,
+        read_max = TEXT_READ_MAX_UNITS,
+        page = TEXT_PAGE_DEFAULT,
     )
 }
 
@@ -496,6 +537,23 @@ pub(crate) struct Opts {
     pub output_format: Option<String>,
     /// `find --stable`: wait for the single match's bounds to settle.
     pub stable: bool,
+    // `text` / `table`
+    /// `--range START,END`: a text range in UTF-16 code units.
+    pub range: Option<String>,
+    /// `--find TEXT`: the needle of `text find`, or the text that names the
+    /// range for the other `text` operations.
+    pub find: Option<String>,
+    /// `--occurrence N`: which match of `--find`, 0-based.
+    pub occurrence: Option<usize>,
+    /// `--offset N`: the offset `text range-at` looks at.
+    pub offset: Option<u32>,
+    /// `--unit U`: the unit `text range-at` returns.
+    pub unit: Option<String>,
+    /// `--limit N`: the page size of `text read` / `lines` / `runs`.
+    pub limit: Option<usize>,
+    /// `--row N` / `--column N`: the slot `table cell-at` looks up.
+    pub row: Option<u32>,
+    pub column: Option<u32>,
 }
 
 /// Fetch the value for a flag at `args[i]`, erroring if the flag is trailing
@@ -624,6 +682,53 @@ pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
             "-o" => {
                 i += 1;
                 opts.output_format = Some(flag_value(args, i, "-o")?.to_string());
+            }
+            "--range" => {
+                i += 1;
+                opts.range = Some(flag_value(args, i, "--range")?.to_string());
+            }
+            "--find" => {
+                i += 1;
+                opts.find = Some(flag_value(args, i, "--find")?.to_string());
+            }
+            "--occurrence" => {
+                i += 1;
+                opts.occurrence = Some(flag_value_parsed(
+                    args,
+                    i,
+                    "--occurrence",
+                    "a 0-based match index",
+                )?);
+            }
+            "--offset" => {
+                i += 1;
+                opts.offset = Some(flag_value_parsed(
+                    args,
+                    i,
+                    "--offset",
+                    "a UTF-16 code-unit offset",
+                )?);
+            }
+            "--unit" => {
+                i += 1;
+                opts.unit = Some(flag_value(args, i, "--unit")?.to_string());
+            }
+            "--limit" => {
+                i += 1;
+                opts.limit = Some(flag_value_parsed(args, i, "--limit", "a positive integer")?);
+            }
+            "--row" => {
+                i += 1;
+                opts.row = Some(flag_value_parsed(args, i, "--row", "a 0-based row index")?);
+            }
+            "--column" => {
+                i += 1;
+                opts.column = Some(flag_value_parsed(
+                    args,
+                    i,
+                    "--column",
+                    "a 0-based column index",
+                )?);
             }
             // A switch: takes no value.
             "--stable" => opts.stable = true,
@@ -1078,6 +1183,14 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
         parts.push(format!("description=\"{}\"", desc));
     }
 
+    // Table and collection positions, spelled as the selector attributes that
+    // match them (`table_cell[row="1"][column="2"]`), so a line can be turned
+    // into a selector by copying. Only what the platform reported is shown.
+    let positions = format_positions(el);
+    if !positions.is_empty() {
+        parts.push(positions);
+    }
+
     // States. A hidden element says why (`hidden=scrolled_out`), which is
     // what decides how to make it visible (issue #590).
     let hidden = match el.states.hidden_reason {
@@ -1169,6 +1282,39 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     }
 
     parts.join(" ")
+}
+
+/// The table / cell / row / collection fields of `el` as `attr=value` pairs,
+/// named after the selector attributes that match them, so a line can be
+/// pasted back into a selector. Empty when none is reported.
+pub(crate) fn format_positions(el: &ElementData) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |name: &str, value: Option<String>| {
+        if let Some(v) = value {
+            out.push(format!("{name}={v}"));
+        }
+    };
+    if let Some(t) = &el.table {
+        push("row_count", t.row_count.map(|c| c.to_string()));
+        push("column_count", t.column_count.map(|c| c.to_string()));
+    }
+    if let Some(c) = &el.cell {
+        push("row", c.row.map(|n| n.to_string()));
+        push("column", c.column.map(|n| n.to_string()));
+        push("row_span", c.row_span.map(|n| n.to_string()));
+        push("column_span", c.column_span.map(|n| n.to_string()));
+        push("header", c.header.map(|h| h.to_snake_case().to_string()));
+    } else if let Some(r) = &el.table_row {
+        // A row's index matches the selector attribute `row`, as a cell's
+        // row does.
+        push("row", r.index.map(|n| n.to_string()));
+    }
+    if let Some(c) = &el.collection {
+        push("index", c.index.map(|n| n.to_string()));
+        push("size", c.size.map(|n| n.to_string()));
+        push("depth", c.depth.map(|n| n.to_string()));
+    }
+    out.join(" ")
 }
 
 fn print_tree_recursive(
@@ -2001,12 +2147,13 @@ fn relabel_action_error(err: CliError, verb: &str) -> CliError {
     }
 }
 
-/// Parse a `START,END` character range for `select-text`.
+/// Parse a `START,END` range for `select-text`, in UTF-16 code units (the
+/// unit every text offset in xa11y uses; issue #646).
 pub(crate) fn parse_text_range(raw: &str) -> CliResult<(u32, u32)> {
     let parts: Vec<&str> = raw.split(',').collect();
     if parts.len() != 2 {
         return Err(CliError::Usage(format!(
-            "select-text value must be START,END (e.g. 0,5), got: {raw}"
+            "select-text value must be START,END in UTF-16 code units (e.g. 0,5), got: {raw}"
         )));
     }
     let start: u32 = parts[0].trim().parse().map_err(|_| {
@@ -2025,6 +2172,722 @@ pub(crate) fn parse_text_range(raw: &str) -> CliResult<(u32, u32)> {
         )));
     }
     Ok((start, end))
+}
+
+// ── Text by range (`xa11y text`, MCP `text`) ────────────────────────────────
+//
+// The value-producing half both surfaces share. Everything here returns JSON
+// rather than printing it, so the MCP handler can call it on the stdio
+// transport; `cmd_text` is the only part that writes to stdout.
+
+/// Every `text` operation, in the order the CLI help and the MCP schema list
+/// them. One list, so the two surfaces cannot disagree on which exist.
+pub(crate) const TEXT_OPS: &[&str] = &[
+    "info", "read", "find", "range-at", "lines", "bounds", "runs",
+];
+
+/// UTF-16 code units `text read` returns when no `limit` is given.
+pub(crate) const TEXT_READ_DEFAULT_UNITS: usize = 4_096;
+/// Ceiling on `text read`'s `limit`.
+pub(crate) const TEXT_READ_MAX_UNITS: usize = 65_536;
+/// Lines or runs one `text lines` / `text runs` page holds by default.
+pub(crate) const TEXT_PAGE_DEFAULT: usize = 100;
+/// Ceiling on a `lines` / `runs` page.
+pub(crate) const TEXT_PAGE_MAX: usize = 1_000;
+/// UTF-16 code units of `text` carried on each range inside a list (a
+/// selection, a line, a run, a match). The range's own `start` / `end` stay
+/// exact; a longer `text` is cut and says so with `text_truncated`.
+pub(crate) const RANGE_TEXT_MAX_UNITS: u32 = 256;
+/// Most selections `text info` lists.
+pub(crate) const MAX_SELECTIONS: usize = 100;
+
+/// Which text a range-taking operation covers.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RangeSpec {
+    /// The whole text: `0..length`.
+    Whole,
+    /// Explicit offsets.
+    Offsets(TextRange),
+    /// The `occurrence`-th (0-based) exact match of `needle`, searched within
+    /// `within` when given.
+    Find {
+        needle: String,
+        occurrence: usize,
+        within: Option<TextRange>,
+    },
+}
+
+/// A parsed `text` operation.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TextOp {
+    Info,
+    Read {
+        range: RangeSpec,
+        limit: usize,
+    },
+    Find {
+        needle: String,
+        occurrence: usize,
+        within: Option<TextRange>,
+    },
+    RangeAt {
+        offset: u32,
+        unit: TextUnit,
+    },
+    Lines {
+        range: RangeSpec,
+        limit: usize,
+    },
+    Bounds {
+        range: RangeSpec,
+    },
+    Runs {
+        range: RangeSpec,
+        limit: usize,
+    },
+}
+
+/// The raw, surface-neutral arguments of a `text` operation. The CLI fills it
+/// from flags and MCP from tool arguments; [`parse_text_op`] validates both
+/// the same way.
+#[derive(Debug, Default)]
+pub(crate) struct TextArgs<'a> {
+    pub range: Option<TextRange>,
+    pub find: Option<&'a str>,
+    pub occurrence: Option<usize>,
+    pub offset: Option<u32>,
+    pub unit: Option<&'a str>,
+    pub limit: Option<usize>,
+}
+
+/// Validate a `text` operation before anything is resolved (parse arguments
+/// before the first OS call).
+///
+/// An argument the operation does not use is refused rather than ignored:
+/// `--offset` on `read` reads as if it chose where to start, and silently
+/// reading from 0 instead would hand back text the caller did not ask for.
+/// `names` spells each argument the way the calling surface does (`--range`
+/// or `start`/`end`), so the refusal names something the caller can type.
+pub(crate) fn parse_text_op(op: &str, a: &TextArgs<'_>, names: &TextArgNames) -> CliResult<TextOp> {
+    let refuse = |given: bool, name: &str| -> CliResult<()> {
+        if given {
+            Err(CliError::Usage(format!("text {op} does not take {name}")))
+        } else {
+            Ok(())
+        }
+    };
+    if let Some(r) = a.range {
+        if r.start > r.end {
+            return Err(CliError::Usage(format!(
+                "{} start must not exceed end, got {}..{}",
+                names.range, r.start, r.end
+            )));
+        }
+    }
+    if a.occurrence.is_some() && a.find.is_none() {
+        return Err(CliError::Usage(format!(
+            "{} picks a match of {}, which was not given",
+            names.occurrence, names.find
+        )));
+    }
+    if a.find == Some("") {
+        return Err(CliError::Usage(format!("{} must not be empty", names.find)));
+    }
+    let range_spec = || match a.find {
+        Some(needle) => RangeSpec::Find {
+            needle: needle.to_string(),
+            occurrence: a.occurrence.unwrap_or(0),
+            within: a.range,
+        },
+        None => a.range.map_or(RangeSpec::Whole, RangeSpec::Offsets),
+    };
+    let limit = |default: usize, max: usize| -> CliResult<usize> {
+        match a.limit {
+            None => Ok(default),
+            Some(n) if (1..=max).contains(&n) => Ok(n),
+            Some(n) => Err(CliError::Usage(format!(
+                "{} for text {op} must be between 1 and {max}, got {n}",
+                names.limit
+            ))),
+        }
+    };
+    let offset_free = || -> CliResult<()> {
+        refuse(a.offset.is_some(), names.offset)?;
+        refuse(a.unit.is_some(), names.unit)
+    };
+    Ok(match op {
+        "info" => {
+            refuse(a.range.is_some(), names.range)?;
+            refuse(a.find.is_some(), names.find)?;
+            refuse(a.limit.is_some(), names.limit)?;
+            offset_free()?;
+            TextOp::Info
+        }
+        "read" => {
+            offset_free()?;
+            TextOp::Read {
+                range: range_spec(),
+                limit: limit(TEXT_READ_DEFAULT_UNITS, TEXT_READ_MAX_UNITS)?,
+            }
+        }
+        "find" => {
+            offset_free()?;
+            refuse(a.limit.is_some(), names.limit)?;
+            let needle = a.find.ok_or_else(|| {
+                CliError::Usage(format!(
+                    "text find requires {} (the text to look for)",
+                    names.find
+                ))
+            })?;
+            TextOp::Find {
+                needle: needle.to_string(),
+                occurrence: a.occurrence.unwrap_or(0),
+                within: a.range,
+            }
+        }
+        "range-at" => {
+            refuse(a.range.is_some(), names.range)?;
+            refuse(a.find.is_some(), names.find)?;
+            refuse(a.limit.is_some(), names.limit)?;
+            let offset = a.offset.ok_or_else(|| {
+                CliError::Usage(format!("text range-at requires {}", names.offset))
+            })?;
+            let unit = a.unit.ok_or_else(|| {
+                CliError::Usage(format!(
+                    "text range-at requires {} (character, word, line or paragraph)",
+                    names.unit
+                ))
+            })?;
+            let unit = TextUnit::parse(unit).map_err(|e| CliError::Usage(e.to_string()))?;
+            TextOp::RangeAt { offset, unit }
+        }
+        "lines" => {
+            offset_free()?;
+            TextOp::Lines {
+                range: range_spec(),
+                limit: limit(TEXT_PAGE_DEFAULT, TEXT_PAGE_MAX)?,
+            }
+        }
+        "bounds" => {
+            offset_free()?;
+            refuse(a.limit.is_some(), names.limit)?;
+            TextOp::Bounds {
+                range: range_spec(),
+            }
+        }
+        "runs" => {
+            offset_free()?;
+            TextOp::Runs {
+                range: range_spec(),
+                limit: limit(TEXT_PAGE_DEFAULT, TEXT_PAGE_MAX)?,
+            }
+        }
+        other => {
+            return Err(CliError::Usage(format!(
+                "unknown text operation: {other} (expected one of: {})",
+                TEXT_OPS.join(", ")
+            )))
+        }
+    })
+}
+
+/// How a surface spells the `text` arguments, for usage errors.
+pub(crate) struct TextArgNames {
+    pub range: &'static str,
+    pub find: &'static str,
+    pub occurrence: &'static str,
+    pub offset: &'static str,
+    pub unit: &'static str,
+    pub limit: &'static str,
+}
+
+/// The CLI's flag spellings.
+pub(crate) const CLI_TEXT_ARG_NAMES: TextArgNames = TextArgNames {
+    range: "--range",
+    find: "--find",
+    occurrence: "--occurrence",
+    offset: "--offset",
+    unit: "--unit",
+    limit: "--limit",
+};
+
+/// Resolve `selector` under `target` to the one element a text or table read
+/// acts on.
+///
+/// Text waits, as [`Locator::text`] does, up to the default timeout for the
+/// selector to match an attached element; it does not require it to be
+/// visible or enabled. `Ok(Err(matches))` is a selector that matched several:
+/// both surfaces refuse it with their own candidate rendering rather than
+/// reading the first, because a model told "exactly one" cannot tell it read
+/// the wrong field.
+pub(crate) fn resolve_text_element(
+    target: &Target,
+    selector: &str,
+) -> CliResult<std::result::Result<Element, Vec<Element>>> {
+    Ok(target.locator(selector).auto_wait_unique("read_text")?)
+}
+
+/// Read at most `cap` units of `range`, returning the text and the offset
+/// the read stopped at.
+///
+/// A cut that would split a surrogate pair is refused by the backend with
+/// `InvalidTextRange`; the cut is then moved back one unit, which cannot
+/// split it. Only a cut this function chose is moved: a caller's own range
+/// that splits a pair is the caller's error and propagates.
+fn capped_read(text: &Text, range: TextRange, cap: u32) -> CliResult<(String, u32)> {
+    let end = range.end.min(range.start.saturating_add(cap));
+    let cut = TextRange {
+        start: range.start,
+        end,
+    };
+    match text.read(cut) {
+        Ok(s) => Ok((s, end)),
+        Err(Error::InvalidTextRange { .. }) if end < range.end && end > range.start + 1 => {
+            let end = end - 1;
+            let s = text.read(TextRange {
+                start: range.start,
+                end,
+            })?;
+            Ok((s, end))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// A range as both surfaces report it: its offsets and the text it covers,
+/// so a caller copies numbers rather than computing them.
+fn range_json(text: &Text, range: TextRange) -> CliResult<serde_json::Value> {
+    let (s, read_end) = capped_read(text, range, RANGE_TEXT_MAX_UNITS)?;
+    let mut out = serde_json::Map::new();
+    out.insert("start".into(), range.start.into());
+    out.insert("end".into(), range.end.into());
+    out.insert("text".into(), s.into());
+    if read_end < range.end {
+        // `text` is a prefix; the offsets above are still the whole range.
+        out.insert("text_truncated".into(), true.into());
+        out.insert("text_end".into(), read_end.into());
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
+fn resolve_range(text: &Text, spec: &RangeSpec) -> CliResult<TextRange> {
+    match spec {
+        RangeSpec::Whole => Ok(TextRange {
+            start: 0,
+            end: text.length()?,
+        }),
+        RangeSpec::Offsets(r) => Ok(*r),
+        RangeSpec::Find {
+            needle,
+            occurrence,
+            within,
+        } => find_range(text, needle, *occurrence, *within)?.ok_or_else(|| {
+            CliError::NotFound(not_found_message(text, needle, *occurrence, *within))
+        }),
+    }
+}
+
+fn find_range(
+    text: &Text,
+    needle: &str,
+    occurrence: usize,
+    within: Option<TextRange>,
+) -> CliResult<Option<TextRange>> {
+    let mut options = FindOptions::new().occurrence(occurrence);
+    if let Some(r) = within {
+        options = options.within(r);
+    }
+    Ok(text.find_with(needle, options)?)
+}
+
+/// What a miss says: the needle, which match, where it looked, and how long
+/// the text is, so a caller can tell a typo from an occurrence past the last.
+fn not_found_message(
+    text: &Text,
+    needle: &str,
+    occurrence: usize,
+    within: Option<TextRange>,
+) -> String {
+    let scope = match within {
+        Some(r) => format!("within {r}"),
+        None => "in the whole text".to_string(),
+    };
+    let length = match text.length() {
+        Ok(l) => format!("text length {l}"),
+        Err(e) => format!("text length unreadable: {e}"),
+    };
+    format!(
+        "text {needle:?} has no match at occurrence {occurrence} (0-based) {scope} \
+         ({length}; matching is exact and case-sensitive)"
+    )
+}
+
+/// JSON with every `null` field dropped, so an attribute the platform did not
+/// report is absent rather than present-and-empty. Serialization of these
+/// plain data types cannot fail; an error is still surfaced rather than
+/// swallowed.
+pub(crate) fn json_without_nulls<T: serde::Serialize>(
+    what: &str,
+    value: &T,
+) -> CliResult<serde_json::Value> {
+    let mut v = serde_json::to_value(value).map_err(|e| {
+        CliError::Xa11y(Error::Platform {
+            code: -1,
+            message: format!("serialize {what}: {e}"),
+        })
+    })?;
+    if let serde_json::Value::Object(map) = &mut v {
+        map.retain(|_, field| !field.is_null());
+    }
+    Ok(v)
+}
+
+/// Run a `text` operation against `text`, producing the result both surfaces
+/// report. Offsets everywhere are UTF-16 code units.
+pub(crate) fn run_text_op(text: &Text, op: &TextOp) -> CliResult<serde_json::Value> {
+    use serde_json::json;
+    Ok(match op {
+        TextOp::Info => {
+            let length = text.length()?;
+            let mut out = serde_json::Map::new();
+            out.insert("length".into(), length.into());
+            // A platform that cannot report a caret at all is reported as
+            // such, by name, rather than failing the length and selection
+            // reads alongside it. Every other failure propagates.
+            match text.caret() {
+                Ok(caret) => {
+                    out.insert("caret".into(), json!(caret));
+                }
+                Err(Error::Unsupported { feature }) => {
+                    out.insert("caret".into(), serde_json::Value::Null);
+                    out.insert("caret_unsupported".into(), feature.into());
+                }
+                Err(e) => return Err(e.into()),
+            }
+            let selections = text.selections()?;
+            let listed = selections
+                .iter()
+                .take(MAX_SELECTIONS)
+                .map(|r| range_json(text, *r))
+                .collect::<CliResult<Vec<_>>>()?;
+            out.insert("selection_count".into(), selections.len().into());
+            out.insert(
+                "selections_truncated".into(),
+                (selections.len() > listed.len()).into(),
+            );
+            out.insert("selections".into(), listed.into());
+            serde_json::Value::Object(out)
+        }
+        TextOp::Read { range, limit } => {
+            let r = resolve_range(text, range)?;
+            let cap = u32::try_from(*limit).unwrap_or(u32::MAX);
+            let (s, read_end) = capped_read(text, r, cap)?;
+            let truncated = read_end < r.end;
+            let mut out = serde_json::Map::new();
+            out.insert("start".into(), r.start.into());
+            out.insert("end".into(), read_end.into());
+            out.insert("text".into(), s.into());
+            out.insert("requested_end".into(), r.end.into());
+            out.insert("truncated".into(), truncated.into());
+            if truncated {
+                out.insert("next_start".into(), read_end.into());
+            }
+            serde_json::Value::Object(out)
+        }
+        TextOp::Find {
+            needle,
+            occurrence,
+            within,
+        } => {
+            let found = find_range(text, needle, *occurrence, *within)?;
+            json!({
+                "find": needle,
+                "occurrence": occurrence,
+                "within": within.map(|r| json!({ "start": r.start, "end": r.end })),
+                "found": found.is_some(),
+                "match": found.map(|r| range_json(text, r)).transpose()?,
+            })
+        }
+        TextOp::RangeAt { offset, unit } => {
+            let r = text.range_at(*offset, *unit)?;
+            json!({
+                "offset": offset,
+                "unit": unit.to_snake_case(),
+                "range": range_json(text, r)?,
+            })
+        }
+        TextOp::Lines { range, limit } => {
+            let r = resolve_range(text, range)?;
+            let page = text.lines(r, *limit)?;
+            let lines = page
+                .lines
+                .iter()
+                .map(|l| range_json(text, *l))
+                .collect::<CliResult<Vec<_>>>()?;
+            json!({
+                "range": { "start": r.start, "end": r.end },
+                "count": lines.len(),
+                "lines": lines,
+                "truncated": page.truncated,
+                "next_start": page.next_start,
+            })
+        }
+        TextOp::Bounds { range } => {
+            let r = resolve_range(text, range)?;
+            let rects: Vec<serde_json::Value> = text
+                .bounds(r)?
+                .into_iter()
+                .map(|b| json!({ "x": b.x, "y": b.y, "width": b.width, "height": b.height }))
+                .collect();
+            json!({
+                "range": range_json(text, r)?,
+                "rects": rects,
+            })
+        }
+        TextOp::Runs { range, limit } => {
+            let r = resolve_range(text, range)?;
+            let page = text.runs(r, *limit)?;
+            let runs = page
+                .runs
+                .iter()
+                .map(|run| {
+                    let mut v = range_json(text, run.range)?;
+                    let attributes = json_without_nulls("text attributes", &run.attributes)?;
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("attributes".into(), attributes);
+                    }
+                    Ok(v)
+                })
+                .collect::<CliResult<Vec<_>>>()?;
+            json!({
+                "range": { "start": r.start, "end": r.end },
+                "count": runs.len(),
+                "runs": runs,
+                "truncated": page.truncated,
+                "next_start": page.next_start,
+            })
+        }
+    })
+}
+
+fn cmd_text(args: &[String]) -> CliResult<()> {
+    let (opts, positional) = parse_opts(args)?;
+    if positional.len() < 2 {
+        return Err(CliError::Usage(format!(
+            "usage: xa11y text OP SELECTOR [--app NAME | --pid PID | --shell KIND] \
+             [--range START,END] [--find TEXT [--occurrence N]] [--offset N --unit U] \
+             [--limit N]  (OP is one of: {})",
+            TEXT_OPS.join(", ")
+        )));
+    }
+    let (op_name, selector) = (&positional[0], &positional[1]);
+    let range = opts
+        .range
+        .as_deref()
+        .map(|raw| parse_range_flag(raw, "--range"))
+        .transpose()?;
+    let op = parse_text_op(
+        op_name,
+        &TextArgs {
+            range,
+            find: opts.find.as_deref(),
+            occurrence: opts.occurrence,
+            offset: opts.offset,
+            unit: opts.unit.as_deref(),
+            limit: opts.limit,
+        },
+        &CLI_TEXT_ARG_NAMES,
+    )?;
+    let target = resolve_target(&opts)?;
+    let element = match resolve_text_element(&target, selector)? {
+        Ok(element) => element,
+        Err(matches) => {
+            return Err(ambiguous_selector(selector, &matches, 8, |el| {
+                format_element_oneline(el)
+            }))
+        }
+    };
+    let result = run_text_op(&element.text()?, &op)?;
+    let rendered = serde_json::to_string_pretty(&result).map_err(|e| {
+        CliError::Xa11y(Error::Platform {
+            code: -1,
+            message: format!("serialize the text result: {e}"),
+        })
+    })?;
+    println!("{rendered}");
+    Ok(())
+}
+
+/// Parse a `START,END` UTF-16 code-unit range flag.
+pub(crate) fn parse_range_flag(raw: &str, flag: &str) -> CliResult<TextRange> {
+    let (start, end) = raw.split_once(',').ok_or_else(|| {
+        CliError::Usage(format!(
+            "{flag} must be START,END in UTF-16 code units (e.g. 0,5), got: {raw}"
+        ))
+    })?;
+    let parse = |part: &str, what: &str| -> CliResult<u32> {
+        part.trim()
+            .parse()
+            .map_err(|_| CliError::Usage(format!("invalid {what} in {flag}: {part}")))
+    };
+    let (start, end) = (parse(start, "START")?, parse(end, "END")?);
+    if start > end {
+        return Err(CliError::Usage(format!(
+            "{flag} START must not exceed END, got: {raw}"
+        )));
+    }
+    Ok(TextRange { start, end })
+}
+
+// ── Table lookups (`xa11y table`, MCP `table`) ──────────────────────────────
+
+/// Every `table` operation, shared by the CLI help and the MCP schema.
+pub(crate) const TABLE_OPS: &[&str] = &[
+    "cell-at",
+    "column-headers",
+    "row-headers",
+    "column-header-cells",
+    "row-header-cells",
+    "selected-items",
+];
+
+/// A parsed `table` operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TableOp {
+    /// On a table: the cell covering 0-based `row` / `column`.
+    CellAt { row: u32, column: u32 },
+    /// On a table: its header cells of one kind.
+    Headers(HeaderKind),
+    /// On a cell: the header cells of one kind that head it.
+    HeaderCells(HeaderKind),
+    /// On a list, tree, table or tab list: the selected items.
+    SelectedItems,
+}
+
+/// Validate a `table` operation before anything is resolved. `row` /
+/// `column` belong to `cell-at` alone and are refused elsewhere.
+pub(crate) fn parse_table_op(
+    op: &str,
+    row: Option<u32>,
+    column: Option<u32>,
+    row_name: &str,
+    column_name: &str,
+) -> CliResult<TableOp> {
+    if op != "cell-at" {
+        for (given, name) in [(row.is_some(), row_name), (column.is_some(), column_name)] {
+            if given {
+                return Err(CliError::Usage(format!("table {op} does not take {name}")));
+            }
+        }
+    }
+    Ok(match op {
+        "cell-at" => match (row, column) {
+            (Some(row), Some(column)) => TableOp::CellAt { row, column },
+            _ => {
+                return Err(CliError::Usage(format!(
+                    "table cell-at requires {row_name} and {column_name} (both 0-based)"
+                )))
+            }
+        },
+        "column-headers" => TableOp::Headers(HeaderKind::Column),
+        "row-headers" => TableOp::Headers(HeaderKind::Row),
+        "column-header-cells" => TableOp::HeaderCells(HeaderKind::Column),
+        "row-header-cells" => TableOp::HeaderCells(HeaderKind::Row),
+        "selected-items" => TableOp::SelectedItems,
+        other => {
+            return Err(CliError::Usage(format!(
+                "unknown table operation: {other} (expected one of: {})",
+                TABLE_OPS.join(", ")
+            )))
+        }
+    })
+}
+
+/// Run a `table` operation on `element`. `cell-at` yields zero or one
+/// element; the others a list.
+pub(crate) fn run_table_op(element: &Element, op: TableOp) -> CliResult<Vec<Element>> {
+    Ok(match op {
+        TableOp::CellAt { row, column } => element.cell_at(row, column)?.into_iter().collect(),
+        TableOp::Headers(HeaderKind::Column) => element.column_headers()?,
+        TableOp::Headers(HeaderKind::Row) => element.row_headers()?,
+        TableOp::HeaderCells(HeaderKind::Column) => element.column_header_cells()?,
+        TableOp::HeaderCells(HeaderKind::Row) => element.row_header_cells()?,
+        TableOp::SelectedItems => element.selected_items()?,
+    })
+}
+
+/// Resolve the one element a `table` operation acts on: read once, no wait,
+/// as `find` does. Several matches are `Ok(Err(..))`; none is the diagnosed
+/// miss from [`Locator::element`].
+pub(crate) fn resolve_table_element(
+    target: &Target,
+    selector: &str,
+) -> CliResult<std::result::Result<Element, Vec<Element>>> {
+    let locator = target.locator(selector);
+    let mut matches = locator.elements()?;
+    match matches.len() {
+        0 => Ok(Ok(locator.element()?)),
+        1 => Ok(Ok(matches.remove(0))),
+        _ => Ok(Err(matches)),
+    }
+}
+
+/// The miss `cell-at` reports: the slot asked for, and the size the table
+/// itself reports, so an off-by-one reads as one.
+pub(crate) fn no_cell_message(table: &ElementData, row: u32, column: u32) -> String {
+    let size = match table.table {
+        Some(t) => format!(
+            "the table reports {} rows and {} columns",
+            t.row_count
+                .map_or("unreported".to_string(), |c| c.to_string()),
+            t.column_count
+                .map_or("unreported".to_string(), |c| c.to_string()),
+        ),
+        None => "the element reports no table size".to_string(),
+    };
+    format!(
+        "no cell at row {row}, column {column} (0-based): the slot is out of range or \
+         not realized; {size}"
+    )
+}
+
+fn cmd_table(args: &[String]) -> CliResult<()> {
+    let (opts, positional) = parse_opts(args)?;
+    if positional.len() < 2 {
+        return Err(CliError::Usage(format!(
+            "usage: xa11y table OP SELECTOR [--app NAME | --pid PID | --shell KIND] \
+             [--row N --column N]  (OP is one of: {})",
+            TABLE_OPS.join(", ")
+        )));
+    }
+    let (op_name, selector) = (&positional[0], &positional[1]);
+    let op = parse_table_op(op_name, opts.row, opts.column, "--row", "--column")?;
+    let target = resolve_target(&opts)?;
+    let element = match resolve_table_element(&target, selector)? {
+        Ok(element) => element,
+        Err(matches) => {
+            return Err(ambiguous_selector(selector, &matches, 8, |el| {
+                format_element_oneline(el)
+            }))
+        }
+    };
+    let found = run_table_op(&element, op)?;
+    if let TableOp::CellAt { row, column } = op {
+        if found.is_empty() {
+            return Err(CliError::NotFound(no_cell_message(&element, row, column)));
+        }
+    }
+    for el in &found {
+        println!("{}", format_element_oneline(el));
+    }
+    if !matches!(op, TableOp::CellAt { .. }) {
+        println!(
+            "({} element{})",
+            found.len(),
+            if found.len() == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
 }
 
 fn cmd_events(args: &[String]) -> CliResult<()> {
@@ -2687,12 +3550,14 @@ mod tests {
         // `ACTION_COMMANDS` is hand-kept. Read the dispatcher's own arms, so
         // a new command that nobody classified fails here instead of
         // silently lacking the `delivery:` line.
-        const NOT_ACTIONS: [&str; 8] = [
+        const NOT_ACTIONS: [&str; 10] = [
             "apps",
             "shell",
             "windows",
             "tree",
             "find",
+            "text",
+            "table",
             "events",
             "screenshot",
             "guide",
@@ -4726,5 +5591,168 @@ mod tests {
         assert!(!is_accessibility_permission_denied(&unrelated));
         let usage = CliError::Usage("bad flag".into());
         assert!(!is_accessibility_permission_denied(&usage));
+    }
+    // ── text / table ────────────────────────────────────────────────────────
+
+    #[test]
+    fn text_and_table_flags_parse_and_reject_bad_numbers() {
+        let (opts, pos) = parse_opts(&strs(&[
+            "read",
+            "text_area",
+            "--range",
+            "0,5",
+            "--find",
+            "x",
+            "--occurrence",
+            "2",
+            "--offset",
+            "3",
+            "--unit",
+            "word",
+            "--limit",
+            "10",
+            "--row",
+            "1",
+            "--column",
+            "2",
+        ]))
+        .expect("parses");
+        assert_eq!(pos, strs(&["read", "text_area"]));
+        assert_eq!(opts.range.as_deref(), Some("0,5"));
+        assert_eq!(opts.find.as_deref(), Some("x"));
+        assert_eq!(
+            (
+                opts.occurrence,
+                opts.offset,
+                opts.limit,
+                opts.row,
+                opts.column
+            ),
+            (Some(2), Some(3), Some(10), Some(1), Some(2))
+        );
+        assert_eq!(opts.unit.as_deref(), Some("word"));
+        for bad in [["--occurrence", "-1"], ["--offset", "x"], ["--row", "1.5"]] {
+            let err = parse_opts(&strs(&bad)).expect_err("bad number");
+            assert_eq!(err.exit_code(), 2, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn range_flags_are_utf16_start_end_pairs() {
+        assert_eq!(
+            parse_range_flag("2, 7", "--range").expect("parses"),
+            TextRange { start: 2, end: 7 }
+        );
+        for bad in ["7,2", "1", "a,2", "1,2,3"] {
+            let err = parse_range_flag(bad, "--range").expect_err(bad);
+            assert_eq!(err.exit_code(), 2, "{bad}");
+        }
+        let err = parse_range_flag("x", "--range").expect_err("no comma");
+        assert!(err.to_string().contains("UTF-16 code units"), "{err}");
+        let err = parse_text_range("0").expect_err("select-text needs two");
+        assert!(err.to_string().contains("UTF-16 code units"), "{err}");
+    }
+
+    #[test]
+    fn a_find_names_the_range_of_the_range_taking_ops() {
+        let a = TextArgs {
+            find: Some("Total"),
+            occurrence: Some(1),
+            range: Some(TextRange { start: 0, end: 9 }),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_text_op("bounds", &a, &CLI_TEXT_ARG_NAMES).expect("valid"),
+            TextOp::Bounds {
+                range: RangeSpec::Find {
+                    needle: "Total".into(),
+                    occurrence: 1,
+                    within: Some(TextRange { start: 0, end: 9 }),
+                }
+            }
+        );
+        assert_eq!(
+            parse_text_op("read", &TextArgs::default(), &CLI_TEXT_ARG_NAMES).expect("valid"),
+            TextOp::Read {
+                range: RangeSpec::Whole,
+                limit: TEXT_READ_DEFAULT_UNITS
+            }
+        );
+        let err = parse_text_op("info", &a, &CLI_TEXT_ARG_NAMES).expect_err("info takes none");
+        assert!(err.to_string().contains("does not take --range"), "{err}");
+    }
+
+    #[test]
+    fn cli_text_runs_through_the_shared_half_against_the_mock() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let target = Target::App(mock_app(&provider));
+        let element = resolve_text_element(&target, r#"text_area[name="Notes"]"#)
+            .expect("resolves")
+            .expect("one match");
+        let op = parse_text_op(
+            "find",
+            &TextArgs {
+                find: Some("line"),
+                ..Default::default()
+            },
+            &CLI_TEXT_ARG_NAMES,
+        )
+        .expect("valid");
+        let out = run_text_op(&element.text().expect("has text"), &op).expect("reads");
+        assert_eq!(out["match"]["text"], "line");
+        assert_eq!(out["match"]["start"], 22);
+    }
+
+    #[test]
+    fn oneline_output_spells_positions_as_selector_attributes() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let target = Target::App(mock_app(&provider));
+        let line = |sel: &str| {
+            let el = target.locator(sel).element().expect("matches");
+            format_element_oneline(&el)
+        };
+        let price = line(r#"table_cell[name="Price"]"#);
+        assert!(
+            price.contains("row=0 column=1 row_span=1 column_span=2 header=column"),
+            "{price}"
+        );
+        assert!(line(r#"table[name="Prices"]"#).contains("row_count=3 column_count=3"));
+        assert!(line(r#"table_row[row="2"]"#).contains("row=2"));
+        assert!(line(r#"list_item[name="First"]"#).contains("index=0 size=unknown"));
+        // Each spelling round-trips as a selector.
+        assert_eq!(
+            target
+                .locator(r#"table_cell[row="0"][column="1"][column_span="2"]"#)
+                .count()
+                .expect("counts"),
+            1
+        );
+    }
+
+    #[test]
+    fn table_cell_at_misses_name_the_reported_size() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let target = Target::App(mock_app(&provider));
+        let table = resolve_table_element(&target, r#"table[name="Prices"]"#)
+            .expect("resolves")
+            .expect("one table");
+        let op = parse_table_op("cell-at", Some(7), Some(0), "--row", "--column").expect("valid");
+        assert!(run_table_op(&table, op).expect("asks").is_empty());
+        let msg = no_cell_message(&table, 7, 0);
+        assert!(
+            msg.contains("row 7, column 0") && msg.contains("3 rows"),
+            "{msg}"
+        );
+        let several = resolve_table_element(&target, "table_cell").expect("resolves");
+        assert!(several.is_err(), "several cells are refused");
+    }
+
+    #[test]
+    fn the_help_lists_every_text_and_table_op() {
+        let help = usage_text();
+        for op in TEXT_OPS.iter().chain(TABLE_OPS) {
+            assert!(help.contains(op), "--help omits {op}");
+        }
+        assert!(help.contains("select-text (requires --value START,END, in UTF-16 code units)"));
     }
 }

@@ -103,6 +103,28 @@ const SCREENSHOT_EXTENT: Bounds = Bounds {
     min: 1,
     max: u32::MAX as i64,
 };
+/// A UTF-16 code-unit offset for the `text` tool. The range is `u32`'s
+/// because that is what [`crate::TextRange`] carries.
+const TEXT_OFFSET: Bounds = Bounds {
+    min: 0,
+    max: u32::MAX as i64,
+};
+/// `text`'s `occurrence`, 0-based.
+const TEXT_OCCURRENCE: Bounds = Bounds {
+    min: 0,
+    max: u32::MAX as i64,
+};
+/// `text`'s `limit`. The schema states the widest cap (`read`'s, in units);
+/// `cli::parse_text_op` applies the per-operation one and names it.
+const TEXT_LIMIT: Bounds = Bounds {
+    min: 1,
+    max: cli::TEXT_READ_MAX_UNITS as i64,
+};
+/// `table`'s `row` and `column`, 0-based.
+const TABLE_INDEX: Bounds = Bounds {
+    min: 0,
+    max: u32::MAX as i64,
+};
 /// `events_poll`'s `max`. Zero would report no events while draining none.
 const EVENTS_MAX: Bounds = Bounds {
     min: 1,
@@ -205,7 +227,13 @@ ordinary attributes: `checked` takes `\"on\"` / `\"off\"` / `\"mixed\"`, and \
 (no attribute) rather than `\"false\"`, so match `minimized=\"true\"` if you \
 need to be sure the state is known. `hidden_reason` is present only on an \
 element that is not visible, and says why: `\"scrolled_out\"` (scroll it into \
-view), `\"window_minimized\"`, `\"not_showing\"`, or `\"unknown\"`.";
+view), `\"window_minimized\"`, `\"not_showing\"`, or `\"unknown\"`. \
+Table and list positions are numeric attributes, 0-based like every index \
+except `:nth`: `row`, `column`, `row_span` and `column_span` on a cell (`row` \
+also on a table row), `index`, `size` and `depth` on a list, tree or tab \
+item, and `row_count` / `column_count` on a table. They take a quoted \
+non-negative integer and only `=`, as in `table_cell[row=\"2\"][column=\"0\"]`; \
+`size`, `row_count` and `column_count` also take `\"unknown\"`.";
 
 /// What one tool call produced.
 #[derive(Debug)]
@@ -306,6 +334,8 @@ const TOOL_NAMES: &[&str] = &[
     "tree",
     "find",
     "action",
+    "text",
+    "table",
     "click",
     "move",
     "drag",
@@ -339,6 +369,8 @@ impl ToolHost for Xa11yTools {
             "tree" => tool_tree(args),
             "find" => tool_find(args),
             "action" => tool_action(args),
+            "text" => tool_text(args),
+            "table" => tool_table(args),
             "click" => tool_click(args),
             "move" => tool_move(args),
             "drag" => tool_drag(args),
@@ -693,7 +725,10 @@ fn tool_definition(name: &str) -> Value {
                     "description": "Argument for actions that need one: the text for `set-value` \
                                     and `type-text`, a number for `set-numeric-value` (e.g. \
                                     \"88\", within the element's `min_value`..`max_value`), or \
-                                    `START,END` character offsets for `select-text`.",
+                                    `START,END` for `select-text`, in UTF-16 code units \
+                                    (an emoji outside the Basic Multilingual Plane is two \
+                                    units). The `text` tool reports ranges in the same \
+                                    units, so copy its `start` / `end` here.",
                 }),
             );
             props.insert(
@@ -935,6 +970,220 @@ fn tool_definition(name: &str) -> Value {
                 "Capture screenshot",
                 &screenshot_description(),
                 object_schema(props, &[]),
+            )
+        }
+        "text" => {
+            let mut props = app_target_properties();
+            props.insert(
+                "op".into(),
+                json!({
+                    "type": "string",
+                    "enum": cli::TEXT_OPS,
+                    "description": "What to read. `info`: `length`, `caret` and the \
+                                    selected ranges. `read`: the text of the range. \
+                                    `find`: the `occurrence`-th match of `find`. \
+                                    `range-at`: the `unit` containing `offset`. `lines`: \
+                                    the rendered lines of the range. `bounds`: screen \
+                                    rectangles of the range, one per rendered line. \
+                                    `runs`: formatting runs of the range.",
+                }),
+            );
+            props.insert(
+                "selector".into(),
+                json!({
+                    "type": "string",
+                    "description": format!(
+                        "Selector for the element whose text to read, usually a \
+                         `text_field`, `text_area` or `document`. Must match exactly \
+                         one element: several are refused with `ambiguous_selector` \
+                         and the candidates.\n\n{SELECTOR_SYNTAX}"
+                    ),
+                }),
+            );
+            for (key, what) in [
+                ("start", "Start of the range, inclusive"),
+                ("end", "End of the range, exclusive"),
+            ] {
+                props.insert(
+                    key.into(),
+                    TEXT_OFFSET.property(format!(
+                        "{what}, in UTF-16 code units. Give `start` and `end` together. \
+                         Without `find` they are the range `read`, `lines`, `bounds` \
+                         and `runs` cover (default: the whole text); with `find` they \
+                         limit where it searches."
+                    )),
+                );
+            }
+            props.insert(
+                "find".into(),
+                json!({
+                    "type": "string",
+                    "description": "Text to look for, matched exactly: case-sensitive, \
+                                    no normalization. Required for `find`. For `read`, \
+                                    `lines`, `bounds` and `runs` the match becomes the \
+                                    range, so `{\"op\": \"bounds\", \"find\": \"Total\"}` \
+                                    gets the rectangle of that word without computing \
+                                    offsets.",
+                }),
+            );
+            props.insert(
+                "occurrence".into(),
+                TEXT_OCCURRENCE.property(
+                    "Which match of `find`, 0-based: 0 is the first. Default 0. Matches \
+                     do not overlap."
+                        .into(),
+                ),
+            );
+            props.insert(
+                "offset".into(),
+                TEXT_OFFSET.property(
+                    "For `range-at`: the offset, in UTF-16 code units. At the end of the \
+                     text it names the unit that ends there."
+                        .into(),
+                ),
+            );
+            props.insert(
+                "unit".into(),
+                json!({
+                    "type": "string",
+                    "enum": ["character", "word", "line", "paragraph"],
+                    "description": "For `range-at`. `line` is a rendered line, so a \
+                                    wrapped paragraph has several; `paragraph` is \
+                                    newline-delimited; `character` is one Unicode \
+                                    scalar (two units for a surrogate pair).",
+                }),
+            );
+            props.insert(
+                "limit".into(),
+                TEXT_LIMIT.property(format!(
+                    "Page size. For `read`, UTF-16 code units of text (default \
+                     {read_default}, at most {read_max}). For `lines` and `runs`, \
+                     entries (default {page}, at most {page_max}). Refused by the \
+                     other operations.",
+                    read_default = cli::TEXT_READ_DEFAULT_UNITS,
+                    read_max = cli::TEXT_READ_MAX_UNITS,
+                    page = cli::TEXT_PAGE_DEFAULT,
+                    page_max = cli::TEXT_PAGE_MAX,
+                )),
+            );
+            tool(
+                "text",
+                "Read text by range",
+                &format!(
+                    "Read an element's text by range: caret and selection, a range of \
+                     text, an exact search, the word / line / paragraph at an offset, \
+                     rendered lines, their screen rectangles, and formatting runs. Use it \
+                     instead of slicing `value`, which `tree` and `find` cut to \
+                     {MAX_FIELD_BYTES} bytes.\n\n\
+                     Every offset is a UTF-16 code unit, on input and output alike: an \
+                     emoji outside the Basic Multilingual Plane counts two. Every range \
+                     in a result carries `start`, `end` and the `text` it covers, so copy \
+                     those numbers (into `select-text`, or into another `text` call) \
+                     rather than computing them. A range inside a list (a selection, \
+                     line, run or match) carries at most {range_cap} units of `text`; a \
+                     longer one is followed by `text_truncated: true` and `text_end`, \
+                     where its text stops, while `start` and `end` stay exact.\n\n\
+                     Results are paged, and each page says whether it was cut. `read` \
+                     returns at most `limit` units with `truncated`, and `next_start` to \
+                     pass as `start` for the next page (`requested_end` is where the \
+                     range ended). `lines` and `runs` do the same per entry. `bounds` \
+                     refuses a range spanning more than {bounds_cap} rendered lines \
+                     with `invalid_text_range`; page with `lines` and ask per page. \
+                     `info` lists at most {sel_cap} selections, with `selection_count` \
+                     and `selections_truncated`. `caret` is null when the element has \
+                     no caret (not focused, or not editable), and `caret_unsupported` \
+                     names the reason when the platform cannot report one at all.\n\n\
+                     `find` answers `found: false` and `match: null` when there is no \
+                     match. Where `find` names the range of another operation, a miss \
+                     fails with `no_match` saying where it looked and the text length. \
+                     A range that is reversed, past the end, or splits a surrogate pair \
+                     fails with `invalid_text_range`, whose `text_range` gives `start`, \
+                     `end` and the text's current `length`. Ranges do not follow edits: \
+                     re-read after the text changes.\n\n\
+                     Waits up to the default timeout, currently {timeout}, for the \
+                     selector to match an element; the element does not have to be \
+                     visible or enabled. An element with no text interface fails with \
+                     `action_not_supported`.",
+                    range_cap = cli::RANGE_TEXT_MAX_UNITS,
+                    bounds_cap = crate::text_api::MAX_BOUNDS_LINES,
+                    sel_cap = cli::MAX_SELECTIONS,
+                    timeout = default_timeout_label(),
+                ),
+                object_schema(props, &["op", "selector"]),
+            )
+        }
+        "table" => {
+            let mut props = app_target_properties();
+            props.insert(
+                "op".into(),
+                json!({
+                    "type": "string",
+                    "enum": cli::TABLE_OPS,
+                    "description": "`cell-at` (on a table, needs `row` and `column`): the \
+                                    cell covering that slot. `column-headers` / \
+                                    `row-headers` (on a table): its header cells. \
+                                    `column-header-cells` / `row-header-cells` (on a \
+                                    cell): the headers that head it. `selected-items` (on \
+                                    a list, tree, table or tab list): the selected rows, \
+                                    cells or items.",
+                }),
+            );
+            props.insert(
+                "selector".into(),
+                json!({
+                    "type": "string",
+                    "description": format!(
+                        "Selector for the table, cell or list to ask. Must match \
+                         exactly one element: several are refused with \
+                         `ambiguous_selector` and the candidates.\n\n{SELECTOR_SYNTAX}"
+                    ),
+                }),
+            );
+            props.insert(
+                "row".into(),
+                TABLE_INDEX.property("For `cell-at`: 0-based row index.".into()),
+            );
+            props.insert(
+                "column".into(),
+                TABLE_INDEX.property("For `cell-at`: 0-based column index.".into()),
+            );
+            props.insert(
+                "limit".into(),
+                FIND_LIMIT.property(format!(
+                    "Most elements to return. Default {FIND_DEFAULT_LIMIT}."
+                )),
+            );
+            tool(
+                "table",
+                "Table lookups",
+                &format!(
+                    "Ask a table about its structure: the cell at a row and column, the \
+                     header cells of the table or of one cell, and what a list, tree or \
+                     table has selected. Elements come back in the shape `find` returns, \
+                     including `cell` (`row`, `column`, `row_span`, `column_span`, \
+                     `header`), `table_row`, `table` (`row_count`, `column_count`) and \
+                     `collection` (`index`, `size`, `depth`). Every index is 0-based. \
+                     A count reads \"unknown\" when the platform says it does not know \
+                     it, as virtualized content does.\n\n\
+                     A plain cell lookup is also a selector, and `find` with \
+                     `table_cell[row=\"2\"][column=\"0\"]` needs no table call. Use \
+                     `cell-at` when a merged cell may cover the slot: it returns the \
+                     merged cell, which a selector on `column` misses because the cell \
+                     reports only its top-left slot. The header relationships have no \
+                     selector form at all. `cell-at` answers `found: false` with the \
+                     `reason` and the table's reported size when no cell covers the \
+                     slot or it is not realized; content is never scrolled into \
+                     existence to answer.\n\n\
+                     Reads once and does not wait, like `find` without `stable`. Lists \
+                     are capped at `limit`, with `count` and `truncated` saying whether \
+                     anything was dropped. An element that is not a table (for the \
+                     `*-header-cells` operations, not a cell) fails with \
+                     `action_not_supported` rather than answering an empty list, and a \
+                     platform that cannot answer at all fails with `unsupported`.\n\n\
+                     {field_cap}",
+                    field_cap = field_cap_note(),
+                ),
+                object_schema(props, &["op", "selector"]),
             )
         }
         "events_start" => tool(
@@ -1689,6 +1938,150 @@ fn tool_action_parsed(
     Ok(ToolOutput::json(Value::Object(out)))
 }
 
+// ── Text and table ──────────────────────────────────────────────────────────
+
+/// How the `text` tool spells its arguments, for `cli::parse_text_op`'s
+/// usage errors.
+const MCP_TEXT_ARG_NAMES: cli::TextArgNames = cli::TextArgNames {
+    range: "\"start\"/\"end\"",
+    find: "\"find\"",
+    occurrence: "\"occurrence\"",
+    offset: "\"offset\"",
+    unit: "\"unit\"",
+    limit: "\"limit\"",
+};
+
+/// An optional `u32` argument, range-checked against `bounds`.
+fn opt_u32(args: &Value, key: &str, bounds: Bounds) -> CliResult<Option<u32>> {
+    match opt_int(args, key)? {
+        None => Ok(None),
+        Some(v) => {
+            let v = bounds.check(key, v)?;
+            // Every `Bounds` used here lies within `0..=u32::MAX`.
+            Ok(Some(u32::try_from(v).map_err(|_| {
+                usage(format!("\"{key}\" is out of range: {v}"))
+            })?))
+        }
+    }
+}
+
+/// Parse the `text` tool's arguments into an operation, before anything is
+/// resolved.
+fn text_op_from_args(args: &Value) -> CliResult<cli::TextOp> {
+    let op = req_str(args, "op")?;
+    let start = opt_u32(args, "start", TEXT_OFFSET)?;
+    let end = opt_u32(args, "end", TEXT_OFFSET)?;
+    let range = match (start, end) {
+        (Some(start), Some(end)) => Some(crate::TextRange { start, end }),
+        (None, None) => None,
+        // Half a range would have to be completed by guessing (0? the
+        // length?), and either guess reads text nobody asked for.
+        _ => return Err(usage("give \"start\" and \"end\" together, or neither")),
+    };
+    let occurrence = opt_u32(args, "occurrence", TEXT_OCCURRENCE)?.map(|n| n as usize);
+    let limit = match opt_int(args, "limit")? {
+        None => None,
+        Some(v) => Some(TEXT_LIMIT.check("limit", v)? as usize),
+    };
+    cli::parse_text_op(
+        op,
+        &cli::TextArgs {
+            range,
+            find: opt_str(args, "find")?,
+            occurrence,
+            offset: opt_u32(args, "offset", TEXT_OFFSET)?,
+            unit: opt_str(args, "unit")?,
+            limit,
+        },
+        &MCP_TEXT_ARG_NAMES,
+    )
+}
+
+fn tool_text(args: &Value) -> CliResult<ToolOutput> {
+    let selector = req_str(args, "selector")?;
+    let op = text_op_from_args(args)?;
+    let target = target(args)?;
+    tool_text_parsed(&target, selector, &op)
+}
+
+/// The resolving half of [`tool_text`], against an explicit target, so the
+/// mock provider can drive it.
+fn tool_text_parsed(target: &Target, selector: &str, op: &cli::TextOp) -> CliResult<ToolOutput> {
+    let element = match cli::resolve_text_element(target, selector)? {
+        Ok(element) => element,
+        Err(matches) => return Err(ambiguous(selector, &matches)),
+    };
+    let result = cli::run_text_op(&element.text()?, op)?;
+    let mut out = Map::new();
+    out.insert("selector".into(), json!(selector));
+    target_fields(target, &mut out);
+    out.insert("units".into(), json!("utf16"));
+    out.insert("result".into(), result);
+    Ok(ToolOutput::json(Value::Object(out)))
+}
+
+fn tool_table(args: &Value) -> CliResult<ToolOutput> {
+    let op_name = req_str(args, "op")?;
+    let selector = req_str(args, "selector")?;
+    let op = cli::parse_table_op(
+        op_name,
+        opt_u32(args, "row", TABLE_INDEX)?,
+        opt_u32(args, "column", TABLE_INDEX)?,
+        "\"row\"",
+        "\"column\"",
+    )?;
+    let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT)?;
+    let target = target(args)?;
+    tool_table_parsed(&target, selector, op_name, op, limit)
+}
+
+/// The resolving half of [`tool_table`], against an explicit target.
+fn tool_table_parsed(
+    target: &Target,
+    selector: &str,
+    op_name: &str,
+    op: cli::TableOp,
+    limit: usize,
+) -> CliResult<ToolOutput> {
+    let element = match cli::resolve_table_element(target, selector)? {
+        Ok(element) => element,
+        Err(matches) => return Err(ambiguous(selector, &matches)),
+    };
+    let found = cli::run_table_op(&element, op)?;
+    let mut out = Map::new();
+    out.insert("op".into(), json!(op_name));
+    out.insert("selector".into(), json!(selector));
+    target_fields(target, &mut out);
+    if let cli::TableOp::CellAt { row, column } = op {
+        out.insert("row".into(), json!(row));
+        out.insert("column".into(), json!(column));
+        out.insert("found".into(), json!(!found.is_empty()));
+        match found.first() {
+            Some(cell) => {
+                out.insert("cell".into(), element_data_json(cell));
+            }
+            None => {
+                out.insert("cell".into(), Value::Null);
+                out.insert(
+                    "reason".into(),
+                    json!(cli::no_cell_message(&element, row, column)),
+                );
+            }
+        }
+        return Ok(ToolOutput::json(Value::Object(out)));
+    }
+    let listed: Vec<Value> = found
+        .iter()
+        .take(limit)
+        .map(|el| element_data_json(el))
+        .collect();
+    out.insert("count".into(), json!(found.len()));
+    out.insert("returned".into(), json!(listed.len()));
+    out.insert("truncated".into(), json!(found.len() > listed.len()));
+    out.insert("elements".into(), Value::Array(listed));
+    Ok(ToolOutput::json(Value::Object(out)))
+}
+
 /// `windows` tool — enumerate top-level windows (winlenium's list-windows).
 ///
 /// Without `app`/`pid` this lists the windows of every running application;
@@ -2220,11 +2613,40 @@ pub(super) fn element_data_json(data: &crate::ElementData) -> Value {
         insert_some(&mut node, "max_value", data.max_value.map(Value::from));
     }
 
+    // Table and collection positions: small fixed-size objects, sent only
+    // when the platform reported one, each field only when reported (a
+    // missing span is absent, never defaulted to 1). `size`, `row_count` and
+    // `column_count` are a number or the string "unknown".
+    insert_position(&mut node, "table", data.table.filter(|t| !t.is_empty()));
+    insert_position(&mut node, "cell", data.cell.filter(|c| !c.is_empty()));
+    insert_position(
+        &mut node,
+        "table_row",
+        data.table_row.filter(|r| !r.is_empty()),
+    );
+    insert_position(
+        &mut node,
+        "collection",
+        data.collection.filter(|c| !c.is_empty()),
+    );
+
     if !data.actions.is_empty() {
         node.insert("actions".into(), json!(data.actions));
     }
     node.insert("states".into(), states_json(&data.states));
     Value::Object(node)
+}
+
+/// Insert one of the position objects, with its unreported fields dropped.
+///
+/// These are plain structs of integers and enums, so serializing one cannot
+/// fail; if it ever did, the node says so in place of the field rather than
+/// silently omitting it.
+fn insert_position<T: serde::Serialize>(map: &mut Map<String, Value>, key: &str, value: Option<T>) {
+    let Some(value) = value else { return };
+    let encoded =
+        cli::json_without_nulls(key, &value).unwrap_or_else(|e| json!({ "error": e.to_string() }));
+    map.insert(key.into(), encoded);
 }
 
 /// Insert a free-text field, cut to [`MAX_FIELD_BYTES`].
@@ -2345,6 +2767,17 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
     structured.insert("delivery".into(), json!(delivery.to_snake_case()));
 
     match err {
+        // The range and the text's current length as fields, so a caller
+        // holding a stale range sees how long the text is now without
+        // parsing the message (tenet 6).
+        CliError::Xa11y(crate::Error::InvalidTextRange {
+            start, end, length, ..
+        }) => {
+            structured.insert(
+                "text_range".into(),
+                json!({ "start": start, "end": end, "length": length }),
+            );
+        }
         CliError::Xa11y(inner) => {
             if let Some(diagnosis) = diagnosis_of(inner) {
                 let mut encoded = diagnosis_json(diagnosis);
@@ -2471,6 +2904,7 @@ fn failure_kind(err: &CliError) -> &'static str {
         crate::Error::Timeout { .. } => "timeout",
         crate::Error::InvalidSelector { .. } => "invalid_selector",
         crate::Error::InvalidActionData { .. } => "invalid_action_data",
+        crate::Error::InvalidTextRange { .. } => "invalid_text_range",
         crate::Error::InvalidConfig { .. } => "invalid_config",
         crate::Error::NoElementBounds => "no_element_bounds",
         crate::Error::Unsupported { .. } => "unsupported",
@@ -4479,5 +4913,326 @@ mod tests {
         assert_eq!(out.content[0]["type"], "text");
         assert_eq!(out.content[0]["text"], "{\"ok\":true}");
         assert_eq!(out.structured.unwrap()["ok"], true);
+    }
+    // ── Text and table ──────────────────────────────────────────────────────
+
+    /// The mock app with the table / list / tree / text-area fixture.
+    fn table_target() -> Target {
+        let provider: std::sync::Arc<dyn xa11y_core::Provider> =
+            xa11y_core::mock::build_table_provider();
+        let app = App::list_with(provider)
+            .expect("the mock must list its app")
+            .into_iter()
+            .next()
+            .expect("the mock must vend one app");
+        Target::App(app)
+    }
+
+    const NOTES: &str = r#"text_area[name="Notes"]"#;
+
+    /// Run a `text` call against the fixture and return its `result`.
+    fn text_result(call: Value) -> Value {
+        let op = text_op_from_args(&call).expect("valid text arguments");
+        let out = tool_text_parsed(&table_target(), NOTES, &op).expect("text call succeeds");
+        let structured = out.structured.expect("structured result");
+        assert_eq!(structured["units"], "utf16");
+        structured["result"].clone()
+    }
+
+    fn text_err(call: Value) -> CliError {
+        let op = text_op_from_args(&call).expect("valid text arguments");
+        tool_text_parsed(&table_target(), NOTES, &op).expect_err("text call fails")
+    }
+
+    #[test]
+    fn element_nodes_carry_reported_table_and_collection_positions() {
+        let target = table_target();
+        let one = |sel: &str| {
+            let els = target.locator(sel).elements().expect("resolves");
+            assert_eq!(els.len(), 1, "{sel}");
+            element_data_json(&els[0])
+        };
+        let price = one(r#"table_cell[name="Price"]"#);
+        assert_eq!(
+            price["cell"],
+            json!({ "row": 0, "column": 1, "row_span": 1, "column_span": 2, "header": "column" })
+        );
+        // An unreported span is absent, not defaulted to 1.
+        let three = one(r#"table_cell[name="3.00"]"#);
+        assert_eq!(three["cell"], json!({ "row": 2, "column": 1 }));
+        let table = one(r#"table[name="Prices"]"#);
+        assert_eq!(table["table"], json!({ "row_count": 3, "column_count": 3 }));
+        let row = one(r#"table_row[row="1"]"#);
+        assert_eq!(row["table_row"], json!({ "index": 1 }));
+        let first = one(r#"list_item[name="First"]"#);
+        assert_eq!(
+            first["collection"],
+            json!({ "index": 0, "size": "unknown" })
+        );
+        // An element without any of them carries none of the keys.
+        let notes = one(NOTES);
+        for key in ["table", "cell", "table_row", "collection"] {
+            assert!(notes.get(key).is_none(), "{key} on a text area: {notes}");
+        }
+    }
+
+    #[test]
+    fn text_info_reports_length_caret_and_selections_in_utf16_units() {
+        let r = text_result(json!({ "op": "info" }));
+        // "Hello 😀 world\nsecond line": the emoji is two units.
+        assert_eq!(r["length"], 26);
+        assert_eq!(r["caret"], Value::Null);
+        assert_eq!(r["selection_count"], 0);
+        assert_eq!(r["selections_truncated"], false);
+        assert_eq!(r["selections"], json!([]));
+    }
+
+    #[test]
+    fn a_found_range_carries_its_text_and_exact_offsets() {
+        let r = text_result(json!({ "op": "find", "find": "world" }));
+        assert_eq!(r["found"], true);
+        assert_eq!(
+            r["match"],
+            json!({ "start": 9, "end": 14, "text": "world" })
+        );
+
+        let miss = text_result(json!({ "op": "find", "find": "world", "occurrence": 1 }));
+        assert_eq!(miss["found"], false);
+        assert_eq!(miss["match"], Value::Null);
+
+        let read = text_result(json!({ "op": "read", "find": "second" }));
+        assert_eq!(read["text"], "second");
+        assert_eq!(
+            (read["start"].clone(), read["end"].clone()),
+            (json!(15), json!(21))
+        );
+        assert_eq!(read["truncated"], false);
+    }
+
+    #[test]
+    fn find_naming_the_range_of_another_op_fails_with_where_it_looked() {
+        let err = text_err(json!({ "op": "bounds", "find": "absent" }));
+        assert_eq!(failure_kind(&err), "no_match");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("\"absent\"") && msg.contains("text length 26"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_read_page_is_cut_before_a_surrogate_pair_and_says_where_to_resume() {
+        // A cut at 7 would split the emoji at 6..8, so the page stops at 6.
+        let r = text_result(json!({ "op": "read", "limit": 7 }));
+        assert_eq!(r["text"], "Hello ");
+        assert_eq!(r["end"], 6);
+        assert_eq!(r["truncated"], true);
+        assert_eq!(r["next_start"], 6);
+        assert_eq!(r["requested_end"], 26);
+        let next = text_result(json!({ "op": "read", "start": 6, "end": 26, "limit": 7 }));
+        assert!(next["text"].as_str().unwrap().starts_with("😀"), "{next}");
+    }
+
+    #[test]
+    fn range_at_lines_bounds_and_runs_return_ranges_with_text() {
+        let word = text_result(json!({ "op": "range-at", "offset": 10, "unit": "word" }));
+        assert_eq!(word["unit"], "word");
+        // The mock's word boundary keeps the trailing newline; what matters
+        // here is that the range's text is the text its offsets cover.
+        assert!(
+            word["range"]["text"].as_str().unwrap().starts_with("world"),
+            "{word}"
+        );
+        assert_eq!(word["range"]["start"], 9);
+
+        let lines = text_result(json!({ "op": "lines", "limit": 1 }));
+        assert_eq!(lines["count"], 1);
+        assert_eq!(lines["truncated"], true);
+        assert_eq!(lines["lines"][0]["text"], "Hello 😀 world\n");
+        let resume = lines["next_start"].as_u64().expect("next_start");
+        let rest = text_result(json!({ "op": "lines", "start": resume, "end": 26 }));
+        assert_eq!(rest["truncated"], false);
+        assert_eq!(rest["next_start"], Value::Null);
+        assert_eq!(rest["lines"][0]["text"], "second line");
+
+        let bounds = text_result(json!({ "op": "bounds", "find": "second" }));
+        assert_eq!(bounds["range"]["text"], "second");
+        assert_eq!(bounds["rects"].as_array().expect("rects").len(), 1);
+
+        let runs = text_result(json!({ "op": "runs", "start": 0, "end": 5 }));
+        let run = &runs["runs"][0];
+        assert_eq!(run["text"], "Hello");
+        assert_eq!(run["attributes"]["font_weight"], 700);
+        // Unreported attributes are absent rather than null.
+        assert!(run["attributes"].get("underline").is_none(), "{run}");
+    }
+
+    #[test]
+    fn an_out_of_bounds_range_is_an_invalid_text_range_with_its_fields() {
+        let err = text_err(json!({ "op": "read", "start": 0, "end": 100 }));
+        assert_eq!(failure_kind(&err), "invalid_text_range");
+        assert_eq!(err.delivery(), Some(crate::Delivery::NotDelivered));
+        let (_, structured) = describe_failure("text", &err);
+        assert_eq!(structured["kind"], "invalid_text_range");
+        assert_eq!(
+            structured["text_range"],
+            json!({ "start": 0, "end": 100, "length": 26 })
+        );
+    }
+
+    #[test]
+    fn text_refuses_ambiguity_and_elements_without_text() {
+        let target = table_target();
+        let op = cli::TextOp::Info;
+        let err = tool_text_parsed(&target, "table_cell", &op).expect_err("several cells");
+        assert_eq!(failure_kind(&err), "ambiguous_selector");
+        let err = tool_text_parsed(&target, r#"table_cell[name="Price"]"#, &op)
+            .expect_err("a cell with no value has no text interface");
+        assert_eq!(failure_kind(&err), "action_not_supported");
+    }
+
+    #[test]
+    fn text_arguments_an_operation_does_not_use_are_refused() {
+        for (call, needle) in [
+            (
+                json!({ "op": "info", "start": 0, "end": 1 }),
+                "does not take \"start\"/\"end\"",
+            ),
+            (
+                json!({ "op": "read", "occurrence": 1 }),
+                "\"occurrence\" picks a match",
+            ),
+            (
+                json!({ "op": "read", "offset": 3 }),
+                "does not take \"offset\"",
+            ),
+            (
+                json!({ "op": "range-at", "offset": 3 }),
+                "requires \"unit\"",
+            ),
+            (
+                json!({ "op": "range-at", "offset": 3, "unit": "sentence" }),
+                "unknown text unit",
+            ),
+            (json!({ "op": "find" }), "requires \"find\""),
+            (json!({ "op": "find", "find": "" }), "must not be empty"),
+            (
+                json!({ "op": "lines", "limit": 5000 }),
+                "between 1 and 1000",
+            ),
+            (
+                json!({ "op": "bounds", "limit": 5 }),
+                "does not take \"limit\"",
+            ),
+            (json!({ "op": "read", "start": 3 }), "together"),
+            (
+                json!({ "op": "read", "start": 5, "end": 3 }),
+                "must not exceed",
+            ),
+            (json!({ "op": "explode" }), "unknown text operation"),
+        ] {
+            let err = text_op_from_args(&call).expect_err(needle);
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{call}");
+            assert!(err.to_string().contains(needle), "{call}: {err}");
+        }
+    }
+
+    fn table_call(
+        op: &str,
+        selector: &str,
+        row: Option<u32>,
+        column: Option<u32>,
+        limit: usize,
+    ) -> Value {
+        let parsed =
+            cli::parse_table_op(op, row, column, "\"row\"", "\"column\"").expect("valid op");
+        tool_table_parsed(&table_target(), selector, op, parsed, limit)
+            .expect("table call succeeds")
+            .structured
+            .expect("structured")
+    }
+
+    const PRICES: &str = r#"table[name="Prices"]"#;
+
+    #[test]
+    fn cell_at_returns_the_merged_cell_covering_a_slot() {
+        let r = table_call("cell-at", PRICES, Some(0), Some(2), 50);
+        assert_eq!(r["found"], true);
+        assert_eq!(r["cell"]["name"], "Price");
+        let miss = table_call("cell-at", PRICES, Some(9), Some(0), 50);
+        assert_eq!(miss["found"], false);
+        assert_eq!(miss["cell"], Value::Null);
+        let reason = miss["reason"].as_str().expect("reason");
+        assert!(reason.contains("3 rows and 3 columns"), "{reason}");
+    }
+
+    #[test]
+    fn header_and_selection_lookups_list_elements_and_report_truncation() {
+        let headers = table_call("column-headers", PRICES, None, None, 50);
+        assert_eq!(headers["count"], 2);
+        assert_eq!(headers["truncated"], false);
+        let cut = table_call("column-headers", PRICES, None, None, 1);
+        assert_eq!(
+            (cut["count"].clone(), cut["returned"].clone()),
+            (json!(2), json!(1))
+        );
+        assert_eq!(cut["truncated"], true);
+
+        let heads = table_call(
+            "column-header-cells",
+            r#"table_cell[name="1.00"]"#,
+            None,
+            None,
+            50,
+        );
+        assert_eq!(heads["elements"][0]["name"], "Price");
+        let rows = table_call(
+            "row-header-cells",
+            r#"table_cell[name="2.00"]"#,
+            None,
+            None,
+            50,
+        );
+        assert_eq!(rows["elements"][0]["name"], "Widget");
+        let selected = table_call("selected-items", PRICES, None, None, 50);
+        assert_eq!(selected["elements"][0]["name"], "2.00");
+    }
+
+    #[test]
+    fn table_arguments_are_checked_before_anything_resolves() {
+        let err = cli::parse_table_op("cell-at", Some(1), None, "\"row\"", "\"column\"")
+            .expect_err("column missing");
+        assert!(
+            err.to_string().contains("requires \"row\" and \"column\""),
+            "{err}"
+        );
+        let err = cli::parse_table_op("row-headers", Some(1), None, "\"row\"", "\"column\"")
+            .expect_err("row is cell-at only");
+        assert!(err.to_string().contains("does not take \"row\""), "{err}");
+        let err = tool_table_parsed(
+            &table_target(),
+            NOTES,
+            "column-headers",
+            cli::TableOp::Headers(crate::HeaderKind::Column),
+            50,
+        )
+        .expect_err("a text area is not a table");
+        assert_eq!(failure_kind(&err), "action_not_supported");
+    }
+
+    #[test]
+    fn the_text_descriptions_state_utf16_units() {
+        let text = tool_definition("text")["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(text.contains("UTF-16 code unit"), "{text}");
+        assert!(text.contains("text_truncated"), "{text}");
+        let action = tool_definition("action");
+        let value = action["inputSchema"]["properties"]["value"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(value.contains("UTF-16 code units"), "{value}");
+        assert!(!value.contains("character offsets"), "{value}");
     }
 }

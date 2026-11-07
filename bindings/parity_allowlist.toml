@@ -305,9 +305,10 @@ files = [
 # as a string their type checker rejects.
 [[types.variant_coverage]]
 type = "HeaderKind"
-reason = "Crosses as 'column' | 'row'; the JS arms and the Python Literal / TypeScript union are hand-written."
+reason = "Crosses as 'column' | 'row'; the JS arms, the CLI/MCP `table` op parser and the Python Literal / TypeScript union are hand-written."
 files = [
     "xa11y-js/src/types.rs",
+    "xa11y/src/cli.rs",
     { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "HeaderKindName" },
 ]

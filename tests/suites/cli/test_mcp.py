@@ -376,6 +376,8 @@ def test_tools_list_is_complete_and_deterministic(mcp):
         "tree",
         "find",
         "action",
+        "text",
+        "table",
         "click",
         "move",
         "drag",
@@ -407,6 +409,83 @@ def test_unknown_tool_is_a_protocol_error(mcp):
     response = mcp.call_tool("teleport", {})
     assert "result" not in response
     assert response["error"]["code"] == -32602
+
+
+# ── Text and table ───────────────────────────────────────────────────────────
+#
+# Argument validation runs before the target is resolved, so these need no
+# desktop: a model that sends a malformed call is told so without a lookup.
+
+
+def _tools_by_name(mcp) -> dict:
+    return {t["name"]: t for t in mcp.request(1, "tools/list")["result"]["tools"]}
+
+
+def test_the_text_tool_states_its_offset_unit_and_operations(mcp):
+    text = _tools_by_name(mcp)["text"]
+    assert "UTF-16 code unit" in text["description"]
+    props = text["inputSchema"]["properties"]
+    assert props["op"]["enum"] == [
+        "info",
+        "read",
+        "find",
+        "range-at",
+        "lines",
+        "bounds",
+        "runs",
+    ]
+    assert props["unit"]["enum"] == ["character", "word", "line", "paragraph"]
+    assert set(text["inputSchema"]["required"]) == {"op", "selector"}
+
+
+def test_the_table_tool_lists_its_lookups(mcp):
+    table = _tools_by_name(mcp)["table"]
+    assert table["inputSchema"]["properties"]["op"]["enum"] == [
+        "cell-at",
+        "column-headers",
+        "row-headers",
+        "column-header-cells",
+        "row-header-cells",
+        "selected-items",
+    ]
+    assert 'table_cell[row=\"2\"][column=\"0\"]' in table["description"]
+
+
+def test_select_text_offsets_are_described_as_utf16_units(mcp):
+    """Issue #646: the `value` description used to say character offsets."""
+    value = _tools_by_name(mcp)["action"]["inputSchema"]["properties"]["value"]
+    assert "UTF-16 code units" in value["description"]
+    assert "character offsets" not in value["description"]
+
+
+@pytest.mark.parametrize(
+    "arguments, needle",
+    [
+        ({"op": "read", "offset": 3}, 'does not take "offset"'),
+        ({"op": "range-at", "offset": 3}, 'requires "unit"'),
+        ({"op": "read", "start": 3}, "together"),
+        ({"op": "find"}, 'requires "find"'),
+        ({"op": "lines", "limit": 5000}, "between 1 and 1000"),
+    ],
+)
+def test_text_arguments_are_refused_before_any_lookup(mcp, arguments, needle):
+    result = mcp.call_tool(
+        "text", {"selector": "text_field", "app": "no-such-app", **arguments}
+    )["result"]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "invalid_arguments", structured
+    assert needle in structured["message"], structured["message"]
+
+
+def test_cell_at_without_a_column_is_refused_before_any_lookup(mcp):
+    result = mcp.call_tool(
+        "table",
+        {"op": "cell-at", "selector": "table", "row": 1, "app": "no-such-app"},
+    )["result"]
+    assert result["isError"] is True
+    assert result["structuredContent"]["kind"] == "invalid_arguments"
+    assert 'requires "row" and "column"' in result["structuredContent"]["message"]
 
 
 # ── Shell surfaces ───────────────────────────────────────────────────────────

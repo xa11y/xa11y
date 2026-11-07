@@ -25,7 +25,8 @@
 //! integer and only `=`: `table_cell[row="2"][column="0"]`. The counts also
 //! accept `"unknown"`. Each compares the value exactly as the element reports
 //! it, 0-based like every index except `:nth`, so `table_cell[row="0"]:nth(1)`
-//! is the first matching cell of the first row.
+//! is the first matching cell of the first row. `header` takes `"column"` or
+//! `"row"` and matches header cells: `table_cell[header="column"]`.
 //!
 //! `*` is the universal selector and matches any element. It is equivalent to
 //! omitting the role, so `*[name="OK"]` and `[name="OK"]` are the same query;
@@ -798,6 +799,12 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
             .collection
             .and_then(|c| c.depth)
             .map(|n| n.to_string()),
+        // `"column"` / `"row"` on a header cell; matches nothing on a data
+        // cell, the same way `expanded` matches nothing on a leaf.
+        "header" => element
+            .cell
+            .and_then(|c| c.header)
+            .map(|h| h.to_snake_case().to_string()),
         "row_count" => element
             .table
             .and_then(|t| t.row_count)
@@ -1343,6 +1350,23 @@ mod numeric_attr_tests {
             &c,
             &simple(r#"table_cell[column_span="2"]"#)
         ));
+        // A data cell has no header kind, so a header filter matches nothing.
+        assert!(!matches_simple(
+            &c,
+            &simple(r#"table_cell[header="column"]"#)
+        ));
+        let mut h = cell(0, 0);
+        h.cell = Some(
+            CellParts {
+                row: Some(0),
+                column: Some(0),
+                row_span: None,
+                column_span: None,
+                header: Some(crate::table::HeaderKind::Column),
+            }
+            .into(),
+        );
+        assert!(matches_simple(&h, &simple(r#"table_cell[header="column"]"#)));
         // An unreported span matches no value.
         assert!(!matches_simple(&c, &simple(r#"table_cell[row_span="1"]"#)));
 

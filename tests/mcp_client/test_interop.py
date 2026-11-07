@@ -35,6 +35,8 @@ EXPECTED_TOOLS = [
     "tree",
     "find",
     "action",
+    "text",
+    "table",
     "click",
     "move",
     "drag",
@@ -394,7 +396,7 @@ def test_the_action_schema_declares_the_geometry_arguments(run_client):
 
 
 def test_the_element_tools_take_a_shell_surface_as_a_target(run_client):
-    for name in ("tree", "find", "action"):
+    for name in ("tree", "find", "action", "text", "table"):
         shell = _tool(run_client, name).input_schema["properties"]["shell"]
         assert set(shell["enum"]) == SHELL_KINDS, name
         assert "Mutually exclusive with `app`" in shell["description"], name
@@ -409,6 +411,43 @@ def test_naming_both_an_app_and_a_shell_surface_is_a_fixable_error(run_client):
     assert structured["kind"] == "invalid_arguments"
     assert '"shell"' in structured["message"]
     assert "--" not in structured["message"], "there are no flags on this surface"
+
+
+# ── Text and table ───────────────────────────────────────────────────────────
+
+
+def test_the_text_tool_states_its_unit_and_bounds(run_client):
+    text = _tool(run_client, "text")
+    assert "UTF-16 code unit" in text.description
+    props = text.input_schema["properties"]
+    assert set(text.input_schema["required"]) == {"op", "selector"}
+    for key in ("start", "end", "offset", "occurrence", "limit"):
+        assert props[key]["type"] == "integer", key
+        assert "minimum" in props[key] and "maximum" in props[key], key
+
+
+def test_a_text_argument_mistake_is_named_in_the_tools_own_vocabulary(run_client):
+    """Validation runs before the target is resolved, so no desktop is needed,
+    and it names `start`/`end` rather than the CLI's `--range`."""
+    result = run_client(
+        lambda c: c.call_tool(
+            "text", {"op": "info", "selector": "text_field", "app": "X", "start": 0, "end": 1}
+        )
+    )
+    assert result.is_error is True
+    structured = result.structured_content
+    assert structured["kind"] == "invalid_arguments"
+    assert '"start"/"end"' in structured["message"], structured["message"]
+    assert "--" not in structured["message"], "there are no flags on this surface"
+
+
+def test_a_table_argument_mistake_is_a_fixable_error(run_client):
+    result = run_client(
+        lambda c: c.call_tool("table", {"op": "cell-at", "selector": "table", "app": "X"})
+    )
+    assert result.is_error is True
+    assert result.structured_content["kind"] == "invalid_arguments"
+    assert "--" not in result.structured_content["message"]
 
 
 # ── Screenshot annotation ────────────────────────────────────────────────────
