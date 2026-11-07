@@ -28,6 +28,15 @@
 //! from `Application.ToolkitName` ([`offset_unit_for`]). For code-point
 //! toolkits every conversion reads the text before the offset, which is the
 //! accepted cost of one public unit.
+//!
+//! # Line ends
+//!
+//! A rendered line or paragraph includes the line terminator that ends it,
+//! as GTK reports it. Qt's `GetStringAtOffset` leaves the terminator out of
+//! every line and, asked at the terminator itself, answers the line before
+//! it, a range that does not contain the offset asked about. The terminator
+//! is appended to such a line ([`include_line_terminator`]), so a line walk
+//! advances and every toolkit reports the same lines.
 
 use xa11y_core::table::index_from_one_based;
 use xa11y_core::text_api::{
@@ -151,10 +160,11 @@ pub(super) fn attributes_from_atspi(attrs: &HashMap<String, String>) -> TextAttr
     let get = |k: &str| attrs.get(k).map(|s| s.trim());
     TextAttributeParts {
         font_family: get("family-name")
+            .map(unquote_family)
             .filter(|s| !s.is_empty())
             .map(String::from),
         font_size: get("size").and_then(|s| s.parse::<f64>().ok()),
-        font_weight: get("weight").and_then(|s| s.parse::<u16>().ok()),
+        font_weight: get("weight").and_then(parse_weight),
         italic: get("style").map(|s| s == "italic" || s == "oblique"),
         underline: get("underline").map(|s| s != "none" && s != "false"),
         strikethrough: get("strikethrough").map(|s| s == "true"),
@@ -164,6 +174,58 @@ pub(super) fn attributes_from_atspi(attrs: &HashMap<String, String>) -> TextAttr
         // script position cannot be read reliably.
         script: None,
         spelling_error: get("invalid").map(|s| s == "spelling"),
+    }
+}
+
+/// A font weight: numeric as ATK reports it, or the CSS keyword Qt sends
+/// (`"bold"`; Qt leaves the attribute out for normal text). The relative
+/// keywords `bolder` / `lighter` name no weight on their own, so they are
+/// not reported.
+fn parse_weight(v: &str) -> Option<u16> {
+    match v {
+        "normal" => Some(400),
+        "bold" => Some(700),
+        n => n.parse::<u16>().ok(),
+    }
+}
+
+/// A family name without the CSS quotes Qt wraps it in (`"Sans Serif"`
+/// with the quotes, from Qt's IAccessible2-style `font-family`).
+fn unquote_family(v: &str) -> &str {
+    ['"', '\'']
+        .iter()
+        .find_map(|&q| v.strip_prefix(q).and_then(|r| r.strip_suffix(q)))
+        .unwrap_or(v)
+        .trim()
+}
+
+/// Whether a UTF-16 unit ends a line. `\r\n` is handled by the caller.
+fn is_line_terminator(unit: u16) -> bool {
+    matches!(unit, 0x0A | 0x0D | 0x2028 | 0x2029)
+}
+
+/// `line`, a line or paragraph reported by the toolkit, with the terminator
+/// that follows it appended when the toolkit left it out (Qt; see the module
+/// docs). A line whose last unit is already a terminator, or that is not
+/// followed by one (a soft wrap, the end of the text), is returned as is.
+pub(super) fn include_line_terminator(units: &[u16], line: TextRange) -> TextRange {
+    let end = line.end as usize;
+    let Some(&next) = units.get(end) else {
+        return line;
+    };
+    let ends_with_terminator =
+        end > line.start as usize && units.get(end - 1).is_some_and(|&u| is_line_terminator(u));
+    if ends_with_terminator || !is_line_terminator(next) {
+        return line;
+    }
+    let width = if next == 0x0D && units.get(end + 1) == Some(&0x0A) {
+        2
+    } else {
+        1
+    };
+    TextRange {
+        start: line.start,
+        end: line.end + width,
     }
 }
 
@@ -731,9 +793,16 @@ impl LinuxProvider {
                 OffsetUnit::CodePoints => char_to_utf16_offset(&full, n),
             }
         };
-        Ok(TextRange {
+        let range = TextRange {
             start: to16(start)?,
             end: to16(end)?,
+        };
+        Ok(match unit {
+            TextUnit::Line | TextUnit::Paragraph => {
+                let units: Vec<u16> = full.encode_utf16().collect();
+                include_line_terminator(&units, range)
+            }
+            TextUnit::Word | TextUnit::Character => range,
         })
     }
 
@@ -951,6 +1020,78 @@ mod tests {
         assert_eq!(a.italic, Some(true));
         assert_eq!(a.underline, None);
         assert_eq!(a.spelling_error, None);
+    }
+
+    #[test]
+    fn qt_weight_keywords_and_quoted_families() {
+        // What Qt 6.12 sends for a bold run (captured over D-Bus).
+        let attrs: HashMap<String, String> = [
+            ("family-name", "\"Sans Serif\""),
+            ("size", "9"),
+            ("style", "normal"),
+            ("weight", "bold"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let a: xa11y_core::TextAttributes = attributes_from_atspi(&attrs).into();
+        assert_eq!(a.font_family.as_deref(), Some("Sans Serif"));
+        assert_eq!(a.font_weight, Some(700));
+        assert_eq!(a.font_size, Some(9.0));
+        assert_eq!(a.italic, Some(false));
+        assert_eq!(parse_weight("normal"), Some(400));
+        assert_eq!(parse_weight("bolder"), None);
+        assert_eq!(unquote_family("'Noto Sans'"), "Noto Sans");
+        assert_eq!(unquote_family("Cantarell"), "Cantarell");
+    }
+
+    fn u16s(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn a_line_without_its_terminator_gets_it() {
+        // Qt: "Hi 😀 wörld 𝄞\nsecond line" reports the first line as 0..14,
+        // also when asked at the newline (14) itself.
+        let text = u16s("Hi \u{1F600} w\u{f6}rld \u{1D11E}\nsecond line");
+        assert_eq!(
+            include_line_terminator(&text, TextRange { start: 0, end: 14 }),
+            TextRange { start: 0, end: 15 }
+        );
+        // The last line has no terminator to take.
+        assert_eq!(
+            include_line_terminator(&text, TextRange { start: 15, end: 26 }),
+            TextRange { start: 15, end: 26 }
+        );
+        // `\r\n` is one terminator.
+        let crlf = u16s("ab\r\ncd");
+        assert_eq!(
+            include_line_terminator(&crlf, TextRange { start: 0, end: 2 }),
+            TextRange { start: 0, end: 4 }
+        );
+        // An empty line between two newlines.
+        let blank = u16s("a\n\nb");
+        assert_eq!(
+            include_line_terminator(&blank, TextRange { start: 2, end: 2 }),
+            TextRange { start: 2, end: 3 }
+        );
+    }
+
+    #[test]
+    fn a_line_that_has_its_terminator_is_left_alone() {
+        // GTK: "a\n\nb" reports 0..2 and then the blank line 2..3; the
+        // newline after the first line is the blank line's, not its own.
+        let text = u16s("a\n\nb");
+        assert_eq!(
+            include_line_terminator(&text, TextRange { start: 0, end: 2 }),
+            TextRange { start: 0, end: 2 }
+        );
+        // A soft-wrapped line is followed by text, not a terminator.
+        let wrapped = u16s("one two\n");
+        assert_eq!(
+            include_line_terminator(&wrapped, TextRange { start: 0, end: 4 }),
+            TextRange { start: 0, end: 4 }
+        );
     }
 
     #[test]

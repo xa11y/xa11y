@@ -42,7 +42,9 @@ plain totals.
 `table`, `cell`, `table_row`, and `collection` are properties of every
 element. Each one is `None` when the element has no such semantics or the
 platform does not report them, and each field inside is `None` when the
-platform left it out. A missing span is never filled in as `1`.
+platform left it out. A missing span is never filled in as `1`. Qt reports
+`1` itself, even for a merged cell; see
+[Platform details](/reference/platform-details/#tables-collections-and-text).
 
 A total can also be the string `"unknown"`. Virtualized lists and grids report
 that when they do not know how many rows they hold.
@@ -183,7 +185,8 @@ individual cells with `column_header_cells()` instead.
 
 `collection` carries an item's `index` in its set, the set's `size`, and the
 item's tree `depth`. On Linux, xa11y reads them for list items, tree items,
-tabs, radio buttons, and rows. `index` starts at 0, so add 1 for a "3 of 10" label.
+tabs, radio buttons, and rows. Qt sets none of them, so its items read
+`collection` as `None`. `index` starts at 0, so add 1 for a "3 of 10" label.
 `depth` is 0 for a top-level tree item. Heading level is a separate concept
 and still reads `1` for an h1.
 

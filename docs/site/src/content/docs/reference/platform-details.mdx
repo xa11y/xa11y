@@ -434,6 +434,26 @@ xa11y reads the text before each offset to convert it, and a `caret()` or
 counts UTF-16 code units and needs no conversion. xa11y picks the unit from
 `Application.ToolkitName`.
 
+Qt's adaptor differs from GTK in a few more places. These were measured on
+Qt 6.12, and `tests/suites/python/test_qt_rich.py` pins them:
+
+- **Merged cells.** Qt answers `1` for every row and column extent, and each
+  slot a merged cell covers is a cell of its own. So a cell merged with
+  `QTableView::setSpan` reads `row_span` and `column_span` as `1`,
+  and `cell_at()` on a covered slot returns the covered cell.
+- **Collections.** Qt sets no `posinset`, `setsize` or `level` attributes, so
+  `collection` is `None` on its list and tree items. A `QListWidget` or
+  `QTreeWidget` row is a table cell instead, and `cell.row` gives its
+  position among the visible rows.
+- **Line ends.** Qt leaves the newline out of each line and paragraph. xa11y
+  appends it, so `range_at(offset, "line")` contains the offset and `lines()`
+  reports the same lines as GTK.
+- **Font attributes.** Qt sends `weight` only for text that is not normal, so
+  plain text reads `font_weight` as `None`. For plain text it also sends no
+  underline, no line-through and no colors, so those read `None`.
+- **Text change events.** Because Qt counts UTF-16, `text_change.range` is
+  set on its `text_changed` events. It is `None` for the code-point toolkits.
+
 ### Linux: X11 vs Wayland
 
 xa11y supports both X11 and Wayland Linux sessions. Backends are selected at runtime, with no compile-time feature flag.
