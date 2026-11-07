@@ -29,6 +29,7 @@ pytestmark = pytest.mark.timeout(120)
 
 EXPECTED_TOOLS = [
     "apps",
+    "capabilities",
     "shell",
     "windows",
     "enable_web_accessibility",
@@ -206,6 +207,21 @@ def test_a_failing_call_carries_structured_context(run_client):
     assert structured["delivery"] in {"not_delivered", "unknown"}, (
         "every failure says whether a retry could double-apply"
     )
+
+
+def test_capabilities_answers_without_touching_an_app(run_client):
+    """The one tool that needs no desktop: a fixed table, readable by a real client."""
+    result = run_client(
+        lambda c: c.call_tool("capabilities", {"platform": "windows", "names": ["window:"]})
+    )
+    assert result.is_error is False
+    structured = result.structured_content
+    assert structured["platform"] == "windows"
+    assert structured["count"] == len(structured["capabilities"]) > 0
+    fullscreen = next(
+        c for c in structured["capabilities"] if c["name"] == "window:enter_fullscreen"
+    )
+    assert fullscreen["support"] == "unsupported" and fullscreen["note"], fullscreen
 
 
 def test_an_argument_mistake_is_reported_as_something_to_fix(run_client):

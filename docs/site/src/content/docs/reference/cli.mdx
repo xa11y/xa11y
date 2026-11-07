@@ -347,6 +347,28 @@ new value.
 
 Useful for understanding what events fire when you interact with an app, or for debugging event subscriptions in your code.
 
+### `xa11y capabilities`
+
+Print what this platform's backend can report, one feature per line:
+`supported`, `partial` (some toolkits, apps or display servers only) or
+`unsupported`, with a note where there is one. It reads a fixed table and
+touches no application. The table is the one under
+[Capabilities](/reference/platform-details/#capabilities).
+
+```bash
+xa11y capabilities                          # this platform, every feature
+xa11y capabilities window: event:menu_opened
+xa11y capabilities --platform windows --os-version 10.0.19045 --json
+```
+
+Positional arguments select features by name (`event:menu_opened`) or by
+area (`window:`). An unknown name is a usage error that lists the closest
+known names. `--platform` takes `linux`, `macos` or `windows`, and
+`--os-version` narrows the answers to that release. Linux has no platform
+version, so it takes none. Text output starts with a `platform:` line,
+followed by `name`, `support` and `note` columns separated by tabs. `--json`
+prints one object with `platform`, `os_version` and `capabilities`.
+
 ### `xa11y guide`
 
 Print the [agent guide](/guides/agent-guide/): the guide an agent reads
@@ -515,6 +537,7 @@ gives it selectors to resolve.
 | Tool | Arguments |
 | --- | --- |
 | `apps` | none |
+| `capabilities` | `platform`, `os_version`, `names` |
 | `shell` | none |
 | `windows` | `app`, `pid`, `limit` |
 | `enable_web_accessibility` | `app`, `pid` |

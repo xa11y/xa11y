@@ -1437,6 +1437,67 @@ class Screenshot:
         """Resize image pixels while scaling coordinate mapping."""
     def __repr__(self) -> str: ...
 
+# ── Capabilities ─────────────────────────────────────────────────────────────
+
+PlatformName = Literal["linux", "macos", "windows"]
+SupportName = Literal["supported", "partial", "unsupported"]
+
+class Capability:
+    """One feature's answer on one platform."""
+
+    @property
+    def name(self) -> str:
+        """Feature name, ``<area>:<name>`` (``"event:menu_opened"``)."""
+    @property
+    def description(self) -> str:
+        """What the feature is, in one sentence."""
+    @property
+    def support(self) -> SupportName:
+        """``"supported"``, ``"partial"`` or ``"unsupported"``."""
+    @property
+    def note(self) -> str | None:
+        """How the platform provides it, or why it does not; ``None`` when there
+        is nothing to add."""
+    @property
+    def since(self) -> str | None:
+        """The first OS version that supports it, when older ones do not."""
+    def __repr__(self) -> str: ...
+
+class Capabilities:
+    """Every feature's answer on one platform. Get one from
+    :func:`xa11y.capabilities`.
+
+    Iterating yields :class:`Capability` objects in table order; ``name in
+    caps`` tests whether a feature name is known.
+    """
+
+    @staticmethod
+    def names() -> list[str]:
+        """Every feature name the table knows, in table order."""
+    @property
+    def platform(self) -> PlatformName:
+        """The platform described."""
+    @property
+    def os_version(self) -> str | None:
+        """The OS version the answers were narrowed to, or ``None`` when none
+        was given or detected. Always ``None`` on Linux."""
+    def entries(self) -> list[Capability]:
+        """Every feature, in table order."""
+    def get(self, name: str) -> Capability:
+        """The capability named ``name``. Raises :class:`InvalidActionDataError`
+        for an unknown name, listing the closest known ones."""
+    def support(self, name: str) -> SupportName:
+        """Shorthand for ``get(name).support``."""
+    def note(self, name: str) -> str | None:
+        """Shorthand for ``get(name).note``."""
+    def has(self, name: str) -> bool:
+        """Whether ``name`` is a feature the table knows (also ``name in caps``)."""
+    def __len__(self) -> int: ...
+    def __contains__(self, name: object) -> bool: ...
+    def __getitem__(self, name: str) -> Capability: ...
+    def __iter__(self) -> Iterator[Capability]: ...
+    def __repr__(self) -> str: ...
+
 # ── Module-level functions ───────────────────────────────────────────────────
 
 def locator(selector: str) -> Locator:
@@ -1461,6 +1522,17 @@ def get_default_timeout() -> float:
 
     Resolution order: the :func:`set_default_timeout` value, else the
     ``XA11Y_DEFAULT_TIMEOUT`` environment variable, else the built-in 5.0.
+    """
+
+def capabilities(
+    platform: PlatformName | None = None, os_version: str | None = None
+) -> Capabilities:
+    """What a platform's backend can report: one answer per feature, read from
+    a static table without connecting to any app.
+
+    With no arguments, describes the running platform and OS version. Pass
+    ``platform`` to describe another one, and ``os_version`` to narrow it to
+    an OS release.
     """
 
 def input_sim() -> InputSim:

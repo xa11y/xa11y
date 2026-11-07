@@ -5,6 +5,7 @@ use pyo3::exceptions::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+mod capabilities;
 mod rich;
 
 // ── Singleton provider ─────────────────────────────────────────────────────
@@ -2988,6 +2989,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Screenshot>()?;
     m.add_class::<ShellSurface>()?;
     m.add_class::<Subscription>()?;
+    m.add_class::<capabilities::Capabilities>()?;
+    m.add_class::<capabilities::Capability>()?;
     m.add_class::<rich::TableInfo>()?;
     m.add_class::<rich::CellInfo>()?;
     m.add_class::<rich::RowInfo>()?;
@@ -3015,6 +3018,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(locator_fn, m)?)?;
 
     // Process-wide default timeout knobs
+    m.add_function(wrap_pyfunction!(capabilities::capabilities, m)?)?;
     m.add_function(wrap_pyfunction!(set_default_timeout, m)?)?;
     m.add_function(wrap_pyfunction!(get_default_timeout, m)?)?;
 

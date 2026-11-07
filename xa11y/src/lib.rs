@@ -41,6 +41,9 @@ pub use xa11y_core::{ElementParts, EventParts, StateParts, TextChangeParts};
 // 5 seconds.
 pub use xa11y_core::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
 
+// Re-export the capability table (see `xa11y_core::capabilities`).
+pub use xa11y_core::{Capabilities, Capability, Platform, Support};
+
 // Re-export input simulation surface.
 pub use xa11y_core::input;
 pub use xa11y_core::{
@@ -76,6 +79,13 @@ pub use xa11y_core::{is_bidi_control, strip_bidi, strip_bidi_opt};
 // Implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
 pub use xa11y_core::{CancelHandle, EventReceiver, Provider, RecvStatus, Selector, SelectorGroup};
+
+/// What this platform's backend can report: one answer per feature, read from
+/// a static table without connecting to any app. See
+/// [`Capabilities::for_platform`] to describe another platform or OS version.
+pub fn capabilities() -> Result<Capabilities> {
+    Capabilities::current()
+}
 
 /// Shared in-memory mock Provider — re-exported from `xa11y-core` when the
 /// `test-support` feature is enabled. Used by language-binding tests so

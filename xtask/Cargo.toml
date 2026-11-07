@@ -6,6 +6,9 @@ license = "MIT"
 publish = false
 
 [dependencies]
+# The capability table is rendered into the docs from the real data
+# (`cargo xtask sync-capabilities`), so the page cannot drift from the code.
+xa11y-core = { workspace = true }
 toml = { version = "1.1", default-features = false, features = ["parse", "serde"] }
 serde_json = { workspace = true }
 # `full` is required to parse whole source files (items, impl blocks, fn

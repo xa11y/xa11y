@@ -294,6 +294,13 @@ So behaviour changes on at least one platform whatever we pick. Options:
 | B. Keep `group` (+ `Navigation`), add `landmark_type` | needs a new "attribute present" selector operator; the selector AST is exhaustive, so that is a change in every backend's fast path | `[landmark_type="main"]` | Linux bug still needs fixing; two ways to say "navigation" |
 | C. One role per landmark (`Main`, `Banner`, …) | no single selector | `main` | eight new roles, nothing gained over A |
 
+"Landmark" is the standard word on every layer: WAI-ARIA defines `landmark`
+as the abstract superclass of `banner`, `complementary`, `contentinfo`,
+`form`, `main`, `navigation`, `region` and `search`; WCAG and the HTML spec
+call them landmark regions; AT-SPI's role is `ROLE_LANDMARK`; UIA's property
+is `LandmarkType`; AX's subroles are `AXLandmarkMain` and friends. So
+`landmark` / `landmark_type` invents no vocabulary.
+
 **Recommend A.** AT-SPI already has a single landmark role; UIA and AX model
 it as group plus a property, which is exactly role + `landmark_type`. No new
 selector operator is needed. `Role::Navigation` is removed (not left as a
@@ -371,7 +378,7 @@ print(field.labelled_by())               # [Element(label "Email address")]
 print(field.relations())                 # {"labelled_by": [...], "details": [...]}
 try:
     field.relations("described_by")      # Windows: no such relation in UIA
-except xa11y.UnsupportedError as e:
+except xa11y.ActionNotSupportedError as e:
     print(e)                             # "relation 'described_by' is not exposed by UIA"
 ```
 
@@ -531,73 +538,72 @@ kind, and actionable targets (Linux targets carry handle 0).
 
 ### Proposal
 
-#### 4a. Split `Announcement` from `LiveRegionChanged`, and carry the payload
+#### 4a. One `announcement` kind everywhere, with an `origin` and the text
 
-They are different facts. An announcement is an explicit "say this" with
-text; a live-region change says "this region's content changed, go read it".
+Two facts arrive through announcement-like events. An explicit request says
+"say this" and carries text. A live-region or alert change says "this region
+changed, go read it" and carries none.
 
 | | Windows | macOS | Linux |
 |---|---|---|---|
-| `Announcement` (text + priority) | `AddNotificationEventHandler`: `displayString`, `NotificationKind`, `NotificationProcessing`, `activityId` | `AXAnnouncementRequested` userInfo: `AXAnnouncementKey`, `AXPriorityKey` (needs `AXObserverCreateWithInfoCallback`) | `Object:Announcement`: text in `any_data`, politeness in `detail1` (AT-SPI 2.46+; GTK 4.14 `gtk_accessible_announce`) |
-| `LiveRegionChanged` (target = region, no text) | `UIA_LiveRegionChangedEventId` | `AXLiveRegionChanged` (not registered today) | **No native signal.** Live updates arrive as `text-changed` / `children-changed` inside a `container-live` subtree |
+| Explicit request (text + priority) | `AddNotificationEventHandler`: `displayString`, `NotificationKind`, `NotificationProcessing`, `activityId` | `AXAnnouncementRequested` userInfo: `AXAnnouncementKey`, `AXPriorityKey` (needs `AXObserverCreateWithInfoCallback`) | `Object:Announcement`: text in `any_data`, politeness in `detail1` (AT-SPI 2.46+; GTK 4.14 `gtk_accessible_announce`) |
+| Live region changed (no text) | `UIA_LiveRegionChangedEventId` | `AXLiveRegionChanged` (not registered today) | **No native signal.** Live updates arrive as `text-changed` / `children-changed` inside a `container-live` subtree |
+| Alert appeared (no text) | `UIA_SystemAlertEventId` | no separate event | no separate event |
 
-New payload, set only on `Announcement`:
+**Recommended: keep one kind, `announcement`, on every platform, and say
+which fact it is.** Today Windows already folds all three UIA events into
+`announcement`; this keeps that, adds what is missing, and makes macOS match:
 
 ```rust
 pub struct AnnouncementInfo {
-    pub text: String,
-    pub politeness: Politeness,      // polite | assertive, normalised
+    pub origin: AnnouncementOrigin,        // request | live_region | alert
+    pub text: Option<String>,              // Some for a request; None for the others
+    pub politeness: Option<Politeness>,    // polite | assertive, normalised
     pub platform_priority: Option<String>, // "High", "ImportantMostRecent", ...
-    pub activity_id: Option<String>, // UIA only
+    pub activity_id: Option<String>,       // UIA only
 }
 ```
 
-Normalisation: AX `High` and UIA `ImportantAll`/`ImportantMostRecent` →
-`assertive`; the rest `polite`. The raw value is preserved. No
-screen-reader policy (queueing, interruption) is implied.
+- A portable `wait_for(announcement)` works on all three, which is the
+  consistency a test writer wants, and nothing that works today on Windows
+  stops working.
+- `origin` keeps the two facts apart for a consumer that cares, without
+  making everyone else subscribe to two kinds.
+- Normalisation: AX `High` and UIA `ImportantAll` / `ImportantMostRecent` →
+  `assertive`; the rest `polite`. The raw value is preserved. No
+  screen-reader policy (queueing, interruption) is implied.
 
-**Linux `LiveRegionChanged`: unsupported (decided).** Subscribing to it on
-Linux fails (see 4c). Consumers listen to `TextChanged` / `StructureChanged`
-and read `live_region` on the target (section 2), which tells them it is
-inside one. Deriving it from `container-live` was rejected: an extra D-Bus
-call per event, for an event the OS never sent.
+**What still differs, and cannot be made the same:** Linux has no live-region
+signal (decided: not derived), so on Linux an `aria-live` update raises an
+announcement only when the toolkit sends one itself. AccessKit and GTK 4's
+announce API do; Chromium and GTK 3 widgets send text and children changes
+instead. `xa11y.capabilities()` carries this as its own row,
+`event:announcement:live_region`, `unsupported` on Linux, so a test can ask
+before it waits.
+
+*Alternative: split `live_region_changed` into its own kind.* Each kind then
+means one fact, but the same app produces different kinds on different
+platforms (AccessKit: an announcement on macOS and Linux, a live-region
+change on Windows), and code waiting for `announcement` after an `aria-live`
+update on Windows starts timing out. Rejected for the consistency reason
+above.
 
 #### 4a-bis. What changes on Windows
 
-Today three UIA events all become `Announcement`
-(`UIA_NotificationEventId`, `UIA_LiveRegionChangedEventId`,
-`UIA_SystemAlertEventId`). After the split:
+Nothing that works today breaks. The three UIA events keep arriving as
+`announcement`; each gains a payload:
 
 | UIA event | Raised by | Today | After |
 |---|---|---|---|
-| Notification | an app calling `RaiseNotificationEvent` (WPF, WinForms `RaiseAutomationNotification`, UWP/WinUI, Windows Terminal) | `Announcement`, no text | `Announcement` **with** text, kind, processing, activity id |
-| LiveRegionChanged | a region with `LiveSetting` changed (WPF, WinUI, browsers for `aria-live`, AccessKit live nodes) | `Announcement` | `LiveRegionChanged` |
-| SystemAlert | an alert appeared (browsers for `role=alert`, Win32 alerts) | `Announcement` | `LiveRegionChanged`, target = the alert, its `live_region.politeness` reads `assertive` |
+| Notification | an app calling `RaiseNotificationEvent` (WPF, WinForms `RaiseAutomationNotification`, UWP/WinUI, Windows Terminal) | `announcement`, no text | `announcement`, `origin: request`, with text, kind, processing, activity id |
+| LiveRegionChanged | a region with `LiveSetting` changed (WPF, WinUI, browsers for `aria-live`, AccessKit live nodes) | `announcement` | `announcement`, `origin: live_region`, politeness from the target's `LiveSetting` |
+| SystemAlert | an alert appeared (browsers for `role=alert`, Win32 alerts) | `announcement` | `announcement`, `origin: alert`, politeness `assertive` |
 
-Consequences:
-
-- **Code waiting for `announcement` after an `aria-live` update on Windows
-  times out.** That is the one real break. It needs a changelog entry with
-  the fix (wait for either kind), and the `Timeout` diagnosis for an
-  `announcement` wait on Windows should say a `live_region_changed` arrived
-  meanwhile, so the cause is in the error (tenet 6).
-- **The same app can produce different kinds on different platforms.**
-  AccessKit turns a live-node update into `AXAnnouncementRequested` on macOS
-  and `Object:Announcement` on Linux (text included), but into
-  `LiveRegionChanged` on Windows (no text). That reflects what each adapter
-  sends; xa11y reporting it faithfully is the point. A portable test waits for
-  `{announcement, live_region_changed}` and reads the target. The AccessKit
-  test that passes on all three today splits into two.
-- **Notification handlers need `IUIAutomation5`** (Windows 10 1709+). On
-  older systems `announcement` is unsupported rather than silently silent.
-  CI (`windows-latest`) has it.
-- **SystemAlert as `LiveRegionChanged`** is a judgment call: it carries no
-  text, and the consumer has to read the alert, which is the live-region
-  contract. The alternative is a separate `alert` kind; macOS and Linux have
-  no matching event, so it would be single-platform, which `events.md`
-  rules out.
-- Registration cost is unchanged: the same per-window subtree registration
-  with one more handler type.
+The one mechanical change is reading the text: Notification moves from the
+generic automation handler to `AddNotificationEventHandler`, which needs
+`IUIAutomation5` (Windows 10 1709+). On older systems a request still arrives,
+without text, and the capability table records the version
+(`event:announcement:text`, `since 10.0.16299`).
 
 #### 4b. Event metadata
 
@@ -617,7 +623,7 @@ App::subscribe_with(SubscribeOptions::new().kinds(&[..]).buffer(4096))
 - Backends skip registering handlers nobody asked for (UIA per-window
   property handlers are the expensive ones).
 - A requested kind the backend cannot deliver fails `subscribe` with
-  `Unsupported` naming it (e.g. `live_region_changed` on Linux,
+  `Unsupported` naming it (e.g. `menu_opened` on Linux,
   `window_deactivated` on Windows today). Today such a kind just never fires.
 - The plain `subscribe()` keeps "everything this backend supports".
 
@@ -645,151 +651,162 @@ from xa11y import App, EventType
 
 app = App.by_name("Chat")
 
-with app.subscribe(kinds=[EventType.ANNOUNCEMENT, EventType.LIVE_REGION_CHANGED,
-                          EventType.TEXT_CHANGED], buffer=4096) as sub:
+with app.subscribe(kinds=[EventType.ANNOUNCEMENT, EventType.TEXT_CHANGED],
+                   buffer=4096) as sub:
     app.locator('button[name="Send"]').press()
 
     ev = sub.wait_for(lambda e: e.event_type == EventType.ANNOUNCEMENT, timeout=5)
-    print(ev.announcement.text)        # "Message sent"
+    print(ev.announcement.origin)      # "request", "live_region" or "alert"
+    print(ev.announcement.text)        # "Message sent" for a request, else None
     print(ev.announcement.politeness)  # "polite"
     print(ev.sequence, ev.timestamp)   # 17, 0.412
 
-    ev = sub.wait_for(lambda e: e.event_type == EventType.LIVE_REGION_CHANGED)
-    print(ev.target.live_region.politeness, ev.target.name)
-    ev.target.text().read_all()        # target is a live Element now
+    if ev.announcement.text is None:   # a region changed: read it
+        print(ev.target.name, ev.target.text().read_all())
 
     print(sub.dropped)                 # 0, or how many were lost to the bound
 
-# Linux
-try:
-    app.subscribe(kinds=[EventType.LIVE_REGION_CHANGED])
-except xa11y.UnsupportedError as e:
-    print(e)  # "live_region_changed: AT-SPI has no live-region signal; ..."
+# Ask before waiting for something a platform never sends
+caps = xa11y.capabilities()
+if caps.support("event:announcement:live_region") == "unsupported":   # Linux
+    ...  # watch text_changed on the region instead
 ```
 
 ### Open questions
 
-Decided: Linux `LiveRegionChanged` is unsupported.
+Decided: no live-region event on Linux (not derived).
 
 1. Default buffer size, and drop-oldest?
-2. Moving UIA `LiveRegionChanged` / `SystemAlert` out of `Announcement` in a
-   minor release (see 4a-bis)?
+2. One `announcement` kind with `origin` (recommended, 4a) or a split?
 
 ---
 
 ## 5. Cross-cutting: capabilities, deadline, IA2
 
-### `xa11y.capabilities()`
+### `xa11y.capabilities()` (implemented)
+
+Status: built on this branch for the features that exist today; the rows for
+sections 2 and 4 arrive with those changes.
 
 #### The problem it solves
 
-Three questions have no answer today except "read the docs and hope they
-are current":
+Three questions had no answer except "read the docs and hope they are
+current":
 
 1. A field is `None`. Does this element lack the property, or can this
    backend never report it? (#476 requires these to be distinguishable.)
-2. Is an event kind I subscribed to silent because nothing happened, or
-   because this backend never sends it? (Today: `window_deactivated` on
-   Windows simply never arrives.)
+2. Is an event kind silent because nothing happened, or because this backend
+   never sends it? (`window_deactivated` on Windows simply never arrives.)
 3. Which relation kinds can I ask for here?
 
-The docs already answer these in prose and tables, and they have drifted:
-the role table claims a Windows landmark mapping no code produces.
+The docs answered these in prose and tables, and had drifted: the role table
+claims a Windows landmark mapping no code produces, and Blur was documented
+as unsupported on Linux and Windows while both implement it (fixed on this
+branch).
 
 #### What it is
 
-A per-backend description of what the backend can *ever* report, as data:
+`xa11y-core/src/capabilities.rs` holds one list of rows, each with a column
+per platform, so a new feature cannot be added without answering for all
+three, and a new platform is a compile error on every row:
 
 ```rust
-pub enum Support { Supported, ToolkitDependent, Unsupported }   // exhaustive: closed domain
+#[non_exhaustive] pub enum Platform { Linux, Macos, Windows }
+#[non_exhaustive] pub enum Support { Supported, Partial, Unsupported }
 
 #[non_exhaustive]
-pub enum Feature {
-    // properties
-    HeadingLevel, LandmarkType, WebRole, LinkUrl, LiveRegion, ...
-    // methods
-    Relation(RelationKind), TextCaret, TextRuns, TableHeaders, ...
-    // events
-    Event(EventKindName),
+pub struct Capability {
+    pub name: &'static str,            // "event:menu_opened"
+    pub description: &'static str,
+    pub support: Support,
+    pub note: Option<String>,          // how it is provided, or why not
+    pub since: Option<&'static str>,   // first OS version that has it
 }
 
-pub struct Capabilities { backend: Backend, entries: BTreeMap<Feature, Entry> }
-pub struct Entry { support: Support, note: Option<&'static str> }   // note: why, or the version needed
-
-trait Provider { fn capabilities(&self) -> Capabilities; }
+impl Capabilities {
+    pub fn current() -> Result<Self>;                                   // running platform + detected OS version
+    pub fn for_platform(p: Platform, os_version: Option<&str>) -> Result<Self>;
+    pub fn get(&self, name: &str) -> Result<&Capability>;               // unknown name: error with closest names
+    pub fn support(&self, name: &str) -> Result<Support>;
+    pub fn note(&self, name: &str) -> Result<Option<&str>>;
+    pub fn has(&self, name: &str) -> bool;
+    pub fn entries(&self) -> &[Capability];
+    pub fn names() -> impl Iterator<Item = &'static str>;
+}
+pub fn capabilities() -> Result<Capabilities>;                          // xa11y crate
 ```
 
-- **`Supported`**: the backend reads it whenever the app exposes it.
-  `None` on an element means *this element* has none.
-- **`ToolkitDependent`**: the backend reads it, but only some toolkits
-  publish it (UIA link URLs: browsers only; AT-SPI live attributes:
-  Chromium, Firefox and WebKitGTK, not GTK 4 widgets). `None` is ambiguous,
-  and the note says which toolkits are known to publish it.
-- **`Unsupported`**: never. Methods return `Error::Unsupported`; `subscribe`
-  with that kind fails; fields are always `None`.
+- **`supported`**: the backend reads it whenever the app exposes it. `None`
+  on an element means *this element* has none.
+- **`partial`**: read for some toolkits, apps or display servers only (Linux
+  window verbs: X11 and Sway; collection positions: GTK yes, Qt no). The note
+  says which.
+- **`unsupported`**: never. Methods fail as unsupported, the event never
+  arrives, the field is always `None`.
 
-It is static per backend, with one runtime refinement: the provider may
-downgrade an entry for the running OS (no `IUIAutomation5` before Windows 10
-1709 → `announcement` unsupported; AT-SPI before 2.46 → no
-`Object:Announcement`). It never probes an app, so it is cheap and does not
-depend on what happens to be open.
+**Other platforms and versions.** `capabilities()` with no arguments
+describes the running platform, with the OS version detected on macOS
+(`kern.osproductversion`) and Windows (`ver`). Passing a platform describes
+another one; passing an OS version narrows the answers, so a row with
+`since = "10.0.17134"` reads `unsupported` for `10.0.16299`, with the reason
+in the note. Linux has no single platform version (what it reports depends on
+the toolkit and display server, which the notes name), so a version for Linux
+is an error rather than ignored. No row is version-gated yet; the first will
+be UIA `HeadingLevel` (Windows 10 1803) and the Notification text (1709).
+
+Names are `<area>:<name>`: `event:`, `action:`, `app:`, `window:`, `state:`,
+`table:`, `text:`. Today's table has 38 rows.
 
 #### Surfaces
 
 | | |
 |---|---|
-| Rust | `xa11y::capabilities()` |
-| Python | `xa11y.capabilities()` → object with `.backend`, `.support(name)`, `.note(name)`, iterable |
-| JS | `capabilities()` |
-| CLI | `xa11y capabilities [--json]` |
-| MCP | a `capabilities` tool, so an agent can check before relying on a field instead of discovering by experiment (the rule in CLAUDE.md about descriptions as contracts) |
+| Rust | `xa11y::capabilities()`, `Capabilities::for_platform(..)` |
+| Python | `xa11y.capabilities(platform=None, os_version=None)` → `Capabilities` (`support`, `note`, `get`, `has`, `in`, `[]`, iteration) |
+| JS | `capabilities({ platform?, osVersion? })` → `Capabilities` |
+| CLI | `xa11y capabilities [NAME \| AREA: ...] [--platform P] [--os-version V] [--json]` |
+| MCP | `capabilities` tool (`platform`, `os_version`, `names`) |
 
-Feature names are the snake_case spellings used elsewhere
-(`heading_level`, `relation:described_by`, `event:live_region_changed`), and
-`Feature` goes under `[[types.variant_coverage]]` like `EventKind`.
+`current` / `for_platform` fold into the single `capabilities(...)` entry in
+both bindings (one name per operation). Strings are the same in both
+bindings: `linux` / `macos` / `windows`, `supported` / `partial` /
+`unsupported`.
 
 #### What keeps it true
 
-A table nobody checks drifts like the docs did. Three guards:
-
-1. **Code consults it.** `subscribe(kinds=...)` and `relations(kind)` decide
-   "unsupported" by reading the table, not by a separate `match`. A wrong
-   entry produces a visible wrong error, not a quiet mismatch.
-2. **Integ tests iterate it.** One test per platform cell walks the table
-   against the fixtures: every `Unsupported` entry must produce
-   `Error::Unsupported` (or a `subscribe` failure); every `Supported` entry
-   must have a fixture that yields a non-`None` value or a delivered event.
-   This turns the table into coverage, and is what #475 asks for ("an empty
-   result or blanket skip must not masquerade as coverage").
-3. **Docs are generated.** `cargo xtask docs` renders the capability table
-   in `platform-details.mdx` from the three backends' tables (each backend's
-   table is plain data, so it compiles on every host the way the stubs do);
-   CI fails if the checked-in page differs. The prose caveats stay
-   hand-written.
-
-#### Costs and alternatives
-
-- Cost: every new property, relation or event kind needs an entry per
-  backend. That is deliberate, the same kind of forced per-platform decision
-  `ElementParts` makes for fields.
-- `ToolkitDependent` will cover a lot of the web semantics on Linux, which is
-  a weaker answer. It is the true one; the note names the tested toolkits.
-- *Alternative: docs only* (today). Drifts, and nothing a program can read.
-- *Alternative: probe at runtime* (ask the app). Answers "does this app
-  publish it", which a field read already does; slow and app-dependent.
-- *Alternative: per-field tri-state* (`Reported<T>`). Rejected in 2c.
+1. **Docs are generated.** `cargo xtask sync-capabilities` renders the table
+   into `reference/platform-details.mdx` between two markers; `--check` runs
+   in `cargo xtask check` and in CI.
+2. **An integration test holds it against the running backend.**
+   `xa11y/tests/integ/capabilities.rs` walks every row in each platform cell
+   and either probes it against the AccessKit app (unsupported → the call
+   fails as unsupported or the state reads unknown; supported → it does not)
+   or names it in an explicit `NOT_PROBED` list with the reason. A new row
+   fails the test until it is placed. Passing on Linux here.
+3. **Completeness guards.** A unit test fails when an `EventKind` has no
+   `event:` row; `[[types.variant_coverage]]` covers `Platform` and `Support`
+   in the Python and TypeScript literal types; every non-`supported` answer
+   must carry a note.
+4. **Code will consult it** once `subscribe(kinds=...)` and `relations(kind)`
+   exist (sections 2 and 4): those decide "unsupported" by reading the table,
+   so a wrong entry is a visible wrong error.
 
 ```python
-caps = xa11y.capabilities()
-caps.backend                                  # "uia"
-caps.support("heading_level")                 # "supported"
-caps.support("link_url"), caps.note("link_url")
-# ("toolkit_dependent", "ValuePattern on Hyperlink; Chromium, Edge, Firefox")
-caps.support("relation:described_by")         # "unsupported"
-caps.support("event:live_region_changed")     # "supported"
+import xa11y
 
-if caps.support("event:live_region_changed") == "unsupported":   # Linux
-    kinds = [EventType.TEXT_CHANGED, EventType.STRUCTURE_CHANGED]
+caps = xa11y.capabilities()                     # this machine
+caps.platform, caps.os_version                  # ("linux", None)
+caps.support("event:menu_opened")               # "unsupported"
+caps.note("event:menu_opened")                  # "the AT-SPI backend maps no menu event"
+"window:maximize" in caps                       # True
+[c.name for c in caps if c.support == "partial"]
+
+win = xa11y.capabilities("windows", os_version="10.0.19045")
+win.get("window:enter_fullscreen")
+# Capability('window:enter_fullscreen', 'unsupported', note='UIA has no fullscreen API')
+
+caps.get("event:menu_open")   # InvalidActionDataError: unknown capability "event:menu_open";
+                              # names in "event": event:menu_opened, event:menu_closed, ...
 ```
 
 ### #531 Deadline
@@ -826,15 +843,16 @@ Made:
   re-read means stale, on all three platforms.
 - **#480** `LiveRegionChanged` is unsupported on Linux.
 - **#482** Default `max_nodes` is 2,000 everywhere.
+- **All** `xa11y.capabilities()`, with a platform and OS-version option:
+  implemented on this branch (section 5).
 
 Recommended, awaiting sign-off:
 
 - **#476** `Role::Landmark` for every landmark plus `landmark_type`;
   `Role::Navigation` removed with a loud selector error (2a-bis).
-- **#480** Split UIA `LiveRegionChanged` and `SystemAlert` out of
-  `Announcement` (4a-bis).
-- **All** `xa11y.capabilities()`, consulted by code, iterated by integ
-  tests, and used to generate the docs table (section 5).
+- **#480** One `announcement` kind on every platform with `origin`
+  (`request` / `live_region` / `alert`) and the text, instead of a split
+  (4a). No Windows break.
 
 Still open: Linux `GetAttributes` gating (2), `web_role` exposure (2), MCP
 ref table size (1), event buffer default (4), `tree()` frozen or not (3).

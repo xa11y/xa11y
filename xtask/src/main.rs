@@ -4,6 +4,7 @@ use std::process::{Command, ExitCode};
 
 mod api;
 mod binding_api;
+mod capabilities_doc;
 mod parity;
 mod rustdoc_api;
 mod versions;
@@ -48,6 +49,7 @@ COMMANDS:
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
     sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
     sync-agent-guide [--check]  Render xa11y/AGENT_GUIDE.md into the docs site
+    sync-capabilities [--check]  Render the xa11y-core capability table into the platform-details page
     check-macos-ffi     Verify xa11y-macos/src/ax.rs only uses safe_* CF/AX wrappers
     check-windows-dpi   Verify coordinate-bearing Win32/UIA calls go through xa11y-windows/src/coords.rs
     check-mcp-stdout    Verify xa11y/src/mcp writes nothing to stdout but protocol
@@ -97,6 +99,9 @@ fn main() -> ExitCode {
         "fuzz" => do_fuzz(rest),
         "sync-readmes" => do_sync_readmes(rest),
         "sync-agent-guide" => do_sync_agent_guide(rest),
+        "sync-capabilities" => {
+            capabilities_doc::sync(&project_root(), rest.iter().any(|a| a == "--check"))
+        }
         "check-macos-ffi" => do_check_macos_ffi(),
         "check-windows-dpi" => do_check_windows_dpi(),
         "check-mcp-stdout" => do_check_mcp_stdout(),
@@ -1908,6 +1913,12 @@ fn do_check() -> bool {
     heading("PRE-PR CHECK: sync-readmes");
     if !do_sync_readmes(&["--check".to_string()]) {
         eprintln!("!! READMEs out of date. Run `cargo xtask sync-readmes` to fix.");
+        ok = false;
+    }
+
+    heading("PRE-PR CHECK: sync-capabilities");
+    if !capabilities_doc::sync(&project_root(), true) {
+        eprintln!("!! Capability table out of date. Run `cargo xtask sync-capabilities` to fix.");
         ok = false;
     }
 

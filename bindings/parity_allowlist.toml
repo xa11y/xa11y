@@ -27,6 +27,7 @@
 # Bindings expose this type and each of its members.
 mirrored = [
     "App",
+    "Capabilities",
     "Element",
     "Event",
     "InputSim",
@@ -62,6 +63,9 @@ opaque = [
     { type = "CellInfo", reason = "Python exposes a frozen CellInfo class; JS returns a plain object. Same split as Rect." },
     { type = "RowInfo", reason = "Python exposes a frozen RowInfo class; JS returns a plain object. Same split as Rect." },
     { type = "CollectionInfo", reason = "Python exposes a frozen CollectionInfo class; JS returns a plain object. Same split as Rect." },
+    { type = "Capability", reason = "Python exposes a frozen Capability class; JS returns a plain { name, description, support, note, since } object. Same split as Rect: members are covered by the per-binding tests (test_capabilities.py, capabilities.test.js)." },
+    { type = "Platform", reason = "Crosses as the identically-spelled strings 'linux' | 'macos' | 'windows' via Platform::to_snake_case / Platform::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
+    { type = "Support", reason = "Crosses as the identically-spelled strings 'supported' | 'partial' | 'unsupported' via Support::to_snake_case. See [[types.variant_coverage]]." },
     { type = "Count", reason = "Crosses as an int (Python) / number (JS), or the string 'unknown' in both, matching its serde form." },
     { type = "HeaderKind", reason = "Crosses as the identically-spelled strings 'column' | 'row' via HeaderKind::to_snake_case. See [[types.variant_coverage]]." },
     { type = "TextRange", reason = "Python exposes a frozen, hashable TextRange class (and accepts (start, end) tuples); JS uses plain { start, end } objects. Same split as Rect." },
@@ -323,6 +327,21 @@ files = [
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "TextScriptName" },
 ]
 [[types.variant_coverage]]
+type = "Platform"
+reason = "Crosses as 'linux' | 'macos' | 'windows' through Platform::to_snake_case / Platform::parse; the Python Literal, the TypeScript union and the capability table's per-platform columns are hand-written."
+files = [
+    "xa11y-core/src/capabilities.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake", within = "PlatformName" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "PlatformName" },
+]
+[[types.variant_coverage]]
+type = "Support"
+reason = "Crosses as 'supported' | 'partial' | 'unsupported' through Support::to_snake_case; the Python Literal and the TypeScript union are hand-written."
+files = [
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake", within = "SupportName" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "SupportName" },
+]
+[[types.variant_coverage]]
 type = "TextChangeKind"
 reason = "Crosses as 'inserted' | 'deleted' on Event.text_change; the JS arms, the CLI/MCP formatter and the Python Literal / TypeScript union are hand-written."
 files = [
@@ -380,6 +399,8 @@ reason = "Both bindings surface the annotation legend on their Screenshot class 
 [python]
 # Core members deliberately not exposed to Python. key = "Type::member".
 rust_only = [
+    { method = "Capabilities::current", reason = "Folded into the module function capabilities(platform=None, os_version=None): with no arguments it is current(). One name per operation (AGENTS.md: options fold into the primary verb)." },
+    { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities(platform, os_version): passing a platform or version is for_platform(). One name per operation." },
     { method = "Text::find_with", reason = "FindOptions folds into find()'s keyword-only occurrence / within parameters (AGENTS.md: options structs fold into the primary verb)." },
     # App: explicit-provider plumbing. The binding uses the global singleton
     # provider; `_with` variants exist for injection in Rust tests.
@@ -474,6 +495,8 @@ python_only = [
 
 [js]
 rust_only = [
+    { method = "Capabilities::current", reason = "Folded into the module function capabilities(options?): with no options it is current(). One name per operation (AGENTS.md: options fold into the primary verb)." },
+    { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities({ platform, osVersion }). One name per operation." },
     { method = "Text::find_with", reason = "FindOptions folds into find()'s options object ({ occurrence, within }) (AGENTS.md: options structs fold into the primary verb)." },
     { method = "App::by_name_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::by_pid_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },

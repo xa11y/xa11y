@@ -10,6 +10,67 @@ pageType: reference
 
 xa11y normalizes platform-specific APIs into a unified interface. This page documents how roles and actions map across platforms, and where behavior differs.
 
+## Capabilities
+
+What each platform's backend can report, one row per feature. The same
+table is available at run time from `xa11y.capabilities()` in Python,
+`capabilities()` in JavaScript, `xa11y::capabilities()` in Rust,
+`xa11y capabilities` on the command line and the `capabilities` MCP tool.
+Pass a platform to read another platform's column, and an OS version to
+narrow the answers to that release.
+
+- **Supported**: reported whenever the app exposes it. A missing value means
+  that element has none.
+- **Partial**: reported for some toolkits, apps or display servers only. The
+  note names them.
+- **Unsupported**: never reported. The call fails as unsupported, the event
+  never arrives, or the field stays empty.
+
+{/* BEGIN GENERATED: capabilities. Edit xa11y-core/src/capabilities.rs, then run `cargo xtask sync-capabilities`. */}
+
+| Feature | Linux (AT-SPI) | macOS | Windows (UIA) |
+| --- | --- | --- | --- |
+| `event:focus_changed`: Keyboard focus moved to another element. | Supported | Supported | Supported |
+| `event:value_changed`: An element's value changed. | Supported | Supported | Supported |
+| `event:name_changed`: An element's name changed. | Supported | Supported | Supported |
+| `event:state_changed`: A state flag changed (checked, expanded, enabled, ...). | Supported | Supported | Supported |
+| `event:structure_changed`: Children were added to or removed from an element. | Supported | Supported | Supported |
+| `event:window_opened`: A window opened. | Supported | Supported | Supported |
+| `event:window_closed`: A window closed. | Supported | Supported | Supported |
+| `event:window_activated`: A window became the active window. | Supported: Window:Activate and Window:Restore | Supported: AXFocusedWindowChanged | Unsupported: no UIA handler is registered for window activation |
+| `event:window_deactivated`: A window stopped being the active window. | Supported: Window:Deactivate and Window:Minimize | Unsupported: AX reports the newly focused window, not the one that lost focus | Unsupported: no UIA handler is registered for window activation |
+| `event:selection_changed`: The selected items of a list, table or other container changed. | Supported | Supported | Supported |
+| `event:menu_opened`: A menu opened. | Unsupported: the AT-SPI backend maps no menu event | Supported: AXMenuOpened | Supported: UIA MenuOpened |
+| `event:menu_closed`: A menu closed. | Unsupported: the AT-SPI backend maps no menu event | Supported: AXMenuClosed | Supported: UIA MenuClosed |
+| `event:text_changed`: Text in an editable element changed. | Supported | Supported | Supported |
+| `event:text_selection_changed`: The caret moved or the text selection changed. | Supported | Supported | Supported |
+| `event:announcement`: The app asked for an announcement, or a live region or alert changed. | Supported: Object:Announcement; the text is not carried | Supported: AXAnnouncementRequested; the text is not carried | Supported: UIA Notification, LiveRegionChanged and SystemAlert; no text is carried |
+| `event:text_change`: A text_changed event says what was inserted or deleted (Event.text_change). | Partial: inserted or deleted text from Object:TextChanged; the UTF-16 range only for Qt, which counts UTF-16 natively | Unsupported: AXValueChanged carries no delta | Unsupported: UIA text-change events carry no delta |
+| `action:blur`: Remove keyboard focus from an element (Element.blur). | Supported: focuses the parent with Component.GrabFocus; fails if the parent cannot take focus | Supported: sets AXFocused to false | Supported: focuses the desktop root |
+| `app:enable_web_accessibility`: Ask a Chromium or Electron app to build its web accessibility tree (App.enable_web_accessibility). | Unsupported: a launch-time switch on Linux; relaunch the app with --force-renderer-accessibility | Supported: sets AXManualAccessibility, then AXEnhancedUserInterface | Unsupported: not needed; Chromium builds the tree when a UI Automation client connects |
+| `window:activate`: Bring a window to the foreground and focus it. | Partial: X11, and Sway on Wayland; other Wayland compositors: unsupported | Supported | Supported |
+| `window:minimize`: Minimize a window. | Partial: X11 only; unsupported on Wayland | Supported | Supported |
+| `window:maximize`: Maximize a window. | Partial: X11 only; unsupported on Wayland | Unsupported: AX has no zoom state to read or set | Supported |
+| `window:enter_fullscreen`: Put a window in native fullscreen. | Partial: X11, and Sway on Wayland; other Wayland compositors: unsupported | Supported: AXFullScreen | Unsupported: UIA has no fullscreen API |
+| `window:restore`: Restore a window from minimized, maximized or fullscreen. | Partial: X11, and Sway on Wayland; other Wayland compositors: unsupported | Supported | Supported |
+| `window:close`: Close a window. | Partial: X11, and Sway on Wayland; other Wayland compositors: unsupported | Supported | Supported |
+| `window:move_to`: Move a window. | Partial: X11, and floating windows on Sway; other Wayland compositors: unsupported | Supported | Supported |
+| `window:resize_to`: Resize a window. | Partial: X11, and floating windows on Sway; other Wayland compositors: unsupported | Supported | Supported |
+| `state:minimized`: Read whether a window is minimized. | Partial: X11, and the AT-SPI iconified state on Wayland compositors other than Sway; unknown on Sway | Supported: AXMinimized | Supported: WindowPattern visual state |
+| `state:maximized`: Read whether a window is maximized. | Partial: X11 only; unsupported on Wayland | Unsupported: AX has no zoom state; always unknown | Supported: WindowPattern visual state |
+| `state:fullscreen`: Read whether a window is fullscreen. | Partial: X11, and Sway on Wayland; other Wayland compositors: unsupported | Supported: AXFullScreen | Unsupported: UIA has no fullscreen state; always unknown |
+| `table:row_index`: The index of a table row element (Element.table_row). | Unsupported: AT-SPI has no row-index call for a row object; read the row from a cell | Supported: AXIndex | Partial: when the row object reports a GridItem row |
+| `table:cell_header`: Whether a cell is a column or row header (CellInfo.header). | Supported: the column header and row header roles | Unsupported: AX marks no cell as a header | Supported |
+| `table:row_headers`: The row header cells of a table or cell. | Supported | Partial: AppKit tables report no row headers | Supported |
+| `table:collection`: Position and size of an item in a list, tree, tab list or radio group (Element.collection). | Partial: toolkits that set posinset, setsize and level (GTK, Chromium); Qt sets none | Partial: rows, tabs and radio buttons; web list items are groups in AX and report none | Supported |
+| `text:range_at:character`: Text.range_at with the character unit. | Supported | Supported | Supported |
+| `text:range_at:word`: Text.range_at with the word unit. | Partial: where the toolkit reports word boundaries | Unsupported: AX has no word boundary API | Supported |
+| `text:range_at:line`: Text.range_at with the line unit. | Supported | Supported: AXLineForIndex and AXRangeForLine | Supported |
+| `text:range_at:paragraph`: Text.range_at with the paragraph unit. | Partial: where the toolkit reports paragraph boundaries; the GTK 3 text view does not | Unsupported: AX has no paragraph boundary API | Supported |
+| `text:attribute:script`: Superscript and subscript in text runs (TextAttributes.script). | Unsupported: AT-SPI text attributes carry no script position | Supported | Supported |
+
+{/* END GENERATED: capabilities */}
+
 ## Role mapping
 
 | xa11y Role | macOS (AX) | Linux (AT-SPI) | Windows (UIA) |
@@ -70,7 +131,7 @@ place of the text, and xa11y passes that placeholder through.
 | --- | --- | --- | --- |
 | `Press` | AXPress *(AXOpen when the element has AXOpen and no AXPress)* | click, activate, press, invoke | InvokePattern, TogglePattern, SelectionItemPattern, or ExpandCollapsePattern. LegacyIAccessible.DoDefaultAction only for an element with none of those and a non-empty MSAA default action |
 | `Focus` | set AXFocused=true | Component.GrabFocus | SetFocus |
-| `Blur` | set AXFocused=false | *(not directly supported)* | *(not directly supported)* |
+| `Blur` | set AXFocused=false | Component.GrabFocus on the parent | SetFocus on the desktop root |
 | `Toggle` | AXPress *(on checkbox)* | toggle, check, uncheck | TogglePattern |
 | `Expand` | AXShowMenu / AXPress | expand, open | ExpandCollapsePattern.Expand |
 | `Collapse` | AXCancel / AXPress | collapse, close | ExpandCollapsePattern.Collapse |
@@ -241,7 +302,9 @@ Text is inserted through the accessibility API. Keyboard events are never simula
 ### Blur
 
 - **macOS** sets `AXFocused` to false on the element.
-- **Linux and Windows** have no direct API equivalent, so the action is unsupported.
+- **Linux** has no unfocus call, so xa11y focuses the element's parent with
+  `Component.GrabFocus`. The call fails when the parent cannot take focus.
+- **Windows** has no unfocus call either, so xa11y focuses the desktop root.
 
 ### Unresponsive apps (macOS)
 

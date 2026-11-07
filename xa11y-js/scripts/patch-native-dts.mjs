@@ -18,6 +18,8 @@
 //   5c. Narrow the table / text plain objects: `Count` (number or
 //      'unknown'), `CellInfo.header`, `TextAttributes.script`,
 //      `TextChange.kind`, and `Text.rangeAt`'s unit parameter.
+//   5d. Narrow the capability table's platform and support strings to
+//      `PlatformName` / `SupportName`.
 //   6. Append a `;` to the napi-emitted `NativeSubscription` type alias
 //      (napi-rs omits terminators, which confuses the docs generator's
 //      multi-line type-alias parser).
@@ -107,6 +109,12 @@ export type CountValue = number | 'unknown';
 
 /** Which kind of header a header cell is. Spelled as in Python. */
 export type HeaderKindName = 'column' | 'row';
+
+/** A platform xa11y has a backend for. */
+export type PlatformName = 'linux' | 'macos' | 'windows';
+
+/** Whether a backend can report a feature (see \`capabilities()\`). */
+export type SupportName = 'supported' | 'partial' | 'unsupported';
 
 /** Units accepted by \`Text.rangeAt\`. Spelled as in Python. */
 export type TextUnitName = 'character' | 'word' | 'line' | 'paragraph';
@@ -228,6 +236,30 @@ const REPLACEMENTS = [
     name: 'Text.rangeAt unit -> TextUnitName',
     from: '  rangeAt(offset: number, unit: string)',
     to: '  rangeAt(offset: number, unit: TextUnitName)',
+    all: 1,
+  },
+  {
+    name: 'Capabilities.platform -> PlatformName',
+    from: '  get platform(): string\n',
+    to: '  get platform(): PlatformName\n',
+    all: 1,
+  },
+  {
+    name: 'CapabilitiesOptions.platform -> PlatformName',
+    from: '  platform?: string\n',
+    to: '  platform?: PlatformName\n',
+    all: 1,
+  },
+  {
+    name: 'Capability.support -> SupportName',
+    from: '  support: string\n',
+    to: '  support: SupportName\n',
+    all: 1,
+  },
+  {
+    name: 'Capabilities.support() -> SupportName',
+    from: '  support(name: string): string\n',
+    to: '  support(name: string): SupportName\n',
     all: 1,
   },
   {

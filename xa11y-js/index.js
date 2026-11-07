@@ -312,6 +312,7 @@ patchPrototypeMethods(native.Event);
 patchPrototypeMethods(native.InputSim);
 patchPrototypeMethods(native.Screenshot);
 patchPrototypeMethods(native.Text);
+patchPrototypeMethods(native.Capabilities);
 
 // ── Locator.waitUntil (JS-side polling loop) ───────────────────────────────
 //
@@ -791,6 +792,19 @@ function getDefaultTimeout() {
 }
 
 /**
+ * What a platform's backend can report: one answer per feature, read from a
+ * static table without connecting to any app. With no options, describes the
+ * running platform and OS version; pass `{ platform, osVersion }` to describe
+ * another.
+ *
+ * @param {{ platform?: string, osVersion?: string }} [options]
+ * @returns {Capabilities}
+ */
+function capabilities(options) {
+  return wrap(native.capabilities)(options);
+}
+
+/**
  * Construct an `InputSim` backed by the platform's native input path.
  * Errors are wrapped in typed `XA11yError` subclasses like every other
  * entry point.
@@ -887,6 +901,7 @@ function screenshot(options) {
 // not a plain identifier. Keep every value a local name, or `import {
 // screenshot } from '@crowecawcaw/xa11y'` fails with a SyntaxError.
 const {
+  Capabilities,
   Element,
   Event,
   InputSim,
@@ -911,6 +926,7 @@ const _makeTestAmbiguousShellSurfaceByKind = wrap(native._makeTestAmbiguousShell
 
 module.exports = {
   App,
+  Capabilities,
   Element,
   Event,
   InputSim,
@@ -919,6 +935,7 @@ module.exports = {
   ShellSurface,
   Subscription,
   Text,
+  capabilities,
   getDefaultTimeout,
   inputSim,
   locator,
