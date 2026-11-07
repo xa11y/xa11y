@@ -117,3 +117,4 @@ viewport
 [Vv]irtualized
 toplevels?
 postconditions?
+strikethrough
