@@ -1231,11 +1231,7 @@ impl Locator {
 
     /// Select a text range within the matched element.
     pub fn select_text(&self, start: u32, end: u32) -> Result<()> {
-        if start > end {
-            return Err(Error::InvalidActionData {
-                message: format!("select_text start ({}) must be <= end ({})", start, end),
-            });
-        }
+        crate::text_api::TextRange::new(start, end)?;
         self.auto_wait("select_text")?.select_text(start, end)
     }
 

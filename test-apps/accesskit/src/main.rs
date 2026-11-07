@@ -886,6 +886,7 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
 
     let mut root_tree = Node::new(Role::TreeItem);
     root_tree.set_label("Root Item");
+    root_tree.set_level(0);
     root_tree.set_children(vec![CHILD_TREE_ITEM]);
     root_tree.set_expanded(true);
     root_tree.add_action(Action::Expand);
@@ -894,6 +895,7 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
 
     let mut child_tree = Node::new(Role::TreeItem);
     child_tree.set_label("Child Item");
+    child_tree.set_level(1);
     nodes.push((CHILD_TREE_ITEM, child_tree));
 
     let mut dialog = Node::new(Role::Dialog);

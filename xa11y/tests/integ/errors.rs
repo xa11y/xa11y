@@ -163,14 +163,14 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn error_select_text_inverted_range_is_invalid_action_data() {
+    fn error_select_text_inverted_range_is_invalid_text_range() {
         // Range validation happens in the Locator before selector
         // resolution, so this fails fast regardless of the target.
         let app = h::app_root();
         let result = app.locator(r#"[name*="Submit"]"#).select_text(5, 2);
         assert!(
-            matches!(result, Err(Error::InvalidActionData { .. })),
-            "select_text(5, 2) should be InvalidActionData, got: {result:?}"
+            matches!(result, Err(Error::InvalidTextRange { .. })),
+            "select_text(5, 2) should be InvalidTextRange, got: {result:?}"
         );
     }
 

@@ -64,6 +64,9 @@ pub mod unresponsive_linux;
 #[cfg(target_os = "linux")]
 pub mod rich;
 
+#[cfg(target_os = "windows")]
+pub mod rich_windows;
+
 use xa11y::*;
 
 /// Get the test app as an `App`, retrying briefly for registration.

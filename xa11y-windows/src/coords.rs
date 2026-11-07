@@ -29,6 +29,7 @@
 #![cfg(target_os = "windows")]
 
 use windows::core::BOOL;
+
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::GetDC;
@@ -47,6 +48,81 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::dpi::DpiScope;
 use xa11y_core::{Error, Result};
+
+/// Read UIA text rectangles while the calling thread uses physical pixels.
+pub fn text_range_bounds(
+    _scope: &DpiScope,
+    range: &windows::Win32::UI::Accessibility::IUIAutomationTextRange,
+) -> Result<Option<xa11y_core::Rect>> {
+    use windows::Win32::System::Ole::{
+        SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound,
+        SafeArrayGetUBound, SafeArrayGetVartype,
+    };
+    use windows::Win32::System::Variant::VT_R8;
+    assert_per_monitor();
+    let err = |e: windows::core::Error| Error::Platform {
+        code: e.code().0 as i64,
+        message: format!("reading UIA text bounding rectangles: {e}"),
+    };
+    let array = unsafe { range.GetBoundingRectangles() }.map_err(err)?;
+    if array.is_null() {
+        return Ok(None);
+    }
+    struct OwnedArray(*mut windows::Win32::System::Com::SAFEARRAY);
+    impl Drop for OwnedArray {
+        fn drop(&mut self) {
+            // Ownership comes from GetBoundingRectangles; destruction cannot
+            // affect the already-read result and must also run on error paths.
+            let _ = unsafe { SafeArrayDestroy(self.0) };
+        }
+    }
+    let array = OwnedArray(array);
+    if unsafe { SafeArrayGetDim(array.0) } != 1
+        || unsafe { SafeArrayGetVartype(array.0) }.map_err(err)? != VT_R8
+    {
+        return Err(Error::Platform {
+            code: -1,
+            message: "UIA text rectangles must be a one-dimensional double array".into(),
+        });
+    }
+    let lower = unsafe { SafeArrayGetLBound(array.0, 1) }.map_err(err)?;
+    let upper = unsafe { SafeArrayGetUBound(array.0, 1) }.map_err(err)?;
+    let count = (i64::from(upper) - i64::from(lower) + 1).max(0);
+    if count % 4 != 0 {
+        return Err(Error::Platform {
+            code: -1,
+            message: "UIA text rectangle array length is not a multiple of four".into(),
+        });
+    }
+    let read = |index: i32| -> Result<f64> {
+        let mut value = 0f64;
+        unsafe { SafeArrayGetElement(array.0, &index, (&raw mut value).cast()) }.map_err(err)?;
+        Ok(value)
+    };
+    let mut union: Option<(f64, f64, f64, f64)> = None;
+    for i in (i64::from(lower)..=i64::from(upper)).step_by(4) {
+        let i = i as i32;
+        let (x, y, w, h) = (read(i)?, read(i + 1)?, read(i + 2)?, read(i + 3)?);
+        if ![x, y, w, h].iter().all(|v| v.is_finite()) || w < 0.0 || h < 0.0 {
+            return Err(Error::Platform {
+                code: -1,
+                message: "UIA returned invalid text rectangle coordinates".into(),
+            });
+        }
+        union = Some(match union {
+            None => (x, y, x + w, y + h),
+            Some((l, t, r, b)) => (l.min(x), t.min(y), r.max(x + w), b.max(y + h)),
+        });
+    }
+    Ok(union.map(|(l, t, r, b)| {
+        crate::dpi::physical_rect_to_desktop(RECT {
+            left: l.floor() as i32,
+            top: t.floor() as i32,
+            right: r.ceil() as i32,
+            bottom: b.ceil() as i32,
+        })
+    }))
+}
 
 /// The runtime layer: the scope a wrapper was handed is really in effect.
 #[inline]

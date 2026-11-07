@@ -15,13 +15,12 @@ sits and what it contains: a cell's row and column, an item's place in its
 list, and an editor's text read range by range instead of as one `value`
 string.
 
-:::caution[Linux only for now]
-The AT-SPI backend on Linux supports everything on this page. macOS and
-Windows support is still to come: `table`, `cell`, `table_row`, and
-`collection` read `None`, and the methods (`text()`, `cell_at()`, the header
-and selection methods) raise `ActionNotSupportedError`. The per-platform
-status is in
-[Platform details](/reference/platform-details/#tables-collections-and-text).
+:::note[Platform support]
+Linux and Windows support the table and text APIs on this page when the
+application exposes the corresponding accessibility interfaces. macOS
+support is still to come. See
+[Platform details](/reference/platform-details/#tables-collections-and-text)
+for the fields and methods each backend can report.
 :::
 
 ## Every index starts at 0, except `nth`
@@ -438,8 +437,8 @@ with `lines()` and ask for each page's bounds instead.
 Four failures are worth handling in Python:
 
 - `ActionNotSupportedError` when the element has no text interface, when a
-  table method is called on something that is not a table, and on macOS and
-  Windows for every method on this page.
+  table method is called on something that is not a table, and on macOS
+  for every method on this page.
 - `InvalidTextRangeError` for a range past the end of the text, reversed, or
   splitting a surrogate pair.
 - `InvalidActionDataError` for an empty `find()` needle or an unknown unit

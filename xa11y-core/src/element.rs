@@ -480,16 +480,12 @@ impl Element {
     /// Select the text range from `start` to `end`: 0-based UTF-16 code-unit
     /// offsets, the unit every text offset in xa11y uses.
     ///
-    /// Returns [`Error::InvalidActionData`] if `start > end`. A backend that
+    /// Returns [`Error::InvalidTextRange`] if `start > end`. A backend that
     /// has adopted the shared offset contract also fails with
     /// [`Error::InvalidTextRange`] for a range past the end or splitting a
-    /// surrogate pair (Linux does; see issue #646 for the others).
+    /// surrogate pair (Linux and Windows do; see issue #646 for macOS).
     pub fn select_text(&self, start: u32, end: u32) -> crate::error::Result<()> {
-        if start > end {
-            return Err(Error::InvalidActionData {
-                message: format!("select_text start ({}) must be <= end ({})", start, end),
-            });
-        }
+        crate::text_api::TextRange::new(start, end)?;
         self.provider.set_text_selection(&self.data, start, end)
     }
 
@@ -1320,7 +1316,7 @@ mod tests {
         let el = find_element(&provider, r#"text_field[name="Search"]"#);
         assert!(matches!(
             el.select_text(5, 2),
-            Err(Error::InvalidActionData { .. })
+            Err(Error::InvalidTextRange { .. })
         ));
         assert!(provider.actions().is_empty());
     }

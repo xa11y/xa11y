@@ -361,6 +361,11 @@ fn do_test_integ(args: &[String]) -> bool {
     heading("Integration tests");
     let root = project_root();
     let os = env::consts::OS;
+    if os == "windows" {
+        let mut cmd_args = vec!["-NoProfile", "-File", "scripts/run_integ_tests_windows.ps1"];
+        cmd_args.extend(args.iter().map(String::as_str));
+        return run_in("pwsh", &cmd_args, &root);
+    }
     let script = match os {
         "macos" => "scripts/run_integ_tests_macos.sh",
         "linux" => "scripts/run_integ_tests.sh",
