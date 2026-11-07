@@ -35,10 +35,7 @@ pub(super) fn table_info(e: &IUIAutomationElement) -> Result<Option<TableInfo>> 
     Ok((!info.is_empty()).then_some(info))
 }
 
-pub(super) fn cell_info(
-    e: &IUIAutomationElement,
-    walker: Option<&IUIAutomationTreeWalker>,
-) -> Result<Option<CellInfo>> {
+pub(super) fn cell_info(e: &IUIAutomationElement) -> Result<Option<CellInfo>> {
     let index =
         |id| -> Result<Option<u32>> { Ok(property(e, id)?.and_then(|n| u32::try_from(n).ok())) };
     let info: CellInfo = CellParts {
@@ -46,70 +43,76 @@ pub(super) fn cell_info(
         column: index(UIA_GridItemColumnPropertyId)?,
         row_span: index(UIA_GridItemRowSpanPropertyId)?.filter(|n| *n > 0),
         column_span: index(UIA_GridItemColumnSpanPropertyId)?.filter(|n| *n > 0),
-        header: header_kind(e, walker)?,
+        header: header_kind(e),
     }
     .into();
     Ok((!info.is_empty()).then_some(info))
 }
 
-fn header_kind(
-    e: &IUIAutomationElement,
-    walker: Option<&IUIAutomationTreeWalker>,
-) -> Result<Option<HeaderKind>> {
+fn header_kind(e: &IUIAutomationElement) -> Option<HeaderKind> {
     match uia_cached_bstr(e, UIA_AriaRolePropertyId).as_deref() {
-        Some("columnheader") => return Ok(Some(HeaderKind::Column)),
-        Some("rowheader") => return Ok(Some(HeaderKind::Row)),
+        Some("columnheader") => return Some(HeaderKind::Column),
+        Some("rowheader") => return Some(HeaderKind::Row),
         _ => {}
     }
-    // Only HeaderItems need the ancestor query. UIA's HeaderItem role does
-    // not encode orientation; the owning Table's header arrays do.
-    if uia_call(|| unsafe { e.CachedControlType() })? != UIA_HeaderItemControlTypeId {
-        return Ok(None);
-    }
-    let Some(walker) = walker else {
-        return Ok(None);
-    };
-    let identity = WindowsProvider::runtime_id(e, 0)?;
-    if identity.is_empty() {
-        return Ok(None);
-    }
-    let mut ancestor = e.clone();
-    for _ in 0..HOST_WINDOW_WALK_LIMIT {
-        ancestor = match unsafe { walker.GetParentElement(&ancestor) } {
-            Ok(parent) => parent,
-            Err(e) if e.code().0 == 0 => return Ok(None),
-            Err(e) => {
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("finding a header's owning Table: {e}"),
-                })
-            }
-        };
-        if let Some(table) = current_pattern::<IUIAutomationTablePattern>(
-            &ancestor,
-            UIA_TablePatternId,
-            "TablePattern",
-        )? {
-            for kind in [HeaderKind::Column, HeaderKind::Row] {
-                let headers = uia_call(|| unsafe {
-                    match kind {
-                        HeaderKind::Column => table.GetCurrentColumnHeaders(),
-                        HeaderKind::Row => table.GetCurrentRowHeaders(),
-                    }
-                })?;
-                for i in 0..uia_call(|| unsafe { headers.Length() })? {
-                    let header = uia_call(|| unsafe { headers.GetElement(i) })?;
-                    if WindowsProvider::runtime_id(&header, 0)? == identity {
-                        return Ok(Some(kind));
-                    }
-                }
-            }
-            return Ok(None);
+    // WPF's peers publish these native class names, but no orientation.
+    // Use only cached properties: enumerating an owning Table's header
+    // arrays for every HeaderItem is quadratic and blocks event snapshots.
+    // Other providers with neither signal honestly leave the kind unknown.
+    // Explicit Table/TableItem header requests label their results below.
+    if uia_cached_bstr(e, UIA_FrameworkIdPropertyId).as_deref() == Some("WPF") {
+        match uia_cached_bstr(e, UIA_ClassNamePropertyId).as_deref() {
+            Some("DataGridColumnHeader") => return Some(HeaderKind::Column),
+            Some("DataGridRowHeader") => return Some(HeaderKind::Row),
+            _ => {}
         }
     }
-    Err(Error::Unsupported {
-        feature: "UIA header ancestry exceeds 256 elements".into(),
-    })
+    None
+}
+
+pub(super) fn parent_header_kind(
+    data: &mut ElementData,
+    element: &IUIAutomationElement,
+    walker: &IUIAutomationTreeWalker,
+    cache: &IUIAutomationCacheRequest,
+) -> Result<()> {
+    if data.cell.is_some_and(|c| c.header.is_some())
+        || uia_call(|| unsafe { element.CachedControlType() })? != UIA_HeaderItemControlTypeId
+    {
+        return Ok(());
+    }
+    // One parent read, independent of table size. Event snapshots never
+    // enter this path. Only an actual Header container defines orientation.
+    let parent = uia_call(|| unsafe { walker.GetParentElementBuildCache(element, cache) })?;
+    if uia_call(|| unsafe { parent.CachedControlType() })? == UIA_HeaderControlTypeId {
+        let kind = match property(&parent, UIA_OrientationPropertyId)? {
+            Some(n) if n == OrientationType_Horizontal.0 => Some(HeaderKind::Column),
+            Some(n) if n == OrientationType_Vertical.0 => Some(HeaderKind::Row),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            label_headers(std::slice::from_mut(data), kind);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn label_headers(headers: &mut [ElementData], kind: HeaderKind) {
+    for header in headers {
+        header
+            .cell
+            .get_or_insert_with(|| {
+                CellParts {
+                    row: None,
+                    column: None,
+                    row_span: None,
+                    column_span: None,
+                    header: None,
+                }
+                .into()
+            })
+            .header = Some(kind);
+    }
 }
 
 pub(super) fn row_info(e: &IUIAutomationElement, role: Role) -> Result<Option<RowInfo>> {
@@ -209,85 +212,186 @@ pub(super) fn offsets(
     })
 }
 
+/// Seek in provider character units using exponential bracketing and bisection.
+/// Each observation measures a UTF-16 prefix; never correct one unit at a time.
+/// `advance` returns the actual provider-unit movement and measured endpoint.
+fn seek_endpoint(
+    target: u32,
+    estimate: i32,
+    mut advance: impl FnMut(i32) -> Result<(i32, u32)>,
+) -> Result<()> {
+    let mut current = 0i64;
+    let mut lower = 0i64;
+    let mut upper = None;
+    let mut next = i64::from(estimate.max(1));
+    loop {
+        let step = i32::try_from(next - current).map_err(|_| Error::Unsupported {
+            feature: "UIA text movement exceeds i32::MAX characters".into(),
+        })?;
+        let (moved, reached) = advance(step)?;
+        current += i64::from(moved);
+        if reached == target {
+            return Ok(());
+        }
+        if moved == 0 {
+            return Err(unreachable_endpoint(target, reached));
+        }
+        if reached < target {
+            lower = current;
+        } else {
+            upper = Some(current);
+        }
+        next = if let Some(upper) = upper {
+            if upper - lower <= 1 {
+                return Err(unreachable_endpoint(target, reached));
+            }
+            lower + (upper - lower) / 2
+        } else {
+            // The initial scalar estimate undershot (e.g. a UTF-16-unit
+            // provider). Double the distance until the endpoint is bracketed.
+            (current * 2).min(i64::from(i32::MAX))
+        };
+        if next == current {
+            return Err(unreachable_endpoint(target, reached));
+        }
+    }
+}
+
+fn unreachable_endpoint(target: u32, reached: u32) -> Error {
+    Error::Unsupported {
+        feature: format!(
+            "UIA provider cannot represent UTF-16 endpoint {target} (reached {reached})"
+        ),
+    }
+}
+
 pub(super) fn range(
     doc: &IUIAutomationTextRange,
     wanted: TextRange,
 ) -> Result<IUIAutomationTextRange> {
     let text = contents(doc)?;
     slice_utf16(&text, wanted)?;
-    let point = |target: u32| -> Result<IUIAutomationTextRange> {
-        let p = uia_call(|| unsafe { doc.Clone() })?;
-        uia_call(|| unsafe {
-            p.MoveEndpointByRange(
-                TextPatternRangeEndpoint_End,
-                doc,
-                TextPatternRangeEndpoint_Start,
-            )
-        })?;
-        // Start with the scalar count, then measure what the provider actually
-        // moved. Usually this needs one call, including text after emoji.
-        let chars = xa11y_core::text_api::utf16_to_char_offset(&text, target)?;
-        let count = i32::try_from(chars).map_err(|_| Error::Unsupported {
-            feature: "UIA text offsets exceeding i32::MAX characters".into(),
-        })?;
-        if count > 0 {
-            uia_call(|| unsafe {
-                p.MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Character, count)
-            })?;
-        }
-        let mut pos = utf16_len(&contents(&p)?);
-        while pos != target {
-            let direction = if pos < target { 1 } else { -1 };
-            let moved = uia_call(|| unsafe {
-                p.MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Character, direction)
-            })?;
-            let next = utf16_len(&contents(&p)?);
-            if moved == 0
-                || next == pos
-                || (pos < target && next > target)
-                || (pos > target && next < target)
-            {
-                return Err(Error::Unsupported {
-                    feature: format!(
-                        "UIA provider cannot represent UTF-16 endpoint {target} (reached {next})"
-                    ),
-                });
-            }
-            pos = next;
-        }
-        uia_call(|| unsafe {
-            p.MoveEndpointByRange(
-                TextPatternRangeEndpoint_Start,
-                &p,
-                TextPatternRangeEndpoint_End,
-            )
-        })?;
-        Ok(p)
-    };
-    let result = point(wanted.start)?;
-    let end = point(wanted.end)?;
+    range_in(doc, &text, wanted)
+}
+
+fn range_in(
+    doc: &IUIAutomationTextRange,
+    text: &str,
+    wanted: TextRange,
+) -> Result<IUIAutomationTextRange> {
+    let start = point(doc, text, None, wanted.start)?;
+    // Reuse the start endpoint rather than seeking from zero twice.
+    let end = point(doc, text, Some((&start, wanted.start)), wanted.end)?;
     uia_call(|| unsafe {
-        result.MoveEndpointByRange(
+        start.MoveEndpointByRange(
             TextPatternRangeEndpoint_End,
             &end,
             TextPatternRangeEndpoint_End,
         )
     })?;
-    Ok(result)
+    Ok(start)
 }
 
-pub(super) fn unit_at(
+fn point(
+    doc: &IUIAutomationTextRange,
+    text: &str,
+    origin: Option<(&IUIAutomationTextRange, u32)>,
+    target: u32,
+) -> Result<IUIAutomationTextRange> {
+    let p = uia_call(|| unsafe { doc.Clone() })?;
+    if target == utf16_len(text) {
+        // WPF Character movement stops before a FlowDocument's final CRLF.
+        // The document End is nevertheless an addressable native endpoint.
+        uia_call(|| unsafe {
+            p.MoveEndpointByRange(
+                TextPatternRangeEndpoint_Start,
+                doc,
+                TextPatternRangeEndpoint_End,
+            )
+        })?;
+        return Ok(p);
+    }
+    let (base, offset) = origin.unwrap_or((doc, 0));
+    uia_call(|| unsafe {
+        p.MoveEndpointByRange(
+            TextPatternRangeEndpoint_End,
+            base,
+            TextPatternRangeEndpoint_Start,
+        )
+    })?;
+    if target > offset {
+        let scalars = |n| xa11y_core::text_api::utf16_to_char_offset(text, n);
+        let count =
+            i32::try_from(scalars(target)? - scalars(offset)?).map_err(|_| Error::Unsupported {
+                feature: "UIA text offsets exceeding i32::MAX characters".into(),
+            })?;
+        seek_endpoint(target, count, |step| {
+            let moved = uia_call(|| unsafe {
+                p.MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Character, step)
+            })?;
+            Ok((moved, utf16_len(&contents(&p)?)))
+        })?;
+    }
+    uia_call(|| unsafe {
+        p.MoveEndpointByRange(
+            TextPatternRangeEndpoint_Start,
+            &p,
+            TextPatternRangeEndpoint_End,
+        )
+    })?;
+    Ok(p)
+}
+
+/// A nondegenerate provider character avoids backward affinity at format
+/// boundaries and does not require an endpoint inside a CRLF or grapheme.
+pub(super) fn format_sample(
     doc: &IUIAutomationTextRange,
     offset: u32,
-    unit: windows::Win32::UI::Accessibility::TextUnit,
 ) -> Result<IUIAutomationTextRange> {
-    let p = range(
-        doc,
+    let text = contents(doc)?;
+    slice_utf16(
+        &text,
         TextRange {
             start: offset,
             end: offset,
         },
     )?;
+    let sample = point(doc, &text, None, offset)?;
+    uia_call(|| unsafe {
+        sample.MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Character, 1)
+    })?;
+    Ok(sample)
+}
+
+pub(super) fn unit_at(
+    doc: &IUIAutomationTextRange,
+    text: &str,
+    offset: u32,
+    unit: windows::Win32::UI::Accessibility::TextUnit,
+) -> Result<IUIAutomationTextRange> {
+    let p = range_in(
+        doc,
+        text,
+        TextRange {
+            start: offset,
+            end: offset,
+        },
+    )?;
+    if offset > 0 && offset == utf16_len(text) {
+        // End has backward affinity in our API: ask for the last unit,
+        // rather than the empty paragraph after a trailing newline. Use a
+        // native Character step, not length-1 (which may be inside CRLF).
+        uia_call(|| unsafe {
+            p.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, -1)
+        })?;
+        uia_call(|| unsafe {
+            p.MoveEndpointByRange(
+                TextPatternRangeEndpoint_End,
+                &p,
+                TextPatternRangeEndpoint_Start,
+            )
+        })?;
+    }
     uia_call(|| unsafe { p.ExpandToEnclosingUnit(unit) })?;
     Ok(p)
 }
@@ -407,6 +511,46 @@ fn decode_color(n: i32, wpf: bool) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_search_is_logarithmic_for_different_provider_units() {
+        // 30k UTF-16 units: scalars, CRLF/grapheme pairs, and surrogate units.
+        for (width, estimate) in [(1, 15_000), (2, 30_000), (3, 30_000)] {
+            let target = 30_000;
+            let mut cursor = 0i32;
+            let mut calls = 0;
+            seek_endpoint(target, estimate, |step| {
+                calls += 1;
+                let next = (cursor + step).clamp(0, 50_000 / width);
+                let moved = next - cursor;
+                cursor = next;
+                Ok((moved, (cursor * width) as u32))
+            })
+            .expect("reachable endpoint");
+            assert_eq!(cursor * width, target as i32);
+            assert!(calls < 25, "width {width}: {calls} remote prefix reads");
+        }
+    }
+
+    #[test]
+    fn endpoint_search_rejects_indivisible_clusters_and_stopped_providers() {
+        for target in [15, 50] {
+            let mut cursor = 0i32;
+            let result = seek_endpoint(target, target as i32, |step| {
+                let next = (cursor + step).clamp(0, 10);
+                let moved = next - cursor;
+                cursor = next;
+                Ok((moved, (cursor * 2) as u32))
+            });
+            assert!(matches!(result, Err(Error::Unsupported { .. })));
+        }
+        let error = seek_endpoint(1, 1, |_| {
+            Err(Error::ElementStale {
+                selector: "native endpoint".into(),
+            })
+        });
+        assert!(matches!(error, Err(Error::ElementStale { .. })));
+    }
 
     #[test]
     fn color_conventions_keep_red_and_blue_distinct() {

@@ -640,7 +640,15 @@ impl WindowsProvider {
                 inherited: clip,
             },
         );
-        build_snapshot_data(dpi, element, pid, handle, Some(&self.raw_walker), hidden)
+        let mut data =
+            build_snapshot_data(dpi, element, pid, handle, Some(&self.raw_walker), hidden)?;
+        rich::parent_header_kind(
+            &mut data,
+            element,
+            &self.raw_walker,
+            self.batch_request.get(dpi),
+        )?;
+        Ok(data)
     }
 
     /// The clip `element`'s children are built under: the one it sits under
@@ -3100,7 +3108,7 @@ fn build_snapshot_data(
         min_value,
         max_value,
         table: rich::table_info(element)?,
-        cell: rich::cell_info(element, walker)?,
+        cell: rich::cell_info(element)?,
         // UIA has no row-index property independent of GridItem.
         table_row: rich::row_info(element, role)?,
         collection: rich::collection_info(element)?,
@@ -3204,6 +3212,7 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_LevelPropertyId,
     UIA_ControlTypePropertyId,
     UIA_AriaRolePropertyId,
+    UIA_OrientationPropertyId,
     UIA_IsDialogPropertyId,
     UIA_IsTableItemPatternAvailablePropertyId,
     UIA_NamePropertyId,
@@ -5662,7 +5671,9 @@ impl Provider for WindowsProvider {
                 xa11y_core::table::HeaderKind::Row => p.GetCurrentRowHeaders(),
             }
         })?;
-        self.rich_elements(&dpi, &array)
+        let mut headers = self.rich_elements(&dpi, &array)?;
+        rich::label_headers(&mut headers, kind);
+        Ok(headers)
     }
 
     fn cell_headers(
@@ -5679,7 +5690,9 @@ impl Provider for WindowsProvider {
                 xa11y_core::table::HeaderKind::Row => p.GetCurrentRowHeaderItems(),
             }
         })?;
-        self.rich_elements(&dpi, &array)
+        let mut headers = self.rich_elements(&dpi, &array)?;
+        rich::label_headers(&mut headers, kind);
+        Ok(headers)
     }
 
     fn selected_items(&self, e: &ElementData) -> Result<Vec<ElementData>> {
@@ -5755,10 +5768,50 @@ impl Provider for WindowsProvider {
     }
 
     fn text_read(&self, e: &ElementData, r: xa11y_core::text_api::TextRange) -> Result<String> {
-        // UIA has no numeric offsets, so obtaining an endpoint already needs
-        // a text read. Slice that observation directly: this also permits
-        // scalar boundaries inside a provider's indivisible grapheme unit.
-        xa11y_core::text_api::slice_utf16(&rich::contents(&self.document(e)?)?, r)
+        // UIA has no numeric offsets. Read only the prefix needed to
+        // validate and slice the request, including a surrogate guard unit.
+        // Scalar boundaries inside CRLF/graphemes remain readable even when
+        // selection/geometry cannot address them as native endpoints.
+        let doc = self.document(e)?;
+        let max = i32::try_from(r.end.saturating_add(1)).unwrap_or(-1);
+        // -1 is UIA's whole-range sentinel when the requested limit cannot
+        // fit its i32 ABI. The resulting text still validates the range.
+        let prefix = uia_call(|| unsafe { doc.GetText(max) })?.to_string();
+        xa11y_core::text_api::slice_utf16(&prefix, r).map_err(|error| {
+            if let Error::InvalidTextRange {
+                start,
+                end,
+                length,
+                message,
+            } = error
+            {
+                Error::InvalidTextRange {
+                    start,
+                    end,
+                    // A capped prefix is not the document's length.
+                    length: length.filter(|n| max < 0 || *n < max as u32),
+                    message,
+                }
+            } else {
+                error
+            }
+        })
+    }
+
+    fn text_find(
+        &self,
+        e: &ElementData,
+        needle: &str,
+        options: xa11y_core::text_api::FindOptions,
+    ) -> Result<Option<xa11y_core::text_api::TextRange>> {
+        // Numeric UIA reads need prefixes. Share one fresh observation for
+        // the entire search rather than re-reading it once per chunk. Use
+        // core's exact matcher, not UIA's provider-dependent FindText rules.
+        let text = rich::contents(&self.document(e)?)?;
+        let units: Vec<u16> = text.encode_utf16().collect();
+        xa11y_core::text_api::find_with_reader(needle, options, units.len() as u32, |r| {
+            xa11y_core::text_api::slice_utf16_units(&units, r)
+        })
     }
 
     fn text_range_at(
@@ -5784,6 +5837,7 @@ impl Provider for WindowsProvider {
         }
         // At the end, answer for the unit that ends there; inside a surrogate
         // pair, for the pair. Both as on Linux and macOS.
+        let all_at_end = offset == length;
         let mut offset = offset.min(length - 1);
         let is_low = |u: u16| (0xDC00..=0xDFFF).contains(&u);
         let is_high = |u: u16| (0xD800..=0xDBFF).contains(&u);
@@ -5808,7 +5862,10 @@ impl Provider for WindowsProvider {
             TextUnit::Line => TextUnit_Line,
             TextUnit::Paragraph => TextUnit_Paragraph,
         };
-        let mut r = rich::offsets(&doc, &rich::unit_at(&doc, offset, unit)?)?;
+        let mut r = rich::offsets(
+            &doc,
+            &rich::unit_at(&doc, &text, if all_at_end { length } else { offset }, unit)?,
+        )?;
         // WPF excludes CR/LF from the enclosing line/paragraph. Include the
         // reported separators so paging can resume at the next unit. A
         // provider whose unit already ends in its terminator (RichEdit
@@ -5855,24 +5912,9 @@ impl Provider for WindowsProvider {
         offset: u32,
     ) -> Result<xa11y_core::text_api::TextRun> {
         let doc = self.document(e)?;
-        let range = rich::unit_at(&doc, offset, TextUnit_Format)?;
-        // UIA format ranges can include zero-width markup at their edges
-        // (WPF reports MixedAttributeValue for that markup). Sample the
-        // insertion point just after the first scalar, inside the format.
-        let text = rich::contents(&doc)?;
-        let prefix = xa11y_core::text_api::slice_utf16(
-            &text,
-            xa11y_core::text_api::TextRange {
-                start: 0,
-                end: offset,
-            },
-        )?;
-        let end = offset
-            + text[prefix.len()..]
-                .chars()
-                .next()
-                .map_or(0, |c| c.len_utf16() as u32);
-        let sample = rich::range(&doc, xa11y_core::text_api::TextRange { start: end, end })?;
+        let sample = rich::format_sample(&doc, offset)?;
+        let range = uia_call(|| unsafe { sample.Clone() })?;
+        uia_call(|| unsafe { range.ExpandToEnclosingUnit(TextUnit_Format) })?;
         Ok(xa11y_core::text_api::TextRun::new(
             rich::offsets(&doc, &range)?,
             rich::attributes(

@@ -582,6 +582,19 @@ pub trait Provider: Send + Sync {
         Err(unsupported("text_read"))
     }
 
+    /// Exact UTF-16 search. Providers whose numeric range reads require
+    /// prefixes can override this to share one text observation per search.
+    fn text_find(
+        &self,
+        element: &ElementData,
+        needle: &str,
+        options: crate::text_api::FindOptions,
+    ) -> Result<Option<TextRange>> {
+        crate::text_api::find_with_reader(needle, options, self.text_length(element)?, |r| {
+            self.text_read(element, r)
+        })
+    }
+
     /// The `unit` containing `offset`.
     fn text_range_at(
         &self,
@@ -789,6 +802,14 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn text_read(&self, e: &ElementData, r: TextRange) -> Result<String> {
         (**self).text_read(e, r)
+    }
+    fn text_find(
+        &self,
+        e: &ElementData,
+        needle: &str,
+        options: crate::text_api::FindOptions,
+    ) -> Result<Option<TextRange>> {
+        (**self).text_find(e, needle, options)
     }
     fn text_range_at(&self, e: &ElementData, offset: u32, unit: TextUnit) -> Result<TextRange> {
         (**self).text_range_at(e, offset, unit)

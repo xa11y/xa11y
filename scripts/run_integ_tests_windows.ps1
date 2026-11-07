@@ -30,9 +30,20 @@ try {
     # its legacy ContextMenu is backed by a native HMENU/#32768 popup.
     $trayFixture = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-File", ".\test-apps\windows-tray\app.ps1" -PassThru -WindowStyle Hidden
 
-    Write-Host "Launching xa11y-test-app..."
+    Write-Host "Launching native rich fixture..."
     $richFixture = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-STA", "-File", ".\test-apps\rich\windows.ps1" -PassThru -WindowStyle Hidden
     $env:XA11Y_WINDOWS_RICH_PID = "$($richFixture.Id)"
+    # Wait for WPF initialization before the AccessKit app takes foreground.
+    # Hidden hides the console, not the fixture's native window.
+    $readyDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        $richFixture.Refresh()
+        if ($richFixture.HasExited) { throw "Rich fixture exited before its window was ready" }
+        if ($richFixture.MainWindowHandle -ne [IntPtr]::Zero) { break }
+        if ([DateTime]::UtcNow -ge $readyDeadline) { throw "Timed out waiting for rich fixture window" }
+        Start-Sleep -Milliseconds 100
+    } while ($true)
+    Write-Host "Launching xa11y-test-app..."
     $testApp = Start-Process -FilePath ".\target\debug\xa11y-test-app.exe" -ArgumentList "--headless" -PassThru -WindowStyle Hidden
 
     # Wait for accessibility registration
