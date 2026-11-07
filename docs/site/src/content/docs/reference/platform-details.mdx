@@ -408,7 +408,7 @@ JavaScript.
 | --- | --- | --- | --- |
 | `table` (`row_count`, `column_count`) | `Table.NRows` / `NColumns`; a negative value reads `unknown` | `AXRowCount` / `AXColumnCount`, or the length of `AXRows` / `AXColumns` where those are absent (AppKit) | Grid row and column counts |
 | `cell` (`row`, `column`, spans) | `TableCell.GetRowColumnSpan` | `AXRowIndexRange` / `AXColumnIndexRange` | GridItem properties |
-| `cell.header` | The `column header` / `row header` roles | Always `None`: AX marks no cell as a header | ARIA header role or membership in the owning Table header arrays |
+| `cell.header` | The `column header` / `row header` roles | Always `None`: AX marks no cell as a header | Cached ARIA header role, WPF header class, or parent Header orientation; explicit header requests label their returned cells |
 | `table_row` | Always `None`: AT-SPI has no row-index call for a row object, so read the row from a cell | `AXIndex` of an `AXRow`, including outline rows | GridItem row when the row object reports it |
 | `collection` (`index`, `size`, `depth`) | Object attributes `posinset`, `setsize`, `level`, converted from 1-based; read for list items, tree items, tabs, radio buttons and rows | `AXARIAPosInSet` / `AXARIASetSize` on rows, tabs and radio buttons, converted from 1-based. `depth` comes from `AXDisclosureLevel` on outline rows. Web list items are groups in AX, so they report none | PositionInSet, SizeOfSet and Level; indices converted from 1-based |
 | `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `AXCellForColumnAndRow`; for AppKit, the `AXCell` in row `AXRows[row]` whose index ranges cover the slot | Grid.GetItem; never realizes a virtual cell |
@@ -421,10 +421,25 @@ JavaScript.
 | `Text.bounds()` | `Text.GetRangeExtents` per rendered line | `AXBoundsForRange` per rendered line | TextRange.GetBoundingRectangles in physical desktop pixels |
 | `select_text()` range check | `InvalidTextRange` past the end or inside a surrogate pair | `InvalidTextRange` past the end or inside a surrogate pair | `InvalidTextRange` past the end or inside a surrogate pair |
 
+Windows reads the prefix needed for a numeric `Text.read()` request,
+including a unit to check surrogate boundaries. A `find()` call shares one
+fresh text observation across its chunks, since UIA has no numeric offsets.
+Endpoint conversion brackets and bisects provider Character steps; it does
+not correct a CRLF-heavy document one character at a time. A pair of endpoints
+shares its start, and document-end selection uses the native End endpoint.
+
+Header classification reads cached properties and, for an unresolved
+HeaderItem during a normal tree read, one parent Header orientation. Event
+snapshots use cached properties only. Providers reporting none of those
+signals leave `cell.header` unknown in tree snapshots; explicit table and
+cell header methods still label the returned header cells.
+
 Windows measures UIA range endpoints in UTF-16 units instead of assuming that
 a provider's character unit has that size. If a valid scalar boundary falls
-inside an indivisible UIA character cluster, the operation raises
-`Unsupported`. UIA text-change events have no inserted or deleted text, so
+inside an indivisible UIA character cluster (including between the CR and
+LF exposed by WPF), selection and geometry raise `Unsupported`. Text reads still permit
+those scalar boundaries. Formatting samples one native Character unit so a
+run need not address an endpoint inside the cluster. UIA text-change events have no inserted or deleted text, so
 `text_change` remains `None`. Text-selection events use
 `TextSelectionChanged`.
 

@@ -462,33 +462,18 @@ impl Text {
     ///
     /// Matching is exact on UTF-16 code units: case-sensitive, with no
     /// Unicode normalization (a precomposed `é` does not match `e` plus a
-    /// combining accent). Matches do not overlap. The text is read in chunks,
-    /// so an edit made while the search runs is not detected.
+    /// combining accent). Matches do not overlap. Backends read chunks or one text observation;
+    /// an edit made while the search runs is not detected.
     ///
     /// An empty `needle` fails with [`Error::InvalidActionData`].
     pub fn find_with(&self, needle: &str, options: FindOptions) -> Result<Option<TextRange>> {
         let el = self.target()?;
-        let p = el.provider();
-        let data = el.data();
-        let needle: Vec<u16> = needle.encode_utf16().collect();
         if needle.is_empty() {
             return Err(Error::InvalidActionData {
                 message: "find needle must not be empty".to_string(),
             });
         }
-        let length = p.text_length(data)?;
-        let scope = match options.within {
-            Some(r) => {
-                check_in_bounds(r, length)?;
-                r
-            }
-            None => TextRange {
-                start: 0,
-                end: length,
-            },
-        };
-        let mut read = |range: TextRange| p.text_read(data, range);
-        find_in_chunks(&mut read, &needle, scope, options.occurrence, FIND_CHUNK)
+        el.provider().text_find(el.data(), needle, options)
     }
 
     /// The `unit` (character, word, rendered line, paragraph) containing
@@ -592,6 +577,29 @@ impl std::fmt::Debug for Text {
             Source::Locator(l) => write!(f, "Text(locator {:?})", l.selector()),
         }
     }
+}
+
+/// Shared exact UTF-16 search for providers with a single text observation.
+/// Implementation support, not a separate consumer search API.
+#[doc(hidden)]
+pub fn find_with_reader(
+    needle: &str,
+    options: FindOptions,
+    length: u32,
+    mut read: impl FnMut(TextRange) -> Result<String>,
+) -> Result<Option<TextRange>> {
+    let needle: Vec<u16> = needle.encode_utf16().collect();
+    if needle.is_empty() {
+        return Err(Error::InvalidActionData {
+            message: "find needle must not be empty".to_string(),
+        });
+    }
+    let scope = options.within.unwrap_or(TextRange {
+        start: 0,
+        end: length,
+    });
+    check_in_bounds(scope, length)?;
+    find_in_chunks(&mut read, &needle, scope, options.occurrence, FIND_CHUNK)
 }
 
 fn check_limit(limit: usize) -> Result<()> {
@@ -813,9 +821,15 @@ pub fn char_to_utf16_offset(s: &str, chars: u32) -> Result<u32> {
 /// either end splits a surrogate pair. For backends that hold the whole text
 /// (the mock, small values).
 pub fn slice_utf16(s: &str, range: TextRange) -> Result<String> {
-    let length = utf16_len(s);
-    check_in_bounds(range, length)?;
     let units: Vec<u16> = s.encode_utf16().collect();
+    slice_utf16_units(&units, range)
+}
+
+/// Slice an encoded provider observation without re-encoding every chunk.
+#[doc(hidden)]
+pub fn slice_utf16_units(units: &[u16], range: TextRange) -> Result<String> {
+    let length = units.len() as u32;
+    check_in_bounds(range, length)?;
     let piece = &units[range.start as usize..range.end as usize];
     let split = |i: usize| {
         i > 0 && i < units.len() && (0xDC00..=0xDFFF).contains(&units[i]) && {
