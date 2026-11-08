@@ -145,6 +145,12 @@ export type RelationKindName =
   | 'member_of'
   | 'linked';
 
+/** Which read of a captured node failed (\`CaptureError.step\`). */
+export type CaptureStepName = 'children' | 'identity' | 'text' | 'relations' | 'cycle';
+
+/** Extra reads a capture can make (\`CaptureOptions.detail\`). */
+export type CaptureDetailName = 'text' | 'relations';
+
 /** A platform xa11y has a backend for. */
 export type PlatformName = 'linux' | 'macos' | 'windows';
 
@@ -172,6 +178,24 @@ export type TextChangeKindName = 'inserted' | 'deleted';
 const REPLACEMENTS = [
   // Before `TextChange.kind`: both are `kind: string` until this one is
   // narrowed, and that entry asserts a single occurrence.
+  {
+    name: 'CapturedRelation.kind -> RelationKindName',
+    from: "  kind: string\n  /**\n   * Each target: a `number` index",
+    to: "  kind: RelationKindName\n  /**\n   * Each target: a `number` index",
+    all: 1,
+  },
+  {
+    name: 'CaptureError.step -> CaptureStepName',
+    from: "  step: string\n  /** The error code the call would have rejected with",
+    to: "  step: CaptureStepName\n  /** The error code the call would have rejected with",
+    all: 1,
+  },
+  {
+    name: 'CaptureOptions.detail -> CaptureDetailName[]',
+    from: "  detail?: Array<string>",
+    to: "  detail?: Array<CaptureDetailName>",
+    all: 1,
+  },
   {
     name: 'Relation.kind -> RelationKindName',
     from: '  kind: string\n  /** The related elements',

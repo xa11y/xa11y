@@ -635,6 +635,17 @@ impl App {
         Ok(tree)
     }
 
+    /// Read the application's accessibility tree into a bounded, flat
+    /// [`Capture`](crate::capture::Capture), rooted at the application
+    /// element. The root's children are those of every native registration
+    /// of the process, as in [`Self::children`].
+    pub fn capture(
+        &self,
+        options: &crate::capture::CaptureOptions,
+    ) -> Result<crate::capture::Capture> {
+        crate::capture::capture_from(self.as_element(), || self.children(), options)
+    }
+
     /// Render the application's accessibility tree as an indented string,
     /// rooted at the application element.
     ///

@@ -60,3 +60,25 @@ def test_tree_without_app_exits_nonzero(run_cli):
     assert "--app" in stderr or "--pid" in stderr, (
         f"expected --app/--pid hint in stderr:\n{stderr}"
     )
+
+
+def test_tree_max_nodes_cuts_and_says_so(run_cli, app_pid):
+    rc, stdout, stderr = run_cli("tree", "--pid", str(app_pid), "--max-nodes", "3")
+    assert rc == 0, stderr
+    lines = stdout.strip().splitlines()
+    assert lines[-1].startswith("(truncated: 3 nodes shown, cut by the node limit of 3"), stdout
+    assert any("more (cut by --max-nodes)" in line for line in lines), stdout
+
+
+def test_tree_max_depth_zero_shows_only_the_application(run_cli, app_pid):
+    rc, stdout, stderr = run_cli("tree", "--pid", str(app_pid), "--max-depth", "0")
+    assert rc == 0, stderr
+    lines = stdout.strip().splitlines()
+    assert lines[0].startswith("application"), stdout
+    assert "more (cut by --max-depth)" in lines[1], stdout
+    assert lines[-1].startswith("(truncated:"), stdout
+
+
+def test_tree_max_nodes_zero_is_a_usage_error(run_cli, app_pid):
+    rc, _stdout, stderr = run_cli("tree", "--pid", str(app_pid), "--max-nodes", "0")
+    assert rc == 2, stderr

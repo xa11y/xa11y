@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from types import TracebackType
 from typing import Literal, TypedDict
 
@@ -357,6 +357,132 @@ class LiveRegionInfo:
     def relevant(self) -> str | None:
         """Which changes are announced, as the platform spells it
         (``"additions text"``)."""
+    def __repr__(self) -> str: ...
+
+# ── Bounded capture ──────────────────────────────────────────────────────────
+
+CaptureDetailName = Literal["text", "relations"]
+CaptureStepName = Literal["children", "identity", "text", "relations", "cycle"]
+
+class Truncation:
+    """Which limits dropped something. A limit that was reached without
+    dropping anything is not reported."""
+
+    @property
+    def by_depth(self) -> bool:
+        """Children below ``max_depth`` were left out."""
+    @property
+    def by_nodes(self) -> bool:
+        """Nodes past ``max_nodes`` were left out."""
+    @property
+    def by_text(self) -> bool:
+        """Text past ``max_text_bytes`` was left out."""
+    @property
+    def by_time(self) -> bool:
+        """The time budget ran out before the walk finished."""
+    def any(self) -> bool:
+        """Whether any limit dropped something."""
+    def __bool__(self) -> bool: ...
+    def __repr__(self) -> str: ...
+
+class CapturedText:
+    """An element's text, as far as the capture's text budget reached."""
+
+    @property
+    def content(self) -> str:
+        """The text read, from offset 0."""
+    @property
+    def length(self) -> int:
+        """The element's full text length, in UTF-16 code units."""
+    @property
+    def truncated(self) -> bool:
+        """Whether ``content`` stops short of ``length``."""
+    def __repr__(self) -> str: ...
+
+class CaptureError:
+    """A read of one node that failed. The capture continued past it."""
+
+    @property
+    def step(self) -> CaptureStepName:
+        """What was being read: ``"children"``, ``"identity"``, ``"text"``,
+        ``"relations"`` or ``"cycle"``."""
+    @property
+    def error(self) -> XA11yError:
+        """The exception the read raised, as an xa11y exception instance."""
+    def __repr__(self) -> str: ...
+
+class CapturedNode:
+    """One node of a :class:`Capture`."""
+
+    @property
+    def index(self) -> int:
+        """Index in ``Capture.nodes``, which is pre-order. 0-based."""
+    @property
+    def parent(self) -> int | None:
+        """The parent's index; ``None`` on the root."""
+    @property
+    def depth(self) -> int:
+        """Depth below the root, which is 0."""
+    @property
+    def element(self) -> Element:
+        """The element, which names exactly this node: actions on it reach it or
+        raise :class:`ElementStaleError`, never a look-alike."""
+    @property
+    def children(self) -> list[int]:
+        """Indices of the children in the capture, in platform order."""
+    @property
+    def children_count(self) -> int | None:
+        """How many children the node has, including ones the capture left out.
+        ``None`` when they were not read."""
+    @property
+    def children_truncated(self) -> bool:
+        """Whether children of this node are missing from the capture."""
+    @property
+    def errors(self) -> list[CaptureError]:
+        """Reads of this node that failed."""
+    @property
+    def text(self) -> CapturedText | None:
+        """The node's text, with ``detail={"text"}``, when it has a text
+        interface."""
+    @property
+    def relations(self) -> dict[RelationKindName, list[int | Element]]:
+        """With ``detail={"relations"}``: kind → targets, each an ``int`` index
+        into ``Capture.nodes`` when inside the capture, or an ``Element``
+        when outside it. Every kind the platform reports appears, ``[]`` when
+        it has no targets."""
+    @property
+    def role(self) -> str:
+        """Shortcut for ``element.role``."""
+    @property
+    def name(self) -> str | None:
+        """Shortcut for ``element.name``."""
+    def __repr__(self) -> str: ...
+
+class Capture:
+    """A bounded read of a subtree: every node read, pre-order, and which limits
+    cut it. See ``Element.capture``."""
+
+    @property
+    def nodes(self) -> list[CapturedNode]:
+        """Every node read, pre-order. The root is index 0."""
+    @property
+    def truncated(self) -> Truncation:
+        """Which limits dropped something."""
+    @property
+    def vanished(self) -> int:
+        """Nodes that disappeared while the capture read them, and were dropped."""
+    @property
+    def started(self) -> float:
+        """When the walk began, in seconds since the epoch."""
+    @property
+    def finished(self) -> float:
+        """When the walk ended, in seconds since the epoch."""
+    def root(self) -> CapturedNode:
+        """The root node."""
+    def subtree(self, index: int) -> list[CapturedNode]:
+        """The nodes of ``index``'s subtree, itself first, in pre-order. Empty
+        when ``index`` is out of range."""
+    def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
 
 # ── Text by range ────────────────────────────────────────────────────────────
@@ -766,6 +892,25 @@ class App:
         Useful for invoking Element-level methods (``children()``,
         ``parent()``, etc.) without going through a locator.
         """
+    def capture(
+        self,
+        *,
+        max_depth: int | None = None,
+        max_nodes: int = 2000,
+        max_text_bytes: int = 65536,
+        detail: Iterable[CaptureDetailName] | None = None,
+        timeout: float | None = None,
+    ) -> Capture:
+        """Read the subtree into a bounded :class:`Capture`: every node read,
+        pre-order, with which limits cut it. Read breadth-first, so when
+        ``max_nodes`` cuts, the top of the tree is complete.
+
+        ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+        counts the root; ``detail`` adds ``"text"`` (full text within
+        ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+        (seconds) returns what was read when it runs out, with
+        ``truncated.by_time``. Releases the GIL while it reads.
+        """
     def tree(self, max_depth: int | None = None) -> dict:
         """Capture this application's accessibility tree as a recursive dict.
 
@@ -858,6 +1003,25 @@ class ShellSurface:
 
         Useful for invoking Element-level methods (``children()``,
         ``parent()``, etc.) without going through a locator.
+        """
+    def capture(
+        self,
+        *,
+        max_depth: int | None = None,
+        max_nodes: int = 2000,
+        max_text_bytes: int = 65536,
+        detail: Iterable[CaptureDetailName] | None = None,
+        timeout: float | None = None,
+    ) -> Capture:
+        """Read the subtree into a bounded :class:`Capture`: every node read,
+        pre-order, with which limits cut it. Read breadth-first, so when
+        ``max_nodes`` cuts, the top of the tree is complete.
+
+        ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+        counts the root; ``detail`` adds ``"text"`` (full text within
+        ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+        (seconds) returns what was read when it runs out, with
+        ``truncated.by_time``. Releases the GIL while it reads.
         """
     def tree(self, max_depth: int | None = None) -> dict:
         """Capture this surface's accessibility tree as a recursive dict.
@@ -998,6 +1162,25 @@ class Element:
         """Get direct children (lazy — each call queries the provider)."""
     def parent(self) -> Element | None:
         """Get parent element (lazy — each call queries the provider)."""
+    def capture(
+        self,
+        *,
+        max_depth: int | None = None,
+        max_nodes: int = 2000,
+        max_text_bytes: int = 65536,
+        detail: Iterable[CaptureDetailName] | None = None,
+        timeout: float | None = None,
+    ) -> Capture:
+        """Read the subtree into a bounded :class:`Capture`: every node read,
+        pre-order, with which limits cut it. Read breadth-first, so when
+        ``max_nodes`` cuts, the top of the tree is complete.
+
+        ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+        counts the root; ``detail`` adds ``"text"`` (full text within
+        ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+        (seconds) returns what was read when it runs out, with
+        ``truncated.by_time``. Releases the GIL while it reads.
+        """
     def tree(self, max_depth: int | None = None) -> dict:
         """Capture the subtree rooted at this element as a recursive dict snapshot.
 
@@ -1178,6 +1361,25 @@ class Locator:
         """Get a single Element handle for the matched element."""
     def elements(self) -> list[Element]:
         """Get all matching elements."""
+    def capture(
+        self,
+        *,
+        max_depth: int | None = None,
+        max_nodes: int = 2000,
+        max_text_bytes: int = 65536,
+        detail: Iterable[CaptureDetailName] | None = None,
+        timeout: float | None = None,
+    ) -> Capture:
+        """Read the subtree into a bounded :class:`Capture`: every node read,
+        pre-order, with which limits cut it. Read breadth-first, so when
+        ``max_nodes`` cuts, the top of the tree is complete.
+
+        ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+        counts the root; ``detail`` adds ``"text"`` (full text within
+        ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+        (seconds) returns what was read when it runs out, with
+        ``truncated.by_time``. Releases the GIL while it reads.
+        """
     def tree(self, max_depth: int | None = None) -> dict:
         """Capture the subtree rooted at the matched element as a recursive dict.
 

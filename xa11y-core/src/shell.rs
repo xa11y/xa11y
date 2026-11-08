@@ -377,6 +377,16 @@ impl ShellSurface {
         self.as_element().tree(max_depth)
     }
 
+    /// Read the surface's accessibility tree into a bounded, flat
+    /// [`Capture`](crate::capture::Capture). Equivalent to
+    /// `self.as_element().capture(options)`.
+    pub fn capture(
+        &self,
+        options: &crate::capture::CaptureOptions,
+    ) -> Result<crate::capture::Capture> {
+        self.as_element().capture(options)
+    }
+
     /// Render the surface's accessibility tree as an indented string, rooted
     /// at the surface element.
     ///

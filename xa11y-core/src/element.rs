@@ -417,6 +417,16 @@ impl Element {
         Ok(out)
     }
 
+    /// Read the subtree rooted at this element into a bounded, flat
+    /// [`Capture`](crate::capture::Capture). See [`crate::capture`] for the
+    /// budgets, the order and what a capture does and does not promise.
+    pub fn capture(
+        &self,
+        options: &crate::capture::CaptureOptions,
+    ) -> crate::error::Result<crate::capture::Capture> {
+        crate::capture::capture_from(self.clone(), || self.children(), options)
+    }
+
     /// The elements this one is related to, by kind: who labels it, what it
     /// controls, where reading flows next. See [`crate::semantics`].
     ///

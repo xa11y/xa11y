@@ -17,7 +17,7 @@
 //! reported in the payload — a silently shortened tree reads as a complete
 //! one, which is worse than no tree.
 
-use super::refs::{Capture, RefTable};
+use super::refs::RefTable;
 use serde_json::{json, Map, Value};
 
 use super::base64;
@@ -669,6 +669,24 @@ fn tool_definition(name: &str) -> Value {
                      says whether either limit was hit, and each node that lost \
                      children to one is marked where it happened."
                 )),
+            );
+            props.insert(
+                "detail".into(),
+                json!({
+                    "type": "array",
+                    "items": { "type": "string", "enum": TREE_DETAILS },
+                    "description": format!(
+                        "Extra reads per node. `text`: the full text of each element \
+                         with a text interface, as `text` (`content`, `length` in UTF-16 \
+                         units, `truncated`), within {} bytes in total, so document \
+                         text that no action needs is still read. `relations`: \
+                         `relations` maps each reported kind (`labelled_by`, \
+                         `controls`, ...) to its targets, each a `ref`; a target outside \
+                         the result also carries `role`, `name` and `outside: true`. \
+                         Each costs a platform read per node.",
+                        crate::capture::DEFAULT_MAX_TEXT_BYTES
+                    ),
+                }),
             );
             tool(
                 "tree",
@@ -1876,129 +1894,161 @@ fn tool_shell() -> CliResult<ToolOutput> {
 
 fn tool_tree(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     let max_depth = opt_usize(args, "max_depth", TREE_DEFAULT_MAX_DEPTH, TREE_DEPTH)?;
+    let detail = tree_detail(args)?;
     let target = target(args)?;
-    let root = target.root();
-
-    let mut budget = TREE_MAX_NODES;
-    let mut cut = Cut::default();
-    let mut capture = refs.begin();
-    let node = build_node(
-        &root,
-        max_depth,
-        0,
-        &mut budget,
-        &mut cut,
-        Some(&target),
-        &mut capture,
-    );
-    refs.keep(capture);
+    let (node, cap) = tree_json(&target, max_depth, TREE_MAX_NODES, detail, refs)?;
 
     let mut out = Map::new();
     target_fields(&target, &mut out);
     out.insert("max_depth".into(), json!(max_depth));
-    out.insert(
-        "truncated".into(),
-        json!({
-            "by_depth": cut.by_depth,
-            "by_node_limit": cut.by_node_limit,
-            "node_limit": TREE_MAX_NODES,
-        }),
-    );
+    let mut truncated = Map::new();
+    truncated.insert("by_depth".into(), json!(cap.truncated.by_depth));
+    truncated.insert("by_node_limit".into(), json!(cap.truncated.by_nodes));
+    truncated.insert("node_limit".into(), json!(TREE_MAX_NODES));
+    if detail.text {
+        truncated.insert("by_text".into(), json!(cap.truncated.by_text));
+        truncated.insert("text_limit_bytes".into(), json!(cap.options.max_text_bytes));
+    }
+    out.insert("truncated".into(), Value::Object(truncated));
+    out.insert("vanished".into(), json!(cap.vanished));
     out.insert("tree".into(), node);
     Ok(ToolOutput::json(Value::Object(out)))
 }
 
-/// Which of `tree`'s limits actually dropped a node.
-///
-/// Set only where children existed and were left out, so a tree that merely
-/// reached `max_depth` at its leaves, or spent its budget exactly, does not
-/// report a cut that removed nothing.
-#[derive(Debug, Default)]
-struct Cut {
-    by_depth: bool,
-    by_node_limit: bool,
+/// What `tree` reads besides structure.
+#[derive(Debug, Clone, Copy, Default)]
+struct TreeDetail {
+    text: bool,
+    relations: bool,
 }
 
-/// Walk `element` into a JSON node, honouring both the depth limit and a
-/// shared node budget.
+/// The `detail` names `tree` accepts.
+const TREE_DETAILS: &[&str] = &["text", "relations"];
+
+fn tree_detail(args: &Value) -> CliResult<TreeDetail> {
+    let mut detail = TreeDetail::default();
+    let items = match args.get("detail") {
+        None | Some(Value::Null) => return Ok(detail),
+        Some(Value::Array(items)) => items,
+        Some(_) => return Err(usage("\"detail\" must be an array of strings")),
+    };
+    for item in items {
+        match item.as_str() {
+            Some("text") => detail.text = true,
+            Some("relations") => detail.relations = true,
+            Some(other) => {
+                return Err(usage(format!(
+                    "unknown detail {other:?}; expected one of {}",
+                    TREE_DETAILS.join(", ")
+                )))
+            }
+            None => return Err(usage("\"detail\" must be an array of strings")),
+        }
+    }
+    Ok(detail)
+}
+
+/// Capture `target` and encode it as nested JSON, every node with a ref.
 ///
-/// A node whose children were dropped by either limit carries
+/// A node whose children were left out by a limit carries
 /// `subtree_truncated: true` and `children_count` (how many children it
 /// has, of which `children` holds the first few or none). Without that a
 /// pruned node is indistinguishable from a leaf, and the global `truncated`
-/// flags cannot say *where* to look deeper. Counting the children of a node
-/// at the depth frontier costs one enumeration per frontier node — at most
-/// one per node already in the budget — and that is what lets a genuine leaf
-/// at the frontier stay unmarked.
-///
-/// A child-enumeration failure is recorded inside the node rather than
-/// failing the whole tree: one inaccessible subtree should not cost the
-/// caller every other window (this mirrors what `xa11y tree` prints).
-fn build_node(
-    element: &Element,
+/// flags cannot say *where* to look deeper. A child-enumeration failure is
+/// recorded in the node (`children_error`) rather than failing the whole
+/// tree: one inaccessible subtree should not cost the caller every other
+/// window.
+fn tree_json(
+    target: &Target,
     max_depth: usize,
-    depth: usize,
-    budget: &mut usize,
-    cut: &mut Cut,
-    scope: Option<&cli::Target>,
-    capture: &mut Capture,
-) -> Value {
-    // `Element` derefs to `ElementData`, so the leaf encoding is shared with
-    // `find` and the two cannot describe the same element differently.
-    let mut node = element_data_json(element);
-    let obj = node
-        .as_object_mut()
-        .expect("element_data_json always builds an object");
-    obj.insert("ref".into(), json!(capture.add(element)));
+    max_nodes: usize,
+    detail: TreeDetail,
+    refs: &RefTable,
+) -> CliResult<(Value, crate::Capture)> {
+    let options = crate::CaptureOptions::new()
+        .max_depth(max_depth)
+        .max_nodes(max_nodes)
+        .text(detail.text)
+        .relations(detail.relations);
+    let cap = target.capture(&options)?;
 
-    let children = match scope.map_or_else(|| element.children(), cli::Target::children) {
-        Ok(children) => children,
-        Err(e) => {
-            obj.insert("children_error".into(), json!(e.to_string()));
-            // Whichever limit would have stopped here may have hidden a
-            // subtree or not; the global flag must not claim nothing was cut
-            // when that is unknown.
-            if depth >= max_depth {
-                cut.by_depth = true;
-            } else if *budget == 0 {
-                cut.by_node_limit = true;
-            }
-            return node;
+    let mut capture = refs.begin();
+    let node_refs: Vec<String> = cap.nodes.iter().map(|n| capture.add(&n.element)).collect();
+    // Built bottom-up: in pre-order every child comes after its parent.
+    let mut built: Vec<Option<Value>> = vec![None; cap.nodes.len()];
+    for node in cap.nodes.iter().rev() {
+        let mut value = element_data_json(&node.element);
+        let obj = value
+            .as_object_mut()
+            .expect("element_data_json always builds an object");
+        obj.insert("ref".into(), json!(node_refs[node.index]));
+        for err in &node.errors {
+            let key = match err.step {
+                crate::CaptureStep::Children | crate::CaptureStep::Cycle => "children_error",
+                crate::CaptureStep::Text => "text_error",
+                crate::CaptureStep::Relations => "relations_error",
+                // Identity only feeds cycle detection and relation
+                // resolution; its failure shows up there.
+                _ => continue,
+            };
+            obj.insert(key.into(), json!(err.error.to_string()));
         }
-    };
-    if children.is_empty() {
-        return node;
-    }
-
-    let mut encoded = Vec::new();
-    if depth >= max_depth {
-        cut.by_depth = true;
-    } else {
-        for child in &children {
-            if *budget == 0 {
-                cut.by_node_limit = true;
-                break;
+        let has_children_error = node
+            .errors
+            .iter()
+            .any(|e| e.step == crate::CaptureStep::Children);
+        if node.children_truncated && !has_children_error {
+            obj.insert("subtree_truncated".into(), json!(true));
+            if let Some(count) = node.children_count {
+                obj.insert("children_count".into(), json!(count));
             }
-            *budget -= 1;
-            encoded.push(build_node(
-                child,
-                max_depth,
-                depth + 1,
-                budget,
-                cut,
-                None,
-                capture,
-            ));
         }
+        if let Some(text) = &node.text {
+            obj.insert(
+                "text".into(),
+                json!({
+                    "content": text.content,
+                    "length": text.length,
+                    "truncated": text.truncated,
+                }),
+            );
+        }
+        let relations: Map<String, Value> = node
+            .relations
+            .iter()
+            .filter(|(_, targets)| !targets.is_empty())
+            .map(|(kind, targets)| {
+                let listed: Vec<Value> = targets
+                    .iter()
+                    .map(|t| match t {
+                        crate::RelationTarget::Node(i) => json!({ "ref": node_refs[*i] }),
+                        crate::RelationTarget::Outside(el) => json!({
+                            "ref": capture.add(el),
+                            "role": el.role.to_snake_case(),
+                            "name": el.name,
+                            "outside": true,
+                        }),
+                    })
+                    .collect();
+                (kind.to_snake_case().to_string(), Value::Array(listed))
+            })
+            .collect();
+        if !relations.is_empty() {
+            obj.insert("relations".into(), Value::Object(relations));
+        }
+        let children: Vec<Value> = node
+            .children
+            .iter()
+            .filter_map(|&c| built[c].take())
+            .collect();
+        if !children.is_empty() {
+            obj.insert("children".into(), Value::Array(children));
+        }
+        built[node.index] = Some(value);
     }
-    if encoded.len() < children.len() {
-        obj.insert("subtree_truncated".into(), json!(true));
-        obj.insert("children_count".into(), json!(children.len()));
-    }
-    if !encoded.is_empty() {
-        obj.insert("children".into(), Value::Array(encoded));
-    }
-    node
+    refs.keep(capture);
+    let root = built[0].take().unwrap_or(Value::Null);
+    Ok((root, cap))
 }
 
 fn tool_find(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
@@ -3364,53 +3414,44 @@ mod tests {
             xa11y_core::mock::build_split_provider();
         let app = crate::App::by_pid_with(provider, 1234, std::time::Duration::ZERO).unwrap();
         let target = cli::Target::App(app);
-        let mut budget = 20;
-        let mut cut = Cut::default();
-        let tree = build_node(
-            &target.root(),
-            1,
-            0,
-            &mut budget,
-            &mut cut,
-            Some(&target),
-            &mut RefTable::default().begin(),
-        );
+        let refs = RefTable::default();
+        let (tree, _) = tree_json(&target, 1, 21, TreeDetail::default(), &refs).unwrap();
         let children = tree["children"].as_array().unwrap();
         assert_eq!(children.len(), 2);
         assert_eq!(children[1]["name"], "Second Window");
         assert!(children.iter().all(|child| child.get("children").is_none()));
-        let mut budget = 1;
-        let tree = build_node(
-            &target.root(),
-            5,
-            0,
-            &mut budget,
-            &mut cut,
-            Some(&target),
-            &mut RefTable::default().begin(),
-        );
+        let (tree, cap) = tree_json(&target, 5, 2, TreeDetail::default(), &refs).unwrap();
         assert_eq!(tree["children"].as_array().unwrap().len(), 1);
-        assert_eq!(budget, 0);
+        assert!(cap.truncated.by_nodes);
+    }
+
+    /// Which of `tree`'s limits cut something, as the result reports them.
+    #[derive(Debug)]
+    struct Cut {
+        by_depth: bool,
+        by_node_limit: bool,
     }
 
     /// Walk the mock app with explicit limits, returning the tree and which
-    /// limits cut something.
+    /// limits cut something. `budget` counts nodes below the root, as the
+    /// old walker did; the capture's limit includes the root.
     fn mock_tree(max_depth: usize, budget: usize) -> (Value, Cut) {
         let provider: std::sync::Arc<dyn crate::Provider> = xa11y_core::mock::build_provider();
         let app = crate::App::by_pid_with(provider, 1234, std::time::Duration::ZERO)
             .expect("the mock app resolves by pid");
         let target = cli::Target::App(app);
-        let mut budget = budget;
-        let mut cut = Cut::default();
-        let tree = build_node(
-            &target.root(),
+        let (tree, cap) = tree_json(
+            &target,
             max_depth,
-            0,
-            &mut budget,
-            &mut cut,
-            Some(&target),
-            &mut RefTable::default().begin(),
-        );
+            budget + 1,
+            TreeDetail::default(),
+            &RefTable::default(),
+        )
+        .expect("the mock tree captures");
+        let cut = Cut {
+            by_depth: cap.truncated.by_depth,
+            by_node_limit: cap.truncated.by_nodes,
+        };
         (tree, cut)
     }
 
@@ -4174,19 +4215,14 @@ mod tests {
     /// A `tree` over the mock app, kept in `refs`, and the ref of the node
     /// named `name`.
     fn ref_named(target: &Target, refs: &RefTable, name: &str) -> String {
-        let mut budget = TREE_MAX_NODES;
-        let mut cut = Cut::default();
-        let mut capture = refs.begin();
-        let tree = build_node(
-            &target.root(),
+        let (tree, _) = tree_json(
+            target,
             TREE_DEFAULT_MAX_DEPTH,
-            0,
-            &mut budget,
-            &mut cut,
-            Some(target),
-            &mut capture,
-        );
-        refs.keep(capture);
+            TREE_MAX_NODES,
+            TreeDetail::default(),
+            refs,
+        )
+        .expect("the mock tree captures");
         fn search(node: &Value, name: &str) -> Option<String> {
             if node["name"] == json!(name) {
                 return node["ref"].as_str().map(str::to_string);
@@ -5577,6 +5613,79 @@ mod tests {
             .next()
             .expect("the mock must vend one app");
         Target::App(app)
+    }
+
+    #[test]
+    fn tree_detail_reads_text_and_relations_on_request() {
+        let refs = RefTable::default();
+        let find = |tree: &Value, name: &str| -> Value {
+            fn walk(node: &Value, name: &str) -> Option<Value> {
+                if node["name"] == json!(name) {
+                    return Some(node.clone());
+                }
+                node["children"]
+                    .as_array()?
+                    .iter()
+                    .find_map(|c| walk(c, name))
+            }
+            walk(tree, name).unwrap_or_else(|| panic!("no {name} in {tree}"))
+        };
+        let (plain, _) = tree_json(
+            &document_target(),
+            TREE_DEFAULT_MAX_DEPTH,
+            TREE_MAX_NODES,
+            TreeDetail::default(),
+            &refs,
+        )
+        .expect("tree");
+        let field = find(&plain, "Email");
+        assert!(field.get("relations").is_none(), "{field}");
+        assert!(field.get("text").is_none(), "{field}");
+
+        let (rich, _) = tree_json(
+            &document_target(),
+            TREE_DEFAULT_MAX_DEPTH,
+            TREE_MAX_NODES,
+            TreeDetail {
+                text: true,
+                relations: true,
+            },
+            &refs,
+        )
+        .expect("tree");
+        let field = find(&rich, "Email");
+        let label = find(&rich, "Email address");
+        assert_eq!(
+            field["relations"]["labelled_by"],
+            json!([{ "ref": label["ref"] }])
+        );
+        // Kinds with no targets are left out of the map.
+        assert!(field["relations"].get("controls").is_none(), "{field}");
+
+        let (notes, _) = tree_json(
+            &table_target(),
+            TREE_DEFAULT_MAX_DEPTH,
+            TREE_MAX_NODES,
+            TreeDetail {
+                text: true,
+                relations: false,
+            },
+            &refs,
+        )
+        .expect("tree");
+        let notes = find(&notes, "Notes");
+        assert_eq!(notes["text"]["content"], "Hello 😀 world\nsecond line");
+        assert_eq!(notes["text"]["length"], 26);
+        assert_eq!(notes["text"]["truncated"], false);
+    }
+
+    #[test]
+    fn an_unknown_tree_detail_is_refused() {
+        for detail in [json!(["formatting"]), json!("text"), json!([1])] {
+            let err = tree_detail(&args(json!({ "detail": detail }))).expect_err("refused");
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{detail}");
+        }
+        assert!(tree_detail(&json!({})).is_ok());
     }
 
     #[test]

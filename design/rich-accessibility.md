@@ -10,8 +10,8 @@ Design proposal for the open children of #475:
 | #480 | Text, selection and live-region events | [4](#4-events-480) |
 | #483, #531 | IA2 backend selection, one deadline | [5](#5-cross-cutting-capabilities-deadline-ia2) |
 
-Status: sections 1, 2 and 5 are implemented (see each section's
-"Implemented" notes); 3 and 4 are proposals. Platform facts are from the
+Status: sections 1, 2, 3 and 5 are implemented (see each section's
+"Implemented" notes); 4 is a proposal. Platform facts are from the
 current code (file references are to `main` at `3603341`) and from
 [Core-AAM 1.2](https://www.w3.org/TR/core-aam-1.2/) §3.4–3.5.
 
@@ -565,13 +565,42 @@ for target in email.relations["labelled_by"]:
 cap.find('button[name="Save"]')[0].element().press()
 ```
 
+### Implemented
+
+Built as designed, with these specifics:
+
+- `xa11y_core::capture`: `CaptureOptions` (chained setters), `Capture`,
+  `CapturedNode`, `Truncation`, `CapturedText`, `CaptureError` (a `step` and
+  the `Error`) and `RelationTarget`. `Element`, `App`, `Locator` and
+  `ShellSurface` have `capture(&options)`. A captured node holds its
+  `Element`, so acting on it reaches that node or fails stale.
+- No `CaptureId` and no `backend` field: refs in MCP carry their own
+  capture ids, and `capabilities()` already names the platform.
+- Detail is `text` and `relations`. `formatting` (runs) is not built yet.
+- The walk is core-only for now: there is no `Provider::capture` hook and no
+  backend override, so nothing has been measured against
+  `FindAllBuildCache(TreeScope_Subtree)` or `Cache.GetItems`, and there is
+  no `bench-capture` target yet. Those are the next step if capture cost
+  shows up.
+- A node whose children read fails with `ElementStale` is dropped and
+  counted in `vanished`; any other failure is a `CaptureError` on the node.
+  A repeated identity is a `cycle` error on the parent.
+- MCP `tree` is rebuilt on capture (breadth-first now, so a node cut keeps
+  the top of the tree) and gains `detail`. CLI `xa11y tree` is rebuilt on
+  it with `--max-nodes` (default 2,000) and `--max-depth`, and prints where
+  and why it cut. `Element.tree()` / `dump()` are unchanged and unbounded,
+  which answers open question 1: they stay frozen and `capture()` is the
+  bounded form.
+- Python and JS expose `capture(...)` with the options folded in (keywords,
+  options object); nodes refer to each other by index, so Python holds no
+  reference cycles.
+
 ### Open questions
 
 Decided: default `max_nodes` is 2,000 on every surface, the same as MCP.
+Decided: `tree()` stays as it is (see Implemented).
 
-1. Should `tree()`'s dict gain `truncated` now, or stay frozen and point
-   users at `capture()`?
-2. `Capture.find(selector)`: run the selector engine over captured data
+1. `Capture.find(selector)`: run the selector engine over captured data
    (cheap, offline), or leave querying to the caller?
 
 ---

@@ -138,6 +138,28 @@ impl Locator {
         })
     }
 
+    /// Read the subtree into a bounded capture: every node read, pre-order,
+    /// with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
+    /// the top of the tree is complete. `detail` adds `'text'` and/or
+    /// `'relations'`; `timeout` (ms) resolves with what was read when it runs
+    /// out, with `truncated.byTime`.
+    ///
+    /// Resolves the selector once, like `tree()`; does not auto-wait.
+    #[napi(
+        ts_args_type = "options?: CaptureOptions | null",
+        ts_return_type = "Promise<Capture>"
+    )]
+    pub fn capture(
+        &self,
+        options: Option<crate::capture::CaptureOptions>,
+    ) -> napi::Result<AsyncTask<crate::text::Blocking<crate::capture::Capture>>> {
+        let options = crate::capture::parse_options(options)?;
+        let locator = self.inner.clone();
+        Ok(AsyncTask::new(crate::text::Blocking::new(move || {
+            locator.capture(&options).map(Into::into)
+        })))
+    }
+
     /// Render the subtree rooted at the matched element as an indented string.
     ///
     /// Returns the string without printing it. Same depth and resolution

@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 mod capabilities;
+mod capture;
 mod rich;
 mod semantics;
 
@@ -573,6 +574,39 @@ impl Element {
         })
     }
 
+    /// Read the subtree into a bounded :class:`Capture`: every node read,
+    /// pre-order, with which limits cut it. Read breadth-first, so when
+    /// ``max_nodes`` cuts, the top of the tree is complete.
+    ///
+    /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+    /// counts the root; ``detail`` adds ``"text"`` (full text within
+    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+    /// (seconds) returns what was read when it runs out, with
+    /// ``truncated.by_time``. Releases the GIL while it reads.
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    fn capture(
+        &self,
+        py: Python<'_>,
+        max_depth: Option<usize>,
+        max_nodes: usize,
+        max_text_bytes: usize,
+        detail: Option<Bound<'_, PyAny>>,
+        timeout: Option<f64>,
+    ) -> PyResult<capture::Capture> {
+        let options = capture::parse_options(
+            max_depth,
+            max_nodes,
+            max_text_bytes,
+            detail.as_ref(),
+            timeout,
+        )?;
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let cap = py
+            .detach(move || element.capture(&options))
+            .map_err(to_py_err)?;
+        capture::to_py(py, cap)
+    }
+
     /// Capture the subtree rooted at this element as a recursive dict snapshot.
     ///
     /// Each dict has keys ``role``, ``name``, ``value``, and ``children``
@@ -1046,6 +1080,41 @@ impl Locator {
             .detach(move || locator.tree(max_depth))
             .map_err(to_py_err)?;
         tree_node_to_py(py, &node)
+    }
+
+    /// Read the subtree into a bounded :class:`Capture`: every node read,
+    /// pre-order, with which limits cut it. Read breadth-first, so when
+    /// ``max_nodes`` cuts, the top of the tree is complete.
+    ///
+    /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+    /// counts the root; ``detail`` adds ``"text"`` (full text within
+    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+    /// (seconds) returns what was read when it runs out, with
+    /// ``truncated.by_time``. Releases the GIL while it reads.
+    ///
+    /// Resolves the selector once, like :meth:`tree`; does not auto-wait.
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    fn capture(
+        &self,
+        py: Python<'_>,
+        max_depth: Option<usize>,
+        max_nodes: usize,
+        max_text_bytes: usize,
+        detail: Option<Bound<'_, PyAny>>,
+        timeout: Option<f64>,
+    ) -> PyResult<capture::Capture> {
+        let options = capture::parse_options(
+            max_depth,
+            max_nodes,
+            max_text_bytes,
+            detail.as_ref(),
+            timeout,
+        )?;
+        let locator = self.inner.clone();
+        let cap = py
+            .detach(move || locator.capture(&options))
+            .map_err(to_py_err)?;
+        capture::to_py(py, cap)
     }
 
     /// Render the subtree rooted at the matched element as an indented string.
@@ -2021,6 +2090,42 @@ impl App {
         tree_node_to_py(py, &node)
     }
 
+    /// Read the subtree into a bounded :class:`Capture`: every node read,
+    /// pre-order, with which limits cut it. Read breadth-first, so when
+    /// ``max_nodes`` cuts, the top of the tree is complete.
+    ///
+    /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+    /// counts the root; ``detail`` adds ``"text"`` (full text within
+    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+    /// (seconds) returns what was read when it runs out, with
+    /// ``truncated.by_time``. Releases the GIL while it reads.
+    ///
+    /// The root is the application; its children are those of every native
+    /// registration of the process, as in :meth:`children`.
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    fn capture(
+        &self,
+        py: Python<'_>,
+        max_depth: Option<usize>,
+        max_nodes: usize,
+        max_text_bytes: usize,
+        detail: Option<Bound<'_, PyAny>>,
+        timeout: Option<f64>,
+    ) -> PyResult<capture::Capture> {
+        let options = capture::parse_options(
+            max_depth,
+            max_nodes,
+            max_text_bytes,
+            detail.as_ref(),
+            timeout,
+        )?;
+        let app = xa11y::App::from_data(self.provider.clone(), self.inner_data.clone());
+        let cap = py
+            .detach(move || app.capture(&options))
+            .map_err(to_py_err)?;
+        capture::to_py(py, cap)
+    }
+
     /// Render this application's accessibility tree as an indented string.
     ///
     /// Returns the string without printing it. Same depth semantics as
@@ -2212,6 +2317,39 @@ impl ShellSurface {
             .detach(move || element.tree(max_depth))
             .map_err(to_py_err)?;
         tree_node_to_py(py, &node)
+    }
+
+    /// Read the subtree into a bounded :class:`Capture`: every node read,
+    /// pre-order, with which limits cut it. Read breadth-first, so when
+    /// ``max_nodes`` cuts, the top of the tree is complete.
+    ///
+    /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+    /// counts the root; ``detail`` adds ``"text"`` (full text within
+    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+    /// (seconds) returns what was read when it runs out, with
+    /// ``truncated.by_time``. Releases the GIL while it reads.
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    fn capture(
+        &self,
+        py: Python<'_>,
+        max_depth: Option<usize>,
+        max_nodes: usize,
+        max_text_bytes: usize,
+        detail: Option<Bound<'_, PyAny>>,
+        timeout: Option<f64>,
+    ) -> PyResult<capture::Capture> {
+        let options = capture::parse_options(
+            max_depth,
+            max_nodes,
+            max_text_bytes,
+            detail.as_ref(),
+            timeout,
+        )?;
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let cap = py
+            .detach(move || element.capture(&options))
+            .map_err(to_py_err)?;
+        capture::to_py(py, cap)
     }
 
     /// Render this surface's accessibility tree as an indented string.
@@ -3129,6 +3267,11 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<capabilities::Capabilities>()?;
     m.add_class::<capabilities::Capability>()?;
     m.add_class::<semantics::LiveRegionInfo>()?;
+    m.add_class::<capture::Capture>()?;
+    m.add_class::<capture::CapturedNode>()?;
+    m.add_class::<capture::CapturedText>()?;
+    m.add_class::<capture::CaptureError>()?;
+    m.add_class::<capture::Truncation>()?;
     m.add_class::<rich::TableInfo>()?;
     m.add_class::<rich::CellInfo>()?;
     m.add_class::<rich::RowInfo>()?;

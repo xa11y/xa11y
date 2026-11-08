@@ -13,6 +13,7 @@ extern crate napi_derive;
 
 mod app;
 mod capabilities;
+mod capture;
 mod element;
 mod errors;
 mod input;

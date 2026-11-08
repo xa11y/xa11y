@@ -126,10 +126,13 @@ the command exits 1 with guidance for that platform. See
 
 ### `xa11y tree`
 
-Print the full accessibility tree for an application.
+Print the accessibility tree for an application, read breadth-first up to
+2,000 nodes. `--max-nodes N` raises or lowers that limit, and `--max-depth N`
+stops at depth N (the application is depth 0).
 
 ```bash
 xa11y tree --app Calculator
+xa11y tree --app Firefox --max-nodes 10000 --max-depth 8
 ```
 
 ```
@@ -145,6 +148,12 @@ application "Calculator" [enabled visible]
 ```
 
 This is the fastest way to understand an app's structure. Every element shows its role, name, value, states, bounds, and available actions.
+
+A node whose children were cut ends with a line such as `… 12 more (cut by
+--max-nodes)`, and a cut tree ends with a summary line,
+`(truncated: 2000 nodes shown, cut by the node limit of 2000 (--max-nodes))`.
+A subtree whose children could not be read shows `<error: …>` in their place
+and the rest of the tree still prints.
 
 The same output is available in-code via `Element.dump()` (and `Element.tree()` for a structured snapshot) in every language binding. See [Find the right selector](/guides/debug-selectors/#read-the-tree-from-code-instead) for examples.
 
@@ -558,7 +567,7 @@ gives it selectors to resolve.
 | `shell` | none |
 | `windows` | `app`, `pid`, `limit` |
 | `enable_web_accessibility` | `app`, `pid` |
-| `tree` | `app`, `pid`, `shell`, `max_depth` |
+| `tree` | `app`, `pid`, `shell`, `max_depth`, `detail` |
 | `find` | `selector`, `app`, `pid`, `shell`, `limit` |
 | `action` | `action`, `selector` or `ref`, `app`, `pid`, `shell`, `value`, `at`, `size` |
 | `text` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `start`, `end`, `find`, `occurrence`, `offset`, `unit`, `limit` |

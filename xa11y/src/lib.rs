@@ -48,6 +48,13 @@ pub use xa11y_core::{Capabilities, Capability, Platform, Support};
 pub use xa11y_core::identity;
 pub use xa11y_core::{NativeObject, NodeIdentity};
 
+// Bounded capture (see `xa11y_core::capture`).
+pub use xa11y_core::capture;
+pub use xa11y_core::{
+    Capture, CaptureError, CaptureOptions, CaptureStep, CapturedNode, CapturedText, RelationTarget,
+    Truncation,
+};
+
 // Document semantics (see `xa11y_core::semantics`).
 pub use xa11y_core::semantics;
 #[doc(hidden)]

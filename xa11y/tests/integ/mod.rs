@@ -37,6 +37,7 @@
 
 pub mod actions;
 pub mod capabilities;
+pub mod capture;
 pub mod errors;
 pub mod identity;
 pub mod mcp;

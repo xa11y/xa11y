@@ -483,6 +483,13 @@ def test_a_table_argument_mistake_is_a_fixable_error(run_client):
     assert "--" not in result.structured_content["message"]
 
 
+def test_a_tree_detail_mistake_is_a_fixable_error(run_client):
+    result = run_client(lambda c: c.call_tool("tree", {"app": "X", "detail": ["formatting"]}))
+    assert result.is_error is True
+    assert result.structured_content["kind"] == "invalid_arguments"
+    assert "relations" in result.structured_content["message"]
+
+
 def test_a_relation_kind_mistake_is_a_fixable_error(run_client):
     result = run_client(
         lambda c: c.call_tool(

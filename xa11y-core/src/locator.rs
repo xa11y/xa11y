@@ -951,6 +951,16 @@ impl Locator {
         self.element()?.tree(max_depth)
     }
 
+    /// Read the subtree rooted at the matched element into a bounded
+    /// [`Capture`](crate::capture::Capture). Resolves the selector once (no
+    /// auto-wait), like [`Self::tree`].
+    pub fn capture(
+        &self,
+        options: &crate::capture::CaptureOptions,
+    ) -> Result<crate::capture::Capture> {
+        self.element()?.capture(options)
+    }
+
     /// Render the subtree rooted at the matched element as an indented
     /// string. Resolves the selector once (no auto-wait). See
     /// [`Element::dump`] for the output format.

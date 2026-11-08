@@ -253,6 +253,29 @@ impl App {
         })
     }
 
+    /// Read the subtree into a bounded capture: every node read, pre-order,
+    /// with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
+    /// the top of the tree is complete. `detail` adds `'text'` and/or
+    /// `'relations'`; `timeout` (ms) resolves with what was read when it runs
+    /// out, with `truncated.byTime`.
+    ///
+    /// The root is the application; its children are those of every native
+    /// registration of the process, as in `children()`.
+    #[napi(
+        ts_args_type = "options?: CaptureOptions | null",
+        ts_return_type = "Promise<Capture>"
+    )]
+    pub fn capture(
+        &self,
+        options: Option<crate::capture::CaptureOptions>,
+    ) -> napi::Result<AsyncTask<crate::text::Blocking<crate::capture::Capture>>> {
+        let options = crate::capture::parse_options(options)?;
+        let app = xa11y::App::from_data(self.provider.clone(), self.data.clone());
+        Ok(AsyncTask::new(crate::text::Blocking::new(move || {
+            app.capture(&options).map(Into::into)
+        })))
+    }
+
     /// Capture this application's accessibility tree as a recursive snapshot,
     /// rooted at the application element.
     ///

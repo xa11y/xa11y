@@ -43,6 +43,14 @@ export type {
   AnchorName,
   Capability,
   CapabilitiesOptions,
+  Capture,
+  CaptureDetailName,
+  CaptureError,
+  CaptureOptions,
+  CaptureStepName,
+  CapturedNode,
+  CapturedRelation,
+  CapturedText,
   CellInfo,
   CheckedState,
   ClickOptions,
@@ -73,6 +81,7 @@ export type {
   TextChange,
   TextChangeKindName,
   TextFindOptions,
+  Truncation,
   TextLines,
   TextRange,
   TextRun,
@@ -83,6 +92,8 @@ export type {
 import type {
   AnchorName,
   AutoScrollOutcomeName,
+  Capture,
+  CaptureOptions,
   Element,
   Event,
   DeliveryName,
@@ -370,6 +381,15 @@ export declare class App {
   asElement(): Element;
 
   /**
+   * Read the subtree into a bounded capture: every node read, pre-order,
+   * with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
+   * the top of the tree is complete. `detail` adds `'text'` and/or
+   * `'relations'`; `timeout` (ms) resolves with what was read when it runs
+   * out, with `truncated.byTime`.
+   */
+  capture(options?: CaptureOptions | null): Promise<Capture>;
+
+  /**
    * Capture this application's accessibility tree as a recursive snapshot,
    * rooted at the application element.
    *
@@ -500,6 +520,15 @@ export declare class ShellSurface {
    * holds the root's accessibility data.
    */
   asElement(): Element;
+
+  /**
+   * Read the subtree into a bounded capture: every node read, pre-order,
+   * with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
+   * the top of the tree is complete. `detail` adds `'text'` and/or
+   * `'relations'`; `timeout` (ms) resolves with what was read when it runs
+   * out, with `truncated.byTime`.
+   */
+  capture(options?: CaptureOptions | null): Promise<Capture>;
 
   /**
    * Capture this surface's accessibility tree as a recursive snapshot, rooted

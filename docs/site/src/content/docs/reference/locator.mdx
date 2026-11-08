@@ -185,6 +185,47 @@ string `"unknown"`. Platform support is in
 and so on. Omit it for the full subtree. `tree()` and `dump()` are also
 available on `App` and `Locator`.
 
+### Bounded capture
+
+`capture()` reads a subtree into a flat list of nodes under explicit limits,
+and reports which limit cut it. It is on `Element`, `App`, `Locator` and
+`ShellSurface`. Use it in place of `tree()` for a large or unknown tree.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `max_depth` | none | Deepest level read; the root is depth 0 |
+| `max_nodes` | 2000 | Most nodes, the root included |
+| `detail` | none | `text` reads each element's text, `relations` its relations |
+| `max_text_bytes` | 65536 | Total text budget for `text` detail |
+| `timeout` | none | Seconds in Python, milliseconds in JavaScript |
+
+The tree is read breadth-first and listed in pre-order, so when `max_nodes`
+cuts, the top of the tree is complete. Each node carries its `index`,
+`parent`, `depth`, the `element` itself, its `children` as indices,
+`children_count` (its real number of children) and `children_truncated`.
+`truncated` on the capture has `by_depth`, `by_nodes`, `by_text` and
+`by_time`, each set only when that limit left something out.
+
+Each node is read once, at some moment while the capture runs, so the result
+is not an atomic snapshot of the app. Nodes that disappear mid-read are
+dropped and counted in `vanished`, and any other failed read is kept in that
+node's `errors` while the walk carries on. When the time budget runs out, the
+call still returns, with what it read and `truncated.by_time` set.
+
+A node's `element` names exactly that node, so an action on it reaches it or
+raises `ElementStaleError`. With `relations` detail, a target inside the
+capture is the `int` index of its node and a target outside it is an
+`Element`.
+
+```python
+cap = app.capture(max_nodes=5000, detail={"text"})
+for node in cap.nodes:
+    if node.children_truncated:
+        print("cut at", node.role, node.name, node.children_count)
+article = next(n for n in cap.nodes if n.element.landmark_type == "main")
+print("".join(n.text.content for n in cap.subtree(article.index) if n.text))
+```
+
 ### Tables and text
 
 | Method | On | Returns |

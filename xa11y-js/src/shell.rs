@@ -193,6 +193,26 @@ impl ShellSurface {
         Element::new(self.data.clone(), self.provider.clone())
     }
 
+    /// Read the subtree into a bounded capture: every node read, pre-order,
+    /// with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
+    /// the top of the tree is complete. `detail` adds `'text'` and/or
+    /// `'relations'`; `timeout` (ms) resolves with what was read when it runs
+    /// out, with `truncated.byTime`.
+    #[napi(
+        ts_args_type = "options?: CaptureOptions | null",
+        ts_return_type = "Promise<Capture>"
+    )]
+    pub fn capture(
+        &self,
+        options: Option<crate::capture::CaptureOptions>,
+    ) -> napi::Result<AsyncTask<crate::text::Blocking<crate::capture::Capture>>> {
+        let options = crate::capture::parse_options(options)?;
+        let el = xa11y::Element::new(self.data.clone(), self.provider.clone());
+        Ok(AsyncTask::new(crate::text::Blocking::new(move || {
+            el.capture(&options).map(Into::into)
+        })))
+    }
+
     /// Capture this surface's accessibility tree as a recursive snapshot,
     /// rooted at the surface element.
     ///

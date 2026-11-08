@@ -1,5 +1,6 @@
 pub mod app;
 pub mod capabilities;
+pub mod capture;
 pub mod config;
 pub mod element;
 pub mod error;
@@ -30,6 +31,10 @@ pub mod mock;
 // Re-export primary types at the crate root for convenience.
 pub use app::App;
 pub use capabilities::{Capabilities, Capability, Platform, Support};
+pub use capture::{
+    Capture, CaptureError, CaptureOptions, CaptureStep, CapturedNode, CapturedText, RelationTarget,
+    Truncation,
+};
 pub use config::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
 pub use element::{
     Element, ElementData, HiddenReason, RawPlatformData, Rect, StateSet, Toggled, TreeNode,

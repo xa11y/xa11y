@@ -110,6 +110,9 @@ pub struct MockProvider {
     selections: Mutex<HashMap<u64, TextRange>>,
     /// Relations per node index, set by [`build_document_provider`].
     relations: Mutex<HashMap<usize, MockRelations>>,
+    /// Errors `get_children` returns for a node index, set by
+    /// [`MockProvider::fail_children`].
+    children_errors: Mutex<HashMap<usize, Error>>,
 }
 
 /// One scripted observation of a node: its bounds and whether it is visible.
@@ -141,6 +144,17 @@ impl MockProvider {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         let idx = Self::index_named(&nodes, name);
         nodes[idx].data.role = role;
+    }
+
+    /// Make reading the children of the node named `name` fail with
+    /// `error`, as a node that went away mid-read or a broken subtree would.
+    pub fn fail_children(&self, name: &str, error: Error) {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = Self::index_named(&nodes, name);
+        self.children_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(idx, error);
     }
 
     fn index_named(nodes: &[MockNode], name: &str) -> usize {
@@ -304,6 +318,14 @@ impl Provider for MockProvider {
             }
             Some(el) => {
                 let idx = el.handle as usize;
+                if let Some(error) = self
+                    .children_errors
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&idx)
+                {
+                    return Err(error.clone());
+                }
                 // A closed element is gone (see `closed`): resolving its subtree
                 // through a stale handle would fake a live window that real
                 // providers have dropped.
@@ -1312,6 +1334,7 @@ pub fn build_provider() -> Arc<MockProvider> {
     Arc::new(MockProvider {
         nodes: Mutex::new(nodes),
         relations: Mutex::new(HashMap::new()),
+        children_errors: Mutex::new(HashMap::new()),
         actions: Mutex::new(Vec::new()),
         frames: Mutex::new(HashMap::new()),
         selections: Mutex::new(HashMap::new()),
