@@ -68,8 +68,10 @@ test('relations resolve to indices inside the capture', async () => {
   assert.equal(labelled.targets.length, 1);
   assert.equal(typeof labelled.targets[0], 'number');
   assert.equal(cap.nodes[labelled.targets[0]].element.name, 'Email address');
-  const controls = field.relations.find((r) => r.kind === 'controls');
-  assert.deepEqual(controls.targets, []);
+  // Every other kind this platform reports is listed, empty.
+  const others = field.relations.filter((r) => !['labelled_by', 'described_by'].includes(r.kind));
+  assert.ok(others.length > 0);
+  for (const r of others) assert.deepEqual(r.targets, []);
 
   const alone = await field.element.capture({ detail: ['relations'] });
   const outside = alone.nodes[0].relations.find((r) => r.kind === 'labelled_by').targets[0];

@@ -799,13 +799,14 @@ mod tests {
             }
             other => panic!("expected one in-capture label, got {other:?}"),
         }
-        // A kind with no targets is listed, empty.
-        let (_, controls) = field
+        // Every other kind this platform reports is listed, empty.
+        let others: Vec<_> = field
             .relations
             .iter()
-            .find(|(k, _)| *k == RelationKind::Controls)
-            .expect("controls is reported");
-        assert!(controls.is_empty());
+            .filter(|(k, _)| !matches!(k, RelationKind::LabelledBy | RelationKind::DescribedBy))
+            .collect();
+        assert!(!others.is_empty(), "the platform reports more kinds");
+        assert!(others.iter().all(|(_, t)| t.is_empty()), "{others:?}");
         // Outside the capture: a capture rooted at the field itself.
         let alone = field
             .element

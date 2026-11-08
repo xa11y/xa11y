@@ -65,7 +65,9 @@ def test_relations_resolve_to_indices_inside_the_capture():
     (label,) = field.relations["labelled_by"]
     assert isinstance(label, int)
     assert cap.nodes[label].name == "Email address"
-    assert field.relations["controls"] == []
+    # Every other kind this platform reports is listed, empty.
+    others = {k: v for k, v in field.relations.items() if k not in ("labelled_by", "described_by")}
+    assert others and all(v == [] for v in others.values())
     alone = field.element.capture(detail=["relations"])
     (outside,) = alone.root().relations["labelled_by"]
     assert isinstance(outside, xa11y.Element)
