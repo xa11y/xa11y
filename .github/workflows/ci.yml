@@ -737,6 +737,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo xtask sync-readmes --check
 
+      # The capability table on the platform-details page is rendered from
+      # xa11y-core/src/capabilities.rs and must not drift from it.
+      - name: Check the capability table page is in sync
+        if: ${{ !cancelled() }}
+        run: cargo xtask sync-capabilities --check
+
       # The agent guide is embedded in the binary and rendered into the docs
       # site; the page must not drift from what `xa11y guide` prints.
       - name: Check the agent guide page is in sync

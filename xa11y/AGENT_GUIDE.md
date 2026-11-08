@@ -194,6 +194,9 @@ the tree again to see the current state.
   `accessibility_not_enabled`.
 - Windows: screen coordinates are physical pixels. On macOS and Linux they are
   logical points.
+- `capabilities` says what this platform can report at all. Call it before
+  waiting on an event kind or relying on a field: `event:menu_opened` is
+  `unsupported` on Linux, so a wait for it there can only time out.
 - Element handles go stale whenever the application rebuilds its UI.
   Selectors re-resolve on every call, so address elements by selector and not
   by remembered position.

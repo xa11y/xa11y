@@ -328,6 +328,7 @@ impl Xa11yTools {
 /// Every tool name, in list order.
 const TOOL_NAMES: &[&str] = &[
     "apps",
+    "capabilities",
     "shell",
     "windows",
     "enable_web_accessibility",
@@ -363,6 +364,7 @@ impl ToolHost for Xa11yTools {
     fn call(&self, name: &str, args: &Value) -> CliResult<ToolOutput> {
         match name {
             "apps" => tool_apps(),
+            "capabilities" => tool_capabilities(args),
             "shell" => tool_shell(),
             "windows" => tool_windows(args),
             "enable_web_accessibility" => tool_enable_web_accessibility(args),
@@ -492,6 +494,53 @@ fn tool_definition(name: &str) -> Value {
              the `app` or `pid` the other tools need.",
             json!({ "type": "object", "additionalProperties": false }),
         ),
+        "capabilities" => {
+            let mut props = Map::new();
+            props.insert(
+                "platform".into(),
+                json!({
+                    "type": "string",
+                    "enum": crate::Platform::ALL.iter().map(|p| p.to_snake_case()).collect::<Vec<_>>(),
+                    "description": "Platform to describe. Default: the one this server runs on.",
+                }),
+            );
+            props.insert(
+                "os_version".into(),
+                json!({
+                    "type": "string",
+                    "description": "Dotted OS version (\"14.5\", \"10.0.19045\") to narrow the \
+                        answers to. Default: the running version on macOS and Windows. Linux \
+                        takes none.",
+                }),
+            );
+            props.insert(
+                "names".into(),
+                json!({
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Feature names (\"event:menu_opened\") or areas ending in \
+                        \":\" (\"window:\") to return. Default: every feature.",
+                }),
+            );
+            tool(
+                "capabilities",
+                "What this platform can report",
+                "Say, per feature, whether this platform's accessibility backend can \
+                 report it: `supported`, `partial` (some toolkits, apps or display servers \
+                 only; `note` says which) or `unsupported` (never). Reads a fixed table and \
+                 touches no application.\n\n\
+                 Use it to tell \"this element or app has nothing to report\" from \
+                 \"this platform never reports it\". A field that is always absent, an \
+                 event kind that never arrives from `events_poll`, or an action that \
+                 fails as unsupported is explained here. Check an event kind before waiting \
+                 on it: `event:menu_opened` is `unsupported` on Linux, so a wait for it \
+                 there can only time out.\n\n\
+                 Names are `<area>:<name>`; the areas are `event:`, `action:`, `app:`, \
+                 `window:`, `state:`, `table:` and `text:`. An unknown name is an \
+                 `invalid_arguments` failure listing the closest known names.",
+                object_schema(props, &[]),
+            )
+        }
         "shell" => tool(
             "shell",
             "List OS shell surfaces",
@@ -1696,6 +1745,35 @@ fn tool_apps() -> CliResult<ToolOutput> {
     Ok(ToolOutput::json(json!({
         "count": listed.len(),
         "applications": listed,
+    })))
+}
+
+fn tool_capabilities(args: &Value) -> CliResult<ToolOutput> {
+    let platform = opt_str(args, "platform")?;
+    let os_version = opt_str(args, "os_version")?;
+    let names: Vec<String> = match args.get("names") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| usage("\"names\" must be an array of strings".to_string()))
+            })
+            .collect::<CliResult<_>>()?,
+        Some(_) => return Err(usage("\"names\" must be an array of strings".to_string())),
+    };
+    let caps = crate::cli::resolve_capabilities(platform, os_version)?;
+    let selected = crate::cli::select_capabilities(&caps, &names)?;
+    let listed: Vec<Value> = selected
+        .iter()
+        .map(|c| crate::cli::capability_json(c))
+        .collect();
+    Ok(ToolOutput::json(json!({
+        "platform": caps.platform.to_snake_case(),
+        "os_version": caps.os_version,
+        "count": listed.len(),
+        "capabilities": listed,
     })))
 }
 
@@ -3718,6 +3796,57 @@ mod tests {
             "the open handles are the way out, so they belong in the message: {text}"
         );
         assert_eq!(structured["live_subscriptions"], json!(["sub_2"]));
+    }
+
+    #[test]
+    fn capabilities_tool_answers_for_any_platform() {
+        let out = tool_capabilities(
+            &json!({ "platform": "linux", "names": ["event:menu_opened", "window:"] }),
+        )
+        .expect("capabilities");
+        let body = out.structured.expect("structured");
+        assert_eq!(body["platform"], json!("linux"));
+        assert_eq!(body["os_version"], Value::Null);
+        let caps = body["capabilities"].as_array().expect("array");
+        assert_eq!(caps[0]["name"], json!("event:menu_opened"));
+        assert_eq!(caps[0]["support"], json!("unsupported"));
+        assert!(
+            caps[0]["note"].is_string(),
+            "an unsupported answer says why"
+        );
+        assert!(caps
+            .iter()
+            .skip(1)
+            .all(|c| c["name"].as_str().is_some_and(|n| n.starts_with("window:"))));
+        assert_eq!(body["count"], json!(caps.len()));
+
+        let all = tool_capabilities(&json!({ "platform": "windows", "os_version": "10.0.19045" }))
+            .expect("capabilities")
+            .structured
+            .expect("structured");
+        assert_eq!(all["os_version"], json!("10.0.19045"));
+        assert_eq!(all["count"], json!(crate::Capabilities::names().count()));
+    }
+
+    #[test]
+    fn capabilities_tool_rejects_bad_arguments_as_invalid() {
+        for args in [
+            json!({ "platform": "darwin" }),
+            json!({ "platform": "linux", "os_version": "6.1" }),
+            json!({ "platform": "windows", "os_version": "eleven" }),
+            json!({ "names": ["event:menu_open"] }),
+            json!({ "names": ["nope:"] }),
+            json!({ "names": "event:menu_opened" }),
+            json!({ "names": [1] }),
+        ] {
+            let err = tool_capabilities(&args).expect_err("must reject");
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{args}");
+        }
+        let err = tool_capabilities(&json!({ "names": ["event:menu_open"] })).expect_err("typo");
+        assert!(
+            err.to_string().contains("event:menu_opened"),
+            "closest names listed: {err}"
+        );
     }
 
     #[test]

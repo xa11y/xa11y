@@ -41,6 +41,9 @@ pub use xa11y_core::{ElementParts, EventParts, StateParts, TextChangeParts};
 // 5 seconds.
 pub use xa11y_core::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
 
+// Re-export the capability table (see `xa11y_core::capabilities`).
+pub use xa11y_core::{Capabilities, Capability, Platform, Support};
+
 // Re-export input simulation surface.
 pub use xa11y_core::input;
 pub use xa11y_core::{
@@ -76,6 +79,57 @@ pub use xa11y_core::{is_bidi_control, strip_bidi, strip_bidi_opt};
 // Implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
 pub use xa11y_core::{CancelHandle, EventReceiver, Provider, RecvStatus, Selector, SelectorGroup};
+
+/// What this platform's backend can report: one answer per feature, read from
+/// a static table without connecting to any app. See [`capabilities_with`]
+/// to describe another platform or OS version.
+///
+/// The table describes each platform's default accessibility source. With
+/// `XA11Y_ACCESSIBILITY_SOURCE=ia2` selected on Windows this fails with
+/// [`Error::Unsupported`] rather than answer for UIA, whose capabilities
+/// differ (IA2 delivers no events, for one).
+pub fn capabilities() -> Result<Capabilities> {
+    capabilities_with(None, None)
+}
+
+/// [`capabilities`] for `platform` (default: the running one), narrowed to
+/// `os_version` when given. The shared entry point of the bindings, the CLI
+/// and MCP.
+///
+/// For the running platform, the selected accessibility source is checked
+/// first, as [`capabilities`] describes. An explicit `platform` describes
+/// that platform's default source.
+pub fn capabilities_with(
+    platform: Option<Platform>,
+    os_version: Option<&str>,
+) -> Result<Capabilities> {
+    match platform {
+        Some(p) => Capabilities::for_platform(p, os_version),
+        None => {
+            let source =
+                parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"))?;
+            if source == "ia2" {
+                return Err(Error::Unsupported {
+                    feature: "capabilities for XA11Y_ACCESSIBILITY_SOURCE=ia2: the table \
+                              describes the default UIA source; the IA2 source's mapping is \
+                              listed on the platform-details reference page"
+                        .to_string(),
+                });
+            }
+            match os_version {
+                None => Capabilities::current(),
+                Some(v) => {
+                    let current = Platform::current().ok_or_else(|| Error::Unsupported {
+                        feature: "capabilities on this operating system: xa11y has no backend \
+                                  for it"
+                            .to_string(),
+                    })?;
+                    Capabilities::for_platform(current, Some(v))
+                }
+            }
+        }
+    }
+}
 
 /// Shared in-memory mock Provider — re-exported from `xa11y-core` when the
 /// `test-support` feature is enabled. Used by language-binding tests so

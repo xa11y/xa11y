@@ -279,6 +279,7 @@ pub fn run(args: &[String]) -> CliResult<()> {
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("mcp") => crate::mcp::serve(&args[1..]),
         Some("guide") => cmd_guide(&args[1..]),
+        Some("capabilities") => cmd_capabilities(&args[1..]),
         _ => {
             print_usage();
             Ok(())
@@ -325,6 +326,11 @@ Accessibility tree:
                                             Turn on a Chromium/Electron app's
                                             web content tree (macOS) and wait
                                             for it to appear
+  xa11y capabilities [NAME | AREA: ...] [--platform linux|macos|windows]
+                   [--os-version V] [--json]
+                                            What this platform (or another)
+                                            can report: supported, partial or
+                                            unsupported, per feature
 
 TARGET — what tree/find/action search (--shell and --app are exclusive):
   --app NAME | --pid PID                    A running application
@@ -1382,6 +1388,146 @@ fn cmd_guide(args: &[String]) -> CliResult<()> {
         )));
     }
     print!("{AGENT_GUIDE}");
+    Ok(())
+}
+
+/// The capability table for `platform` (default: the running one), narrowed
+/// to `os_version` when given. Shared by `xa11y capabilities` and the MCP
+/// `capabilities` tool; prints nothing.
+///
+/// A bad platform name or version is a usage error: it is the caller's
+/// argument, not an operation that failed.
+pub(crate) fn resolve_capabilities(
+    platform: Option<&str>,
+    os_version: Option<&str>,
+) -> CliResult<Capabilities> {
+    let usage = |e: Error| match e {
+        Error::InvalidActionData { message } => CliError::Usage(message),
+        other => CliError::Xa11y(other),
+    };
+    let platform = platform.map(Platform::parse).transpose().map_err(usage)?;
+    crate::capabilities_with(platform, os_version).map_err(usage)
+}
+
+/// The entries of `caps` that `filters` select: each filter is a feature
+/// name (`event:menu_opened`) or an area ending in `:` (`window:`). No
+/// filters selects everything. A filter that selects nothing is a usage
+/// error naming the closest known names, so a typo is not read as "no such
+/// capability".
+pub(crate) fn select_capabilities<'a>(
+    caps: &'a Capabilities,
+    filters: &[String],
+) -> CliResult<Vec<&'a Capability>> {
+    if filters.is_empty() {
+        return Ok(caps.entries().iter().collect());
+    }
+    let mut out: Vec<&Capability> = Vec::new();
+    for filter in filters {
+        let before = out.len();
+        if filter.ends_with(':') {
+            out.extend(
+                caps.entries()
+                    .iter()
+                    .filter(|c| c.name.starts_with(filter.as_str())),
+            );
+            if out.len() == before {
+                let areas: std::collections::BTreeSet<&str> = caps
+                    .entries()
+                    .iter()
+                    .filter_map(|c| c.name.split(':').next())
+                    .collect();
+                return Err(CliError::Usage(format!(
+                    "no capabilities in area {filter:?}; areas are: {}",
+                    areas
+                        .into_iter()
+                        .map(|a| format!("{a}:"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        } else {
+            match caps.get(filter) {
+                Ok(c) => out.push(c),
+                Err(Error::InvalidActionData { message }) => return Err(CliError::Usage(message)),
+                Err(other) => return Err(CliError::Xa11y(other)),
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    out.retain(|c| seen.insert(c.name));
+    Ok(out)
+}
+
+/// JSON form of one capability, the same for `--json` and MCP.
+pub(crate) fn capability_json(c: &Capability) -> serde_json::Value {
+    serde_json::json!({
+        "name": c.name,
+        "support": c.support.to_snake_case(),
+        "note": c.note,
+        "since": c.since,
+        "description": c.description,
+    })
+}
+
+/// `xa11y capabilities`: what a platform's backend can report.
+///
+/// Text output is one `name\tsupport[\tnote]` line per feature after a
+/// `platform:` header line; `--json` prints one object.
+fn cmd_capabilities(args: &[String]) -> CliResult<()> {
+    let mut platform = None;
+    let mut os_version = None;
+    let mut json = false;
+    let mut filters = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--platform" => {
+                i += 1;
+                platform = Some(flag_value(args, i, "--platform")?);
+            }
+            "--os-version" => {
+                i += 1;
+                os_version = Some(flag_value(args, i, "--os-version")?);
+            }
+            "--json" => json = true,
+            flag if flag.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {flag} for capabilities; expected --platform, \
+                     --os-version or --json"
+                )));
+            }
+            name => filters.push(name.to_string()),
+        }
+        i += 1;
+    }
+    let caps = resolve_capabilities(platform, os_version)?;
+    let selected = select_capabilities(&caps, &filters)?;
+    if json {
+        let out = serde_json::json!({
+            "platform": caps.platform.to_snake_case(),
+            "os_version": caps.os_version,
+            "capabilities": selected.iter().map(|c| capability_json(c)).collect::<Vec<_>>(),
+        });
+        let rendered = serde_json::to_string_pretty(&out).map_err(|e| {
+            CliError::Xa11y(Error::Platform {
+                code: -1,
+                message: format!("serialize the capability table: {e}"),
+            })
+        })?;
+        println!("{rendered}");
+        return Ok(());
+    }
+    println!(
+        "platform: {}\tos_version: {}",
+        caps.platform.to_snake_case(),
+        caps.os_version.as_deref().unwrap_or("-")
+    );
+    for c in selected {
+        match &c.note {
+            Some(note) => println!("{}\t{}\t{}", c.name, c.support.to_snake_case(), note),
+            None => println!("{}\t{}", c.name, c.support.to_snake_case()),
+        }
+    }
     Ok(())
 }
 
@@ -3639,8 +3785,9 @@ mod tests {
         // `ACTION_COMMANDS` is hand-kept. Read the dispatcher's own arms, so
         // a new command that nobody classified fails here instead of
         // silently lacking the `delivery:` line.
-        const NOT_ACTIONS: [&str; 10] = [
+        const NOT_ACTIONS: [&str; 11] = [
             "apps",
+            "capabilities",
             "shell",
             "windows",
             "tree",

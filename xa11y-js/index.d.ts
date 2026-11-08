@@ -22,12 +22,14 @@ import { EventEmitter } from 'node:events';
 // Re-export Rust-generated classes (except App and _NativeSubscription,
 // which are shadowed by the JS wrapper classes below).
 export {
+  Capabilities,
   Element,
   Event,
   InputSim,
   Locator,
   Screenshot,
   Text,
+  capabilities,
   inputSim,
   locator,
   _makeTestApp,
@@ -39,6 +41,8 @@ export {
 // Forward the narrowed types from native.d.ts.
 export type {
   AnchorName,
+  Capability,
+  CapabilitiesOptions,
   CellInfo,
   CheckedState,
   ClickOptions,
@@ -54,9 +58,11 @@ export type {
   MouseButtonName,
   Omission,
   OmissionReasonName,
+  PlatformName,
   Rect,
   RowInfo,
   ShellSurfaceKindName,
+  SupportName,
   TableInfo,
   TextAttributes,
   TextChange,

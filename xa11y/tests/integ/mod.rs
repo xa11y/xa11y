@@ -13,6 +13,7 @@
 //!   evidence that each platform's classifier matches a real surface, with
 //!   the per-platform requirement stated in the file rather than skipped
 //!   when the listing comes back empty.
+//! * `capabilities` — the capability table held against the running backend.
 //! * `stability` — `Locator::wait_stable` against the sliding widget.
 //! * `errors` — error paths on the query/wait surface: selector misses,
 //!   invalid selectors, `wait_*` timeouts, auto-wait timeouts, unknown
@@ -34,6 +35,7 @@
 //! are reached from submodule tests via `use crate::integ as h;`.
 
 pub mod actions;
+pub mod capabilities;
 pub mod errors;
 pub mod mcp;
 pub mod multi_window;

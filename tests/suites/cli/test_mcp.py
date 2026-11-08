@@ -370,6 +370,7 @@ def test_tools_list_is_complete_and_deterministic(mcp):
     assert first == second, "the spec asks for a deterministic order"
     assert first == [
         "apps",
+        "capabilities",
         "shell",
         "windows",
         "enable_web_accessibility",
@@ -2351,3 +2352,53 @@ def test_a_stable_find_that_never_matches_is_a_diagnosed_miss(
     structured = result["structuredContent"]
     assert structured["kind"] == "no_match", structured
     assert structured["diagnosis"]["selector"] == selector
+
+
+# ── capabilities ─────────────────────────────────────────────────────────────
+
+
+def test_cli_capabilities_from_every_launcher(entry_point):
+    result = _run(entry_point, "capabilities", "--platform", "macos", "window:", "action:blur")
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0] == "platform: macos\tos_version: -"
+    rows = [line.split("\t") for line in lines[1:]]
+    assert rows[-1][0] == "action:blur"
+    assert all(r[0].startswith("window:") for r in rows[:-1])
+    maximize = next(r for r in rows if r[0] == "window:maximize")
+    assert maximize[1] == "unsupported" and maximize[2], maximize
+
+    args = ["capabilities", "--json", "--platform", "windows", "--os-version", "10.0.19045"]
+    result = _run(entry_point, *args)
+    assert result.returncode == 0, result.stderr
+    body = json.loads(result.stdout)
+    assert body["platform"] == "windows"
+    assert body["os_version"] == "10.0.19045"
+    supports = {c["support"] for c in body["capabilities"]}
+    assert supports <= {"supported", "partial", "unsupported"}
+
+
+def test_cli_capabilities_rejects_typos_as_usage_errors(entry_point):
+    result = _run(entry_point, "capabilities", "event:menu_open")
+    assert result.returncode == 2, result.stderr
+    assert "event:menu_opened" in result.stderr
+    result = _run(entry_point, "capabilities", "--platform", "darwin")
+    assert result.returncode == 2, result.stderr
+
+
+def test_capabilities_tool(mcp):
+    result = mcp.call_tool(
+        "capabilities", {"platform": "linux", "names": ["event:menu_opened"]}
+    )["result"]
+    assert not result.get("isError"), result
+    structured = result["structuredContent"]
+    assert structured["platform"] == "linux"
+    assert structured["count"] == 1
+    [menu] = structured["capabilities"]
+    assert menu["support"] == "unsupported"
+    assert menu["note"]
+
+    result = mcp.call_tool("capabilities", {"names": ["event:menu_open"]})["result"]
+    assert result["isError"] is True
+    assert result["structuredContent"]["kind"] == "invalid_arguments"
+    assert "event:menu_opened" in result["structuredContent"]["message"]

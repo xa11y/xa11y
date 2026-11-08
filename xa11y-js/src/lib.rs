@@ -12,6 +12,7 @@ use std::sync::Arc;
 extern crate napi_derive;
 
 mod app;
+mod capabilities;
 mod element;
 mod errors;
 mod input;
