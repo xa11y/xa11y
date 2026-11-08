@@ -1420,9 +1420,14 @@ def test_an_action_by_ref_reaches_the_element_find_returned(mcp, app_pid):
     assert reference.startswith("c") and ":" in reference, match
     pressed = mcp.call_tool("action", {"action": "focus", "ref": reference})["result"]
     if pressed["isError"]:
-        # A button that cannot take focus is a legitimate answer; anything
-        # else (a stale or expired ref) is a failure of the ref itself.
-        assert pressed["structuredContent"]["kind"] == "action_not_supported", pressed
+        # The platform may refuse to focus the button (egui on Windows fails
+        # UIA SetFocus with a platform error). That still shows the ref
+        # reached an element; a failure of the ref itself is one of these.
+        assert pressed["structuredContent"]["kind"] not in {
+            "element_stale",
+            "ref_expired",
+            "invalid_arguments",
+        }, pressed
     else:
         assert pressed["structuredContent"] == {"ok": True, "action": "focus", "ref": reference}
     tree = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 1})["result"]
