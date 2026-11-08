@@ -10,7 +10,12 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const xa11y = require('../../../xa11y-js/index.js');
-const { ActionNotSupportedError, PlatformError, SelectorNotMatchedError, TimeoutError } = xa11y;
+const {
+  ActionNotSupportedError,
+  ElementStaleError,
+  PlatformError,
+  TimeoutError,
+} = xa11y;
 const { getApp, act, sleep, appConfig, textFieldSelector } = require('./helpers.js');
 
 test('press on primary button succeeds', async () => {
@@ -295,16 +300,14 @@ test('snapshot-bound Element can be pressed twice', async () => {
     // object paths when the tree is rebuilt, and the first press grows the
     // list. The snapshot captured beforehand then names an object that is
     // gone, so re-pressing it surfaces as a stale element under the AT-SPI
-    // bridge: SelectorNotMatchedError from the XA11Y_ELEMENT_STALE code
-    // ("Element stale: …") since the pre-action attachment check (#491), a
+    // bridge: ElementStaleError with reason "removed" (a SelectorNotMatchedError
+    // subclass) since the pre-action attachment check (#491, #481), a
     // PlatformError before it.
     // That's the expected reuse semantic for this bridge: the auto-resolving
     // Locator (exercised above) is the supported way to act across a
     // mutation. The library surfaces the error rather than silently
     // re-resolving (design tenet 1).
-    if (err instanceof SelectorNotMatchedError && err.message.startsWith('Element stale:')) {
-      return;
-    }
+    if (err instanceof ElementStaleError && err.reason === 'removed') return;
     if (err instanceof PlatformError) return;
     throw err;
   }
