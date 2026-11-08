@@ -37,6 +37,10 @@ impl From<&xa11y::Capability> for Capability {
 
 /// Options for {@link capabilities}.
 #[napi(object)]
+#[allow(
+    dead_code,
+    reason = "Constructed by napi-derive from the JS caller's options; the lib-test clippy build doesn't see it"
+)]
 pub struct CapabilitiesOptions {
     /// `linux`, `macos` or `windows`; defaults to the running platform.
     pub platform: Option<String>,
@@ -114,6 +118,10 @@ impl Capabilities {
 /// static table without connecting to any app. With no options, describes the
 /// running platform and OS version.
 #[napi]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive; clippy on the Rust-only build can't see the JS-side caller"
+)]
 pub fn capabilities(options: Option<CapabilitiesOptions>) -> napi::Result<Capabilities> {
     let (platform, os_version) = match options {
         Some(o) => (o.platform, o.os_version),
