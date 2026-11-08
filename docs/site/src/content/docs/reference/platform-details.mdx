@@ -471,7 +471,7 @@ JavaScript.
 | --- | --- | --- | --- |
 | `table` (`row_count`, `column_count`) | `Table.NRows` / `NColumns`; a negative value reads `unknown` | `AXRowCount` / `AXColumnCount`, or the length of `AXRows` / `AXColumns` where those are absent (AppKit) | Grid row and column counts |
 | `cell` (`row`, `column`, spans) | `TableCell.GetRowColumnSpan` | `AXRowIndexRange` / `AXColumnIndexRange` | GridItem properties |
-| `cell.header` | The `column header` / `row header` roles | Always `None`: AX marks no cell as a header | ARIA header role or membership in the owning Table header arrays |
+| `cell.header` | The `column header` / `row header` roles | Always `None`: AX marks no cell as a header | Cached ARIA header role, WPF header class, or parent Header orientation; explicit header requests label their returned cells |
 | `table_row` | Always `None`: AT-SPI has no row-index call for a row object, so read the row from a cell | `AXIndex` of an `AXRow`, including outline rows | GridItem row when the row object reports it |
 | `collection` (`index`, `size`, `depth`) | Object attributes `posinset`, `setsize`, `level`, converted from 1-based; read for list items, tree items, tabs, radio buttons and rows | `AXARIAPosInSet` / `AXARIASetSize` on rows, tabs and radio buttons, converted from 1-based. `depth` comes from `AXDisclosureLevel` on outline rows. Web list items are groups in AX, so they report none | PositionInSet, SizeOfSet and Level; indices converted from 1-based |
 | `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `AXCellForColumnAndRow`; for AppKit, the `AXCell` in row `AXRows[row]` whose index ranges cover the slot | Grid.GetItem; never realizes a virtual cell |
@@ -484,12 +484,86 @@ JavaScript.
 | `Text.bounds()` | `Text.GetRangeExtents` per rendered line | `AXBoundsForRange` per rendered line | TextRange.GetBoundingRectangles in physical desktop pixels |
 | `select_text()` range check | `InvalidTextRange` past the end or inside a surrogate pair | `InvalidTextRange` past the end or inside a surrogate pair | `InvalidTextRange` past the end or inside a surrogate pair |
 
+Windows reads the prefix needed for a numeric `Text.read()` request,
+including a unit to check surrogate boundaries. A `find()` call shares one
+fresh text observation across its chunks, since UIA has no numeric offsets.
+Endpoint conversion brackets and bisects provider Character steps; it does
+not correct a CRLF-heavy document one character at a time. A pair of endpoints
+shares its start, and document-end selection uses the native End endpoint.
+
+Header classification reads cached properties and, for an unresolved
+HeaderItem during a normal tree read, one parent Header orientation. Event
+snapshots use cached properties only. Providers reporting none of those
+signals leave `cell.header` unknown in tree snapshots; explicit table and
+cell header methods still label the returned header cells.
+
 Windows measures UIA range endpoints in UTF-16 units instead of assuming that
 a provider's character unit has that size. If a valid scalar boundary falls
-inside an indivisible UIA character cluster, the operation raises
-`Unsupported`. UIA text-change events have no inserted or deleted text, so
+inside an indivisible UIA character cluster (including between the CR and
+LF exposed by WPF), selection and geometry raise `Unsupported`. Text reads still permit
+those scalar boundaries. Formatting samples one native Character unit so a
+run need not address an endpoint inside the cluster. UIA text-change events have no inserted or deleted text, so
 `text_change` remains `None`. Text-selection events use
 `TextSelectionChanged`.
+
+#### Explicit IA2 source on Windows
+
+Set `XA11Y_ACCESSIBILITY_SOURCE=ia2` before the first accessibility call to
+select the MSAA/IAccessible2 source. The setting applies to Rust's umbrella
+provider and the Python, JavaScript, CLI and MCP surfaces. Rust can also
+construct `xa11y_windows::Ia2Provider` directly. The default `native` source
+uses UIA on Windows, and `uia` selects that source explicitly. Other values
+fail. IA2 and UIA selections on other operating systems fail as unsupported.
+
+An IA2 result carries `raw.accessibility_backend = "ia2"`. Text fields also
+report the `ia2_text` and `ia2_text2` interface capability flags. This source never
+substitutes UIA operations. An absent native interface raises
+`ActionNotSupported` and an unavailable capability raises `Unsupported`.
+MSAA provides navigation and standard role/name/state properties. Additional
+IA2 document semantics, relationships and hypertext object mapping remain
+work under [#483](https://github.com/xa11y/xa11y/issues/483).
+
+| IA2 capability | Mapping and limits |
+| --- | --- |
+| Text length and reads | `IAccessibleText.nCharacters` / `text`, with native UTF-16 offsets and surrogate checks. A read accepts at most 1 Mi UTF-16 units |
+| Caret and selections | `caretOffset`, `nSelections`, `selection`, `addSelection`, `setSelection`, `removeSelection` and `setCaretOffset`. Changes may publish asynchronously |
+| Character, word and paragraph ranges | Unicode scalars for characters, `textAtOffset` for other units |
+| Lines | Native `textAtOffset(Line)` ranges, constrained at explicit line breaks. Soft wrapping remains unverified |
+| Formatting | `IAccessibleText2.attributeRange` when that interface exists. Otherwise `IAccessibleText.attributes`. Errors never switch mechanisms |
+| Geometry | Screen-relative `characterExtents`, united per rendered line in physical desktop pixels. At most 4096 UTF-16 units per line |
+| Table and cell metadata | `IAccessibleTable2.nRows` / `nColumns`, with the required `IAccessibleTableCell` index and extent methods |
+| Cell lookup | `Table2.cellAt`, including merged spans, without realizing content |
+| Cell headers | `TableCell.columnHeaderCells` / `rowHeaderCells`, preserving signed native identities |
+| Table headers | Collect the cell header relationships, keeping each native identity once. Requires a known table size of at most 256 cells |
+| Selected items | `Table2.selectedCells`, at most 4096. List selection enumeration remains unsupported |
+| Collection position and row metadata | Not mapped by this source. Table cell coordinates remain available |
+| Actions | MSAA default action for `press`, `accSelect` for `focus` / `select`, and `put_accValue` (at most 1 Mi UTF-16 units). Mutation requires a retained IA2 identity |
+| Events and window operations | Unsupported on this source |
+
+The owned browser fixture verifies Chrome 156 on Windows with
+`--force-renderer-accessibility=complete` and
+`--disable-backgrounding-occluded-windows`. It checks two active tabs
+separately, UTF-16 text and formatting, native parent/header identity,
+merged cells and removed objects. Firefox and older Chromium versions have
+not been verified. Chrome exposes Text, without Text2, in this fixture.
+The Text2 ABI and mapping have been reviewed but have no live fixture evidence.
+The existing UIA source remains available for those apps.
+
+IA2 interfaces live on one COM worker with a queue of 32 requests. Tree
+searches stop with an error above 4096 nodes or depth 32. The registry keeps
+at most 8192 handles, expiring them after five minutes. Expired or evicted
+handles fail as stale. Signed IDs are validated against their event window
+and owning process generation, without resolving a replacement by name.
+
+Each native request has a five-second caller deadline. Validation and loops
+check the deadline before issuing further native writes. A timeout disables
+the worker and requests COM cancellation. Cancellation is best effort, so
+native cleanup may continue after the caller returns. An in-flight action
+has unknown delivery. Restart the host before issuing further IA2 requests.
+An initialization failure also disables this process's IA2 source.
+Native range, attribute and array allocations occur inside the provider
+before their sizes can be checked. Oversized results are refused. Releasing
+native array references can also outlive the caller's deadline.
 
 macOS counts text in UTF-16 units natively, so no offset is converted. AX
 lists only the attributes applied to a run: once a run reports a font,

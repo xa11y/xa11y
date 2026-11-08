@@ -3,9 +3,10 @@
 //! ABI source: LinuxA11y/IAccessible2 c9ae003d9c85eb707716928de97e055f5b77189c,
 //! api/Accessible2.idl. The inherited prefix is the SDK's complete IAccessible
 //! vtable (IUnknown + IDispatch + MSAA), not merely an IUnknown prefix.
+#[cfg(test)]
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
-use windows::core::{IUnknown, Interface, BSTR, HRESULT};
+use windows::core::{IUnknown, Interface, BSTR};
 use windows::Win32::Foundation::{CloseHandle, E_NOINTERFACE, FILETIME, HWND};
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, IDispatch, IServiceProvider, COINIT_APARTMENTTHREADED,
@@ -15,54 +16,19 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::Variant::{VARIANT, VT_DISPATCH, VT_I4};
 use windows::Win32::UI::Accessibility::{
-    AccessibleChildren, AccessibleObjectFromWindow, IAccessible, IAccessible_Vtbl,
+    AccessibleChildren, AccessibleObjectFromWindow, IAccessible,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetWindowThreadProcessId, IsWindow, GA_ROOT,
 };
 
-type LongOut = unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT;
-type StringOut = unsafe extern "system" fn(*mut c_void, *mut BSTR) -> HRESULT;
-
-#[repr(C)]
-struct Locale {
-    language: BSTR,
-    country: BSTR,
-    variant: BSTR,
-}
-
-// The unused slots are deliberately retained with their exact IDL signatures:
-// removing one changes every subsequent native method's offset.
-#[repr(C)]
-pub struct Accessible2Vtable {
-    base: IAccessible_Vtbl,
-    n_relations: LongOut,
-    relation: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HRESULT,
-    relations: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void, *mut i32) -> HRESULT,
-    role: LongOut,
-    scroll_to: unsafe extern "system" fn(*mut c_void, i32) -> HRESULT,
-    scroll_to_point: unsafe extern "system" fn(*mut c_void, i32, i32, i32) -> HRESULT,
-    group_position: unsafe extern "system" fn(*mut c_void, *mut i32, *mut i32, *mut i32) -> HRESULT,
-    states: LongOut,
-    extended_role: StringOut,
-    localized_extended_role: StringOut,
-    n_extended_states: LongOut,
-    extended_states:
-        unsafe extern "system" fn(*mut c_void, i32, *mut *mut BSTR, *mut i32) -> HRESULT,
-    localized_extended_states:
-        unsafe extern "system" fn(*mut c_void, i32, *mut *mut BSTR, *mut i32) -> HRESULT,
-    unique_id: LongOut,
-    window_handle: unsafe extern "system" fn(*mut c_void, *mut HWND) -> HRESULT,
-    index_in_parent: LongOut,
-    locale: unsafe extern "system" fn(*mut c_void, *mut Locale) -> HRESULT,
-    attributes: StringOut,
-}
-windows::core::imp::define_interface!(
-    Accessible2,
-    Accessible2Vtable,
-    0xe89f726e_c4f4_4c19_bb19_b647d7fa8478
-);
-windows::core::imp::interface_hierarchy!(Accessible2, IUnknown, IDispatch, IAccessible);
+#[path = "../../src/ia2/abi.rs"]
+mod abi;
+use abi::Accessible2;
+#[cfg(test)]
+use abi::Accessible2Vtable;
+#[cfg(test)]
+use windows::Win32::UI::Accessibility::IAccessible_Vtbl;
 
 pub type ProbeResult<T> = Result<T, Box<dyn std::error::Error>>;
 

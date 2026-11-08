@@ -219,21 +219,14 @@ jobs:
       - name: Run unit tests
         run: cargo test --workspace
 
-      # #483 stage one: private MSAA/IA2 ABI and native browser conformance.
-      # This does not select IA2 for the public UIA provider. The owned fixture
-      # uses a separate profile/job and subprocess deadlines, without input.
-      - name: Test private IA2 COM ownership and browser identity
-        timeout-minutes: 5
-        shell: pwsh
-        run: |
-          python -m pip install pywin32
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test -p xa11y-windows --example ia2_probe -- --test-threads=1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build -p xa11y-windows --example ia2_probe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:XA11Y_IA2_PROBE = "$PWD/target/debug/examples/ia2_probe.exe"
-          cargo test -p xa11y-windows --example ia2_probe -- --ignored --test-threads=1 --nocapture
+      # #483/#656: explicit source, native ABI/lifetimes, and rich reads through
+      # Rust, Python, JavaScript, CLI and MCP against isolated Chromium tabs.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Test explicit IA2 source and native browser contracts
+        timeout-minutes: 15
+        run: cargo xtask test-integ ia2
 
       # strands-xa11y claims macOS, Windows and Linux. A headless runner
       # cannot drive a desktop, but it can prove the package imports and that

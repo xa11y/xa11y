@@ -199,6 +199,99 @@ fn windows_rich_formatting() {
 
 #[test]
 #[ignore]
+fn windows_rich_paragraph_breaks_and_document_end() {
+    let app = fixture();
+    let view = crate::integ::one(&app, r#"[name="Rich text"]"#);
+    let text = view.text().expect("rich text interface");
+    let all = text.read_all().expect("document text");
+    assert!(all.contains("\r\nSecond paragraph"), "{all:?}");
+    assert!(all.ends_with("\r\n"), "{all:?}");
+    let length = text.length().expect("length");
+    let runs = text
+        .runs(r(0, length), 100)
+        .expect("runs over paragraph breaks");
+    assert!(!runs.truncated);
+    assert_eq!(runs.runs.last().expect("final run").range.end, length);
+    view.select_text(0, length)
+        .expect("select complete document");
+    assert_eq!(
+        text.selections().expect("complete selection"),
+        [r(0, length)]
+    );
+    view.select_text(length, length)
+        .expect("caret at document end");
+    assert!(text.selections().expect("end selection").is_empty());
+    for unit in [TextUnit::Word, TextUnit::Line, TextUnit::Paragraph] {
+        let last = text.range_at(length, unit).expect("unit at document end");
+        assert!(
+            last.end <= length && last.end > last.start,
+            "{unit:?}: {last:?}"
+        );
+    }
+    let lines = text.lines(r(0, length), 100).expect("all lines");
+    assert!(!lines.truncated);
+    assert_eq!(lines.lines.last().expect("last line").end, length);
+    assert!(
+        text.bounds(r(0, length))
+            .expect("bounds through final CRLF")
+            .len()
+            >= 2
+    );
+    let cr = all.find("\r\n").expect("paragraph separator");
+    let between = all[..cr].encode_utf16().count() as u32 + 1;
+    assert!(matches!(
+        view.select_text(between, between),
+        Err(Error::Unsupported { .. })
+    ));
+    assert_eq!(
+        text.read(r(between, between + 1))
+            .expect("read inside CRLF"),
+        "\n"
+    );
+}
+
+#[test]
+#[ignore]
+fn windows_rich_large_document_offsets_and_search() {
+    let app = fixture();
+    let edit = crate::integ::one(&app, r#"text_field[name="Long text"]"#);
+    let text = edit.text().expect("large text interface");
+    let length = text.length().expect("large text length");
+    assert_eq!(length, 6_014);
+    assert_eq!(
+        text.read(r(6_000, length)).expect("last chunk"),
+        "needle 😀 tail"
+    );
+    assert_eq!(
+        text.find("needle 😀").expect("search near end"),
+        Some(r(6_000, 6_009))
+    );
+    assert!(text
+        .find("absent")
+        .expect("search whole document")
+        .is_none());
+    assert_eq!(
+        text.find_with("line", xa11y::text_api::FindOptions::new().occurrence(999))
+            .expect("last repeated match"),
+        Some(r(5_994, 5_998))
+    );
+    edit.select_text(6_000, 6_009)
+        .expect("selection after 1k CRLFs");
+    assert_eq!(
+        text.selections().expect("large document selection"),
+        [r(6_000, 6_009)]
+    );
+    let word = text
+        .range_at(6_001, TextUnit::Word)
+        .expect("word after 1k CRLFs");
+    assert!(text
+        .read(word)
+        .expect("large document word")
+        .starts_with("needle"));
+}
+
+#[test]
+#[ignore]
 fn windows_rich_text_selection_events() {
     let app = fixture();
     let edit = crate::integ::one(&app, r#"text_field[name="Edit text"]"#);
