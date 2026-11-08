@@ -1405,22 +1405,8 @@ pub(crate) fn resolve_capabilities(
         Error::InvalidActionData { message } => CliError::Usage(message),
         other => CliError::Xa11y(other),
     };
-    match (platform, os_version) {
-        (None, None) => Capabilities::current().map_err(CliError::Xa11y),
-        (platform, version) => {
-            let platform = match platform {
-                Some(p) => Platform::parse(p).map_err(usage)?,
-                None => Platform::current().ok_or_else(|| {
-                    CliError::Xa11y(Error::Unsupported {
-                        feature: "capabilities on this operating system: xa11y has no backend \
-                                  for it"
-                            .to_string(),
-                    })
-                })?,
-            };
-            Capabilities::for_platform(platform, version).map_err(usage)
-        }
-    }
+    let platform = platform.map(Platform::parse).transpose().map_err(usage)?;
+    crate::capabilities_with(platform, os_version).map_err(usage)
 }
 
 /// The entries of `caps` that `filters` select: each filter is a feature

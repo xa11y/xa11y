@@ -214,20 +214,10 @@ pub(crate) fn capabilities(
     platform: Option<&str>,
     os_version: Option<&str>,
 ) -> PyResult<Capabilities> {
-    let inner = match (platform, os_version) {
-        (None, None) => xa11y::Capabilities::current(),
-        (platform, version) => {
-            let platform = match platform {
-                Some(p) => xa11y::Platform::parse(p),
-                None => xa11y::Platform::current().ok_or_else(|| xa11y::Error::Unsupported {
-                    feature: "capabilities on this operating system: xa11y has no backend for it"
-                        .to_string(),
-                }),
-            }
-            .map_err(to_py_err)?;
-            xa11y::Capabilities::for_platform(platform, version)
-        }
-    }
-    .map_err(to_py_err)?;
+    let platform = platform
+        .map(xa11y::Platform::parse)
+        .transpose()
+        .map_err(to_py_err)?;
+    let inner = xa11y::capabilities_with(platform, os_version).map_err(to_py_err)?;
     Ok(Capabilities { inner })
 }

@@ -119,23 +119,11 @@ pub fn capabilities(options: Option<CapabilitiesOptions>) -> napi::Result<Capabi
         Some(o) => (o.platform, o.os_version),
         None => (None, None),
     };
-    let inner = match (platform, os_version) {
-        (None, None) => xa11y::Capabilities::current(),
-        (platform, version) => {
-            let platform = match platform {
-                Some(p) => xa11y::Platform::parse(&p),
-                None => xa11y::Platform::current().ok_or_else(no_backend),
-            }
-            .map_err(map_err)?;
-            xa11y::Capabilities::for_platform(platform, version.as_deref())
-        }
-    }
-    .map_err(map_err)?;
+    let platform = platform
+        .as_deref()
+        .map(xa11y::Platform::parse)
+        .transpose()
+        .map_err(map_err)?;
+    let inner = xa11y::capabilities_with(platform, os_version.as_deref()).map_err(map_err)?;
     Ok(Capabilities { inner })
-}
-
-fn no_backend() -> xa11y::Error {
-    xa11y::Error::Unsupported {
-        feature: "capabilities on this operating system: xa11y has no backend for it".to_string(),
-    }
 }

@@ -754,6 +754,13 @@ the toolkit and display server, which the notes name), so a version for Linux
 is an error rather than ignored. No row is version-gated yet; the first will
 be UIA `HeadingLevel` (Windows 10 1803) and the Notification text (1709).
 
+**Sources.** The table describes each platform's default accessibility
+source. Since #659, Windows can select IA2 with
+`XA11Y_ACCESSIBILITY_SOURCE=ia2`, whose capabilities differ (no events, no
+window verbs). Describing the running machine with IA2 selected fails as
+unsupported rather than answering for UIA; a per-source column is the
+follow-up when #483 lands the rest of the adapter.
+
 Names are `<area>:<name>`: `event:`, `action:`, `app:`, `window:`, `state:`,
 `table:`, `text:`. Today's table has 38 rows.
 

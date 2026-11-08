@@ -96,3 +96,26 @@ def test_version_alone_narrows_the_current_platform():
         caps = xa11y.capabilities(os_version="1.0")
         assert caps.platform == CURRENT
         assert caps.os_version == "1.0"
+
+
+def test_a_non_default_source_is_refused_rather_than_misdescribed():
+    """With the IA2 source selected the table (which describes UIA) would be
+    wrong, so describing "this machine" fails; an explicit platform still
+    answers for that platform's default source."""
+    import os
+    import subprocess
+
+    code = (
+        "import xa11y\n"
+        "try:\n"
+        "    xa11y.capabilities()\n"
+        "    print('answered')\n"
+        "except xa11y.ActionNotSupportedError as e:\n"
+        "    print('refused', 'ia2' in str(e))\n"
+        "print(xa11y.capabilities('windows').platform)\n"
+    )
+    env = {**os.environ, "XA11Y_ACCESSIBILITY_SOURCE": "ia2"}
+    out = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+    ).stdout.split()
+    assert out == ["refused", "True", "windows"], out

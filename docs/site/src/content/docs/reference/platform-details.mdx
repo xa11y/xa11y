@@ -19,6 +19,12 @@ table is available at run time from `xa11y.capabilities()` in Python,
 Pass a platform to read another platform's column, and an OS version to
 narrow the answers to that release.
 
+The table describes each platform's default accessibility source. On
+Windows with `XA11Y_ACCESSIBILITY_SOURCE=ia2` selected, the run-time call for
+the running platform fails as unsupported instead of answering for UIA. The
+IA2 source's own mapping is under
+[Explicit IA2 source on Windows](#explicit-ia2-source-on-windows).
+
 - **Supported**: reported whenever the app exposes it. A missing value means
   that element has none.
 - **Partial**: reported for some toolkits, apps or display servers only. The
