@@ -401,30 +401,10 @@ fn probe_os_version() -> Option<String> {
     None
 }
 
-/// The feature name of an event kind: `event:` plus the snake_case spelling
-/// the bindings use. Exhaustive (core may match its own `#[non_exhaustive]`
-/// enum without a wildcard), so a new kind fails this build until it has a
-/// name, and a unit test then fails until it has a row. Test-only: the guard
-/// is the exhaustive match, which a test build compiles.
+/// The feature name of an event kind: `event:` plus [`EventKind::name`].
 #[cfg(test)]
-fn event_feature(kind: &EventKind) -> &'static str {
-    match kind {
-        EventKind::FocusChanged => "event:focus_changed",
-        EventKind::ValueChanged => "event:value_changed",
-        EventKind::NameChanged => "event:name_changed",
-        EventKind::StateChanged { .. } => "event:state_changed",
-        EventKind::StructureChanged => "event:structure_changed",
-        EventKind::WindowOpened => "event:window_opened",
-        EventKind::WindowClosed => "event:window_closed",
-        EventKind::WindowActivated => "event:window_activated",
-        EventKind::WindowDeactivated => "event:window_deactivated",
-        EventKind::SelectionChanged => "event:selection_changed",
-        EventKind::MenuOpened => "event:menu_opened",
-        EventKind::MenuClosed => "event:menu_closed",
-        EventKind::TextChanged => "event:text_changed",
-        EventKind::TextSelectionChanged => "event:text_selection_changed",
-        EventKind::Announcement => "event:announcement",
-    }
+fn event_feature(kind: &crate::EventKind) -> String {
+    format!("event:{}", kind.name())
 }
 
 // ── The table ───────────────────────────────────────────────────────────────
@@ -552,10 +532,24 @@ const ROWS: &[Row] = &[
     event("event:text_selection_changed", "The caret moved or the text selection changed."),
     Row {
         name: "event:announcement",
-        description: "The app asked for an announcement, or a live region or alert changed.",
-        linux: yes_by("Object:Announcement; the text is not carried"),
-        macos: yes_by("AXAnnouncementRequested; the text is not carried"),
-        windows: yes_by("UIA Notification, LiveRegionChanged and SystemAlert; no text is carried"),
+        description: "The app asked for an announcement, or a live region or alert changed (`Event.announcement` says which).",
+        linux: yes_by("Object:Announcement"),
+        macos: yes_by("AXAnnouncementRequested and AXLiveRegionChanged"),
+        windows: yes_by("UIA Notification, LiveRegionChanged and SystemAlert"),
+    },
+    Row {
+        name: "event:announcement:text",
+        description: "An announcement request carries the text to announce (`announcement.text`).",
+        linux: yes_by("the `any_data` of Object:Announcement"),
+        macos: yes_by("`AXAnnouncementKey` in the notification's `userInfo`"),
+        windows: no("the text arrives only through `AddNotificationEventHandler`, which is not registered yet"),
+    },
+    Row {
+        name: "event:announcement:live_region",
+        description: "A live region's change raises an announcement with `origin` `live_region`.",
+        linux: no("AT-SPI has no live-region signal; an `aria-live` update arrives as text and children changes"),
+        macos: yes_by("AXLiveRegionChanged"),
+        windows: yes_by("UIA LiveRegionChanged"),
     },
     Row {
         name: "event:text_change",
@@ -958,13 +952,22 @@ mod tests {
         }
         let event_rows = ROWS
             .iter()
-            .filter(|r| r.name.starts_with("event:") && r.name != "event:text_change")
+            // `event:text_change` and the `event:announcement:*` rows are
+            // details of a kind, not kinds.
+            .filter(|r| {
+                r.name.starts_with("event:")
+                    && r.name != "event:text_change"
+                    && !r.name.starts_with("event:announcement:")
+            })
             .count();
         assert_eq!(
             event_rows,
             kinds.len(),
             "an event row has no EventKind, or the kind list is short"
         );
+        // `subscribe_with` validates names against this list.
+        let names: Vec<&str> = kinds.iter().map(EventKind::name).collect();
+        assert_eq!(names, crate::event_provider::KIND_NAMES);
     }
 
     #[test]

@@ -15,7 +15,7 @@
 //!      its next 100ms poll cycle.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -44,6 +44,71 @@ pub struct Event {
     app_pid: u32,
     target_data: Option<xa11y::ElementData>,
     provider: Arc<dyn xa11y::Provider>,
+    sequence: u64,
+    announcement: Option<AnnouncementInfo>,
+}
+
+/// What an `announcement` event carries (`Event.announcement`).
+#[napi(object)]
+#[derive(Clone)]
+pub struct AnnouncementInfo {
+    /// `'request'` (an app asked for text to be spoken), `'live_region'` or
+    /// `'alert'` (a region changed: read the target).
+    pub origin: String,
+    /// The text to announce, for a request where the platform sends it.
+    pub text: Option<String>,
+    /// `'polite'` or `'assertive'`, normalised across platforms.
+    pub politeness: Option<String>,
+    /// The platform's own priority, as it spells it.
+    pub platform_priority: Option<String>,
+    /// UIA's `activityId` (Windows only).
+    pub activity_id: Option<String>,
+}
+
+impl From<xa11y::AnnouncementInfo> for AnnouncementInfo {
+    fn from(a: xa11y::AnnouncementInfo) -> Self {
+        Self {
+            origin: match a.origin {
+                xa11y::AnnouncementOrigin::Request => "request",
+                xa11y::AnnouncementOrigin::LiveRegion => "live_region",
+                xa11y::AnnouncementOrigin::Alert => "alert",
+            }
+            .to_string(),
+            text: a.text,
+            politeness: a
+                .politeness
+                .map(|p| crate::types::politeness_name(p).to_string()),
+            platform_priority: a.platform_priority,
+            activity_id: a.activity_id,
+        }
+    }
+}
+
+/// Turn the JS event type names `kinds` takes (`'focusChanged'`, the same
+/// spelling as `Event.type`) into the core's snake_case names. Unknown names
+/// pass through for core to reject with the list.
+pub(crate) fn subscribe_options(
+    kinds: Option<Vec<String>>,
+    buffer: Option<u32>,
+) -> xa11y::SubscribeOptions {
+    let snake = |name: &str| {
+        let mut out = String::with_capacity(name.len() + 4);
+        for c in name.chars() {
+            if c.is_ascii_uppercase() {
+                out.push('_');
+                out.push(c.to_ascii_lowercase());
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+    let mut options =
+        xa11y::SubscribeOptions::new().kinds(kinds.unwrap_or_default().iter().map(|k| snake(k)));
+    if let Some(buffer) = buffer {
+        options = options.buffer(buffer as usize);
+    }
+    options
 }
 
 impl Event {
@@ -64,6 +129,8 @@ impl Event {
             app_pid: event.app_pid,
             target_data: event.target,
             provider,
+            sequence: event.sequence,
+            announcement: event.announcement.map(Into::into),
         }
     }
 }
@@ -112,6 +179,19 @@ impl Event {
         self.app_pid
     }
 
+    /// Position in this subscription's stream, from 0. A gap means events
+    /// were dropped because the buffer was full (see `Subscription.dropped`).
+    #[napi(getter)]
+    pub fn sequence(&self) -> i64 {
+        i64::try_from(self.sequence).unwrap_or(i64::MAX)
+    }
+
+    /// For announcement events: the origin and, where sent, the text.
+    #[napi(getter)]
+    pub fn announcement(&self) -> Option<AnnouncementInfo> {
+        self.announcement.clone()
+    }
+
     /// Snapshot of the element that triggered the event, if available.
     #[napi(getter)]
     pub fn target(&self) -> Option<Element> {
@@ -127,6 +207,9 @@ impl Event {
 pub struct NativeSubscription {
     queue: Arc<Mutex<VecDeque<xa11y::Event>>>,
     cancelled: Arc<AtomicBool>,
+    /// The core subscription's dropped count, refreshed by the worker after
+    /// each receive (the subscription itself lives on the worker thread).
+    dropped: Arc<AtomicU64>,
     provider: Arc<dyn xa11y::Provider>,
     /// Holds the xa11y::Subscription until `start()` moves it to the worker.
     pending_sub: Mutex<Option<xa11y::Subscription>>,
@@ -135,6 +218,7 @@ pub struct NativeSubscription {
 impl NativeSubscription {
     pub(crate) fn new(sub: xa11y::Subscription, provider: Arc<dyn xa11y::Provider>) -> Self {
         Self {
+            dropped: Arc::new(AtomicU64::new(sub.dropped())),
             queue: Arc::new(Mutex::new(VecDeque::new())),
             cancelled: Arc::new(AtomicBool::new(false)),
             provider,
@@ -161,10 +245,13 @@ impl NativeSubscription {
 
         let queue = self.queue.clone();
         let cancelled = self.cancelled.clone();
+        let dropped = self.dropped.clone();
 
         std::thread::spawn(move || {
             while !cancelled.load(Ordering::Acquire) {
-                match sub.recv_status(Duration::from_millis(100)) {
+                let status = sub.recv_status(Duration::from_millis(100));
+                dropped.store(sub.dropped(), Ordering::Release);
+                match status {
                     xa11y::RecvStatus::Event(evt) => {
                         queue.lock().unwrap().push_back(*evt);
                         wakeup.call(Ok(()), ThreadsafeFunctionCallMode::NonBlocking);
@@ -181,6 +268,12 @@ impl NativeSubscription {
         });
 
         Ok(())
+    }
+
+    /// How many events the buffer has dropped, in total, because it was full.
+    #[napi(getter)]
+    pub fn dropped(&self) -> i64 {
+        i64::try_from(self.dropped.load(Ordering::Acquire)).unwrap_or(i64::MAX)
     }
 
     /// Drain all queued events (called from the JS wake-up handler).

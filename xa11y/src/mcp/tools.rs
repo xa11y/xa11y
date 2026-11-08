@@ -1418,7 +1418,9 @@ fn events_start_properties() -> Map<String, Value> {
             "description": "Kinds to buffer, e.g. [\"focus_changed\", \"value_changed\"]. \
                             Omit for every kind. Filtering happens before buffering, so \
                             on a chatty application it is what keeps the events you \
-                            care about from being evicted by ones you do not.",
+                            care about from being evicted by ones you do not. A kind \
+                            this platform never sends fails with `unsupported` (see the \
+                            `event:*` rows of `capabilities`) instead of never arriving.",
         }),
     );
     props
@@ -2905,7 +2907,10 @@ fn tool_events_start(registry: &Registry, args: &Value) -> CliResult<ToolOutput>
     // leave a live platform subscription behind that nobody holds a handle to.
     let kinds = event_kinds(args)?;
     let app = events_app(args)?;
-    let sub = app.subscribe()?;
+    // Core refuses a kind this platform never sends (`unsupported`) before
+    // subscribing; the drainer below still filters what it buffers.
+    let sub = app
+        .subscribe_with(&crate::SubscribeOptions::new().kinds(kinds.clone().unwrap_or_default()))?;
     Ok(ToolOutput::json(
         registry.start(&app.name, app.pid, sub, kinds)?,
     ))

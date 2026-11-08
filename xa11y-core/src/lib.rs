@@ -46,10 +46,16 @@ pub use element::{ElementParts, StateParts};
 pub use error::{
     AutoScrollOutcome, Delivery, Diagnosis, Error, PointerTargetDiagnosis, Result, StaleReason,
 };
-pub use event::{ElementState, Event, EventKind, StateFlag, TextChange, TextChangeKind};
+pub use event::{
+    AnnouncementInfo, AnnouncementOrigin, ElementState, Event, EventKind, StateFlag, TextChange,
+    TextChangeKind,
+};
 #[doc(hidden)]
-pub use event::{EventParts, TextChangeParts};
-pub use event_provider::{CancelHandle, EventReceiver, RecvStatus, Subscription, SubscriptionIter};
+pub use event::{AnnouncementParts, EventParts, TextChangeParts};
+pub use event_provider::{
+    event_channel, CancelHandle, EventReceiver, EventSendError, EventSender, RecvStatus,
+    SubscribeOptions, Subscription, SubscriptionIter, DEFAULT_EVENT_BUFFER,
+};
 pub use identity::{NativeObject, NodeIdentity};
 pub use input::{
     anchor_point, point_for, Anchor, ClickOptions, ClickTarget, DragOptions, InputProvider,

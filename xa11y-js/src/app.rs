@@ -244,12 +244,21 @@ impl App {
         Element::new(self.data.clone(), self.provider.clone())
     }
 
-    /// Subscribe to accessibility events from this application.
-    #[napi(ts_return_type = "Promise<_NativeSubscription>")]
-    pub fn subscribe(&self) -> AsyncTask<AppSubscribeTask> {
+    /// Subscribe to accessibility events from this application. See
+    /// `Element.subscribe` for `kinds` and `buffer`.
+    #[napi(
+        ts_args_type = "kinds?: Array<EventTypeName> | null, buffer?: number | null",
+        ts_return_type = "Promise<_NativeSubscription>"
+    )]
+    pub fn subscribe(
+        &self,
+        kinds: Option<Vec<String>>,
+        buffer: Option<u32>,
+    ) -> AsyncTask<AppSubscribeTask> {
         AsyncTask::new(AppSubscribeTask {
             data: self.data.clone(),
             provider: self.provider.clone(),
+            options: crate::subscription::subscribe_options(kinds, buffer),
         })
     }
 
@@ -457,6 +466,7 @@ impl Task for AppWindowsTask {
 pub struct AppSubscribeTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
+    options: xa11y::SubscribeOptions,
 }
 
 impl Task for AppSubscribeTask {
@@ -464,7 +474,9 @@ impl Task for AppSubscribeTask {
     type JsValue = NativeSubscription;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        self.provider.subscribe(&self.data).map_err(map_err)
+        xa11y::App::from_data(self.provider.clone(), self.data.clone())
+            .subscribe_with(&self.options)
+            .map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {

@@ -603,6 +603,18 @@ impl App {
         self.provider.subscribe(&self.data)
     }
 
+    /// Subscribe to some kinds of event, or with another buffer size.
+    ///
+    /// A kind this platform never sends fails [`Error::Unsupported`]
+    /// (`crate::Error`) at once, with the capability table's reason, rather
+    /// than leaving a wait for it to time out.
+    pub fn subscribe_with(
+        &self,
+        options: &crate::event_provider::SubscribeOptions,
+    ) -> Result<Subscription> {
+        crate::event_provider::subscribe_with(&*self.provider, &self.data, options)
+    }
+
     /// Get direct children (typically windows) of this application.
     pub fn children(&self) -> Result<Vec<Element>> {
         let mut children = Vec::new();

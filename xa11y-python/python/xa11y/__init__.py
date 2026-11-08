@@ -11,6 +11,7 @@ Quick start:
 from xa11y._native import (
     AccessibilityNotEnabledError,
     ActionNotSupportedError,
+    AnnouncementInfo,
     App,
     Capabilities,
     Capability,
@@ -62,6 +63,7 @@ from xa11y._native import (
 __all__ = [
     "AccessibilityNotEnabledError",
     "ActionNotSupportedError",
+    "AnnouncementInfo",
     "App",
     "Capabilities",
     "Capability",

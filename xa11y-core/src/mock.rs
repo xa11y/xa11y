@@ -113,6 +113,9 @@ pub struct MockProvider {
     /// Errors `get_children` returns for a node index, set by
     /// [`MockProvider::fail_children`].
     children_errors: Mutex<HashMap<usize, Error>>,
+    /// Whether `subscribe` yields [`announcement_events`] (set by
+    /// [`MockProvider::enable_events`]) rather than failing.
+    events: std::sync::atomic::AtomicBool,
 }
 
 /// One scripted observation of a node: its bounds and whether it is visible.
@@ -144,6 +147,14 @@ impl MockProvider {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         let idx = Self::index_named(&nodes, name);
         nodes[idx].data.role = role;
+    }
+
+    /// Make `subscribe` succeed with a scripted [`announcement_events`]
+    /// stream. Without it, `subscribe` fails with a platform error, which the
+    /// binding error-mapping tests rely on.
+    pub fn enable_events(&self) {
+        self.events
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Make reading the children of the node named `name` fail with
@@ -864,11 +875,27 @@ impl Provider for MockProvider {
         self.record(el, "resize_to", Some(format!("{width}x{height}")))
     }
 
+    /// With [`MockProvider::enable_events`]: a subscription on the bounded
+    /// channel that yields [`announcement_events`] and then disconnects.
+    /// Otherwise a platform error.
     fn subscribe(&self, _el: &ElementData) -> Result<Subscription> {
-        Err(Error::Platform {
-            code: -1,
-            message: "MockProvider does not support subscribe".to_string(),
-        })
+        use crate::event_provider::{event_channel, CancelHandle};
+        if !self.events.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(Error::Platform {
+                code: -1,
+                message: "MockProvider does not support subscribe".to_string(),
+            });
+        }
+        let (tx, rx) = event_channel();
+        for event in announcement_events() {
+            // The receiver is alive in this scope, so the send cannot fail.
+            tx.send(event).map_err(|e| Error::Platform {
+                code: -1,
+                message: e.to_string(),
+            })?;
+        }
+        drop(tx);
+        Ok(Subscription::new(rx, CancelHandle::noop()))
     }
 }
 
@@ -1335,6 +1362,7 @@ pub fn build_provider() -> Arc<MockProvider> {
         nodes: Mutex::new(nodes),
         relations: Mutex::new(HashMap::new()),
         children_errors: Mutex::new(HashMap::new()),
+        events: std::sync::atomic::AtomicBool::new(false),
         actions: Mutex::new(Vec::new()),
         frames: Mutex::new(HashMap::new()),
         selections: Mutex::new(HashMap::new()),
@@ -1770,6 +1798,48 @@ pub fn text_edit_events() -> Vec<crate::event::Event> {
         deleted,
         Event::new(EventKind::TextChanged, "Mock", 1),
         Event::new(EventKind::TextSelectionChanged, "Mock", 1),
+    ]
+}
+
+/// The events [`MockProvider::subscribe`] yields, in order:
+///
+/// 1. `FocusChanged`.
+/// 2. `Announcement`, a request: text `"Saved"`, polite (UIA `MostRecent`).
+/// 3. `Announcement` from a live region: no text, polite.
+/// 4. `Announcement` from an alert: no text, assertive.
+pub fn announcement_events() -> Vec<crate::event::Event> {
+    use crate::event::{AnnouncementOrigin, AnnouncementParts, Event, EventKind};
+    use crate::semantics::Politeness;
+
+    let announce = |origin, text: Option<&str>, politeness, priority: Option<&str>| {
+        let mut event = Event::new(EventKind::Announcement, "Mock", 1);
+        event.announcement = Some(
+            AnnouncementParts {
+                origin,
+                text: text.map(str::to_string),
+                politeness: Some(politeness),
+                platform_priority: priority.map(str::to_string),
+                activity_id: priority.map(|_| "save".to_string()),
+            }
+            .into(),
+        );
+        event
+    };
+    vec![
+        Event::new(EventKind::FocusChanged, "Mock", 1),
+        announce(
+            AnnouncementOrigin::Request,
+            Some("Saved"),
+            Politeness::Polite,
+            Some("MostRecent"),
+        ),
+        announce(
+            AnnouncementOrigin::LiveRegion,
+            None,
+            Politeness::Polite,
+            None,
+        ),
+        announce(AnnouncementOrigin::Alert, None, Politeness::Assertive, None),
     ]
 }
 

@@ -211,6 +211,11 @@ and `events_stop` closes the subscription. Start the subscription before the
 action you want to observe. An event is a snapshot from when it fired, so read
 the tree again to see the current state.
 
+An `announcement` event carries `announcement.origin`. A `request` usually
+has the `text` to speak. A `live_region` or `alert` change has no text, so read
+its `target`. Asking `events_start` for a kind the platform never sends fails
+with `unsupported`, so check `capabilities` first instead of waiting.
+
 ## Platform notes
 
 - macOS: the process running xa11y needs the Accessibility permission, and

@@ -21,9 +21,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
-    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    HiddenReason, Provider, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet,
-    Subscription, Toggled,
+    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, HiddenReason,
+    Provider, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet, Subscription,
+    Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -7648,7 +7648,7 @@ fn cleanup_registrations(
 /// disconnect the stream and become visible to a waiting consumer. The mutex
 /// keeps that transition atomic with concurrent callback sends.
 struct EventContext {
-    sender: Mutex<Option<std::sync::mpsc::Sender<Event>>>,
+    sender: Mutex<Option<xa11y_core::EventSender>>,
     app_name: String,
     app_pid: u32,
     frame_runtime_ids: Arc<Mutex<HashMap<usize, HashSet<Vec<i32>>>>>,
@@ -7675,6 +7675,15 @@ fn known_frame_sender(runtime_id: &[i32], frames: &HashMap<usize, HashSet<Vec<i3
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
+        self.emit_with(kind, target, None);
+    }
+
+    fn emit_with(
+        &self,
+        kind: EventKind,
+        target: Option<ElementData>,
+        announcement: Option<xa11y_core::AnnouncementInfo>,
+    ) {
         let event: Event = EventParts {
             kind,
             target,
@@ -7684,6 +7693,8 @@ impl EventContext {
             // UIA TextChanged has no insertion/deletion payload. Do not infer
             // a delta by racing a fresh text read against subsequent edits.
             text_change: None,
+            announcement,
+            sequence: 0,
         }
         .into();
         if let Some(tx) = self
@@ -7933,9 +7944,43 @@ impl IUIAutomationEventHandler_Impl for AutomationHandler_Impl {
             _ => return Ok(()),
         };
         let target = self.ctx.snapshot_or_log(el, &self.cache);
-        self.ctx.emit(kind, target);
+        let announcement = uia_announcement(eventid, target.as_ref());
+        self.ctx.emit_with(kind, target, announcement);
         Ok(())
     }
+}
+
+/// The payload of a UIA announcement-like event. A Notification's text and
+/// kind arrive only through `AddNotificationEventHandler`, which this
+/// backend does not register yet, so a request carries no text here.
+#[allow(non_upper_case_globals)] // UIA constants use CamelCase in the windows crate
+fn uia_announcement(
+    eventid: UIA_EVENT_ID,
+    target: Option<&ElementData>,
+) -> Option<xa11y_core::AnnouncementInfo> {
+    use xa11y_core::{AnnouncementOrigin, AnnouncementParts, Politeness};
+    let (origin, politeness) = match eventid {
+        UIA_NotificationEventId => (AnnouncementOrigin::Request, None),
+        // The region's own `LiveSetting` says how urgently.
+        UIA_LiveRegionChangedEventId => (
+            AnnouncementOrigin::LiveRegion,
+            target
+                .and_then(|t| t.live_region.as_ref())
+                .and_then(|l| l.politeness),
+        ),
+        UIA_SystemAlertEventId => (AnnouncementOrigin::Alert, Some(Politeness::Assertive)),
+        _ => return None,
+    };
+    Some(
+        AnnouncementParts {
+            origin,
+            text: None,
+            politeness,
+            platform_priority: None,
+            activity_id: None,
+        }
+        .into(),
+    )
 }
 
 /// Same native IID and ABI as IUIAutomationPropertyChangedEventHandler.
@@ -8326,7 +8371,7 @@ impl WindowsProvider {
         app_name: String,
         saved_app: Option<SavedSyntheticAppIdentity>,
     ) -> Result<Subscription> {
-        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+        let (tx, rx) = xa11y_core::event_channel();
 
         // Enumerate every current top-level window of the pid up front and
         // register the scoped handlers on *each* of them — the pre-C1 shape
@@ -8518,7 +8563,7 @@ impl WindowsProvider {
             }
         });
 
-        Ok(Subscription::new(EventReceiver::new(rx), cancel))
+        Ok(Subscription::new(rx, cancel))
     }
 }
 

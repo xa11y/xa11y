@@ -130,18 +130,119 @@ pub enum EventKind {
     /// - macOS, Windows: not emitted yet.
     TextSelectionChanged,
 
-    /// An accessibility announcement was posted (live region update, alert,
-    /// or explicit announcement request).
-    /// Target: the element that made the announcement, if available.
+    /// Something asked to be announced: an explicit request with text, a
+    /// live region that changed, or an alert that appeared. Target: the
+    /// element that made the announcement, if available.
     ///
-    /// No text payload: Windows UIA_LiveRegionChangedEventId carries no text,
-    /// so the announcement text cannot be populated cross-platform. Consumers
-    /// should re-query a nearby alert or live region element for the content.
+    /// [`Event::announcement`] says which ([`AnnouncementOrigin`]) and carries
+    /// the text where the platform sends it. A live-region or alert change
+    /// carries no text: read the target.
     ///
-    /// - macOS: AXAnnouncementRequested.
-    /// - Linux: Object:Announcement.
-    /// - Windows: UIA_NotificationEventId and UIA_LiveRegionChangedEventId.
+    /// - macOS: `AXAnnouncementRequested` (a request) and
+    ///   `AXLiveRegionChanged`.
+    /// - Linux: `Object:Announcement` (a request). AT-SPI has no live-region
+    ///   signal, so an `aria-live` update arrives as an announcement only
+    ///   when the toolkit sends one itself.
+    /// - Windows: UIA `Notification` (a request), `LiveRegionChanged` and
+    ///   `SystemAlert`.
     Announcement,
+}
+
+impl EventKind {
+    /// The `snake_case` name of this kind, without its payload:
+    /// `"focus_changed"`, `"state_changed"`, `"announcement"`, ... The
+    /// capability table names each kind `event:<name>`, and
+    /// [`SubscribeOptions::kinds`](crate::SubscribeOptions::kinds) takes
+    /// these names.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::FocusChanged => "focus_changed",
+            Self::ValueChanged => "value_changed",
+            Self::NameChanged => "name_changed",
+            Self::StateChanged { .. } => "state_changed",
+            Self::StructureChanged => "structure_changed",
+            Self::WindowOpened => "window_opened",
+            Self::WindowClosed => "window_closed",
+            Self::WindowActivated => "window_activated",
+            Self::WindowDeactivated => "window_deactivated",
+            Self::SelectionChanged => "selection_changed",
+            Self::MenuOpened => "menu_opened",
+            Self::MenuClosed => "menu_closed",
+            Self::TextChanged => "text_changed",
+            Self::TextSelectionChanged => "text_selection_changed",
+            Self::Announcement => "announcement",
+        }
+    }
+}
+
+/// Why an [`EventKind::Announcement`] was raised.
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Closed domain: every platform's announcement-like events are an \
+              explicit request, a live-region change or an alert (UIA \
+              Notification / LiveRegionChanged / SystemAlert)."
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnouncementOrigin {
+    /// An app asked for text to be spoken (UIA Notification,
+    /// `AXAnnouncementRequested`, AT-SPI `Object:Announcement`).
+    Request,
+    /// A live region changed. No text: read the target.
+    LiveRegion,
+    /// An alert appeared. No text: read the target.
+    Alert,
+}
+
+impl AnnouncementOrigin {
+    /// `"request"`, `"live_region"` or `"alert"`.
+    pub fn to_snake_case(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::LiveRegion => "live_region",
+            Self::Alert => "alert",
+        }
+    }
+}
+
+impl std::fmt::Display for AnnouncementOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_snake_case())
+    }
+}
+
+reader_writer_pair! {
+    /// What an [`EventKind::Announcement`] carries, on [`Event::announcement`].
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct AnnouncementInfo;
+
+    /// Every field a backend must decide on for an announcement. Not public
+    /// API.
+    #[allow(
+        clippy::exhaustive_structs,
+        reason = "Completeness guard for AnnouncementInfo; see ElementParts."
+    )]
+    #[derive(Debug, Clone)]
+    pub struct AnnouncementParts;
+
+    fields {
+        /// Which fact the announcement reports.
+        pub origin: AnnouncementOrigin,
+        /// The text to announce. Set for a [`AnnouncementOrigin::Request`]
+        /// where the platform sends it; `None` for a live-region or alert
+        /// change, which carry none.
+        pub text: Option<String>,
+        /// How urgently, normalised: UIA `ImportantAll` /
+        /// `ImportantMostRecent` and AX high priority are `assertive`, the
+        /// rest `polite`.
+        pub politeness: Option<crate::semantics::Politeness>,
+        /// The platform's own priority, as it spells it (`"ImportantAll"`,
+        /// `"High"`, `"2"`), for a consumer that needs more than politeness.
+        pub platform_priority: Option<String>,
+        /// UIA's `activityId`, which groups related notifications. Windows
+        /// only.
+        pub activity_id: Option<String>,
+    }
 }
 
 /// Individual state flags used in [`EventKind::StateChanged`].
@@ -229,6 +330,14 @@ reader_writer_pair! {
         /// `TextChanged` whose platform supplies no delta (macOS, Windows,
         /// and the `TextChanged` Linux derives from a value change).
         pub text_change: Option<TextChange>,
+        /// For [`EventKind::Announcement`]: its origin and, where sent, its
+        /// text. `None` for every other kind.
+        pub announcement: Option<AnnouncementInfo>,
+        /// Position in this subscription's stream, from 0. Assigned when
+        /// the event is queued, so a gap means events were dropped (see
+        /// [`Subscription::dropped`](crate::Subscription::dropped)). A
+        /// backend writes 0; the channel overwrites it.
+        pub sequence: u64,
     }
 }
 
@@ -320,6 +429,8 @@ impl Event {
             app_pid,
             timestamp: std::time::Instant::now(),
             text_change: None,
+            announcement: None,
+            sequence: 0,
         }
     }
 }

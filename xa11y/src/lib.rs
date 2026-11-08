@@ -28,11 +28,20 @@ pub use xa11y_core::{
     SubscriptionIter, TextChange, TextChangeKind, Toggled, TreeNode,
 };
 
+// Event announcements and subscribe options (#480).
+pub use xa11y_core::{
+    AnnouncementInfo, AnnouncementOrigin, SubscribeOptions, DEFAULT_EVENT_BUFFER,
+};
+// The element-level form of `App::subscribe_with`, for the bindings. Not
+// public API.
+#[doc(hidden)]
+pub use xa11y_core::event_provider::{event_kind_names, subscribe_with};
+
 // `#[doc(hidden)]`: the provider-side construction contracts. Re-exported so
 // an out-of-tree `Provider` implementation can reach them — without this the
 // completeness guard stops at this repo's own backends. Not public API.
 #[doc(hidden)]
-pub use xa11y_core::{ElementParts, EventParts, StateParts, TextChangeParts};
+pub use xa11y_core::{AnnouncementParts, ElementParts, EventParts, StateParts, TextChangeParts};
 
 // Re-export the process-wide default-timeout configuration (see
 // `xa11y_core::config`): the default for every auto-wait / `wait_*` call

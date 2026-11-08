@@ -15,9 +15,9 @@ use rayon::prelude::*;
 #[cfg(test)]
 use xa11y_core::Selector;
 use xa11y_core::{
-    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    HiddenReason, Provider, Rect, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet,
-    Subscription, Toggled,
+    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, HiddenReason,
+    Provider, Rect, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet, Subscription,
+    Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -97,9 +97,15 @@ extern "C" {
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
     fn safe_cg_preflight_screen_capture_access() -> bool;
-    fn safe_ax_observer_create(
+    fn safe_ax_observer_create_with_info(
         pid: i32,
-        callback: unsafe extern "C" fn(CFTypeRef, AXUIElementRef, CFTypeRef, *mut c_void),
+        callback: unsafe extern "C" fn(
+            CFTypeRef,
+            AXUIElementRef,
+            CFTypeRef,
+            CFTypeRef,
+            *mut c_void,
+        ),
         observer: *mut CFTypeRef,
     ) -> i32;
     fn safe_ax_observer_add_notification(
@@ -6156,15 +6162,96 @@ impl Provider for MacOSProvider {
 // ── Event subscription ──────────────────────────────────────────────────────
 
 struct ObserverContext {
-    sender: std::sync::mpsc::Sender<Event>,
+    sender: xa11y_core::EventSender,
     app_name: String,
     app_pid: u32,
+}
+
+/// `NSAccessibilityPriorityHigh`; `Low` is 10 and `Medium` 50.
+const AX_PRIORITY_HIGH: i64 = 90;
+
+/// A string value of a borrowed `userInfo` dictionary, or `None`.
+fn info_string(info: CFTypeRef, key: &str) -> Option<String> {
+    if info.is_null() {
+        return None;
+    }
+    let key = CFString::new(key);
+    unsafe {
+        let v = safe_cf_dict_get_value(info, key.as_concrete_TypeRef() as CFTypeRef);
+        if v.is_null() || safe_cf_get_type_id(v) != safe_cf_string_get_type_id() {
+            return None;
+        }
+        // Borrowed from the dictionary (Get rule).
+        Some(CFString::wrap_under_get_rule(v as *const _).to_string())
+    }
+}
+
+/// An integer value of a borrowed `userInfo` dictionary, or `None`.
+fn info_i64(info: CFTypeRef, key: &str) -> Option<i64> {
+    if info.is_null() {
+        return None;
+    }
+    let key = CFString::new(key);
+    unsafe {
+        let v = safe_cf_dict_get_value(info, key.as_concrete_TypeRef() as CFTypeRef);
+        if v.is_null() || safe_cf_get_type_id(v) != safe_cf_number_get_type_id() {
+            return None;
+        }
+        let mut out: i64 = 0;
+        safe_cf_number_get_value(v, CF_NUMBER_SINT64, &mut out as *mut _ as *mut c_void)
+            .then_some(out)
+    }
+}
+
+/// The payload of an AX announcement-like notification.
+fn ax_announcement(
+    notification: &str,
+    info: CFTypeRef,
+    target: Option<&ElementData>,
+) -> Option<xa11y_core::AnnouncementInfo> {
+    use xa11y_core::{AnnouncementOrigin, AnnouncementParts, Politeness};
+    match notification {
+        "AXAnnouncementRequested" => {
+            let priority = info_i64(info, "AXPriorityKey");
+            Some(
+                AnnouncementParts {
+                    origin: AnnouncementOrigin::Request,
+                    text: info_string(info, "AXAnnouncementKey").filter(|t| !t.is_empty()),
+                    politeness: priority.map(|p| {
+                        if p >= AX_PRIORITY_HIGH {
+                            Politeness::Assertive
+                        } else {
+                            Politeness::Polite
+                        }
+                    }),
+                    platform_priority: priority.map(|p| p.to_string()),
+                    activity_id: None,
+                }
+                .into(),
+            )
+        }
+        // The region changed; its own `AXARIALive` says how urgently.
+        "AXLiveRegionChanged" => Some(
+            AnnouncementParts {
+                origin: AnnouncementOrigin::LiveRegion,
+                text: None,
+                politeness: target
+                    .and_then(|t| t.live_region.as_ref())
+                    .and_then(|l| l.politeness),
+                platform_priority: None,
+                activity_id: None,
+            }
+            .into(),
+        ),
+        _ => None,
+    }
 }
 
 unsafe extern "C" fn ax_observer_callback(
     _observer: CFTypeRef,
     element: AXUIElementRef,
     notification: CFTypeRef,
+    info: CFTypeRef,
     refcon: *mut c_void,
 ) {
     let ctx = &*(refcon as *const ObserverContext);
@@ -6302,13 +6389,17 @@ unsafe extern "C" fn ax_observer_callback(
         "AXMenuOpened" => vec![EventKind::MenuOpened],
         "AXMenuClosed" => vec![EventKind::MenuClosed],
 
-        "AXAnnouncementRequested" => vec![EventKind::Announcement],
+        "AXAnnouncementRequested" | "AXLiveRegionChanged" => vec![EventKind::Announcement],
 
         _ => return,
     };
 
+    let announcement = ax_announcement(notif_str.as_str(), info, target.as_ref());
     for kind in kinds {
         let event: Event = EventParts {
+            announcement: (kind == EventKind::Announcement)
+                .then(|| announcement.clone())
+                .flatten(),
             kind,
             target: target.clone(),
             app_name: ctx.app_name.clone(),
@@ -6316,8 +6407,11 @@ unsafe extern "C" fn ax_observer_callback(
             timestamp: std::time::Instant::now(),
             // AXValueChanged carries no delta (#480).
             text_change: None,
+            sequence: 0,
         }
         .into();
+        // Fails only once the subscription is dropped; the cancel path
+        // stops this run loop.
         let _ = ctx.sender.send(event);
     }
 }
@@ -6371,7 +6465,7 @@ fn register_notifications(
 
 impl MacOSProvider {
     fn subscribe_impl(&self, pid: i32, app_name: String) -> Result<Subscription> {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = xa11y_core::event_channel();
 
         let ctx = Box::new(ObserverContext {
             sender: tx,
@@ -6381,12 +6475,13 @@ impl MacOSProvider {
         let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
 
         let mut observer: CFTypeRef = std::ptr::null();
-        let err = unsafe { safe_ax_observer_create(pid, ax_observer_callback, &mut observer) };
+        let err =
+            unsafe { safe_ax_observer_create_with_info(pid, ax_observer_callback, &mut observer) };
         if err != AX_ERROR_SUCCESS || observer.is_null() {
             unsafe { drop(Box::from_raw(ctx_ptr as *mut ObserverContext)) };
             return Err(Error::Platform {
                 code: err as i64,
-                message: "AXObserverCreate failed".to_string(),
+                message: "AXObserverCreateWithInfoCallback failed".to_string(),
             });
         }
 
@@ -6422,6 +6517,7 @@ impl MacOSProvider {
             "AXMenuOpened",
             "AXMenuClosed",
             "AXAnnouncementRequested",
+            "AXLiveRegionChanged",
         ];
 
         // Register every notification, failing the whole subscribe on the
@@ -6532,7 +6628,7 @@ impl MacOSProvider {
             }
         });
 
-        Ok(Subscription::new(EventReceiver::new(rx), cancel))
+        Ok(Subscription::new(rx, cancel))
     }
 }
 

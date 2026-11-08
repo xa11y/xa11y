@@ -358,7 +358,8 @@ Accessibility tree:
                                             where reading flows. No KIND means
                                             every kind this platform reports:
                                             {relation_kinds}
-  xa11y events [--app NAME | --pid PID]     Stream accessibility events
+  xa11y events [--app NAME | --pid PID] [--kinds K,K]
+                                            Stream accessibility events
   xa11y enable-web-accessibility (--app NAME | --pid PID)
                                             Turn on a Chromium/Electron app's
                                             web content tree (macOS) and wait
@@ -581,6 +582,8 @@ pub(crate) struct Opts {
     pub output_format: Option<String>,
     /// `find --stable`: wait for the single match's bounds to settle.
     pub stable: bool,
+    /// `events --kinds a,b`: the event kinds to show.
+    pub kinds: Option<String>,
     /// `tree --max-nodes N`: the node limit (default 2000).
     pub max_nodes: Option<usize>,
     /// `tree --max-depth N`: the depth limit (default none).
@@ -764,6 +767,10 @@ pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
             "--limit" => {
                 i += 1;
                 opts.limit = Some(flag_value_parsed(args, i, "--limit", "a positive integer")?);
+            }
+            "--kinds" => {
+                i += 1;
+                opts.kinds = Some(flag_value(args, i, "--kinds")?.to_string());
             }
             "--max-nodes" => {
                 i += 1;
@@ -3238,8 +3245,24 @@ fn cmd_events(args: &[String]) -> CliResult<()> {
                 .into(),
         ));
     }
+    let kinds: Vec<String> = opts
+        .kinds
+        .as_deref()
+        .map(|k| k.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+    if let Some(bad) = kinds
+        .iter()
+        .find(|k| !crate::event_kind_names().contains(&k.as_str()))
+    {
+        return Err(CliError::Usage(format!(
+            "unknown event kind {bad:?} for --kinds; expected one of {}",
+            crate::event_kind_names().join(", ")
+        )));
+    }
     let app = resolve_app(&opts)?;
-    let sub = app.subscribe()?;
+    // A kind this platform never sends fails here rather than leaving the
+    // command listening for nothing.
+    let sub = app.subscribe_with(&SubscribeOptions::new().kinds(kinds))?;
     eprintln!(
         "Listening for events on \"{}\" (ctrl-c to stop)...",
         app.name
@@ -3368,6 +3391,20 @@ pub(crate) fn format_event_detail(event: &Event) -> String {
     if let EventKind::StateChanged { flag, value } = event.kind {
         return format!(" {flag:?}={value}");
     }
+    if let Some(a) = &event.announcement {
+        let mut out = format!(" {}", a.origin);
+        if let Some(p) = a.politeness {
+            out.push_str(&format!(" {}", p.to_snake_case()));
+        }
+        if let Some(text) = &a.text {
+            let (shown, truncated) = clip_utf16(text, RANGE_TEXT_MAX_UNITS);
+            out.push_str(&format!(" {shown:?}"));
+            if truncated {
+                out.push_str(&format!(" (truncated, {} units)", utf16_units(text)));
+            }
+        }
+        return out;
+    }
     let Some(change) = &event.text_change else {
         return String::new();
     };
@@ -3419,6 +3456,29 @@ pub(crate) fn clip_utf16(s: &str, max: u32) -> (&str, bool) {
 /// supplied), cut to [`RANGE_TEXT_MAX_UNITS`] UTF-16 units. A cut text says so
 /// with `text_truncated: true` and the full `text_length`, so a shortened
 /// string never reads as the whole edit.
+/// An announcement's payload as MCP reports it: each field only when set.
+pub(crate) fn announcement_json(a: &crate::AnnouncementInfo) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    out.insert("origin".into(), a.origin.to_snake_case().into());
+    if let Some(text) = &a.text {
+        let (shown, truncated) = clip_utf16(text, RANGE_TEXT_MAX_UNITS);
+        out.insert("text".into(), shown.into());
+        if truncated {
+            out.insert("text_truncated".into(), true.into());
+        }
+    }
+    if let Some(p) = a.politeness {
+        out.insert("politeness".into(), p.to_snake_case().into());
+    }
+    if let Some(p) = &a.platform_priority {
+        out.insert("platform_priority".into(), p.clone().into());
+    }
+    if let Some(id) = &a.activity_id {
+        out.insert("activity_id".into(), id.clone().into());
+    }
+    serde_json::Value::Object(out)
+}
+
 pub(crate) fn text_change_json(change: &TextChange) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("kind".into(), format_text_change_kind(change.kind).into());
@@ -4894,6 +4954,21 @@ mod tests {
         );
         let detail = format_event_detail(&event);
         assert!(detail.contains("Focused=true"));
+    }
+
+    #[test]
+    fn format_event_detail_names_an_announcements_origin_and_text() {
+        let event = xa11y_core::mock::announcement_events().remove(1);
+        assert_eq!(format_event_detail(&event), r#" request polite "Saved""#);
+        let alert = xa11y_core::mock::announcement_events().remove(3);
+        assert_eq!(format_event_detail(&alert), " alert assertive");
+    }
+
+    #[test]
+    fn an_unknown_events_kind_is_a_usage_error_before_any_lookup() {
+        let err = cmd_events(&strs(&["--kinds", "focus", "--pid", "1"])).expect_err("refused");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert!(err.to_string().contains("focus_changed"), "{err}");
     }
 
     #[test]

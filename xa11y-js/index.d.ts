@@ -41,6 +41,8 @@ export {
 // Forward the narrowed types from native.d.ts.
 export type {
   AnchorName,
+  AnnouncementInfo,
+  AnnouncementOriginName,
   Capability,
   CapabilitiesOptions,
   Capture,
@@ -111,6 +113,14 @@ import type {
 export interface SubscribeOptions {
   /** Abort signal; closes the subscription when aborted. */
   signal?: AbortSignal;
+  /**
+   * Keep only these event types (`'announcement'`, `'focusChanged'`). A
+   * type this platform never sends rejects with `ActionNotSupportedError`
+   * at once rather than never arriving.
+   */
+  kinds?: EventTypeName[];
+  /** Most events to buffer; the oldest are dropped first. Default 4096. */
+  buffer?: number;
 }
 
 export interface AppLookupOptions {
@@ -211,6 +221,11 @@ declare module './native.js' {
 export class Subscription extends EventEmitter {
   /** Whether the subscription has been closed. */
   readonly closed: boolean;
+  /**
+   * How many events the buffer has dropped, in total, because it was full.
+   * A dropped event leaves a gap in `Event.sequence`.
+   */
+  readonly dropped: number;
 
   /** Stop event delivery and release the underlying platform subscription. */
   close(): void;

@@ -127,6 +127,9 @@ export type LandmarkName =
 /** A live region's politeness (\`LiveRegionInfo.politeness\`). */
 export type PolitenessName = 'off' | 'polite' | 'assertive';
 
+/** Why an announcement event was raised (\`AnnouncementInfo.origin\`). */
+export type AnnouncementOriginName = 'request' | 'live_region' | 'alert';
+
 /** A relation kind (\`Element.relations\`). */
 export type RelationKindName =
   | 'labelled_by'
@@ -333,6 +336,18 @@ const REPLACEMENTS = [
     name: 'Element.landmarkType -> LandmarkName',
     from: '  get landmarkType(): string | null\n',
     to: '  get landmarkType(): LandmarkName | null\n',
+    all: 1,
+  },
+  {
+    name: 'AnnouncementInfo.origin -> AnnouncementOriginName',
+    from: "   * `'alert'` (a region changed: read the target).\n   */\n  origin: string\n",
+    to: "   * `'alert'` (a region changed: read the target).\n   */\n  origin: AnnouncementOriginName\n",
+    all: 1,
+  },
+  {
+    name: 'AnnouncementInfo.politeness -> PolitenessName',
+    from: "  politeness?: string\n",
+    to: "  politeness?: PolitenessName\n",
     all: 1,
   },
   {

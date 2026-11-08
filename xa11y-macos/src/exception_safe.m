@@ -427,6 +427,19 @@ int safe_ax_observer_create(pid_t pid, AXObserverCallback callback, AXObserverRe
     }
 }
 
+// Create an AXObserver whose callback also receives the notification's
+// userInfo dictionary (AXAnnouncementKey / AXPriorityKey for
+// AXAnnouncementRequested).
+int safe_ax_observer_create_with_info(pid_t pid, AXObserverCallbackWithInfo callback,
+                                      AXObserverRef *outObserver) {
+    @try {
+        return AXObserverCreateWithInfoCallback(pid, callback, outObserver);
+    } @catch (NSException *e) {
+        *outObserver = NULL;
+        return -9999;
+    }
+}
+
 // Add a notification to an AXObserver.
 int safe_ax_observer_add_notification(AXObserverRef observer, AXUIElementRef element,
                                        CFStringRef notification, void *refcon) {

@@ -707,6 +707,36 @@ class Event:
         delta. A ``text_selection_changed`` event carries no offsets: read
         ``Text.caret()`` / ``Text.selections()`` on the target.
         """
+    @property
+    def sequence(self) -> int:
+        """Position in this subscription's stream, from 0. A gap means events
+        were dropped because the buffer was full (see ``Subscription.dropped``)."""
+    @property
+    def announcement(self) -> AnnouncementInfo | None:
+        """For announcement events: the origin and, where sent, the text."""
+    def __repr__(self) -> str: ...
+
+AnnouncementOriginName = Literal["request", "live_region", "alert"]
+
+class AnnouncementInfo:
+    """What an ``announcement`` event carries (``Event.announcement``)."""
+
+    @property
+    def origin(self) -> AnnouncementOriginName:
+        """``"request"`` (an app asked for text to be spoken), ``"live_region"``
+        or ``"alert"`` (a region changed: read the target)."""
+    @property
+    def text(self) -> str | None:
+        """The text to announce, for a request where the platform sends it."""
+    @property
+    def politeness(self) -> PolitenessName | None:
+        """``"polite"`` or ``"assertive"``, normalised across platforms."""
+    @property
+    def platform_priority(self) -> str | None:
+        """The platform's own priority, as it spells it."""
+    @property
+    def activity_id(self) -> str | None:
+        """UIA's ``activityId`` (Windows only)."""
     def __repr__(self) -> str: ...
 
 # ── Subscription ─────────────────────────────────────────────────────────────
@@ -714,6 +744,10 @@ class Event:
 class Subscription:
     """A live event subscription."""
 
+    @property
+    def dropped(self) -> int:
+        """How many events the buffer has dropped, in total, because it was full.
+        A dropped event leaves a gap in ``Event.sequence``."""
     def try_recv(self) -> Event | None: ...
     def recv(self, timeout: float = 5.0) -> Event: ...
     def wait_for(
@@ -841,8 +875,20 @@ class App:
         """
     def locator(self, selector: str) -> Locator:
         """Create a Locator scoped to this application's accessibility tree."""
-    def subscribe(self) -> Subscription:
-        """Subscribe to accessibility events from this application."""
+    def subscribe(
+        self,
+        *,
+        kinds: Iterable[str] | None = None,
+        buffer: int | None = None,
+    ) -> Subscription:
+        """Subscribe to accessibility events from this application.
+
+        ``kinds`` keeps only those event kinds (``["announcement",
+        "focus_changed"]``); a kind this platform never sends raises
+        :class:`ActionNotSupportedError` at once rather than never arriving.
+        ``buffer`` bounds the queue (default 4096 events, oldest dropped
+        first; see ``Subscription.dropped``).
+        """
     def children(self) -> list[Element]:
         """Get direct children (typically windows) of this application."""
     def windows(self) -> list[Element]:
@@ -1203,8 +1249,20 @@ class Element:
 
         For the same output from the shell, use ``xa11y tree --app NAME``.
         """
-    def subscribe(self) -> Subscription:
-        """Subscribe to accessibility events for this element (typically an app)."""
+    def subscribe(
+        self,
+        *,
+        kinds: Iterable[str] | None = None,
+        buffer: int | None = None,
+    ) -> Subscription:
+        """Subscribe to accessibility events for this element (typically an app).
+
+        ``kinds`` keeps only those event kinds (``["announcement",
+        "focus_changed"]``); a kind this platform never sends raises
+        :class:`ActionNotSupportedError` at once rather than never arriving.
+        ``buffer`` bounds the queue (default 4096 events, oldest dropped
+        first; see ``Subscription.dropped``).
+        """
     def press(self) -> None:
         """Click / invoke this element."""
     def focus(self) -> None:

@@ -295,6 +295,45 @@ mod tests {
             )
             .expect("Announcement must be delivered within 3s");
         assert_eq!(event.kind, EventKind::Announcement);
+        // AccessKit sends the region's new text and its politeness (#480).
+        let info = event
+            .announcement
+            .as_ref()
+            .expect("an announcement payload");
+        assert_eq!(info.origin, AnnouncementOrigin::Request);
+        assert!(
+            info.text
+                .as_deref()
+                .is_some_and(|t| t.starts_with("Announcement #")),
+            "{info:?}"
+        );
+        assert_eq!(info.politeness, Some(Politeness::Polite));
+    }
+
+    /// `subscribe_with` keeps only the kinds asked for, and refuses one this
+    /// platform never sends (#480).
+    #[test]
+    #[ignore]
+    fn subscribe_with_filters_kinds_and_refuses_undeliverable_ones() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let sub = app
+            .subscribe_with(&SubscribeOptions::new().kinds(["announcement"]))
+            .expect("subscribe");
+        app.locator(r#"button[name="Announce"]"#)
+            .press()
+            .expect("press Announce");
+        let event = sub.recv(Duration::from_secs(3)).expect("an event");
+        assert_eq!(
+            event.kind,
+            EventKind::Announcement,
+            "only the kind asked for"
+        );
+        let err = app
+            .subscribe_with(&SubscribeOptions::new().kinds(["menu_opened"]))
+            .err()
+            .expect("AT-SPI has no menu-opened signal");
+        assert!(matches!(err, Error::Unsupported { .. }), "{err}");
     }
 
     /// StateChanged{Checked}: pressing the checkbox fires

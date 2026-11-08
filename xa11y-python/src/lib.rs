@@ -562,11 +562,24 @@ impl Element {
     }
 
     /// Subscribe to accessibility events for this element (typically an app).
-    fn subscribe(&self, py: Python<'_>) -> PyResult<Subscription> {
+    ///
+    /// ``kinds`` keeps only those event kinds (``["announcement",
+    /// "focus_changed"]``); a kind this platform never sends raises
+    /// :class:`ActionNotSupportedError` at once rather than never arriving.
+    /// ``buffer`` bounds the queue (default 4096 events, oldest dropped
+    /// first; see ``Subscription.dropped``).
+    #[pyo3(signature = (*, kinds=None, buffer=None))]
+    fn subscribe(
+        &self,
+        py: Python<'_>,
+        kinds: Option<Vec<String>>,
+        buffer: Option<usize>,
+    ) -> PyResult<Subscription> {
+        let options = subscribe_options(kinds, buffer);
         let provider = self.provider.clone();
         let data = self.inner_data.clone();
         let sub = py
-            .detach(move || provider.subscribe(&data))
+            .detach(move || xa11y::subscribe_with(&*provider, &data, &options))
             .map_err(to_py_err)?;
         Ok(Subscription {
             inner: std::sync::Mutex::new(Some(sub)),
@@ -1555,6 +1568,13 @@ struct Event {
     /// platform reports it.
     #[pyo3(get)]
     text_change: Option<rich::TextChange>,
+    /// Position in this subscription's stream, from 0. A gap means events
+    /// were dropped because the buffer was full (see ``Subscription.dropped``).
+    #[pyo3(get)]
+    sequence: u64,
+    /// For announcement events: the origin and, where sent, the text.
+    #[pyo3(get)]
+    announcement: Option<semantics::AnnouncementInfo>,
 }
 
 impl Event {
@@ -1574,6 +1594,8 @@ impl Event {
             state_flag,
             state_value,
             text_change: event.text_change.map(rich::TextChange::from),
+            sequence: event.sequence,
+            announcement: event.announcement.map(semantics::AnnouncementInfo::new),
         }
     }
 }
@@ -1604,6 +1626,16 @@ struct Subscription {
     provider: Arc<dyn xa11y::Provider>,
 }
 
+/// The core options for ``subscribe(kinds=, buffer=)``. Validation of the
+/// names happens in core, before the platform is asked.
+fn subscribe_options(kinds: Option<Vec<String>>, buffer: Option<usize>) -> xa11y::SubscribeOptions {
+    let mut options = xa11y::SubscribeOptions::new().kinds(kinds.unwrap_or_default());
+    if let Some(buffer) = buffer {
+        options = options.buffer(buffer);
+    }
+    options
+}
+
 impl Subscription {
     fn with_sub<T>(&self, f: impl FnOnce(&xa11y::Subscription) -> T) -> PyResult<T> {
         let guard = self.inner.lock().unwrap();
@@ -1619,6 +1651,13 @@ impl Subscription {
 
 #[pymethods]
 impl Subscription {
+    /// How many events the buffer has dropped, in total, because it was full.
+    /// A dropped event leaves a gap in ``Event.sequence``.
+    #[getter]
+    fn dropped(&self) -> PyResult<u64> {
+        self.with_sub(|sub| sub.dropped())
+    }
+
     fn try_recv(&self) -> PyResult<Option<Event>> {
         let provider = self.provider.clone();
         self.with_sub(|sub| sub.try_recv().map(|e| Event::from_core(e, provider)))
@@ -1985,11 +2024,23 @@ impl App {
     }
 
     /// Subscribe to accessibility events from this application.
-    fn subscribe(&self, py: Python<'_>) -> PyResult<Subscription> {
-        let provider = self.provider.clone();
-        let data = self.inner_data.clone();
+    ///
+    /// ``kinds`` keeps only those event kinds (``["announcement",
+    /// "focus_changed"]``); a kind this platform never sends raises
+    /// :class:`ActionNotSupportedError` at once rather than never arriving.
+    /// ``buffer`` bounds the queue (default 4096 events, oldest dropped
+    /// first; see ``Subscription.dropped``).
+    #[pyo3(signature = (*, kinds=None, buffer=None))]
+    fn subscribe(
+        &self,
+        py: Python<'_>,
+        kinds: Option<Vec<String>>,
+        buffer: Option<usize>,
+    ) -> PyResult<Subscription> {
+        let options = subscribe_options(kinds, buffer);
+        let app = xa11y::App::from_data(self.provider.clone(), self.inner_data.clone());
         let sub = py
-            .detach(move || provider.subscribe(&data))
+            .detach(move || app.subscribe_with(&options))
             .map_err(to_py_err)?;
         Ok(Subscription {
             inner: std::sync::Mutex::new(Some(sub)),
@@ -3267,6 +3318,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<capabilities::Capabilities>()?;
     m.add_class::<capabilities::Capability>()?;
     m.add_class::<semantics::LiveRegionInfo>()?;
+    m.add_class::<semantics::AnnouncementInfo>()?;
     m.add_class::<capture::Capture>()?;
     m.add_class::<capture::CapturedNode>()?;
     m.add_class::<capture::CapturedText>()?;
@@ -3454,13 +3506,17 @@ fn _make_test_input(delay_ms: u32) -> InputSim {
 
 /// Create a test App backed by the shared mock provider (resolves "TestApp").
 #[pyfunction]
-#[pyo3(signature = (split=false))]
-fn _make_test_app(split: bool) -> PyResult<App> {
-    let provider = if split {
+#[pyo3(signature = (split=false, events=false))]
+fn _make_test_app(split: bool, events: bool) -> PyResult<App> {
+    let mock = if split {
         xa11y::mock::build_split_provider()
     } else {
         xa11y::mock::build_provider()
-    } as Arc<dyn xa11y::Provider>;
+    };
+    if events {
+        mock.enable_events();
+    }
+    let provider = mock as Arc<dyn xa11y::Provider>;
     // Resolve via the predicate finder (not `by_name_with`) so the returned
     // app is foreground-tagged — the mock reports its root as the focused app,
     // letting `App.is_foreground` tests observe a `True` value.

@@ -429,6 +429,14 @@ class Subscription extends EventEmitter {
     });
   }
 
+  /**
+   * How many events the buffer has dropped, in total, because it was full.
+   * A dropped event leaves a gap in `Event.sequence`.
+   */
+  get dropped() {
+    return this._native.dropped;
+  }
+
   /** Whether the subscription has been closed. */
   get closed() {
     return this._closed;
@@ -682,7 +690,7 @@ class App extends native.App {
   async subscribe(opts = {}) {
     let nativeSub;
     try {
-      nativeSub = await native.App.prototype.subscribe.call(this);
+      nativeSub = await native.App.prototype.subscribe.call(this, opts.kinds, opts.buffer);
     } catch (err) {
       throw toTypedError(err);
     }

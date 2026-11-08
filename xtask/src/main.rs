@@ -1562,6 +1562,7 @@ fn do_check_macos_ffi() -> bool {
         "AXUIElementGetPid",
         "AXValueGetValue",
         "AXObserverCreate",
+        "AXObserverCreateWithInfoCallback",
         "AXObserverAddNotification",
         "AXObserverRemoveNotification",
         "AXObserverGetRunLoopSource",

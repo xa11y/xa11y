@@ -392,11 +392,23 @@ impl Element {
     }
 
     /// Subscribe to accessibility events for this element (typically an app).
-    #[napi(ts_return_type = "Promise<_NativeSubscription>")]
-    pub fn subscribe(&self) -> AsyncTask<SubscribeTask> {
+    /// `kinds` keeps only those event types (`'announcement'`,
+    /// `'focusChanged'`); a type this platform never sends rejects with
+    /// `ActionNotSupportedError` at once. `buffer` bounds the queue (default
+    /// 4096 events, oldest dropped first).
+    #[napi(
+        ts_args_type = "kinds?: Array<EventTypeName> | null, buffer?: number | null",
+        ts_return_type = "Promise<_NativeSubscription>"
+    )]
+    pub fn subscribe(
+        &self,
+        kinds: Option<Vec<String>>,
+        buffer: Option<u32>,
+    ) -> AsyncTask<SubscribeTask> {
         AsyncTask::new(SubscribeTask {
             data: self.data.clone(),
             provider: self.provider.clone(),
+            options: crate::subscription::subscribe_options(kinds, buffer),
         })
     }
 
@@ -915,6 +927,7 @@ impl Task for ParentTask {
 pub struct SubscribeTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
+    options: xa11y::SubscribeOptions,
 }
 
 impl Task for SubscribeTask {
@@ -922,7 +935,7 @@ impl Task for SubscribeTask {
     type JsValue = NativeSubscription;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        self.provider.subscribe(&self.data).map_err(map_err)
+        xa11y::subscribe_with(&*self.provider, &self.data, &self.options).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {

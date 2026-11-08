@@ -10,8 +10,8 @@ Design proposal for the open children of #475:
 | #480 | Text, selection and live-region events | [4](#4-events-480) |
 | #483, #531 | IA2 backend selection, one deadline | [5](#5-cross-cutting-capabilities-deadline-ia2) |
 
-Status: sections 1, 2, 3 and 5 are implemented (see each section's
-"Implemented" notes); 4 is a proposal. Platform facts are from the
+Status: every section is implemented, with the gaps listed in each
+section's "Implemented" notes. Platform facts are from the
 current code (file references are to `main` at `3603341`) and from
 [Core-AAM 1.2](https://www.w3.org/TR/core-aam-1.2/) §3.4–3.5.
 
@@ -752,12 +752,40 @@ if caps.support("event:announcement:live_region") == "unsupported":   # Linux
     ...  # watch text_changed on the region instead
 ```
 
+### Implemented
+
+Built as designed, with these specifics and gaps:
+
+- `Event.announcement: Option<AnnouncementInfo>` (`origin`, `text`,
+  `politeness`, `platform_priority`, `activity_id`) and `Event.sequence`.
+  Linux reads `any_data` and `detail1` of `Object:Announcement`. macOS moved
+  to `AXObserverCreateWithInfoCallback` for `AXAnnouncementKey` /
+  `AXPriorityKey` and registers `AXLiveRegionChanged`. Windows reports the
+  origin and politeness of its three events.
+- **Not done:** Windows notification text. It needs
+  `AddNotificationEventHandler` (IUIAutomation5) wired through per-window
+  registration, reconciliation and cleanup; `capabilities()` says so in
+  `event:announcement:text`.
+- 4d: `event_channel()` in core, a bounded ring (4,096, drop-oldest) that
+  numbers events as they are queued, with `Subscription::dropped`. Every
+  backend sends through it. `EventReceiver::new` over a plain channel
+  remains for tests and adapters.
+- 4c: `App::subscribe_with(SubscribeOptions { kinds, buffer })` checks each
+  kind against the capability table and fails `Unsupported` before
+  subscribing. The filter runs at the channel, so other kinds never take a
+  buffer slot. Backends still register every handler; skipping
+  registrations is a later optimisation. Bindings fold the options into
+  `subscribe(kinds=, buffer=)` / `subscribe({ kinds, buffer })`, the CLI
+  takes `--kinds`, and MCP `events_start` passes its `kinds` through.
+- 4b: `sequence` is exposed in the bindings and MCP. **Not done:** a binding
+  `timestamp` (still Rust-only) and actionable Linux event targets (still
+  handle-0 snapshots).
+- MCP keeps its own 1,024-event poll buffer on top of the core one.
+
 ### Open questions
 
 Decided: no live-region event on Linux (not derived).
-
-1. Default buffer size, and drop-oldest?
-2. One `announcement` kind with `origin` (recommended, 4a) or a split?
+Decided: 4,096 events, drop-oldest; one `announcement` kind with `origin`.
 
 ---
 

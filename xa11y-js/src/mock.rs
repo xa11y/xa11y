@@ -69,12 +69,16 @@ pub fn make_test_table_locator() -> Locator {
     dead_code,
     reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
 )]
-pub fn make_test_app(split: Option<bool>) -> napi::Result<App> {
-    let provider = if split.unwrap_or(false) {
+pub fn make_test_app(split: Option<bool>, events: Option<bool>) -> napi::Result<App> {
+    let mock = if split.unwrap_or(false) {
         xa11y::mock::build_split_provider()
     } else {
         xa11y::mock::build_provider()
-    } as Arc<dyn xa11y::Provider>;
+    };
+    if events.unwrap_or(false) {
+        mock.enable_events();
+    }
+    let provider = mock as Arc<dyn xa11y::Provider>;
     // Resolve via the predicate finder (not `by_name_with`) so the returned
     // app is foreground-tagged — the mock reports its root as the focused app,
     // letting `App.isForeground` tests observe a `true` value.

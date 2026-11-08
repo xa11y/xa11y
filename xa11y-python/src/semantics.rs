@@ -79,3 +79,63 @@ pub(crate) fn landmark_name(l: xa11y::Landmark) -> &'static str {
         other => other.to_snake_case(),
     }
 }
+
+/// What an ``announcement`` event carries (``Event.announcement``).
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+pub(crate) struct AnnouncementInfo {
+    inner: xa11y::AnnouncementInfo,
+}
+
+impl AnnouncementInfo {
+    pub(crate) fn new(inner: xa11y::AnnouncementInfo) -> Self {
+        Self { inner }
+    }
+}
+
+/// The Python spelling of an announcement origin.
+pub(crate) fn origin_name(o: xa11y::AnnouncementOrigin) -> &'static str {
+    match o {
+        xa11y::AnnouncementOrigin::Request => "request",
+        xa11y::AnnouncementOrigin::LiveRegion => "live_region",
+        xa11y::AnnouncementOrigin::Alert => "alert",
+    }
+}
+
+#[pymethods]
+impl AnnouncementInfo {
+    /// ``"request"`` (an app asked for text to be spoken), ``"live_region"``
+    /// or ``"alert"`` (a region changed: read the target).
+    #[getter]
+    fn origin(&self) -> &'static str {
+        origin_name(self.inner.origin)
+    }
+    /// The text to announce, for a request where the platform sends it.
+    #[getter]
+    fn text(&self) -> Option<String> {
+        self.inner.text.clone()
+    }
+    /// ``"polite"`` or ``"assertive"``, normalised across platforms.
+    #[getter]
+    fn politeness(&self) -> Option<&'static str> {
+        self.inner.politeness.map(politeness_name)
+    }
+    /// The platform's own priority, as it spells it.
+    #[getter]
+    fn platform_priority(&self) -> Option<String> {
+        self.inner.platform_priority.clone()
+    }
+    /// UIA's ``activityId`` (Windows only).
+    #[getter]
+    fn activity_id(&self) -> Option<String> {
+        self.inner.activity_id.clone()
+    }
+    fn __repr__(&self) -> String {
+        format!(
+            "AnnouncementInfo(origin='{}', text={:?}, politeness={:?})",
+            self.origin(),
+            self.inner.text,
+            self.politeness()
+        )
+    }
+}

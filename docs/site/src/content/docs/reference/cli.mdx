@@ -369,7 +369,11 @@ Event type names are `snake_case`, matching the roles in the same output and
 the `event_type` strings the Python binding reports. See
 [Events](/reference/events/) for the full list. A target that could not be
 resolved prints as `-`, and a `state_changed` line appends the flag and its
-new value.
+new value. An `announcement` line appends its origin, politeness and text.
+
+`--kinds announcement,focus_changed` prints only those kinds. An unknown name is
+a usage error, and a kind this platform never sends fails at once with the
+capability table's reason.
 
 Useful for understanding what events fire when you interact with an app, or for debugging event subscriptions in your code.
 
