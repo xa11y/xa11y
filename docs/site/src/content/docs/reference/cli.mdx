@@ -323,6 +323,23 @@ Indices count from 0. A cell by position is also a selector,
 `row`, `column`, `index`, `size`, and related positions under the same names
 the selector uses.
 
+### `xa11y relations`
+
+List the elements one element is related to, grouped by kind. Name the kinds
+to read, or give none for every kind this platform reports.
+
+```bash
+xa11y relations "text_field[name='Email']" labelled_by described_by --app Firefox
+xa11y relations "button[name='Menu']" --app Firefox
+```
+
+The selector must match one element. Each kind prints a header with its count,
+then its elements indented, one per line as `find` prints them. A kind with no
+targets prints a count of 0. A kind the platform never reports is an error.
+The kinds are `labelled_by`, `label_for`, `described_by`, `description_for`,
+`details`, `details_for`, `controls`, `controlled_by`, `flows_to`,
+`flows_from`, `error_message`, `error_for`, `owns`, `member_of` and `linked`.
+
 ### `xa11y events`
 
 Stream accessibility events in real time. Runs until you press ctrl-c.
@@ -546,6 +563,7 @@ gives it selectors to resolve.
 | `action` | `action`, `selector` or `ref`, `app`, `pid`, `shell`, `value`, `at`, `size` |
 | `text` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `start`, `end`, `find`, `occurrence`, `offset`, `unit`, `limit` |
 | `table` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `row`, `column`, `limit` |
+| `relations` | `selector` or `ref`, `app`, `pid`, `shell`, `kinds`, `limit` |
 | `click` | `x`, `y`, `button`, `count`, `held` |
 | `move` | `x`, `y` |
 | `drag` | `from_x`, `from_y`, `to_x`, `to_y`, `button`, `duration_ms`, `held` |
@@ -565,12 +583,13 @@ gives it selectors to resolve.
 accepts the same key names as [`xa11y key`](#input-simulation). Selectors are
 the same syntax the library takes; see [Selectors](/reference/selectors/).
 
-Every `tree` node and `find` match carries a `ref` such as `c3:17`. `action`,
-`text` and `table` take one in place of `selector` (and then no `app`, `pid`
-or `shell`), and act on exactly that element. A ref is never re-resolved by
-selector: an element that was removed or replaced fails with `element_stale`
-and a `stale_reason`. The server keeps the refs of its 8 most recent `tree`
-and `find` results, and an older ref fails with `ref_expired`. The command
+Every `tree` node, `find` match and `relations` target carries a `ref` such
+as `c3:17`. `action`, `text`, `table` and `relations` take one in place of
+`selector` (and then no `app`, `pid` or `shell`), and act on exactly that
+element. A ref is never re-resolved by selector: an element that was removed
+or replaced fails with `element_stale` and a `stale_reason`. The server keeps
+the refs of its 8 most recent `tree`, `find` and `relations` results, and an
+older ref fails with `ref_expired`. The command
 line has no refs, because each invocation is a new process.
 
 `shell` takes a kind string, is mutually exclusive with `app`, and combines

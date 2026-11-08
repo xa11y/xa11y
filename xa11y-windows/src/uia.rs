@@ -1053,6 +1053,11 @@ impl WindowsProvider {
             );
         }
         Ok(ElementParts {
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             role: Role::Application,
             name: if name.is_empty() { None } else { Some(name) },
             value: None,
@@ -2852,6 +2857,106 @@ fn uia_cached_i32(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Opti
         .and_then(|v| variant_i32(&v))
 }
 
+/// Document semantics from an element's cached properties (#476).
+struct UiaSemantics {
+    heading_level: Option<u32>,
+    landmark_type: Option<xa11y_core::Landmark>,
+    web_role: Option<String>,
+    link_url: Option<String>,
+    live_region: Option<xa11y_core::LiveRegionInfo>,
+}
+
+/// The landmark a UIA `LandmarkType` id names. A custom landmark's kind is
+/// in its localized name ("banner", "content information") or ARIA role.
+fn landmark_from_type_id(
+    element: &IUIAutomationElement,
+    id: i32,
+    web_role: Option<&str>,
+) -> xa11y_core::Landmark {
+    use xa11y_core::Landmark;
+    match id {
+        id if id == UIA_FormLandmarkTypeId.0 => Landmark::Form,
+        id if id == UIA_MainLandmarkTypeId.0 => Landmark::Main,
+        id if id == UIA_NavigationLandmarkTypeId.0 => Landmark::Navigation,
+        id if id == UIA_SearchLandmarkTypeId.0 => Landmark::Search,
+        _ => uia_cached_bstr(element, UIA_LocalizedLandmarkTypePropertyId)
+            .as_deref()
+            .and_then(|name| {
+                if name.eq_ignore_ascii_case("content information") {
+                    Some(Landmark::ContentInfo)
+                } else {
+                    Landmark::from_aria_role(name)
+                }
+            })
+            .or_else(|| web_role.and_then(Landmark::from_aria_role))
+            .unwrap_or(Landmark::Unknown),
+    }
+}
+
+fn uia_semantics(
+    element: &IUIAutomationElement,
+    role: Role,
+    landmark_type_id: Option<i32>,
+    value: Option<&str>,
+) -> UiaSemantics {
+    let web_role = uia_cached_bstr(element, UIA_AriaRolePropertyId);
+    // `HeadingLevel1` .. `HeadingLevel9`; `HeadingLevel_None` and anything
+    // else is no level.
+    let heading_level = uia_cached_i32(element, UIA_HeadingLevelPropertyId)
+        .map(|id| id - (HeadingLevel1.0 - 1))
+        .filter(|level| (1..=9).contains(level))
+        .map(|level| level as u32);
+    let landmark_type = match landmark_type_id {
+        Some(id) => Some(landmark_from_type_id(element, id, web_role.as_deref())),
+        // No UIA LandmarkType: a landmark the ARIA role alone marked.
+        None if role == Role::Landmark => Some(
+            web_role
+                .as_deref()
+                .and_then(xa11y_core::Landmark::from_aria_role)
+                .unwrap_or(xa11y_core::Landmark::Unknown),
+        ),
+        None => None,
+    };
+    let aria = uia_cached_bstr(element, UIA_AriaPropertiesPropertyId);
+    let aria_prop = |key: &str| {
+        aria.as_deref().and_then(|props| {
+            props.split(';').find_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                (k.trim() == key).then(|| v.trim().to_string())
+            })
+        })
+    };
+    // UIA reports `Off` (0) for every element that is not a live region, so
+    // only polite / assertive mark one.
+    let politeness = match uia_cached_i32(element, UIA_LiveSettingPropertyId) {
+        Some(1) => Some(xa11y_core::Politeness::Polite),
+        Some(2) => Some(xa11y_core::Politeness::Assertive),
+        _ => None,
+    };
+    let live = politeness.map(|politeness| {
+        xa11y_core::LiveRegionParts {
+            politeness: Some(politeness),
+            atomic: aria_prop("atomic").and_then(|v| match v.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            }),
+            relevant: aria_prop("relevant").filter(|v| !v.is_empty()),
+        }
+        .into()
+    });
+    UiaSemantics {
+        heading_level,
+        landmark_type,
+        web_role,
+        // UIA has no URL property; browsers put a link's URL in its value.
+        link_url: (role == Role::Link)
+            .then(|| value.map(str::to_string))
+            .flatten(),
+        live_region: live,
+    }
+}
+
 /// Build an ElementData snapshot from a pre-fetched UIA element without
 /// retaining the live reference in the provider's handle cache.
 ///
@@ -2909,6 +3014,15 @@ fn build_snapshot_data(
                 "separator" => role = Role::Separator,
                 "progressbar" => role = Role::ProgressBar,
                 "link" => role = Role::Link,
+                // A landmark that sets only its ARIA role (AccessKit, and
+                // frameworks without a UIA LandmarkType) is still a landmark
+                // (#476); `uia_semantics` reads its kind from the same role.
+                other
+                    if matches!(role, Role::Group | Role::Unknown)
+                        && xa11y_core::Landmark::from_aria_role(other).is_some() =>
+                {
+                    role = Role::Landmark;
+                }
                 _ => {}
             }
         }
@@ -2920,6 +3034,13 @@ fn build_snapshot_data(
         {
             role = Role::Dialog;
         }
+    }
+    // A landmark is a group with a UIA LandmarkType (#476); its kind is
+    // read below.
+    let landmark_type_id = uia_cached_i32(element, UIA_LandmarkTypePropertyId)
+        .filter(|id| (UIA_CustomLandmarkTypeId.0..=UIA_SearchLandmarkTypeId.0).contains(id));
+    if landmark_type_id.is_some() && matches!(role, Role::Group | Role::Unknown) {
+        role = Role::Landmark;
     }
 
     let name = unsafe { element.CachedName() }
@@ -2940,6 +3061,7 @@ fn build_snapshot_data(
         name: name.as_deref(),
     };
     let (value, observed_range_value) = get_value(site, &patterns, password)?;
+    let semantics = uia_semantics(element, role, landmark_type_id, value.as_deref());
 
     // Try FullDescription first (AccessKit's description), then HelpText
     let description = uia_cached_bstr(element, UIA_FullDescriptionPropertyId)
@@ -3075,6 +3197,11 @@ fn build_snapshot_data(
     };
 
     Ok(ElementParts {
+        heading_level: semantics.heading_level,
+        landmark_type: semantics.landmark_type,
+        web_role: semantics.web_role,
+        link_url: semantics.link_url,
+        live_region: semantics.live_region,
         role,
         name,
         value,
@@ -3190,6 +3317,13 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_LevelPropertyId,
     UIA_ControlTypePropertyId,
     UIA_AriaRolePropertyId,
+    // Document semantics (#476): heading level, landmark, live region and
+    // the ARIA properties carrying atomic / relevant.
+    UIA_HeadingLevelPropertyId,
+    UIA_LandmarkTypePropertyId,
+    UIA_LocalizedLandmarkTypePropertyId,
+    UIA_LiveSettingPropertyId,
+    UIA_AriaPropertiesPropertyId,
     UIA_OrientationPropertyId,
     UIA_IsDialogPropertyId,
     UIA_IsTableItemPatternAvailablePropertyId,
@@ -5721,6 +5855,70 @@ impl Provider for WindowsProvider {
                 message: format!("Grid.GetItem({row}, {column}) failed: {e}"),
             }),
         }
+    }
+
+    fn relations(
+        &self,
+        e: &ElementData,
+        kinds: &[xa11y_core::RelationKind],
+    ) -> Result<Vec<(xa11y_core::RelationKind, Vec<ElementData>)>> {
+        use xa11y_core::RelationKind as K;
+        // Refuse an unsupported kind before any COM call, naming it.
+        for kind in kinds {
+            if !matches!(
+                kind,
+                K::LabelledBy | K::Details | K::Controls | K::FlowsTo | K::FlowsFrom
+            ) {
+                return Err(Error::Unsupported {
+                    feature: format!(
+                        "relation {kind} on UIA: UIA reports labelled_by (LabeledBy), details \
+                         (DescribedBy), controls (ControllerFor), flows_to and flows_from only"
+                    ),
+                });
+            }
+        }
+        let dpi = crate::dpi::DpiScope::enter()?;
+        let uia = self.get_cached(e.handle)?;
+        let mut out = Vec::with_capacity(kinds.len());
+        for kind in kinds {
+            let targets = match kind {
+                K::LabelledBy => match uia_call(|| unsafe { uia.CurrentLabeledBy() }) {
+                    Ok(label) => vec![self.rich_element(&dpi, &label)?],
+                    // No label: UIA answers a null element, which the
+                    // binding surfaces as an error with a success-class
+                    // code. Anything else is a real failure.
+                    Err(Error::Platform { code: 0, .. }) => Vec::new(),
+                    Err(err) => return Err(err),
+                },
+                K::Details => {
+                    let array = uia_call(|| unsafe { uia.CurrentDescribedBy() })?;
+                    self.rich_elements(&dpi, &array)?
+                }
+                K::Controls => {
+                    let array = uia_call(|| unsafe { uia.CurrentControllerFor() })?;
+                    self.rich_elements(&dpi, &array)?
+                }
+                K::FlowsTo => {
+                    let array = uia_call(|| unsafe { uia.CurrentFlowsTo() })?;
+                    self.rich_elements(&dpi, &array)?
+                }
+                K::FlowsFrom => {
+                    let element2: IUIAutomationElement2 = windows::core::Interface::cast(&uia)
+                        .map_err(|err| Error::Unsupported {
+                            feature: format!(
+                                "relation flows_from: this UIA element has no \
+                                 IUIAutomationElement2 ({err})"
+                            ),
+                        })?;
+                    let array = uia_call(|| unsafe { element2.CurrentFlowsFrom() })?;
+                    self.rich_elements(&dpi, &array)?
+                }
+                // Refused above.
+                _ => Vec::new(),
+            };
+            out.push((*kind, targets));
+        }
+        Ok(out)
     }
 
     fn table_headers(

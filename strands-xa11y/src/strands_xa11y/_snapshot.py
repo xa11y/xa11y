@@ -36,7 +36,7 @@ ACTIONABLE_ROLES = frozenset(
 )
 
 # Containers whose identity orients the reader even when they do nothing.
-LANDMARK_ROLES = frozenset({"alert", "dialog", "menu", "menu_bar", "navigation", "toolbar", "window"})
+LANDMARK_ROLES = frozenset({"alert", "dialog", "landmark", "menu", "menu_bar", "toolbar", "window"})
 
 # Nodes that carry information rather than behaviour; kept when they have text.
 INFORMATIVE_ROLES = frozenset({"heading", "image", "progress_bar", "static_text", "status", "table_cell", "tooltip"})

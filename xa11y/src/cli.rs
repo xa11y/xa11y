@@ -297,6 +297,7 @@ pub fn run(args: &[String]) -> CliResult<()> {
         Some("action") => cmd_action(&args[1..]),
         Some("text") => cmd_text(&args[1..]),
         Some("table") => cmd_table(&args[1..]),
+        Some("relations") => cmd_relations(&args[1..]),
         Some("events") => cmd_events(&args[1..]),
         Some("click") => cmd_click(&args[1..]),
         Some("move") => cmd_move(&args[1..]),
@@ -349,6 +350,12 @@ Accessibility tree:
                                             prints JSON; see Text below
   xa11y table  OP SELECTOR [TARGET] [--row N --column N]
                                             Table lookups: {table_ops}
+  xa11y relations SELECTOR [KIND...] [TARGET]
+                                            Elements related to one: who labels
+                                            or describes it, what it controls,
+                                            where reading flows. No KIND means
+                                            every kind this platform reports:
+                                            {relation_kinds}
   xa11y events [--app NAME | --pid PID]     Stream accessibility events
   xa11y enable-web-accessibility (--app NAME | --pid PID)
                                             Turn on a Chromium/Electron app's
@@ -457,6 +464,7 @@ Exit codes:
         kinds = shell_kind_names().join(", "),
         text_ops = TEXT_OPS.join(", "),
         table_ops = TABLE_OPS.join(", "),
+        relation_kinds = relation_kind_names().join(", "),
         read_default = TEXT_READ_DEFAULT_UNITS,
         read_max = TEXT_READ_MAX_UNITS,
         page = TEXT_PAGE_DEFAULT,
@@ -1223,6 +1231,23 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     let positions = format_positions(el);
     if !positions.is_empty() {
         parts.push(positions);
+    }
+
+    // Document semantics (#476), spelled as their selector attributes.
+    if let Some(level) = el.heading_level {
+        parts.push(format!("heading_level={level}"));
+    }
+    if let Some(landmark) = el.landmark_type {
+        parts.push(format!("landmark_type={landmark}"));
+    }
+    if let Some(web_role) = &el.web_role {
+        parts.push(format!("web_role=\"{web_role}\""));
+    }
+    if let Some(url) = &el.link_url {
+        parts.push(format!("url=\"{url}\""));
+    }
+    if let Some(politeness) = el.live_region.as_ref().and_then(|l| l.politeness) {
+        parts.push(format!("live={}", politeness.to_snake_case()));
     }
 
     // States. A hidden element says why (`hidden=scrolled_out`), which is
@@ -3078,6 +3103,53 @@ fn cmd_table(args: &[String]) -> CliResult<()> {
     Ok(())
 }
 
+/// Every relation kind's name, for usage text and the MCP schema.
+pub(crate) fn relation_kind_names() -> Vec<&'static str> {
+    RelationKind::ALL
+        .iter()
+        .map(|k| k.to_snake_case())
+        .collect()
+}
+
+/// Parse relation kind names. A bad name is a usage error naming the valid
+/// ones, raised before anything is resolved.
+pub(crate) fn parse_relation_kinds<S: AsRef<str>>(names: &[S]) -> CliResult<Vec<RelationKind>> {
+    names
+        .iter()
+        .map(|n| RelationKind::parse(n.as_ref()).map_err(|e| CliError::Usage(e.to_string())))
+        .collect()
+}
+
+fn cmd_relations(args: &[String]) -> CliResult<()> {
+    let (opts, positional) = parse_opts(args)?;
+    let Some((selector, kind_names)) = positional.split_first() else {
+        return Err(CliError::Usage(format!(
+            "usage: xa11y relations SELECTOR [KIND...] [--app NAME | --pid PID | --shell KIND]  \
+             (KIND is one of: {})",
+            relation_kind_names().join(", ")
+        )));
+    };
+    let kinds = parse_relation_kinds(kind_names)?;
+    let target = resolve_target(&opts)?;
+    // One element, read once like `table`: relations of several matches
+    // would not say whose they are.
+    let element = match resolve_table_element(&target, selector)? {
+        Ok(element) => element,
+        Err(matches) => {
+            return Err(ambiguous_selector(selector, &matches, 8, |el| {
+                format_element_oneline(el)
+            }))
+        }
+    };
+    for (kind, targets) in element.relations(&kinds)? {
+        println!("{kind} ({}):", targets.len());
+        for el in &targets {
+            println!("  {}", format_element_oneline(el));
+        }
+    }
+    Ok(())
+}
+
 fn cmd_events(args: &[String]) -> CliResult<()> {
     let (opts, _pos) = parse_opts(args)?;
     // Events are subscribed per application; there is no surface-level event
@@ -3813,7 +3885,7 @@ mod tests {
         // `ACTION_COMMANDS` is hand-kept. Read the dispatcher's own arms, so
         // a new command that nobody classified fails here instead of
         // silently lacking the `delivery:` line.
-        const NOT_ACTIONS: [&str; 11] = [
+        const NOT_ACTIONS: [&str; 12] = [
             "apps",
             "capabilities",
             "shell",
@@ -3822,6 +3894,7 @@ mod tests {
             "find",
             "text",
             "table",
+            "relations",
             "events",
             "screenshot",
             "guide",

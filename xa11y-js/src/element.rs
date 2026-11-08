@@ -307,6 +307,70 @@ impl Element {
         self.data.collection.map(Into::into)
     }
 
+    /// A heading's level, `1` for a top-level heading (a level, not an
+    /// index); `null` on a non-heading or when not reported.
+    #[napi(getter)]
+    pub fn heading_level(&self) -> Option<u32> {
+        self.data.heading_level
+    }
+
+    /// Which landmark a `landmark` element is, as its ARIA role (`'main'`,
+    /// `'navigation'`, `'contentinfo'`, ...); `null` on every other role.
+    #[napi(getter)]
+    pub fn landmark_type(&self) -> Option<String> {
+        self.data
+            .landmark_type
+            .map(|l| crate::types::landmark_name(l).to_string())
+    }
+
+    /// The ARIA role web content declares, verbatim; `null` outside web
+    /// content and on macOS.
+    #[napi(getter)]
+    pub fn web_role(&self) -> Option<String> {
+        self.data.web_role.clone()
+    }
+
+    /// A link's target URL; `null` on a non-link or when not reported.
+    #[napi(getter)]
+    pub fn link_url(&self) -> Option<String> {
+        self.data.link_url.clone()
+    }
+
+    /// Live-region settings; `null` when the element has none.
+    #[napi(getter)]
+    pub fn live_region(&self) -> Option<crate::types::LiveRegionInfo> {
+        self.data.live_region.clone().map(Into::into)
+    }
+
+    /// The elements this one is related to, by kind, in the order asked for:
+    /// `[{ kind, elements }]`. No `kinds` asks for every kind this platform
+    /// reports. A kind it never reports rejects with
+    /// `ActionNotSupportedError` naming it; a reported kind with no targets
+    /// has an empty `elements`.
+    #[napi(ts_return_type = "Promise<Relation[]>")]
+    pub fn relations(
+        &self,
+        kinds: Option<Vec<String>>,
+    ) -> napi::Result<AsyncTask<Blocking<Vec<Relation>>>> {
+        let kinds: Vec<xa11y::RelationKind> = kinds
+            .unwrap_or_default()
+            .iter()
+            .map(|k| xa11y::RelationKind::parse(k))
+            .collect::<xa11y::Result<_>>()
+            .map_err(map_err)?;
+        let el = self.core();
+        Ok(AsyncTask::new(Blocking::new(move || {
+            Ok(el
+                .relations(&kinds)?
+                .into_iter()
+                .map(|(kind, targets)| Relation {
+                    kind: kind.to_snake_case().to_string(),
+                    elements: targets.into_iter().map(Element::from_core).collect(),
+                })
+                .collect())
+        })))
+    }
+
     // ── Async navigation ────────────────────────────────────────────────
 
     /// Get direct children (lazy — each call re-queries the provider).
@@ -976,6 +1040,16 @@ pub enum ElementActionKind {
     Close,
     MoveTo,
     ResizeTo,
+}
+
+/// One relation kind and its targets (`Element.relations`). Output only:
+/// it holds `Element` instances, which JS cannot construct.
+#[napi(object, object_from_js = false)]
+pub struct Relation {
+    /// The kind: `'labelled_by'`, `'controls'`, `'flows_to'`, ...
+    pub kind: String,
+    /// The related elements, possibly none.
+    pub elements: Vec<Element>,
 }
 
 pub struct ElementActionTask {

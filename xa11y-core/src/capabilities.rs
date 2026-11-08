@@ -466,8 +466,7 @@ const fn no(note: &'static str) -> Entry {
 }
 
 impl Entry {
-    /// The first OS version that supports this entry. No row uses it yet; the
-    /// first will be UIA properties that arrived in Windows 10 updates.
+    /// The first OS version that supports this entry.
     #[allow(
         dead_code,
         reason = "Version-gated rows arrive with #476 / #480; tested now."
@@ -564,6 +563,148 @@ const ROWS: &[Row] = &[
         linux: partial("inserted or deleted text from Object:TextChanged; the UTF-16 range only for Qt, which counts UTF-16 natively"),
         macos: no("AXValueChanged carries no delta"),
         windows: no("UIA text-change events carry no delta"),
+    },
+    // ── Document semantics (#476) ──
+    Row {
+        name: "property:heading_level",
+        description: "A heading's level (`ElementData.heading_level`).",
+        linux: partial("the `level` object attribute, where the toolkit sets it (web engines, GTK 4)"),
+        macos: yes_by("the `AXValue` of an `AXHeading`"),
+        windows: yes_by("UIA `HeadingLevel`").since("10.0.17134"),
+    },
+    Row {
+        name: "property:landmark_type",
+        description: "Which landmark a `landmark` element is (`ElementData.landmark_type`).",
+        linux: yes_by("`ROLE_LANDMARK` and the `xml-roles` attribute"),
+        macos: yes_by("the `AXLandmark*` subroles"),
+        windows: yes_by("UIA `LandmarkType` (`LocalizedLandmarkType` for the custom kinds), or the `AriaRole` of a group that sets none").since("10.0.15063"),
+    },
+    Row {
+        name: "property:web_role",
+        description: "The ARIA role web content declares (`ElementData.web_role`).",
+        linux: partial("the `xml-roles` attribute, in web content"),
+        macos: no("AX reports no ARIA role"),
+        windows: partial("UIA `AriaRole`, set by web content and some frameworks"),
+    },
+    Row {
+        name: "property:link_url",
+        description: "A link's target (`ElementData.link_url`).",
+        linux: yes_by("`Hyperlink.GetURI`"),
+        macos: yes_by("`AXURL`"),
+        windows: partial("the value of a Hyperlink, which browsers set to the URL; UIA has no URL property"),
+    },
+    Row {
+        name: "property:live_region",
+        description: "Live-region politeness, atomic and relevant (`ElementData.live_region`).",
+        linux: partial("the `live`, `atomic` and `relevant` attributes (and their `container-` forms), which web engines set"),
+        macos: partial("`AXARIALive`, `AXARIAAtomic` and `AXARIARelevant`, which web content sets"),
+        windows: yes_by("UIA `LiveSetting`; `atomic` and `relevant` from `AriaProperties`, which only web content sets"),
+    },
+    // ── Relations (#476) ──
+    Row {
+        name: "relation:labelled_by",
+        description: "The elements that label this one.",
+        linux: yes_by("`LABELLED_BY`"),
+        macos: yes_by("`AXTitleUIElement`, set only when exactly one element labels it"),
+        windows: yes_by("UIA `LabeledBy`, a single element"),
+    },
+    Row {
+        name: "relation:label_for",
+        description: "The elements this one labels.",
+        linux: yes_by("`LABEL_FOR`"),
+        macos: yes_by("`AXServesAsTitleForUIElements`"),
+        windows: no("UIA has no reverse of `LabeledBy`"),
+    },
+    Row {
+        name: "relation:described_by",
+        description: "The elements that describe this one.",
+        linux: yes_by("`DESCRIBED_BY`"),
+        macos: no("AX exposes a description as text only"),
+        windows: no("UIA `FullDescription` is text; UIA `DescribedBy` carries `aria-details`, read it as `details`"),
+    },
+    Row {
+        name: "relation:description_for",
+        description: "The elements this one describes.",
+        linux: yes_by("`DESCRIPTION_FOR`"),
+        macos: no("AX has no reverse description relation"),
+        windows: no("UIA has no reverse description relation"),
+    },
+    Row {
+        name: "relation:details",
+        description: "Extended details for this element.",
+        linux: yes_by("`DETAILS`"),
+        macos: yes_by("`AXDetailsElements`"),
+        windows: yes_by("UIA `DescribedBy`, which carries `aria-details`"),
+    },
+    Row {
+        name: "relation:details_for",
+        description: "The elements this one provides details for.",
+        linux: yes_by("`DETAILS_FOR`"),
+        macos: no("AX has no reverse details relation"),
+        windows: no("UIA has no reverse details relation"),
+    },
+    Row {
+        name: "relation:controls",
+        description: "The elements this one controls.",
+        linux: yes_by("`CONTROLLER_FOR`"),
+        macos: no("`AXLinkedUIElements` mixes controls and flows-to; read it as `linked`"),
+        windows: yes_by("UIA `ControllerFor`, which also carries `aria-errormessage` targets"),
+    },
+    Row {
+        name: "relation:controlled_by",
+        description: "The elements that control this one.",
+        linux: yes_by("`CONTROLLED_BY`"),
+        macos: no("AX has no reverse controls relation"),
+        windows: no("UIA has no reverse of `ControllerFor`"),
+    },
+    Row {
+        name: "relation:flows_to",
+        description: "The next elements in reading order.",
+        linux: yes_by("`FLOWS_TO`"),
+        macos: no("`AXLinkedUIElements` mixes controls and flows-to; read it as `linked`"),
+        windows: yes_by("UIA `FlowsTo`"),
+    },
+    Row {
+        name: "relation:flows_from",
+        description: "The previous elements in reading order.",
+        linux: yes_by("`FLOWS_FROM`"),
+        macos: no("AX has no reverse reading-order relation"),
+        windows: yes_by("UIA `FlowsFrom`"),
+    },
+    Row {
+        name: "relation:error_message",
+        description: "The element holding this one's error message.",
+        linux: yes_by("`ERROR_MESSAGE`"),
+        macos: yes_by("`AXErrorMessageElements`"),
+        windows: no("UIA carries `aria-errormessage` targets inside `ControllerFor`; read it as `controls`"),
+    },
+    Row {
+        name: "relation:error_for",
+        description: "The elements this one is the error message for.",
+        linux: yes_by("`ERROR_FOR`"),
+        macos: no("AX has no reverse error-message relation"),
+        windows: no("UIA has no reverse error-message relation"),
+    },
+    Row {
+        name: "relation:owns",
+        description: "Elements this one owns outside its own subtree.",
+        linux: no("AT-SPI rebuilds the tree for `aria-owns`, so owned elements are children"),
+        macos: yes_by("`AXOwns`"),
+        windows: no("UIA rebuilds the tree for `aria-owns`, so owned elements are children"),
+    },
+    Row {
+        name: "relation:member_of",
+        description: "The group this element is a member of.",
+        linux: yes_by("`MEMBER_OF`"),
+        macos: no("AX has no membership relation"),
+        windows: no("UIA has no membership relation"),
+    },
+    Row {
+        name: "relation:linked",
+        description: "macOS linked elements: `aria-controls` and `aria-flowto` targets together.",
+        linux: no("AT-SPI reports controls and flows-to separately"),
+        macos: yes_by("`AXLinkedUIElements`"),
+        windows: no("UIA reports controls and flows-to separately"),
     },
     // ── Element actions ──
     Row {
@@ -824,6 +965,19 @@ mod tests {
             kinds.len(),
             "an event row has no EventKind, or the kind list is short"
         );
+    }
+
+    #[test]
+    fn every_relation_kind_has_a_row() {
+        for kind in crate::semantics::RelationKind::ALL {
+            let name = kind.feature_name();
+            assert!(ROWS.iter().any(|r| r.name == name), "no row for {name}");
+        }
+        let relation_rows = ROWS
+            .iter()
+            .filter(|r| r.name.starts_with("relation:"))
+            .count();
+        assert_eq!(relation_rows, crate::semantics::RelationKind::ALL.len());
     }
 
     #[test]

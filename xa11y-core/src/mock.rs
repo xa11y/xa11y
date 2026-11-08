@@ -95,6 +95,9 @@ type MockElementSpec<'a> = (
 /// One entry in the mock's action log. `(handle, action_name, optional_argument)`.
 pub type ActionLogEntry = (u64, String, Option<String>);
 
+/// One node's relations: each kind with the indices of its targets.
+type MockRelations = Vec<(crate::semantics::RelationKind, Vec<usize>)>;
+
 /// Mock provider backing the test tree.
 pub struct MockProvider {
     /// Interior-mutable so window verbs can mutate state/bounds in place.
@@ -105,6 +108,8 @@ pub struct MockProvider {
     /// Text selection per node handle, set by `set_text_selection`. A
     /// selection with `start == end` is a caret.
     selections: Mutex<HashMap<u64, TextRange>>,
+    /// Relations per node index, set by [`build_document_provider`].
+    relations: Mutex<HashMap<usize, MockRelations>>,
 }
 
 /// One scripted observation of a node: its bounds and whether it is visible.
@@ -366,6 +371,39 @@ impl Provider for MockProvider {
         Ok(SHELL_SURFACES
             .iter()
             .map(|(kind, idx)| (*kind, nodes[*idx].data.clone()))
+            .collect())
+    }
+
+    fn relations(
+        &self,
+        el: &ElementData,
+        kinds: &[crate::semantics::RelationKind],
+    ) -> Result<Vec<(crate::semantics::RelationKind, Vec<ElementData>)>> {
+        // The mock reports every kind except `linked`, so the unsupported path
+        // is testable too.
+        if let Some(kind) = kinds
+            .iter()
+            .find(|k| **k == crate::semantics::RelationKind::Linked)
+        {
+            return Err(Error::Unsupported {
+                feature: format!("relation {kind} on the mock provider"),
+            });
+        }
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let relations = self.relations.lock().unwrap_or_else(|e| e.into_inner());
+        let own = relations.get(&(el.handle as usize));
+        Ok(kinds
+            .iter()
+            .map(|kind| {
+                let targets = own
+                    .into_iter()
+                    .flatten()
+                    .filter(|(k, _)| k == kind)
+                    .flat_map(|(_, t)| t.iter())
+                    .map(|&i| nodes[i].data.clone())
+                    .collect();
+                (*kind, targets)
+            })
             .collect())
     }
 
@@ -1239,6 +1277,11 @@ pub fn build_provider() -> Arc<MockProvider> {
             1234
         };
         let data = ElementData {
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             role,
             name: name.map(String::from),
             value: value.map(String::from),
@@ -1268,6 +1311,7 @@ pub fn build_provider() -> Arc<MockProvider> {
 
     Arc::new(MockProvider {
         nodes: Mutex::new(nodes),
+        relations: Mutex::new(HashMap::new()),
         actions: Mutex::new(Vec::new()),
         frames: Mutex::new(HashMap::new()),
         selections: Mutex::new(HashMap::new()),
@@ -1401,6 +1445,84 @@ fn mock_unit_at(text: &str, offset: u32, unit: TextUnit) -> Result<TextRange> {
         start: start as u32,
         end: end as u32,
     })
+}
+
+/// The shared tree plus a document (#476): a `main` landmark holding an h1
+/// and an h2, a navigation landmark with a link, a polite live region, and a
+/// labelled, described text field whose relations point at its label and its
+/// hint. Used by the binding tests of document semantics.
+pub fn build_document_provider() -> Arc<MockProvider> {
+    use crate::semantics::{Landmark, LiveRegionParts, Politeness, RelationKind};
+    let provider = build_provider();
+    {
+        let mut nodes = provider.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let window = 1;
+        let pid = nodes[window].data.pid;
+        let mut add = |parent: usize, mut data: ElementData| {
+            let i = nodes.len();
+            data.handle = i as u64;
+            data.pid = pid;
+            nodes.push(MockNode {
+                data,
+                children: Vec::new(),
+                parent: Some(parent),
+                closed: false,
+            });
+            nodes[parent].children.push(i);
+            i
+        };
+        let named = |role: Role, name: &str| {
+            let mut d = ElementData::for_role(role);
+            d.name = Some(name.into());
+            d
+        };
+        let mut main = named(Role::Landmark, "Article");
+        main.landmark_type = Some(Landmark::Main);
+        main.web_role = Some("main".into());
+        let main = add(window, main);
+        let mut h1 = named(Role::Heading, "Title");
+        h1.heading_level = Some(1);
+        add(main, h1);
+        let mut h2 = named(Role::Heading, "Section");
+        h2.heading_level = Some(2);
+        add(main, h2);
+        let mut nav = named(Role::Landmark, "Site");
+        nav.landmark_type = Some(Landmark::Navigation);
+        let nav = add(window, nav);
+        let mut link = named(Role::Link, "Docs");
+        link.link_url = Some("https://example.com/docs".into());
+        add(nav, link);
+        let mut live = named(Role::Status, "Saved");
+        live.live_region = Some(
+            LiveRegionParts {
+                politeness: Some(Politeness::Polite),
+                atomic: Some(true),
+                relevant: Some("additions text".into()),
+            }
+            .into(),
+        );
+        add(window, live);
+        let label = add(window, named(Role::StaticText, "Email address"));
+        let hint = add(window, named(Role::StaticText, "We never share it"));
+        let field = add(window, named(Role::TextField, "Email"));
+        provider
+            .relations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                field,
+                vec![
+                    (RelationKind::LabelledBy, vec![label]),
+                    (RelationKind::DescribedBy, vec![hint]),
+                ],
+            );
+        provider
+            .relations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(label, vec![(RelationKind::LabelFor, vec![field])]);
+    }
+    provider
 }
 
 /// Build the test tree plus a table, a virtualized list and a tree under the

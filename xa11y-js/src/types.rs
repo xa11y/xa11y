@@ -474,3 +474,54 @@ pub fn nullable<T>(v: Option<napi::Either<T, napi::bindgen_prelude::Null>>) -> O
         Some(napi::Either::B(_)) | None => None,
     }
 }
+
+/// Live-region settings of an element (`Element.liveRegion`). Each field is
+/// `null` when not reported.
+#[napi(object, use_nullable = true)]
+#[derive(Clone)]
+pub struct LiveRegionInfo {
+    /// `'off'`, `'polite'` or `'assertive'`.
+    pub politeness: Option<String>,
+    /// Whether the whole region is announced when part of it changes.
+    pub atomic: Option<bool>,
+    /// Which changes are announced, as the platform spells it.
+    pub relevant: Option<String>,
+}
+
+impl From<xa11y::LiveRegionInfo> for LiveRegionInfo {
+    fn from(l: xa11y::LiveRegionInfo) -> Self {
+        Self {
+            politeness: l.politeness.map(|p| politeness_name(p).to_string()),
+            atomic: l.atomic,
+            relevant: l.relevant,
+        }
+    }
+}
+
+/// The JS spelling of a politeness value, the same as Python's.
+pub(crate) fn politeness_name(p: xa11y::Politeness) -> &'static str {
+    match p {
+        xa11y::Politeness::Off => "off",
+        xa11y::Politeness::Polite => "polite",
+        xa11y::Politeness::Assertive => "assertive",
+    }
+}
+
+/// The JS spelling of a landmark kind (its ARIA role name), the same as
+/// Python's.
+pub(crate) fn landmark_name(l: xa11y::Landmark) -> &'static str {
+    match l {
+        xa11y::Landmark::Banner => "banner",
+        xa11y::Landmark::Complementary => "complementary",
+        xa11y::Landmark::ContentInfo => "contentinfo",
+        xa11y::Landmark::Form => "form",
+        xa11y::Landmark::Main => "main",
+        xa11y::Landmark::Navigation => "navigation",
+        xa11y::Landmark::Region => "region",
+        xa11y::Landmark::Search => "search",
+        xa11y::Landmark::Unknown => "unknown",
+        // `Landmark` is `#[non_exhaustive]`; variant coverage in the parity
+        // check fails the build before a new one reaches this arm.
+        other => other.to_snake_case(),
+    }
+}

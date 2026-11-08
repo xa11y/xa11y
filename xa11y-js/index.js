@@ -935,6 +935,7 @@ const {
   _makeDisconnectedSubscription,
   _makeTestTextEventSubscription,
   _makeTestStaleElements,
+  _makeTestDocumentLocator,
 } = native;
 // Wrapped, unlike the helpers above: these lookups fail on purpose in the
 // shell tests (no such surface / an ambiguous shell), and a test asserting
@@ -984,6 +985,7 @@ module.exports = {
   _makeDisconnectedSubscription,
   _makeTestTextEventSubscription,
   _makeTestStaleElements,
+  _makeTestDocumentLocator,
   _makeTestShellSurfaces,
   _makeTestShellSurfaceByKind,
   _makeTestAmbiguousShellSurfaceByKind,

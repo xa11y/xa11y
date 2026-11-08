@@ -340,6 +340,7 @@ const TOOL_NAMES: &[&str] = &[
     "action",
     "text",
     "table",
+    "relations",
     "click",
     "move",
     "drag",
@@ -376,6 +377,7 @@ impl ToolHost for Xa11yTools {
             "action" => tool_action(args, &self.refs),
             "text" => tool_text(args, &self.refs),
             "table" => tool_table(args, &self.refs),
+            "relations" => tool_relations(args, &self.refs),
             "click" => tool_click(args),
             "move" => tool_move(args),
             "drag" => tool_drag(args),
@@ -436,12 +438,12 @@ fn ref_property() -> Value {
     json!({
         "type": "string",
         "description": format!(
-            "An element `ref` from a recent `tree` or `find` result (`c3:17`), in place of \
+            "An element `ref` from a recent `tree`, `find` or `relations` result (`c3:17`), in place of \
              `selector`: give exactly one of the two, and no `app` / `pid` / `shell` with a \
              ref. A ref names exactly that element. If it was removed, its application \
              restarted, or its id now names a different element, the call fails with \
              `element_stale` (and `stale_reason`) rather than finding a similar one. The \
-             server keeps the refs of its {} most recent `tree` / `find` results; an older \
+             server keeps the refs of its {} most recent `tree` / `find` / `relations` results; an older \
              ref fails with `ref_expired`.",
             super::refs::MAX_CAPTURES
         ),
@@ -1189,6 +1191,53 @@ fn tool_definition(name: &str) -> Value {
                     timeout = default_timeout_label(),
                 ),
                 object_schema(props, &["op"]),
+            )
+        }
+        "relations" => {
+            let mut props = app_target_properties();
+            props.insert(
+                "selector".into(),
+                json!({
+                    "type": "string",
+                    "description": format!(
+                        "Selector for the element to ask. Must match exactly one \
+                         element: several are refused with `ambiguous_selector` and \
+                         the candidates.\n\n{SELECTOR_SYNTAX}"
+                    ),
+                }),
+            );
+            props.insert(
+                "kinds".into(),
+                json!({
+                    "type": "array",
+                    "items": { "type": "string", "enum": cli::relation_kind_names() },
+                    "description": "Relation kinds to read. Omit for every kind this \
+                                    platform reports (the `relation:*` rows of \
+                                    `capabilities`). Naming a kind the platform never \
+                                    reports fails with `unsupported`.",
+                }),
+            );
+            props.insert(
+                "limit".into(),
+                FIND_LIMIT.property(format!(
+                    "Most elements to return per kind. Default {FIND_DEFAULT_LIMIT}."
+                )),
+            );
+            props.insert("ref".into(), ref_property());
+            tool(
+                "relations",
+                "Element relations",
+                "The elements one element is related to: who labels it \
+                 (`labelled_by`) or describes it (`described_by`), what it controls \
+                 (`controls`), where reading flows next (`flows_to`), its error \
+                 message, and the reverse of each. Each kind comes back once, in \
+                 request order, as `{kind, count, returned, truncated, elements}`; a \
+                 kind with no targets has an empty list, never an absent entry. \
+                 Elements are in the shape `find` returns, each with a `ref`.\n\n\
+                 The kinds are reported as the platform reports them: macOS reports \
+                 `aria-controls` and `aria-flowto` together as `linked`, and Windows \
+                 reports `aria-details` as `details`. Reads once and does not wait.",
+                object_schema(props, &[]),
             )
         }
         "table" => {
@@ -2279,6 +2328,100 @@ fn tool_table(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     }
 }
 
+fn tool_relations(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
+    let subject = subject(args)?;
+    let kinds = match args.get("kinds") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => {
+            let names = items
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .ok_or_else(|| usage("\"kinds\" must be an array of strings"))
+                })
+                .collect::<CliResult<Vec<&str>>>()?;
+            if names.is_empty() {
+                return Err(usage(
+                    "\"kinds\" is empty; omit it to read every kind this platform reports",
+                ));
+            }
+            cli::parse_relation_kinds(&names)?
+        }
+        Some(_) => return Err(usage("\"kinds\" must be an array of strings")),
+    };
+    let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT)?;
+    match subject {
+        Subject::Selector(selector) => {
+            let target = target(args)?;
+            tool_relations_parsed(&target, selector, &kinds, limit, refs)
+        }
+        Subject::Ref(reference) => {
+            let element = resolve_ref_for_read(refs, reference)?;
+            let mut out = Map::new();
+            out.insert("ref".into(), json!(reference));
+            relations_output(out, &element, &kinds, limit, refs)
+        }
+    }
+}
+
+/// The resolving half of [`tool_relations`], against an explicit target.
+fn tool_relations_parsed(
+    target: &Target,
+    selector: &str,
+    kinds: &[crate::RelationKind],
+    limit: usize,
+    refs: &RefTable,
+) -> CliResult<ToolOutput> {
+    let element = match cli::resolve_table_element(target, selector)? {
+        Ok(element) => element,
+        Err(matches) => return Err(ambiguous(selector, &matches)),
+    };
+    let mut out = Map::new();
+    out.insert("selector".into(), json!(selector));
+    target_fields(target, &mut out);
+    relations_output(out, &element, kinds, limit, refs)
+}
+
+/// The `relations` result: each kind with at most `limit` targets, each
+/// target carrying a ref.
+fn relations_output(
+    mut out: Map<String, Value>,
+    element: &Element,
+    kinds: &[crate::RelationKind],
+    limit: usize,
+    refs: &RefTable,
+) -> CliResult<ToolOutput> {
+    let found = element.relations(kinds)?;
+    let mut capture = refs.begin();
+    let relations: Vec<Value> = found
+        .iter()
+        .map(|(kind, targets)| {
+            let listed: Vec<Value> = targets
+                .iter()
+                .take(limit)
+                .map(|el| {
+                    let mut encoded = element_data_json(el);
+                    if let Some(obj) = encoded.as_object_mut() {
+                        obj.insert("ref".into(), json!(capture.add(el)));
+                    }
+                    encoded
+                })
+                .collect();
+            json!({
+                "kind": kind.to_snake_case(),
+                "count": targets.len(),
+                "returned": listed.len(),
+                "truncated": targets.len() > listed.len(),
+                "elements": listed,
+            })
+        })
+        .collect();
+    refs.keep(capture);
+    out.insert("element".into(), element_data_json(element));
+    out.insert("relations".into(), Value::Array(relations));
+    Ok(ToolOutput::json(Value::Object(out)))
+}
+
 /// The resolving half of [`tool_table`], against an explicit target.
 fn tool_table_parsed(
     target: &Target,
@@ -2885,6 +3028,39 @@ pub(super) fn element_data_json(data: &crate::ElementData) -> Value {
         "collection",
         data.collection.filter(|c| !c.is_empty()),
     );
+
+    // Document semantics (#476): each only when reported.
+    insert_some(
+        &mut node,
+        "heading_level",
+        data.heading_level.map(Value::from),
+    );
+    insert_some(
+        &mut node,
+        "landmark_type",
+        data.landmark_type.map(|l| Value::from(l.to_snake_case())),
+    );
+    insert_some(
+        &mut node,
+        "web_role",
+        data.web_role.as_deref().map(Value::from),
+    );
+    insert_some(&mut node, "url", data.link_url.as_deref().map(Value::from));
+    if let Some(live) = data.live_region.as_ref().filter(|l| !l.is_empty()) {
+        let mut l = Map::new();
+        insert_some(
+            &mut l,
+            "politeness",
+            live.politeness.map(|p| Value::from(p.to_snake_case())),
+        );
+        insert_some(&mut l, "atomic", live.atomic.map(Value::from));
+        insert_some(
+            &mut l,
+            "relevant",
+            live.relevant.as_deref().map(Value::from),
+        );
+        node.insert("live_region".into(), Value::Object(l));
+    }
 
     if !data.actions.is_empty() {
         node.insert("actions".into(), json!(data.actions));
@@ -5389,6 +5565,118 @@ mod tests {
     }
 
     const NOTES: &str = r#"text_area[name="Notes"]"#;
+
+    // ── Document semantics and relations (#476) ─────────────────────────────
+
+    fn document_target() -> Target {
+        let provider: std::sync::Arc<dyn xa11y_core::Provider> =
+            xa11y_core::mock::build_document_provider();
+        let app = App::list_with(provider)
+            .expect("the mock must list its app")
+            .into_iter()
+            .next()
+            .expect("the mock must vend one app");
+        Target::App(app)
+    }
+
+    #[test]
+    fn element_nodes_carry_document_semantics_only_when_reported() {
+        let target = document_target();
+        let one = |sel: &str| {
+            let els = target.locator(sel).elements().expect("resolves");
+            assert_eq!(els.len(), 1, "{sel}");
+            element_data_json(&els[0])
+        };
+        let h1 = one(r#"heading[heading_level="1"]"#);
+        assert_eq!(h1["heading_level"], 1);
+        let main = one(r#"landmark[landmark_type="main"]"#);
+        assert_eq!(main["landmark_type"], "main");
+        assert_eq!(main["web_role"], "main");
+        assert_eq!(
+            one(r#"link[name="Docs"]"#)["url"],
+            "https://example.com/docs"
+        );
+        assert_eq!(
+            one(r#"status[name="Saved"]"#)["live_region"],
+            json!({ "politeness": "polite", "atomic": true, "relevant": "additions text" })
+        );
+        let field = one(r#"text_field[name="Email"]"#);
+        for key in [
+            "heading_level",
+            "landmark_type",
+            "web_role",
+            "url",
+            "live_region",
+        ] {
+            assert!(field.get(key).is_none(), "{key} must be absent: {field}");
+        }
+    }
+
+    #[test]
+    fn relations_lists_each_kind_once_with_refs() {
+        let refs = RefTable::default();
+        let kinds = [
+            crate::RelationKind::LabelledBy,
+            crate::RelationKind::Controls,
+        ];
+        let out = tool_relations_parsed(
+            &document_target(),
+            r#"text_field[name="Email"]"#,
+            &kinds,
+            FIND_DEFAULT_LIMIT,
+            &refs,
+        )
+        .expect("relations read");
+        let got = out.structured.expect("structured");
+        assert_eq!(got["element"]["name"], "Email");
+        let relations = got["relations"].as_array().expect("a list");
+        assert_eq!(relations.len(), 2, "{got}");
+        assert_eq!(relations[0]["kind"], "labelled_by");
+        assert_eq!(relations[0]["count"], 1);
+        assert_eq!(relations[0]["elements"][0]["name"], "Email address");
+        // A supported kind with no targets is an empty list, not absent.
+        assert_eq!(relations[1]["kind"], "controls");
+        assert_eq!(relations[1]["elements"], json!([]));
+        assert_eq!(relations[1]["truncated"], false);
+        // The target's ref acts on exactly the label.
+        let label_ref = relations[0]["elements"][0]["ref"].as_str().expect("a ref");
+        let label = refs.resolve(label_ref).expect("the ref resolves");
+        assert_eq!(label.name.as_deref(), Some("Email address"));
+    }
+
+    #[test]
+    fn relations_refuses_bad_kinds_before_resolving() {
+        let refs = RefTable::default();
+        for kinds in [
+            json!(["labeled_by"]),
+            json!([]),
+            json!("labelled_by"),
+            json!([1]),
+        ] {
+            let err = tool_relations(
+                &args(json!({ "selector": "button", "app": "nope", "kinds": kinds })),
+                &refs,
+            )
+            .expect_err("refused");
+            assert!(matches!(err, CliError::Usage(_)), "{kinds}: {err}");
+        }
+    }
+
+    #[test]
+    fn relations_of_an_unreported_kind_is_unsupported() {
+        let err = tool_relations_parsed(
+            &document_target(),
+            r#"text_field[name="Email"]"#,
+            &[crate::RelationKind::Linked],
+            FIND_DEFAULT_LIMIT,
+            &RefTable::default(),
+        )
+        .expect_err("the mock does not report linked");
+        assert!(
+            matches!(err, CliError::Xa11y(crate::Error::Unsupported { .. })),
+            "{err}"
+        );
+    }
 
     /// Run a `text` call against the fixture and return its `result`.
     fn text_result(call: Value) -> Value {

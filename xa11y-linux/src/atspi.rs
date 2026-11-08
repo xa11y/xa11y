@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
+use xa11y_core::RelationKind;
 
 use rayon::prelude::*;
 use xa11y_core::{
@@ -118,6 +119,7 @@ pub(crate) struct Interfaces {
     pub(crate) table: bool,
     pub(crate) table_cell: bool,
     pub(crate) selection: bool,
+    pub(crate) hyperlink: bool,
 }
 
 impl Interfaces {
@@ -130,6 +132,7 @@ impl Interfaces {
             table: has("org.a11y.atspi.Table"),
             table_cell: has("org.a11y.atspi.TableCell"),
             selection: has("org.a11y.atspi.Selection"),
+            hyperlink: has("org.a11y.atspi.Hyperlink"),
         }
     }
 }
@@ -1537,6 +1540,11 @@ impl LinuxProvider {
         };
 
         let mut data: ElementData = ElementParts {
+            heading_level: meta.semantics.heading_level,
+            landmark_type: meta.semantics.landmark_type,
+            web_role: meta.semantics.web_role,
+            link_url: meta.link_url,
+            live_region: meta.semantics.live_region,
             role,
             name,
             value,
@@ -2203,6 +2211,71 @@ impl LinuxProvider {
         }
     }
 
+    /// [`Provider::relations`] over `GetRelationSet`, which returns every
+    /// relation in one call; the requested kinds are picked out of it.
+    fn relations_atspi(
+        &self,
+        element: &ElementData,
+        kinds: &[RelationKind],
+    ) -> Result<Vec<(RelationKind, Vec<ElementData>)>> {
+        // Refuse an unsupported kind before any IPC, naming it (tenet 6).
+        let codes: Vec<(RelationKind, u32)> = kinds
+            .iter()
+            .map(|k| {
+                atspi_relation_code(*k)
+                    .map(|c| (*k, c))
+                    .ok_or_else(|| Error::Unsupported {
+                        feature: format!(
+                            "relation {k} on AT-SPI: {}",
+                            match k {
+                                RelationKind::Owns =>
+                                    "AT-SPI rebuilds the tree for aria-owns, so \
+                                                   owned elements are children",
+                                _ =>
+                                    "AT-SPI reports controls and flows-to separately; ask for \
+                                  controls or flows_to",
+                            }
+                        ),
+                    })
+            })
+            .collect::<Result<_>>()?;
+        let aref = self.get_cached(element.handle)?;
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = proxy
+            .call_method("GetRelationSet", &())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!(
+                    "GetRelationSet on {}{} failed: {e}",
+                    aref.bus_name, aref.path
+                ),
+            })?;
+        let set: Vec<(u32, Vec<(String, zbus::zvariant::OwnedObjectPath)>)> =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetRelationSet reply did not decode: {e}"),
+            })?;
+        Ok(codes
+            .into_iter()
+            .map(|(kind, code)| {
+                let targets = set
+                    .iter()
+                    .filter(|(c, _)| *c == code)
+                    .flat_map(|(_, targets)| targets.iter())
+                    .filter(|(_, path)| path.as_str() != "/org/a11y/atspi/null")
+                    .map(|(bus, path)| {
+                        let target = AccessibleRef {
+                            bus_name: bus.clone(),
+                            path: path.as_str().to_string(),
+                        };
+                        self.build_element_data(&target, element.pid)
+                    })
+                    .collect();
+                (kind, targets)
+            })
+            .collect())
+    }
+
     /// Perform an AT-SPI2 action by its integer index (from discovery).
     ///
     /// Checks first that the object is still attached to the tree
@@ -2624,6 +2697,14 @@ impl Provider for LinuxProvider {
 
     fn revalidate(&self, element: &ElementData) -> Result<()> {
         self.revalidate_atspi(element)
+    }
+
+    fn relations(
+        &self,
+        element: &ElementData,
+        kinds: &[RelationKind],
+    ) -> Result<Vec<(RelationKind, Vec<ElementData>)>> {
+        self.relations_atspi(element, kinds)
     }
 
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
@@ -4069,7 +4150,7 @@ fn try_map_atspi_role(role_name: &str) -> Option<Role> {
         "split pane" => Role::SplitGroup,
         "tooltip" | "tool tip" => Role::Tooltip,
         "status bar" | "statusbar" => Role::Status,
-        "landmark" | "navigation" => Role::Navigation,
+        "landmark" | "navigation" => Role::Landmark,
         _ => return None,
     })
 }
@@ -4205,9 +4286,9 @@ pub(crate) fn try_map_atspi_role_number(role: u32) -> Option<Role> {
         103 => Role::ProgressBar, // LevelBar (GtkLevelBar)
         104 => Role::Group,       // TitleBar (mirrors UIA TitleBar)
         105 => Role::Group,       // BlockQuote
-        110 => Role::Navigation,  // Landmark
-        116 => Role::StaticText,  // Static
-        129 => Role::Button,      // PushButtonMenu
+        110 => Role::Landmark,
+        116 => Role::StaticText, // Static
+        129 => Role::Button,     // PushButtonMenu
         _ => return None,
     })
 }
@@ -4429,6 +4510,27 @@ pub(crate) fn is_listable_top_level(bits: u64) -> bool {
     const ICONIFIED: u64 = 1 << 15;
     const VISIBLE: u64 = 1 << 30;
     bits & (VISIBLE | ICONIFIED) != 0
+}
+
+/// The `AtspiRelationType` number for a relation kind, or `None` for a kind
+/// AT-SPI does not report (see the capability table).
+fn atspi_relation_code(kind: RelationKind) -> Option<u32> {
+    Some(match kind {
+        RelationKind::LabelFor => 1,
+        RelationKind::LabelledBy => 2,
+        RelationKind::Controls => 3,
+        RelationKind::ControlledBy => 4,
+        RelationKind::MemberOf => 5,
+        RelationKind::FlowsTo => 10,
+        RelationKind::FlowsFrom => 11,
+        RelationKind::DescriptionFor => 17,
+        RelationKind::DescribedBy => 18,
+        RelationKind::Details => 19,
+        RelationKind::DetailsFor => 20,
+        RelationKind::ErrorMessage => 21,
+        RelationKind::ErrorFor => 22,
+        RelationKind::Owns | RelationKind::Linked => return None,
+    })
 }
 
 /// The D-Bus error a peer answers for an object path it no longer serves.

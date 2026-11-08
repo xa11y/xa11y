@@ -147,6 +147,11 @@ A live handle returned by `app.children()`, `element.children()`,
 | `cell` | Cell position (`row`, `column`, `row_span`, `column_span`, `header`), optional |
 | `table_row` | Row position (`index`), optional |
 | `collection` | Position in a list or tree (`index`, `size`, `depth`), optional |
+| `heading_level` | Integer, optional. `1` is an h1. |
+| `landmark_type` | Landmark kind (`main`, `navigation`, `contentinfo`, and the rest), optional, on a `landmark` |
+| `web_role` | The ARIA role a web page gave the element, optional |
+| `link_url` | A link's target URL, optional. The selector attribute is `url`. |
+| `live_region` | Live-region settings (`politeness`, `atomic`, `relevant`), optional |
 | `pid` | Process ID of the owning application |
 | `raw` | Platform-native key/value map |
 
@@ -154,7 +159,8 @@ A live handle returned by `app.children()`, `element.children()`,
 controls. `raw` holds the unstripped platform string under the platform-native
 key. Each of these properties except `raw`, `states`, and `actions` is also
 usable as a selector attribute, along with the individual state flags.
-`pid` is the exception, having no attribute of its own. `table`, `cell`,
+`pid` is the exception, having no attribute of its own. `link_url` matches as
+`url`, and `live_region` as `live` (its politeness). `table`, `cell`,
 `table_row`, and `collection` are matched through their fields, as
 [numeric attributes](/reference/selectors/#numeric-attributes). See
 [Selectors](/reference/selectors/#attributes).
@@ -188,6 +194,20 @@ available on `App` and `Locator`.
 | `column_headers()`, `row_headers()` | A table | Its header cells |
 | `column_header_cells()`, `row_header_cells()` | A cell | The header cells that head it |
 | `selected_items()` | A list, tree, table, or tab list | The selected rows or cells |
+
+### Relations
+
+| Method | Returns |
+| --- | --- |
+| `relations(kinds)` | The elements this one is related to, per kind. Its label is `labelled_by` and its hint `described_by`. The reverse of each kind is a kind too (`label_for`). |
+
+Each requested kind appears once, in request order, with an empty list when
+there are none. Python returns a `dict` keyed by kind and JavaScript an array
+of `{ kind, elements }`. With no kinds it reads every kind the platform reports,
+the `relation:*` rows of [`capabilities()`](/reference/platform-details/#capabilities).
+A kind the platform never reports raises `Unsupported`. macOS reports
+`aria-controls` and `aria-flowto` together as `linked`, and Windows reports
+`aria-details` as `details`, because the platforms do not tell them apart.
 
 `Locator.text()` returns a `Text` that re-resolves the selector on every read,
 waiting until it matches. It does not wait for visible or enabled.

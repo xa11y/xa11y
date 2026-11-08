@@ -7,6 +7,7 @@ use pyo3::types::{PyDict, PyList};
 
 mod capabilities;
 mod rich;
+mod semantics;
 
 // ── Singleton provider ─────────────────────────────────────────────────────
 
@@ -742,6 +743,70 @@ impl Element {
     #[getter]
     fn collection(&self) -> Option<rich::CollectionInfo> {
         rich::collection_info(&self.inner_data)
+    }
+    /// A heading's level, ``1`` for a top-level heading (a level, not an
+    /// index); ``None`` on a non-heading or when not reported.
+    #[getter]
+    fn heading_level(&self) -> Option<u32> {
+        self.inner_data.heading_level
+    }
+    /// Which landmark a ``landmark`` element is, as its ARIA role
+    /// (``"main"``, ``"navigation"``, ``"contentinfo"``, ...); ``None`` on
+    /// every other role.
+    #[getter]
+    fn landmark_type(&self) -> Option<&'static str> {
+        self.inner_data.landmark_type.map(semantics::landmark_name)
+    }
+    /// The ARIA role web content declares, verbatim; ``None`` outside web
+    /// content and on macOS.
+    #[getter]
+    fn web_role(&self) -> Option<String> {
+        self.inner_data.web_role.clone()
+    }
+    /// A link's target URL; ``None`` on a non-link or when not reported.
+    #[getter]
+    fn link_url(&self) -> Option<String> {
+        self.inner_data.link_url.clone()
+    }
+    /// Live-region settings; ``None`` when the element has none.
+    #[getter]
+    fn live_region(&self) -> Option<semantics::LiveRegionInfo> {
+        self.inner_data
+            .live_region
+            .clone()
+            .map(semantics::LiveRegionInfo::new)
+    }
+    /// The elements this one is related to, as a ``dict`` from relation
+    /// kind (``"labelled_by"``, ``"controls"``, ...) to a list of elements,
+    /// in the order asked for. ``kinds=None`` asks for every kind this
+    /// platform reports. A kind it never reports raises
+    /// :class:`ActionNotSupportedError` (``Unsupported``) naming it; a
+    /// reported kind with no targets maps to ``[]``.
+    #[pyo3(signature = (kinds=None))]
+    fn relations(
+        &self,
+        py: Python<'_>,
+        kinds: Option<Vec<String>>,
+    ) -> PyResult<Py<pyo3::types::PyDict>> {
+        let kinds: Vec<xa11y::RelationKind> = kinds
+            .unwrap_or_default()
+            .iter()
+            .map(|k| xa11y::RelationKind::parse(k))
+            .collect::<xa11y::Result<_>>()
+            .map_err(to_py_err)?;
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let found = py
+            .detach(move || element.relations(&kinds))
+            .map_err(to_py_err)?;
+        let out = pyo3::types::PyDict::new(py);
+        for (kind, targets) in found {
+            let list = targets
+                .iter()
+                .map(|t| make_py_element(py, t.data(), t.provider().clone()))
+                .collect::<PyResult<Vec<_>>>()?;
+            out.set_item(kind.to_snake_case(), list)?;
+        }
+        Ok(out.unbind())
     }
     /// This element's text, read by range (UTF-16 offsets). Raises
     /// ``ActionNotSupportedError`` when the element has no text interface.
@@ -3063,6 +3128,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Subscription>()?;
     m.add_class::<capabilities::Capabilities>()?;
     m.add_class::<capabilities::Capability>()?;
+    m.add_class::<semantics::LiveRegionInfo>()?;
     m.add_class::<rich::TableInfo>()?;
     m.add_class::<rich::CellInfo>()?;
     m.add_class::<rich::RowInfo>()?;
@@ -3106,6 +3172,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_document_locator, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_stale_elements, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_table_locator, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_input, m)?)?;
@@ -3171,6 +3238,17 @@ fn _make_test_table_locator(selector: &str) -> PyResult<Locator> {
         .ok_or_else(|| PyRuntimeError::new_err("mock has no application"))?;
     Ok(Locator {
         inner: xa11y::Locator::new_for_app(provider, root, selector)
+            .with_timeout(Duration::from_millis(0)),
+    })
+}
+
+/// A test Locator over the mock document (`build_document_provider`):
+/// landmarks, headings, a link, a live region and a labelled text field.
+#[pyfunction]
+fn _make_test_document_locator(selector: &str) -> PyResult<Locator> {
+    let provider = xa11y::mock::build_document_provider();
+    Ok(Locator {
+        inner: xa11y::Locator::new(provider as Arc<dyn xa11y::Provider>, None, selector)
             .with_timeout(Duration::from_millis(0)),
     })
 }

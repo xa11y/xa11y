@@ -48,6 +48,12 @@ pub use xa11y_core::{Capabilities, Capability, Platform, Support};
 pub use xa11y_core::identity;
 pub use xa11y_core::{NativeObject, NodeIdentity};
 
+// Document semantics (see `xa11y_core::semantics`).
+pub use xa11y_core::semantics;
+#[doc(hidden)]
+pub use xa11y_core::LiveRegionParts;
+pub use xa11y_core::{Landmark, LiveRegionInfo, Politeness, RelationKind};
+
 // Re-export input simulation surface.
 pub use xa11y_core::input;
 pub use xa11y_core::{

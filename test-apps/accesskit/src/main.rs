@@ -145,6 +145,18 @@ const LONG_TEXT: NodeId = NodeId(78);
 // pressed. Late in document order so it shifts no `:nth(n)` index.
 const START_SLIDE_BTN: NodeId = NodeId(80);
 const SLIDE_TARGET: NodeId = NodeId(81);
+
+// Document semantics (#476): two landmarks, a heading with a level, a link
+// with a URL, and a button that controls another element. Late in document
+// order so they shift no `:nth(n)` index.
+const DOC_MAIN: NodeId = NodeId(82);
+const DOC_HEADING: NodeId = NodeId(83);
+const DOC_NAV: NodeId = NodeId(84);
+const DOC_LINK: NodeId = NodeId(85);
+const DOC_CONTROLLER: NodeId = NodeId(86);
+const DOC_CONTROLLED: NodeId = NodeId(87);
+/// The URL the fixture's "Docs Link" points at.
+const DOC_LINK_URL: &str = "https://example.com/docs";
 /// How long one slide takes. Long enough that a short `wait_stable` started
 /// right after the press is guaranteed to see it moving.
 const SLIDE_DURATION: Duration = Duration::from_millis(3000);
@@ -829,8 +841,43 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         READONLY_FIELD,
         PASSWORD_FIELD,
         LONG_TEXT,
+        DOC_MAIN,
+        DOC_NAV,
+        DOC_CONTROLLER,
+        DOC_CONTROLLED,
     ]);
     nodes.push((EXTRA_PANEL, extra_panel));
+
+    let mut doc_main = Node::new(Role::Main);
+    doc_main.set_label("Document Main");
+    doc_main.set_children(vec![DOC_HEADING]);
+    nodes.push((DOC_MAIN, doc_main));
+
+    let mut doc_heading = Node::new(Role::Heading);
+    doc_heading.set_label("Document Heading");
+    doc_heading.set_level(2);
+    nodes.push((DOC_HEADING, doc_heading));
+
+    let mut doc_nav = Node::new(Role::Navigation);
+    doc_nav.set_label("Document Nav");
+    doc_nav.set_children(vec![DOC_LINK]);
+    nodes.push((DOC_NAV, doc_nav));
+
+    let mut doc_link = Node::new(Role::Link);
+    doc_link.set_label("Docs Link");
+    doc_link.set_url(DOC_LINK_URL);
+    nodes.push((DOC_LINK, doc_link));
+
+    let mut controller = Node::new(Role::Button);
+    controller.set_label("Toggle Details");
+    controller.set_controls(vec![DOC_CONTROLLED]);
+    nodes.push((DOC_CONTROLLER, controller));
+
+    // Label and value both: AT-SPI reads a Label's name from its value.
+    let mut controlled = Node::new(Role::Label);
+    controlled.set_label("Details Text");
+    controlled.set_value("Details Text");
+    nodes.push((DOC_CONTROLLED, controlled));
 
     let mut password = Node::new(Role::PasswordInput);
     password.set_label("Password");

@@ -1003,6 +1003,11 @@ mod tests {
         /// The Application node for the shared process (pid 42).
         fn app(handle: u64) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: Role::Application,
                 name: Some("SharedApp".to_string()),
                 value: None,
@@ -1029,6 +1034,11 @@ mod tests {
         /// window actually in the foreground reports it.
         fn window(name: &str, handle: u64, active: bool) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: Role::Window,
                 name: Some(name.to_string()),
                 value: None,
@@ -1202,6 +1212,11 @@ mod tests {
         /// window is actually in the foreground reports it.
         fn app(name: &str, handle: u64, active: bool) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: Role::Application,
                 name: Some(name.to_string()),
                 value: None,
@@ -1371,6 +1386,11 @@ mod tests {
 
         fn app(handle: u64) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: Role::Application,
                 name: Some("SharedApp".to_string()),
                 value: None,
@@ -1394,6 +1414,11 @@ mod tests {
 
         fn window(name: &str, handle: u64, stable_id: &str) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: Role::Window,
                 name: Some(name.to_string()),
                 value: None,

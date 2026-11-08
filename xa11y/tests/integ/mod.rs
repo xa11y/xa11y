@@ -42,6 +42,7 @@ pub mod identity;
 pub mod mcp;
 pub mod multi_window;
 pub mod screenshot;
+pub mod semantics;
 pub mod shell;
 pub mod stability;
 pub mod tree;

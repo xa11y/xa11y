@@ -759,6 +759,11 @@ fn data(snapshot: Snapshot, bits: i32, owner: &Owner, handle: u64) -> ElementDat
     }
     .into();
     ElementParts {
+        heading_level: None,
+        landmark_type: None,
+        web_role: None,
+        link_url: None,
+        live_region: None,
         role,
         name,
         value,

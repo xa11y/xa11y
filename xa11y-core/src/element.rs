@@ -195,6 +195,33 @@ reader_writer_pair! {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub collection: Option<crate::table::CollectionInfo>,
 
+        /// Heading level, `1` for a top-level heading (a level, not an index:
+        /// `1` is h1). `None` on a non-heading, or when the platform does not
+        /// report it. See [`crate::semantics`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub heading_level: Option<u32>,
+
+        /// Which landmark a [`Role::Landmark`] element is (`main`,
+        /// `navigation`, ...). `None` on every other role.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub landmark_type: Option<crate::semantics::Landmark>,
+
+        /// The web (ARIA) role the platform reports, verbatim (`"tab"`,
+        /// `"main"`): UIA `AriaRole`, AT-SPI `xml-roles`. `None` outside web
+        /// content and on macOS, which reports no ARIA role.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub web_role: Option<String>,
+
+        /// A link's target URL. `None` on a non-link, or when the platform
+        /// does not report it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub link_url: Option<String>,
+
+        /// Live-region settings (politeness, atomic, relevant). `None` when
+        /// the element has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub live_region: Option<crate::semantics::LiveRegionInfo>,
+
         /// Platform-assigned stable identifier for cross-snapshot correlation.
         /// - macOS: `AXIdentifier`
         /// - Windows: native window handle (`hwnd:0x…`) for top-level windows,
@@ -251,6 +278,11 @@ impl ElementData {
             cell: None,
             table_row: None,
             collection: None,
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             stable_id: None,
             pid: None,
             raw: RawPlatformData::new(),
@@ -383,6 +415,30 @@ impl Element {
         let mut out = String::new();
         write_tree_node(&node, 0, &mut out);
         Ok(out)
+    }
+
+    /// The elements this one is related to, by kind: who labels it, what it
+    /// controls, where reading flows next. See [`crate::semantics`].
+    ///
+    /// Each requested kind appears once in the result, in request order,
+    /// with an empty list when there are none. An empty `kinds` asks for every
+    /// kind this platform reports (per [`crate::Capabilities`]). A kind the
+    /// platform never reports fails with [`Error::Unsupported`] naming it.
+    pub fn relations(
+        &self,
+        kinds: &[crate::semantics::RelationKind],
+    ) -> crate::error::Result<Vec<(crate::semantics::RelationKind, Vec<Element>)>> {
+        let kinds: Vec<crate::semantics::RelationKind> = if kinds.is_empty() {
+            supported_relation_kinds()?
+        } else {
+            kinds.to_vec()
+        };
+        Ok(self
+            .provider
+            .relations(&self.data, &kinds)?
+            .into_iter()
+            .map(|(kind, targets)| (kind, targets.into_iter().map(|d| self.wrap(d)).collect()))
+            .collect())
     }
 
     // ── Identity and liveness ───────────────────────────────────────
@@ -765,6 +821,19 @@ impl Element {
         self.provider.revalidate(&self.data)?;
         self.provider.resize_to(&self.data, width, height)
     }
+}
+
+/// The relation kinds the running platform reports, from the capability
+/// table, so an empty `kinds` never asks a backend for one it would refuse.
+fn supported_relation_kinds() -> crate::error::Result<Vec<crate::semantics::RelationKind>> {
+    let caps = crate::Capabilities::current()?;
+    Ok(crate::semantics::RelationKind::ALL
+        .into_iter()
+        .filter(|k| {
+            caps.support(&k.feature_name())
+                .is_ok_and(|s| s != crate::Support::Unsupported)
+        })
+        .collect())
 }
 
 fn build_tree_node(
@@ -1779,5 +1848,58 @@ mod tests {
             back.perform_action("custom_thing"),
             Err(Error::ElementStale { .. })
         ));
+    }
+
+    // ── Document semantics (#476) ───────────────────────────────────
+
+    #[test]
+    fn document_semantics_are_fields_and_selector_attributes() {
+        let provider = crate::mock::build_document_provider();
+        let main = find_element(&provider, r#"landmark[landmark_type="main"]"#);
+        assert_eq!(main.name.as_deref(), Some("Article"));
+        assert_eq!(main.web_role.as_deref(), Some("main"));
+        let h2 = find_element(&provider, r#"heading[heading_level="2"]"#);
+        assert_eq!(h2.name.as_deref(), Some("Section"));
+        let link = find_element(&provider, r#"link[url*="example.com"]"#);
+        assert_eq!(link.link_url.as_deref(), Some("https://example.com/docs"));
+        let live = find_element(&provider, r#"[live="polite"]"#);
+        let region = live.live_region.as_ref().expect("live region");
+        assert_eq!(region.atomic, Some(true));
+        assert_eq!(region.relevant.as_deref(), Some("additions text"));
+    }
+
+    #[test]
+    fn navigation_is_refused_with_its_replacement() {
+        let err = Selector::parse("navigation").expect_err("no longer a role");
+        assert!(
+            matches!(&err, Error::InvalidSelector { message, .. }
+                if message.contains(r#"landmark[landmark_type="navigation"]"#)),
+            "{err:?}"
+        );
+        assert!(
+            Selector::parse("navigation_bar").is_ok(),
+            "other names are untouched"
+        );
+    }
+
+    #[test]
+    fn relations_come_back_in_request_order_and_unsupported_kinds_fail() {
+        use crate::semantics::RelationKind as K;
+        let provider = crate::mock::build_document_provider();
+        let field = find_element(&provider, r#"text_field[name="Email"]"#);
+        let rel = field
+            .relations(&[K::DescribedBy, K::LabelledBy, K::Controls])
+            .expect("relations");
+        let kinds: Vec<_> = rel.iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds, [K::DescribedBy, K::LabelledBy, K::Controls]);
+        assert_eq!(rel[1].1[0].name.as_deref(), Some("Email address"));
+        assert_eq!(rel[0].1[0].name.as_deref(), Some("We never share it"));
+        assert!(rel[2].1.is_empty(), "supported but empty is an empty list");
+        assert!(matches!(
+            field.relations(&[K::Linked]),
+            Err(Error::Unsupported { .. })
+        ));
+        // The labelled-by target is actionable: it is an Element.
+        rel[1].1[0].check_alive().expect("a live element");
     }
 }

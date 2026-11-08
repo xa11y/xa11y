@@ -71,8 +71,9 @@ pub enum Role {
     Tooltip,
     /// Status bar or live region
     Status,
-    /// Navigation landmark
-    Navigation,
+    /// A landmark region (`main`, `navigation`, `banner`, ...). Which one is
+    /// [`ElementData::landmark_type`](crate::ElementData::landmark_type).
+    Landmark,
     /// Scroll thumb — the draggable indicator inside a scroll bar
     ScrollThumb,
 }
@@ -164,7 +165,7 @@ mod tests {
             Role::SpinButton,
             Role::Tooltip,
             Role::Status,
-            Role::Navigation,
+            Role::Landmark,
         ];
         for role in roles {
             let s = role.to_snake_case();

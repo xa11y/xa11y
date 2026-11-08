@@ -308,6 +308,19 @@ impl Selector {
             }
             if pos > start {
                 let role_str: String = chars[start..pos].iter().collect();
+                // `navigation` was a role until every landmark became
+                // `landmark` (#476). Treated as a platform role name it would
+                // silently match nothing, so it is refused with the
+                // replacement instead.
+                if role_str == "navigation" {
+                    return Err(Error::InvalidSelector {
+                        selector: input.to_string(),
+                        message: "`navigation` is no longer a role: every landmark is \
+                                  `landmark`, and `landmark_type` says which. Write \
+                                  `landmark[landmark_type=\"navigation\"]`"
+                            .to_string(),
+                    });
+                }
                 match Role::from_snake_case(&role_str) {
                     Some(r) => role = Some(RoleMatch::Normalized(r)),
                     None => {
@@ -514,6 +527,7 @@ pub const NUMERIC_ATTRS: &[&str] = &[
     "depth",
     "row_count",
     "column_count",
+    "heading_level",
 ];
 
 /// Attributes whose values are validated at parse time: the numeric ones
@@ -824,6 +838,15 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
             .cell
             .and_then(|c| c.header)
             .map(|h| h.to_snake_case().to_string()),
+        "heading_level" => element.heading_level.map(|n| n.to_string()),
+        "landmark_type" => element.landmark_type.map(|l| l.to_snake_case().to_string()),
+        "web_role" => element.web_role.clone(),
+        "url" => element.link_url.clone(),
+        "live" => element
+            .live_region
+            .as_ref()
+            .and_then(|l| l.politeness)
+            .map(|p| p.to_snake_case().to_string()),
         "row_count" => element
             .table
             .and_then(|t| t.row_count)
@@ -1657,6 +1680,11 @@ mod tests {
     ) -> impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>> + '_ {
         fn make_data(row: &Row) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: row.role,
                 name: Some(row.name.to_string()),
                 value: None,
@@ -1889,6 +1917,11 @@ mod tests {
     /// Helper: build an ElementData with a given `raw` map for matcher tests.
     fn element_with_raw(raw: crate::element::RawPlatformData) -> ElementData {
         ElementData {
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             role: Role::Unknown,
             name: None,
             value: None,
@@ -2550,6 +2583,11 @@ mod tests {
         tree: &[GroupRow],
     ) -> impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>> + '_ {
         let make_data = |row: &GroupRow| ElementData {
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             role: row.role,
             name: Some(row.name.to_string()),
             value: None,
@@ -2707,6 +2745,11 @@ mod tests {
                 };
                 by_handle.borrow_mut().insert(fresh, row.name);
                 out.push(ElementData {
+                    heading_level: None,
+                    landmark_type: None,
+                    web_role: None,
+                    link_url: None,
+                    live_region: None,
                     role: row.role,
                     name: Some(row.name.to_string()),
                     value: None,
@@ -3002,6 +3045,11 @@ mod tests {
         // for clauses that would match nodes there at the root level.
         let tree = group_fixture();
         let toolbar = ElementData {
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             role: Role::Toolbar,
             name: Some("T".to_string()),
             value: None,

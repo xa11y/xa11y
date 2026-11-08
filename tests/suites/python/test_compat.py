@@ -524,7 +524,7 @@ def test_all_roles_are_valid_strings(app):
         "table_cell", "toolbar", "scroll_bar", "scroll_thumb", "slider",
         "image", "link", "group", "dialog", "alert", "progress_bar",
         "tree_item", "web_area", "heading", "separator", "split_group",
-        "switch", "spin_button", "tooltip", "status", "navigation",
+        "switch", "spin_button", "tooltip", "status", "landmark",
     }
     nodes = collect_tree_nodes(app)
     invalid = [

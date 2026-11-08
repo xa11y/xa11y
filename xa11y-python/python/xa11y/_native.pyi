@@ -311,6 +311,54 @@ class CollectionInfo:
         """0-based nesting depth."""
     def __repr__(self) -> str: ...
 
+# ── Document semantics ───────────────────────────────────────────────────────
+
+LandmarkName = Literal[
+    "banner",
+    "complementary",
+    "contentinfo",
+    "form",
+    "main",
+    "navigation",
+    "region",
+    "search",
+    "unknown",
+]
+PolitenessName = Literal["off", "polite", "assertive"]
+RelationKindName = Literal[
+    "labelled_by",
+    "label_for",
+    "described_by",
+    "description_for",
+    "details",
+    "details_for",
+    "controls",
+    "controlled_by",
+    "flows_to",
+    "flows_from",
+    "error_message",
+    "error_for",
+    "owns",
+    "member_of",
+    "linked",
+]
+
+class LiveRegionInfo:
+    """Live-region settings of an element. Every field is ``None`` when the
+    platform did not report it."""
+
+    @property
+    def politeness(self) -> PolitenessName | None:
+        """``"off"``, ``"polite"`` or ``"assertive"``."""
+    @property
+    def atomic(self) -> bool | None:
+        """Whether the whole region is announced when part of it changes."""
+    @property
+    def relevant(self) -> str | None:
+        """Which changes are announced, as the platform spells it
+        (``"additions text"``)."""
+    def __repr__(self) -> str: ...
+
 # ── Text by range ────────────────────────────────────────────────────────────
 
 TextUnitName = Literal["character", "word", "line", "paragraph"]
@@ -1020,6 +1068,31 @@ class Element:
     def collection(self) -> CollectionInfo | None:
         """Position in a list, tree, tab list or radio group (0-based index and
         depth); ``None`` otherwise."""
+    @property
+    def heading_level(self) -> int | None:
+        """A heading's level, ``1`` for a top-level heading (a level, not an
+        index); ``None`` on a non-heading or when not reported."""
+    @property
+    def landmark_type(self) -> LandmarkName | None:
+        """Which landmark a ``landmark`` element is, as its ARIA role;
+        ``None`` on every other role."""
+    @property
+    def web_role(self) -> str | None:
+        """The ARIA role web content declares, verbatim; ``None`` outside web
+        content and on macOS."""
+    @property
+    def link_url(self) -> str | None:
+        """A link's target URL; ``None`` on a non-link or when not reported."""
+    @property
+    def live_region(self) -> LiveRegionInfo | None:
+        """Live-region settings; ``None`` when the element has none."""
+    def relations(
+        self, kinds: list[RelationKindName] | None = None
+    ) -> dict[RelationKindName, list[Element]]:
+        """The elements this one is related to, by kind, in the order asked
+        for. ``kinds=None`` asks for every kind this platform reports. A kind
+        it never reports raises :class:`ActionNotSupportedError` naming it; a
+        reported kind with no targets maps to ``[]``."""
     def text(self) -> Text:
         """This element's text, read by range (UTF-16 offsets). Raises
         ``ActionNotSupportedError`` when the element has no text interface."""

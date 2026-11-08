@@ -50,7 +50,8 @@ fn answer(c: &Capability) -> String {
     if extra.is_empty() {
         word.to_string()
     } else {
-        format!("{word} ({})", extra.join("; "))
+        // A comma, not a semicolon: the prose linter flags semicolons.
+        format!("{word} ({})", extra.join(", "))
     }
 }
 

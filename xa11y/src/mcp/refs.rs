@@ -2,12 +2,12 @@
 //!
 //! MCP is the one surface where a reference must outlive a call: a model
 //! reads a tree, then acts on a node it saw. A `ref` (`c3:17`, node 17 of
-//! capture 3) names exactly that [`Element`], so `action`, `text` and
-//! `table` reach that node or fail with `element_stale`. A ref is never
+//! capture 3) names exactly that [`Element`], so `action`, `text`, `table`
+//! and `relations` reach that node or fail with `element_stale`. A ref is never
 //! re-resolved by name or selector.
 //!
 //! Bounded twice: the table keeps the refs of the last [`MAX_CAPTURES`]
-//! `tree` / `find` results (an older ref fails with `ref_expired`), and each
+//! `tree` / `find` / `relations` results (an older ref fails with `ref_expired`), and each
 //! capture is itself bounded by its tool's node or match cap. The CLI has no
 //! refs: each invocation is a new process with nothing to resolve against.
 

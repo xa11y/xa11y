@@ -617,6 +617,27 @@ pub trait Provider: Send + Sync {
         Err(unsupported("text_attributes_at"))
     }
 
+    // ── Relations ───────────────────────────────────────────────────
+
+    /// The elements `element` is related to, by kind (see
+    /// [`crate::semantics`]). Each requested kind appears once in the result,
+    /// in request order, with an empty list when the element has none.
+    ///
+    /// A kind this platform never reports fails the whole call with
+    /// [`Error::Unsupported`] naming it, so "unsupported" is never read as
+    /// "no relations". Backends report the kind the platform itself reports:
+    /// macOS `AXLinkedUIElements` is [`RelationKind::Linked`], not a guess at
+    /// controls or flows-to.
+    ///
+    /// [`RelationKind::Linked`]: crate::semantics::RelationKind::Linked
+    fn relations(
+        &self,
+        _element: &ElementData,
+        _kinds: &[crate::semantics::RelationKind],
+    ) -> Result<Vec<(crate::semantics::RelationKind, Vec<ElementData>)>> {
+        Err(unsupported("relations"))
+    }
+
     // ── Identity and liveness ───────────────────────────────────────
 
     /// The platform identity of `element`'s node, for equality (see
@@ -843,6 +864,13 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn text_attributes_at(&self, e: &ElementData, offset: u32) -> Result<TextRun> {
         (**self).text_attributes_at(e, offset)
+    }
+    fn relations(
+        &self,
+        e: &ElementData,
+        kinds: &[crate::semantics::RelationKind],
+    ) -> Result<Vec<(crate::semantics::RelationKind, Vec<ElementData>)>> {
+        (**self).relations(e, kinds)
     }
     fn identity(&self, e: &ElementData) -> Result<crate::identity::NodeIdentity> {
         (**self).identity(e)

@@ -38,6 +38,7 @@ EXPECTED_TOOLS = [
     "action",
     "text",
     "table",
+    "relations",
     "click",
     "move",
     "drag",
@@ -426,7 +427,7 @@ def test_the_action_schema_declares_the_geometry_arguments(run_client):
 
 
 def test_the_element_tools_take_a_shell_surface_as_a_target(run_client):
-    for name in ("tree", "find", "action", "text", "table"):
+    for name in ("tree", "find", "action", "text", "table", "relations"):
         shell = _tool(run_client, name).input_schema["properties"]["shell"]
         assert set(shell["enum"]) == SHELL_KINDS, name
         assert "Mutually exclusive with `app`" in shell["description"], name
@@ -480,6 +481,17 @@ def test_a_table_argument_mistake_is_a_fixable_error(run_client):
     assert result.is_error is True
     assert result.structured_content["kind"] == "invalid_arguments"
     assert "--" not in result.structured_content["message"]
+
+
+def test_a_relation_kind_mistake_is_a_fixable_error(run_client):
+    result = run_client(
+        lambda c: c.call_tool(
+            "relations", {"selector": "text_field", "app": "X", "kinds": ["labeled_by"]}
+        )
+    )
+    assert result.is_error is True
+    assert result.structured_content["kind"] == "invalid_arguments"
+    assert "labelled_by" in result.structured_content["message"]
 
 
 # ── Screenshot annotation ────────────────────────────────────────────────────

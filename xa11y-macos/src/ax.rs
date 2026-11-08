@@ -138,6 +138,8 @@ extern "C" {
     fn safe_cf_number_get_type_id() -> u64;
     fn safe_cf_boolean_get_type_id() -> u64;
     fn safe_cf_array_get_type_id() -> u64;
+    fn safe_cf_url_get_type_id() -> u64;
+    fn safe_cf_url_get_string(url: CFTypeRef) -> CFTypeRef;
 
     fn safe_ax_is_process_trusted() -> bool;
 
@@ -349,6 +351,24 @@ fn ax_attr(element: AXUIElementRef, attribute: &str) -> Option<CFTypeRef> {
         Some(value)
     } else {
         None
+    }
+}
+
+/// The string of a borrowed `CFURL` value, or `None` for anything else.
+fn cf_url_string(v: CFTypeRef) -> Option<String> {
+    if v.is_null() {
+        return None;
+    }
+    unsafe {
+        if safe_cf_get_type_id(v) != safe_cf_url_get_type_id() {
+            return None;
+        }
+        let s = safe_cf_url_get_string(v);
+        if s.is_null() || safe_cf_get_type_id(s) != safe_cf_string_get_type_id() {
+            return None;
+        }
+        // Borrowed from the URL (Get rule).
+        Some(CFString::wrap_under_get_rule(s as *const _).to_string())
     }
 }
 
@@ -1270,7 +1290,12 @@ mod attr_idx {
     pub const DISCLOSURE_LEVEL: usize = 22;
     pub const ARIA_POS_IN_SET: usize = 23;
     pub const ARIA_SET_SIZE: usize = 24;
-    pub const COUNT: usize = 25;
+    // Document semantics (#476), in the same batch.
+    pub const ARIA_LIVE: usize = 25;
+    pub const ARIA_ATOMIC: usize = 26;
+    pub const ARIA_RELEVANT: usize = 27;
+    pub const URL: usize = 28;
+    pub const COUNT: usize = 29;
 }
 
 /// Raw values returned by a single batch AX fetch. Values are borrowed
@@ -1313,6 +1338,10 @@ impl BatchAttrs {
             CFString::new("AXDisclosureLevel"),
             CFString::new("AXARIAPosInSet"),
             CFString::new("AXARIASetSize"),
+            CFString::new("AXARIALive"),
+            CFString::new("AXARIAAtomic"),
+            CFString::new("AXARIARelevant"),
+            CFString::new("AXURL"),
         ];
         let ptrs: Vec<CFTypeRef> = attr_names
             .iter()
@@ -1367,6 +1396,11 @@ impl BatchAttrs {
                 None
             }
         }
+    }
+
+    /// Read a value as a URL string (CFURL).
+    fn url(&self, idx: usize) -> Option<String> {
+        cf_url_string(self.vals[idx])
     }
 
     /// Read a value as a bool (CFBoolean).
@@ -1528,6 +1562,11 @@ struct ResolvedAttrs {
     identifier: Option<String>,
     /// Table / collection position attributes (#479).
     rich: rich::PositionAttrs,
+    /// Live-region settings and link target (#476).
+    aria_live: Option<String>,
+    aria_atomic: Option<bool>,
+    aria_relevant: Option<String>,
+    url: Option<String>,
 }
 
 impl ResolvedAttrs {
@@ -1589,6 +1628,10 @@ impl ResolvedAttrs {
                 pos_in_set: batch.integer(attr_idx::ARIA_POS_IN_SET),
                 set_size: batch.integer(attr_idx::ARIA_SET_SIZE),
             },
+            aria_live: batch.string(attr_idx::ARIA_LIVE),
+            aria_atomic: batch.boolean(attr_idx::ARIA_ATOMIC),
+            aria_relevant: batch.string(attr_idx::ARIA_RELEVANT),
+            url: batch.url(attr_idx::URL),
         })
     }
 
@@ -1677,6 +1720,14 @@ impl ResolvedAttrs {
             size: ax_size(element),
             identifier: ax_string(element, "AXIdentifier"),
             rich,
+            aria_live: ax_string(element, "AXARIALive"),
+            aria_atomic: ax_bool(element, "AXARIAAtomic"),
+            aria_relevant: ax_string(element, "AXARIARelevant"),
+            url: ax_attr(element, "AXURL").and_then(|v| {
+                let s = cf_url_string(v);
+                unsafe { safe_cf_release(v) };
+                s
+            }),
         })
     }
 }
@@ -3191,6 +3242,109 @@ fn settle_window_size(
     }
 }
 
+// ── Document semantics (#476) ─────────────────────────────────────────────────
+
+struct AxSemantics {
+    heading_level: Option<u32>,
+    landmark_type: Option<xa11y_core::Landmark>,
+    link_url: Option<String>,
+    live_region: Option<xa11y_core::LiveRegionInfo>,
+}
+
+/// The document semantics in one element's batch read: an `AXHeading`'s
+/// level is its `AXValue`, a landmark's kind its `AXLandmark*` subrole, a
+/// link's target its `AXURL`, and the `AXARIA*` live attributes.
+fn document_semantics(attrs: &ResolvedAttrs, role: Role) -> AxSemantics {
+    let live: xa11y_core::LiveRegionInfo = xa11y_core::LiveRegionParts {
+        politeness: attrs
+            .aria_live
+            .as_deref()
+            .and_then(xa11y_core::Politeness::parse),
+        atomic: attrs.aria_atomic,
+        relevant: attrs.aria_relevant.clone().filter(|r| !r.is_empty()),
+    }
+    .into();
+    AxSemantics {
+        heading_level: (role == Role::Heading)
+            .then_some(attrs.value_int)
+            .flatten()
+            .and_then(|level| u32::try_from(level).ok())
+            .filter(|level| *level > 0),
+        landmark_type: (role == Role::Landmark).then(|| {
+            attrs
+                .subrole_str
+                .as_deref()
+                .and_then(landmark_from_subrole)
+                .unwrap_or(xa11y_core::Landmark::Unknown)
+        }),
+        link_url: (role == Role::Link).then(|| attrs.url.clone()).flatten(),
+        live_region: (!live.is_empty()).then_some(live),
+    }
+}
+
+fn landmark_from_subrole(subrole: &str) -> Option<xa11y_core::Landmark> {
+    use xa11y_core::Landmark;
+    Some(match subrole {
+        "AXLandmarkBanner" => Landmark::Banner,
+        "AXLandmarkComplementary" => Landmark::Complementary,
+        "AXLandmarkContentInfo" => Landmark::ContentInfo,
+        "AXLandmarkForm" => Landmark::Form,
+        "AXLandmarkMain" => Landmark::Main,
+        "AXLandmarkNavigation" => Landmark::Navigation,
+        "AXLandmarkRegion" => Landmark::Region,
+        "AXLandmarkSearch" => Landmark::Search,
+        _ => return None,
+    })
+}
+
+/// The AX attribute holding a relation, and whether it holds one element
+/// (`AXTitleUIElement`) rather than an array. `None` for a kind AX does not
+/// report (see the capability table).
+fn ax_relation_attribute(kind: xa11y_core::RelationKind) -> Option<(&'static str, bool)> {
+    use xa11y_core::RelationKind as K;
+    Some(match kind {
+        K::LabelledBy => ("AXTitleUIElement", true),
+        K::LabelFor => ("AXServesAsTitleForUIElements", false),
+        K::Details => ("AXDetailsElements", false),
+        K::ErrorMessage => ("AXErrorMessageElements", false),
+        K::Owns => ("AXOwns", false),
+        K::Linked => ("AXLinkedUIElements", false),
+        K::DescribedBy
+        | K::DescriptionFor
+        | K::DetailsFor
+        | K::Controls
+        | K::ControlledBy
+        | K::FlowsTo
+        | K::FlowsFrom
+        | K::ErrorFor
+        | K::MemberOf => return None,
+    })
+}
+
+/// One element-valued attribute: `Ok(None)` when absent, an error when the
+/// app did not answer (never read as "no element", tenet 1).
+fn ax_single_element(element: AXUIElementRef, attribute: &str) -> Result<Option<AXElement>> {
+    match read_raw_attr(element, attribute) {
+        RawAttr::Value(v) => {
+            let is_element =
+                unsafe { safe_cf_get_type_id(v) == safe_cf_get_type_id(element as CFTypeRef) };
+            if is_element {
+                Ok(Some(AXElement::from_owned(v as AXUIElementRef)))
+            } else {
+                unsafe { safe_cf_release(v) };
+                Ok(None)
+            }
+        }
+        RawAttr::Absent => Ok(None),
+        RawAttr::Unanswered(code) => Err(Error::Platform {
+            code: code as i64,
+            message: format!(
+                "{attribute} read failed (AXError {code}); the relation is unknown, not empty"
+            ),
+        }),
+    }
+}
+
 // ── Role Mapping ──────────────────────────────────────────────────────────────
 
 /// Whether an AX role/subrole pair is a secure (password) text field.
@@ -3213,7 +3367,7 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         Some("AXSwitch") => return Role::Switch,
         // WebKit exposes <nav>/role="navigation" as AXGroup with this
         // subrole; matches AT-SPI's "navigation" landmark mapping.
-        Some("AXLandmarkNavigation") => return Role::Navigation,
+        Some(sub) if sub.starts_with("AXLandmark") => return Role::Landmark,
         _ => {}
     }
 
@@ -3788,6 +3942,11 @@ fn build_snapshot_data(
         // through ElementParts rather than `for_role`. A new property needs a
         // decision here too, even if the decision is almost always "absent".
         return Ok(ElementParts {
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             role: Role::Unknown,
             name: None,
             value: None,
@@ -3828,6 +3987,7 @@ fn build_snapshot_data(
         };
 
         let role = map_ax_role(&attrs.role_str, attrs.subrole_str.as_deref());
+        let semantics = document_semantics(&attrs, role);
         let password = is_secure_text_field(&attrs.role_str, attrs.subrole_str.as_deref());
 
         // Build raw platform data map before consuming attrs fields.
@@ -4191,6 +4351,11 @@ fn build_snapshot_data(
         let description = xa11y_core::text::strip_bidi_opt(description);
 
         Ok(ElementParts {
+            heading_level: semantics.heading_level,
+            landmark_type: semantics.landmark_type,
+            web_role: None,
+            link_url: semantics.link_url,
+            live_region: semantics.live_region,
             role,
             name,
             value,
@@ -4786,6 +4951,43 @@ impl MacOSProvider {
 }
 
 impl Provider for MacOSProvider {
+    fn relations(
+        &self,
+        element: &ElementData,
+        kinds: &[xa11y_core::RelationKind],
+    ) -> Result<Vec<(xa11y_core::RelationKind, Vec<ElementData>)>> {
+        let attributes = kinds
+            .iter()
+            .map(|k| {
+                ax_relation_attribute(*k)
+                    .map(|a| (*k, a))
+                    .ok_or_else(|| Error::Unsupported {
+                        feature: format!(
+                            "relation {k} on macOS: AX does not report it (controls and flows-to \
+                         arrive together as `linked`)"
+                        ),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let ax = self.get_cached(element.handle)?;
+        let mut out = Vec::with_capacity(attributes.len());
+        for (kind, (attribute, single)) in attributes {
+            let targets = if single {
+                ax_single_element(ax.as_ptr(), attribute)?
+                    .into_iter()
+                    .collect()
+            } else {
+                ax_element_list_strict(ax.as_ptr(), attribute)?
+            };
+            let built = targets
+                .iter()
+                .map(|t| self.build_element_data(t, element.pid))
+                .collect::<Result<Vec<_>>>()?;
+            out.push((kind, built));
+        }
+        Ok(out)
+    }
+
     fn identity(&self, element: &ElementData) -> Result<xa11y_core::NodeIdentity> {
         let ax = self.get_cached(element.handle)?;
         let process = element
@@ -7212,7 +7414,7 @@ mod tests {
         assert_eq!(map_ax_role("AXPopover", None), Role::Group);
         assert_eq!(
             map_ax_role("AXGroup", Some("AXLandmarkNavigation")),
-            Role::Navigation
+            Role::Landmark
         );
         assert_eq!(map_ax_role("AXWindow", Some("AXDialog")), Role::Dialog);
         assert_eq!(

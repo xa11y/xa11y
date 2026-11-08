@@ -14,6 +14,7 @@ pub mod provider;
 pub mod role;
 pub mod screenshot;
 pub mod selector;
+pub mod semantics;
 pub mod shell;
 pub mod table;
 pub mod text;
@@ -56,6 +57,9 @@ pub use role::{unknown_role, Role};
 pub use screenshot::{CaptureMapping, CaptureMappingSegment};
 pub use screenshot::{Screenshot, ScreenshotProvider};
 pub use selector::{Selector, SelectorGroup};
+#[doc(hidden)]
+pub use semantics::LiveRegionParts;
+pub use semantics::{Landmark, LiveRegionInfo, Politeness, RelationKind};
 pub use shell::{ShellSurface, ShellSurfaceKind};
 pub use table::{CellInfo, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
 #[doc(hidden)]

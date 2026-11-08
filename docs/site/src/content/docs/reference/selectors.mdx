@@ -44,8 +44,13 @@ A selector may begin with a role name. Normalized roles are written in
 `tab_group`, `table`, `table_row`, `table_cell`, `toolbar`, `scroll_bar`,
 `scroll_thumb`, `slider`, `image`, `link`, `group`, `dialog`, `alert`,
 `progress_bar`, `tree_item`, `web_area`, `heading`, `separator`, `split_group`,
-`switch`, `spin_button`, `tooltip`, `status`, `navigation`, `window`,
+`switch`, `spin_button`, `tooltip`, `status`, `landmark`, `window`,
 `application`, `unknown`.
+
+Every landmark is `landmark`, and its `landmark_type` attribute says which
+kind: `landmark[landmark_type='navigation']`. The `navigation` role no longer
+exists, and a selector naming it fails with `InvalidSelector` giving that
+replacement.
 
 The mapping from each of these onto the platform's own role vocabulary is in
 [Platform Details](/reference/platform-details/#role-mapping). An element whose
@@ -141,6 +146,10 @@ Element properties, matched against the element's normalized data:
 | `min_value` | Number formatted as a string |
 | `max_value` | Number formatted as a string |
 | `stable_id` | String |
+| `landmark_type` | The ARIA landmark name: `banner`, `complementary`, `contentinfo`, `form`, `main`, `navigation`, `region`, `search`, or `unknown`. |
+| `web_role` | The ARIA role a web page gave the element, as the platform reports it |
+| `url` | A link's target URL |
+| `live` | A live region's politeness: `off`, `polite` or `assertive` |
 | `hidden_reason` | The `snake_case` reason a hidden element gives, such as `scrolled_out`. Absent on a visible element, which then matches nothing. See [hidden reason](/reference/platform-details/#hidden-reason). |
 
 State flags, matched as the strings `'true'` and `'false'`:
@@ -182,7 +191,7 @@ One tri-state flag:
 ### Numeric attributes
 
 Table and collection positions, read from the element's `cell`, `table_row`,
-`collection`, and `table` properties:
+`collection`, and `table` properties, and a heading's level:
 
 | Attribute | Matches | Accepts `"unknown"` |
 | --- | --- | --- |
@@ -195,6 +204,7 @@ Table and collection positions, read from the element's `cell`, `table_row`,
 | `size` | `collection.size` | Yes |
 | `row_count` | `table.row_count` | Yes |
 | `column_count` | `table.column_count` | Yes |
+| `heading_level` | `heading_level`, the level as written: `1` is an h1. | No |
 
 Rules for these attributes:
 

@@ -57,6 +57,8 @@ pub(super) struct TableMeta {
     pub(super) cell: Option<CellInfo>,
     pub(super) table_row: Option<RowInfo>,
     pub(super) collection: Option<CollectionInfo>,
+    pub(super) semantics: Semantics,
+    pub(super) link_url: Option<String>,
 }
 
 /// The offset unit a toolkit's `org.a11y.atspi.Text` speaks.
@@ -141,6 +143,85 @@ pub(super) fn collection_from_attributes(
 }
 
 /// Roles whose elements can sit in a set.
+/// Roles whose object attributes can carry document semantics: heading
+/// level, landmark kind, ARIA role and live-region settings. Live regions sit
+/// on generic sections (`group`) and status / alert elements; a bound keeps
+/// the extra read off everything else.
+fn carries_document_semantics(role: Role) -> bool {
+    matches!(
+        role,
+        Role::Heading
+            | Role::Landmark
+            | Role::Link
+            | Role::Group
+            | Role::Status
+            | Role::Alert
+            | Role::WebArea
+    )
+}
+
+/// Document semantics read from object attributes (#476).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Semantics {
+    pub(crate) heading_level: Option<u32>,
+    pub(crate) landmark_type: Option<xa11y_core::Landmark>,
+    pub(crate) web_role: Option<String>,
+    pub(crate) live_region: Option<xa11y_core::LiveRegionInfo>,
+}
+
+impl Semantics {
+    /// What the role alone says, with no attributes read: a landmark whose
+    /// kind is unknown.
+    pub(crate) fn for_role(role: Role) -> Self {
+        Self {
+            landmark_type: (role == Role::Landmark).then_some(xa11y_core::Landmark::Unknown),
+            ..Self::default()
+        }
+    }
+}
+
+/// Parse the object attributes that carry document semantics:
+///
+/// - `level` on a heading (a label: `1` is h1, kept as reported);
+/// - `xml-roles`, the ARIA role, which also names a landmark's kind;
+/// - `live` / `atomic` / `relevant` on a live region, or their `container-`
+///   forms, which the region's descendants carry.
+pub(crate) fn semantics_from_attributes(role: Role, attrs: &HashMap<String, String>) -> Semantics {
+    let get = |k: &str| attrs.get(k).map(|v| v.trim()).filter(|v| !v.is_empty());
+    let web_role = get("xml-roles").map(str::to_string);
+    let heading_level = if role == Role::Heading {
+        get("level").and_then(|v| v.parse::<u32>().ok())
+    } else {
+        None
+    };
+    let landmark_type = (role == Role::Landmark).then(|| {
+        web_role
+            .as_deref()
+            .and_then(|r| {
+                r.split_whitespace()
+                    .find_map(xa11y_core::Landmark::from_aria_role)
+            })
+            .unwrap_or(xa11y_core::Landmark::Unknown)
+    });
+    let own_or_container = |k: &str| get(k).or_else(|| get(&format!("container-{k}")));
+    let live: xa11y_core::LiveRegionInfo = xa11y_core::LiveRegionParts {
+        politeness: own_or_container("live").and_then(xa11y_core::Politeness::parse),
+        atomic: own_or_container("atomic").and_then(|v| match v {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        }),
+        relevant: own_or_container("relevant").map(str::to_string),
+    }
+    .into();
+    Semantics {
+        heading_level,
+        landmark_type,
+        web_role,
+        live_region: (!live.is_empty()).then_some(live),
+    }
+}
+
 fn is_collection_role(role: Role) -> bool {
     matches!(
         role,
@@ -410,11 +491,27 @@ impl LinuxProvider {
                 .into()
             })
         };
-        let collection = if is_collection_role(role) {
+        // One GetAttributes read serves both the collection position and the
+        // document semantics (#476), and only for roles that can carry them,
+        // so other nodes pay nothing.
+        let attrs = if is_collection_role(role) || carries_document_semantics(role) {
             match self.scan_attributes(aref) {
-                Ok(Some(Some(attrs))) => collection_from_attributes(&attrs),
+                Ok(Some(Some(attrs))) => Some(attrs),
                 _ => None,
             }
+        } else {
+            None
+        };
+        let collection = attrs
+            .as_ref()
+            .filter(|_| is_collection_role(role))
+            .and_then(collection_from_attributes);
+        let semantics = attrs
+            .as_ref()
+            .map(|a| semantics_from_attributes(role, a))
+            .unwrap_or_else(|| Semantics::for_role(role));
+        let link_url = if role == Role::Link && ifaces.hyperlink {
+            self.read_link_url(aref)
         } else {
             None
         };
@@ -423,7 +520,25 @@ impl LinuxProvider {
             cell,
             table_row: None,
             collection,
+            semantics,
+            link_url,
         }
+    }
+
+    /// A link's URL: `Hyperlink.GetURI(0)`. `None` when the toolkit reports
+    /// none (an empty string) or the read fails, like the other per-field
+    /// reads in a snapshot.
+    fn read_link_url(&self, aref: &AccessibleRef) -> Option<String> {
+        let proxy = self
+            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Hyperlink")
+            .ok()?;
+        let uri: String = proxy
+            .call_method("GetURI", &(0i32,))
+            .ok()?
+            .body()
+            .deserialize()
+            .ok()?;
+        Some(uri).filter(|u| !u.is_empty())
     }
 
     fn read_table_info(&self, aref: &AccessibleRef) -> Option<TableInfo> {
@@ -1002,6 +1117,59 @@ fn utf16_last_scalar_start(s: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap as Attrs;
+
+    fn attrs(pairs: &[(&str, &str)]) -> Attrs<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn document_semantics_come_from_object_attributes() {
+        let heading = super::semantics_from_attributes(
+            Role::Heading,
+            &attrs(&[("level", "2"), ("xml-roles", "heading")]),
+        );
+        assert_eq!(heading.heading_level, Some(2));
+        assert_eq!(heading.web_role.as_deref(), Some("heading"));
+        assert_eq!(heading.landmark_type, None);
+
+        let main =
+            super::semantics_from_attributes(Role::Landmark, &attrs(&[("xml-roles", "main")]));
+        assert_eq!(main.landmark_type, Some(xa11y_core::Landmark::Main));
+        let odd = super::semantics_from_attributes(Role::Landmark, &attrs(&[("xml-roles", "x")]));
+        assert_eq!(odd.landmark_type, Some(xa11y_core::Landmark::Unknown));
+
+        // A live region's own settings, and a descendant's inherited ones.
+        let own = super::semantics_from_attributes(
+            Role::Group,
+            &attrs(&[
+                ("live", "polite"),
+                ("atomic", "true"),
+                ("relevant", "additions text"),
+            ]),
+        );
+        let live = own.live_region.expect("live region");
+        assert_eq!(live.politeness, Some(xa11y_core::Politeness::Polite));
+        assert_eq!(live.atomic, Some(true));
+        assert_eq!(live.relevant.as_deref(), Some("additions text"));
+        let inherited = super::semantics_from_attributes(
+            Role::Group,
+            &attrs(&[("container-live", "assertive")]),
+        );
+        assert_eq!(
+            inherited.live_region.and_then(|l| l.politeness),
+            Some(xa11y_core::Politeness::Assertive)
+        );
+
+        // Nothing relevant: nothing reported, and a level on a non-heading
+        // is not a heading level.
+        let plain = super::semantics_from_attributes(Role::Group, &attrs(&[("level", "3")]));
+        assert_eq!(plain, super::Semantics::default());
+    }
+
     use super::*;
 
     #[test]

@@ -1541,6 +1541,8 @@ fn do_check_macos_ffi() -> bool {
         "CGPreflightScreenCaptureAccess",
         "CFEqual",
         "CFHash",
+        "CFURLGetTypeID",
+        "CFURLGetString",
         // The AX family. `AXIsProcessTrusted` was the only one listed, so the
         // wrapper rule AGENTS.md states for "a new CF or AX interop call" was
         // unenforced for every other AX symbol — including the messaging-timeout

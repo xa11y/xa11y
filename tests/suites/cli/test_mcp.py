@@ -379,6 +379,7 @@ def test_tools_list_is_complete_and_deterministic(mcp):
         "action",
         "text",
         "table",
+        "relations",
         "click",
         "move",
         "drag",
@@ -489,6 +490,53 @@ def test_cell_at_without_a_column_is_refused_before_any_lookup(mcp):
     assert result["isError"] is True
     assert result["structuredContent"]["kind"] == "invalid_arguments"
     assert 'requires "row" and "column"' in result["structuredContent"]["message"]
+
+
+RELATION_KINDS = [
+    "labelled_by",
+    "label_for",
+    "described_by",
+    "description_for",
+    "details",
+    "details_for",
+    "controls",
+    "controlled_by",
+    "flows_to",
+    "flows_from",
+    "error_message",
+    "error_for",
+    "owns",
+    "member_of",
+    "linked",
+]
+
+
+def test_the_relations_tool_lists_its_kinds(mcp):
+    relations = _tools_by_name(mcp)["relations"]
+    props = relations["inputSchema"]["properties"]
+    assert props["kinds"]["items"]["enum"] == RELATION_KINDS
+    # `selector` and `ref` are alternatives; nothing else is required.
+    assert not relations["inputSchema"].get("required")
+    assert {"selector", "ref", "kinds", "limit"} <= props.keys()
+    assert "empty list" in relations["description"]
+
+
+@pytest.mark.parametrize(
+    "kinds, needle",
+    [
+        (["labeled_by"], "unknown relation kind"),
+        ([], "omit it"),
+        ("labelled_by", "array of strings"),
+    ],
+)
+def test_relation_kind_mistakes_are_refused_before_any_lookup(mcp, kinds, needle):
+    result = mcp.call_tool(
+        "relations", {"selector": "text_field", "app": "no-such-app", "kinds": kinds}
+    )["result"]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "invalid_arguments", structured
+    assert needle in structured["message"], structured["message"]
 
 
 # ── Shell surfaces ───────────────────────────────────────────────────────────

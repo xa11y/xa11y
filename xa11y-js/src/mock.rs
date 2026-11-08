@@ -27,6 +27,22 @@ pub fn make_test_locator() -> Locator {
     ))
 }
 
+/// Create a mock `Locator` over the document fixture
+/// (`xa11y_core::mock::build_document_provider`): landmarks, headings, a link,
+/// a live region and a labelled text field. Used only from the JS unit tests.
+#[napi(js_name = "_makeTestDocumentLocator")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_document_locator(selector: String) -> Locator {
+    let provider = xa11y::mock::build_document_provider();
+    Locator::from_inner(
+        xa11y::Locator::new(provider as Arc<dyn xa11y::Provider>, None, &selector)
+            .with_timeout(std::time::Duration::from_millis(0)),
+    )
+}
+
 /// Create a mock `Locator` over the table fixture
 /// (`xa11y_core::mock::build_table_provider`): the shared tree plus a table,
 /// a virtualized list, a tree and a text area holding

@@ -10,7 +10,8 @@ Design proposal for the open children of #475:
 | #480 | Text, selection and live-region events | [4](#4-events-480) |
 | #483, #531 | IA2 backend selection, one deadline | [5](#5-cross-cutting-capabilities-deadline-ia2) |
 
-Status: proposal. Nothing here is implemented. Platform facts are from the
+Status: sections 1, 2 and 5 are implemented (see each section's
+"Implemented" notes); 3 and 4 are proposals. Platform facts are from the
 current code (file references are to `main` at `3603341`) and from
 [Core-AAM 1.2](https://www.w3.org/TR/core-aam-1.2/) §3.4–3.5.
 
@@ -404,11 +405,39 @@ except xa11y.ActionNotSupportedError as e:
     print(e)                             # "relation 'described_by' is not exposed by UIA"
 ```
 
+### Implemented
+
+Built as designed, with these specifics:
+
+- Fields: `heading_level`, `landmark_type`, `web_role`, `link_url` and
+  `live_region` on `ElementData` / `ElementParts`, in `xa11y_core::semantics`
+  with `Landmark`, `Politeness`, `LiveRegionInfo` and `RelationKind`.
+  `Role::Navigation` is now `Role::Landmark`, and the selector `navigation`
+  fails with `InvalidSelector` naming `landmark[landmark_type="navigation"]`.
+- Selector attributes: `heading_level` (numeric, `=` only), `landmark_type`,
+  `web_role`, `url` and `live` (the politeness).
+- `Element::relations(kinds)` returns each requested kind once, in request
+  order. An empty `kinds` means every kind the capability table does not mark
+  unsupported, so the table and the call cannot disagree. `capabilities()`
+  gained `property:*` and `relation:*` rows.
+- Linux reads one `GetAttributes` per node, gated by role (headings,
+  landmarks, links, live regions and the web roles that carry them), and
+  shares it with the table read. Answer to open question 1: a role list.
+- Windows marks a group as a landmark from its UIA `LandmarkType` or, when it
+  has none, from a landmark `AriaRole`. AccessKit, and other frameworks
+  without `LandmarkType`, set only the latter.
+- Surfaces: Python and JS getters and `relations()`, the CLI's element line
+  and `xa11y relations SELECTOR [KIND...]`, the MCP element JSON and a
+  `relations` tool whose targets carry refs.
+- The AccessKit adapters publish little of this (see
+  `xa11y/tests/integ/semantics.rs`): no heading level anywhere, landmark kinds
+  on macOS and Windows only, live regions on Windows only, and only
+  `controls` among relations.
+
 ### Open questions
 
-1. Linux `GetAttributes` gating list: accept a role list, or always fetch and
-   eat the cost?
-2. `web_role`: worth exposing raw, or is it a `raw` key?
+1. `web_role`: worth exposing raw, or is it a `raw` key? Exposed as a field
+   for now.
 
 ---
 
