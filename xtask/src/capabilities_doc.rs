@@ -37,15 +37,21 @@ fn answer(c: &Capability) -> String {
         // guess a word for it.
         _ => "UNRENDERED",
     };
-    let mut out = word.to_string();
+    // The note goes in parentheses, not after a colon: the prose linter
+    // reads "Supported: Note" as a capitalised word after a colon, and the
+    // parenthesis keeps the answer word scannable down the column.
+    let mut extra: Vec<String> = Vec::new();
     if let Some(note) = &c.note {
-        out.push_str(": ");
-        out.push_str(&cell(note));
+        extra.push(cell(note));
     }
     if let Some(since) = c.since {
-        out.push_str(&format!(" (since {since})"));
+        extra.push(format!("since {since}"));
     }
-    out
+    if extra.is_empty() {
+        word.to_string()
+    } else {
+        format!("{word} ({})", extra.join("; "))
+    }
 }
 
 /// The generated block, markers included.
@@ -56,12 +62,12 @@ pub fn render() -> Result<String, String> {
         .collect::<Result<_, _>>()?;
     let mut out = String::new();
     out.push_str(BEGIN);
-    out.push_str("\n\n| Feature | Linux (AT-SPI) | macOS | Windows (UIA) |\n");
-    out.push_str("| --- | --- | --- | --- |\n");
+    out.push_str("\n\n| Feature | What it is | Linux (AT-SPI) | macOS | Windows (UIA) |\n");
+    out.push_str("| --- | --- | --- | --- | --- |\n");
     let first = &tables[0];
     for (i, feature) in first.entries().iter().enumerate() {
         out.push_str(&format!(
-            "| `{}`: {}",
+            "| `{}` | {}",
             feature.name,
             cell(feature.description)
         ));
