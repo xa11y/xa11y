@@ -435,7 +435,12 @@ The same action verbs are also available directly on `Element`. A `Locator`
 re-resolves its selector and auto-waits for the element to be visible and
 enabled before acting; an `Element` acts on the snapshot you already captured,
 with no re-resolution and no auto-wait. If the underlying element has been
-destroyed since you fetched it, the call returns an `ElementStale` error.
+destroyed or replaced since you fetched it, the call returns an `ElementStale`
+error.
+
+That error's `reason` is one of `removed`, `process_exited`,
+`process_restarted`, `identity_changed` or `evicted`. No other element is acted
+on in its place.
 
 Reach for `Element` actions when you've already inspected an element, typically
 after `.dump()` or reading `.actions`, and want to act on that same instance.

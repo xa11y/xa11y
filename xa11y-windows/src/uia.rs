@@ -2,9 +2,10 @@
 
 mod rich;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
 
 use windows::core::{implement, Interface, BOOL};
 use windows::Win32::Foundation::*;
@@ -46,53 +47,7 @@ const SYNTHETIC_APP_TAG: u64 = 1 << 63;
 /// flows while preventing repeated enumeration from retaining every UIA COM
 /// object for the lifetime of the process. Synthetic apps are much smaller,
 /// but process churn is unbounded too, so they have their own cap.
-const MAX_CACHED_ELEMENTS: usize = 65_536;
 const MAX_SYNTHETIC_APPS: usize = 4_096;
-
-/// Insertion-order-bounded handle table with refresh-on-update.
-///
-/// Handle values are never reused, so insertion order is enough: an evicted
-/// capability becomes stale and can never accidentally resolve to a newer
-/// object. Updating an existing key refreshes its age, which lets repeated
-/// app enumeration keep a still-live synthetic identity resident while old
-/// process generations age out.
-struct BoundedHandleCache<T> {
-    entries: HashMap<u64, T>,
-    order: VecDeque<u64>,
-    capacity: usize,
-}
-
-impl<T> BoundedHandleCache<T> {
-    fn new(capacity: usize) -> Self {
-        debug_assert!(capacity > 0);
-        Self {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-            capacity,
-        }
-    }
-
-    fn insert(&mut self, handle: u64, value: T) {
-        if self.entries.insert(handle, value).is_some() {
-            self.order.retain(|candidate| *candidate != handle);
-        }
-        self.order.push_back(handle);
-        while self.entries.len() > self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            }
-        }
-    }
-
-    fn get(&self, handle: &u64) -> Option<&T> {
-        self.entries.get(handle)
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
 
 /// True for every handle in the synthetic Application-node tag space.
 fn is_synthetic_handle(handle: u64) -> bool {
@@ -135,7 +90,6 @@ fn cache_synthetic_app_identity(
     // doing so could make a new process inherit an old process's handle.
     let existing = identity.creation_time.and_then(|_| {
         synthetic_apps
-            .entries
             .iter()
             .find_map(|(handle, candidate)| (*candidate == identity).then_some(*handle))
     });
@@ -419,9 +373,10 @@ impl WindowsProvider {
             .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
-            .ok_or(Error::ElementStale {
-                selector: format!("handle:{}", handle),
-            })
+            .ok_or(Error::stale(
+                xa11y_core::StaleReason::Evicted,
+                format!("handle:{}", handle),
+            ))
     }
 
     /// Identity of the synthesized Application node for `handle`, if any.
@@ -453,11 +408,14 @@ impl WindowsProvider {
         }
         self.synthetic_app_identity(handle)
             .map(Some)
-            .ok_or_else(|| Error::ElementStale {
-                selector: format!(
-                    "handle:{handle}; the synthetic Application identity expired, so its pid \
+            .ok_or_else(|| {
+                Error::stale(
+                    xa11y_core::StaleReason::Evicted,
+                    format!(
+                        "handle:{handle}; the synthetic Application identity expired, so its pid \
                      can no longer be resolved safely"
-                ),
+                    ),
+                )
             })
     }
 
@@ -1585,6 +1543,23 @@ fn uia_call<T>(f: impl Fn() -> windows::core::Result<T>) -> Result<T> {
         code: e.code().0 as i64,
         message: e.to_string(),
     })
+}
+
+/// HRESULTs that mean the element, or the process serving it, is gone:
+/// `UIA_E_ELEMENTNOTAVAILABLE`, `RPC_E_DISCONNECTED`, `CO_E_OBJNOTCONNECTED`
+/// and `RPC_S_SERVER_UNAVAILABLE` as an HRESULT.
+fn is_gone_code(code: i64) -> bool {
+    const RPC_E_DISCONNECTED_HR: i32 = 0x8001_0108_u32 as i32;
+    const CO_E_OBJNOTCONNECTED_HR: i32 = 0x8004_01FD_u32 as i32;
+    const RPC_S_SERVER_UNAVAILABLE_HR: i32 = 0x8007_06BA_u32 as i32;
+    [
+        UIA_E_ELEMENTNOTAVAILABLE as i32,
+        RPC_E_DISCONNECTED_HR,
+        CO_E_OBJNOTCONNECTED_HR,
+        RPC_S_SERVER_UNAVAILABLE_HR,
+    ]
+    .iter()
+    .any(|hr| i64::from(*hr) == code)
 }
 
 /// A candidate invalidated during a live tree/query snapshot is no longer
@@ -2827,27 +2802,30 @@ fn validate_synthetic_app_identity(
 ) -> Result<()> {
     match (identity.creation_time, current) {
         (Some(stored), Some(current)) if stored == current => Ok(()),
-        (Some(_), Some(_)) => Err(Error::ElementStale {
-            selector: format!(
+        (Some(_), Some(_)) => Err(Error::stale(
+            xa11y_core::StaleReason::ProcessRestarted,
+            format!(
                 "handle:{handle} (pid {}); the process exited and Windows reused its pid, \
                  so this Application node is stale",
                 identity.pid
             ),
-        }),
-        (None, _) => Err(Error::ElementStale {
-            selector: format!(
+        )),
+        (None, _) => Err(Error::stale(
+            xa11y_core::StaleReason::ProcessRestarted,
+            format!(
                 "handle:{handle} (pid {}); the process identity could not be captured when \
                  this Application node was created, so resolving the pid would be unsafe",
                 identity.pid
             ),
-        }),
-        (Some(_), None) => Err(Error::ElementStale {
-            selector: format!(
+        )),
+        (Some(_), None) => Err(Error::stale(
+            xa11y_core::StaleReason::ProcessRestarted,
+            format!(
                 "handle:{handle} (pid {}); the current process identity could not be verified, \
                  so resolving the pid would be unsafe",
                 identity.pid
             ),
-        }),
+        )),
     }
 }
 
@@ -3971,12 +3949,13 @@ impl WindowsProvider {
                 && crate::uwp::PidFilter::for_pid(identity.pid).owns(hwnd)?
         };
         if !belongs_to_app {
-            return Err(Error::ElementStale {
-                selector: format!(
+            return Err(Error::stale(
+                xa11y_core::StaleReason::IdentityChanged,
+                format!(
                     "handle:{} (pid {}); top-level window HWND was reused by pid {reacquired_pid}",
                     app.handle, identity.pid
                 ),
-            });
+            ));
         }
         // Re-check the process generation after resolving the
         // numeric HWND. HWNDs are reusable too; together these
@@ -4028,6 +4007,93 @@ impl WindowsProvider {
 // scope is a defensive habit, not a requirement: it keeps a coordinate call
 // added to one of them later from needing a scope threaded in first.
 impl Provider for WindowsProvider {
+    fn identity(&self, element: &ElementData) -> Result<xa11y_core::NodeIdentity> {
+        if let Some(app) = self.synthetic_app_identity_checked(element.handle)? {
+            return Ok(xa11y_core::NodeIdentity::from_key(
+                "uia",
+                format!("{}:{:?}", app.pid, app.creation_time),
+                "application",
+            ));
+        }
+        let uia = self.get_cached(element.handle)?;
+        let rid = Self::runtime_id(&uia, element.handle).map_err(|e| match e {
+            Error::Platform { code, .. } if is_gone_code(code) => Error::stale(
+                xa11y_core::StaleReason::Removed,
+                xa11y_core::error::stale_subject(element),
+            ),
+            other => other,
+        })?;
+        if rid.is_empty() {
+            return Err(Error::Unsupported {
+                feature: format!(
+                    "identity of {}: its UIA provider reports no RuntimeId",
+                    xa11y_core::error::stale_subject(element)
+                ),
+            });
+        }
+        // The pid alone can be reused; its creation time names the process
+        // instance. A process that cannot be opened keeps `None`, which still
+        // compares consistently within this session.
+        let process = element.pid.map_or_else(
+            || "-".to_string(),
+            |pid| format!("{pid}:{:?}", process_creation_time(pid)),
+        );
+        let key = rid
+            .iter()
+            .map(|part| part.to_string())
+            .collect::<Vec<_>>()
+            .join(".");
+        Ok(xa11y_core::NodeIdentity::from_key("uia", process, key))
+    }
+
+    fn revalidate(&self, element: &ElementData) -> Result<()> {
+        if let Some(app) = self.synthetic_app_identity_checked(element.handle)? {
+            return validate_synthetic_app_identity(
+                element.handle,
+                app,
+                process_creation_time(app.pid),
+            );
+        }
+        let uia = self.get_cached(element.handle)?;
+        let subject = xa11y_core::error::stale_subject(element);
+        let gone = |code: i64| -> Error {
+            let exited = element
+                .pid
+                .is_some_and(|pid| process_creation_time(pid).is_none());
+            let reason = if exited {
+                xa11y_core::StaleReason::ProcessExited
+            } else {
+                xa11y_core::StaleReason::Removed
+            };
+            Error::stale(reason, format!("{subject} (HRESULT {code:#x})"))
+        };
+        let live = |result: Result<i32>| -> Result<i32> {
+            result.map_err(|e| match e {
+                Error::Platform { code, .. } if is_gone_code(code) => gone(code),
+                other => other,
+            })
+        };
+        // `ElementData::pid` is the owning application's, which for a
+        // hosted window (a UWP frame) is not the element's own process, so
+        // it is not compared: the COM element is bound to its node, and the
+        // control type below catches a reused id.
+        // The role guard compares UIA's own control type, which the snapshot
+        // stored as `control_type_id`, so a mapping refinement (ARIA role,
+        // DataItem cells) cannot make a live node look replaced. Partial
+        // data with no control type carries nothing to compare.
+        let control_type = live(uia_call(|| unsafe { uia.CurrentControlType() }).map(|c| c.0))?;
+        match element.raw.get("control_type_id").and_then(|v| v.as_i64()) {
+            Some(captured) if captured != i64::from(control_type) => Err(Error::stale(
+                xa11y_core::StaleReason::IdentityChanged,
+                format!(
+                    "{subject}; the element now reports UIA control type {control_type}, \
+                     not {captured}"
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
         let dpi = &crate::dpi::DpiScope::enter()?;
         if let Some(identity) = self.synthetic_app_identity_checked(app.handle)? {
@@ -10409,9 +10475,10 @@ mod tests {
                 if code == i64::from(hr.0))
             );
         }
-        let result: Result<()> = Err(Error::ElementStale {
-            selector: "saved App pid was reused".into(),
-        });
+        let result: Result<()> = Err(Error::stale(
+            xa11y_core::StaleReason::ProcessRestarted,
+            "saved App pid was reused",
+        ));
         assert!(matches!(
             live_snapshot(result),
             Err(Error::ElementStale { .. })

@@ -198,6 +198,28 @@ seen = {toolbar_save, focused}          # hashable
 toolbar_save.check_alive()              # raises ElementStaleError, or returns None
 ```
 
+### Implemented
+
+Built as designed, with these specifics:
+
+- `Provider::revalidate` runs before every `Element` action (so `Locator`,
+  the bindings, the CLI and MCP all get it). Its default is no check; the
+  Linux, macOS and Windows backends and the mock implement it. The IA2 source
+  keeps its own retained-identity checks and the default.
+- Role guard compares the *raw* platform role the snapshot stored
+  (`atspi_role`, `ax_role`, `control_type_id`), so a mapping refinement cannot
+  report a live node as replaced.
+- Windows does not compare `ElementData::pid` with the element's process: for
+  hosted windows (UWP frames) it is the owning app's pid, not the element's.
+- macOS process key is the pid alone (no `libc`); `process_exited` is told
+  from `removed` by asking the pid's application element whether it answers.
+- `ElementStale` changed shape: `{ reason, element }` replaces `{ selector }`
+  (breaking for code that matches the variant's fields). Python and JS raise
+  `ElementStaleError`, a subclass of `SelectorNotMatchedError`.
+- Known limit, documented in `xa11y_core::identity` and the integ test: a
+  platform that reuses an id for a new node with the same role (AccessKit on
+  Linux and Windows reuses a `NodeId` for a re-added item) passes the check.
+
 ### Decided
 
 - Bounded cache now (65,536, insertion-order eviction, `evicted` reason).
@@ -851,10 +873,7 @@ Made:
 - **#480** `LiveRegionChanged` is unsupported on Linux.
 - **#482** Default `max_nodes` is 2,000 everywhere.
 - **All** `xa11y.capabilities()`, with a platform and OS-version option:
-  implemented on this branch (section 5).
-
-Recommended, awaiting sign-off:
-
+  implemented in #660 (section 5).
 - **#476** `Role::Landmark` for every landmark plus `landmark_type`;
   `Role::Navigation` removed with a loud selector error (2a-bis).
 - **#480** One `announcement` kind on every platform with `origin`

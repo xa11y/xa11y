@@ -2064,8 +2064,14 @@ mod tests {
             "a closed window's descendant must not resolve a parent"
         );
         assert!(
-            matches!(button.press(), Err(Error::Platform { .. })),
-            "a closed window's descendant must not remain actionable"
+            matches!(
+                button.press(),
+                Err(Error::ElementStale {
+                    reason: crate::error::StaleReason::Removed,
+                    ..
+                })
+            ),
+            "a closed window's descendant must fail stale, not act"
         );
         // `windows_with` on a window is a role error after the app-node
         // unification (a window is not an Application, and the self-inclusion
@@ -2121,8 +2127,14 @@ mod tests {
                 _ => unreachable!(),
             };
             assert!(
-                matches!(err, Error::Platform { .. }),
-                "{action} on a closed window must fail with Platform, got {err:?}"
+                matches!(
+                    err,
+                    Error::ElementStale {
+                        reason: crate::error::StaleReason::Removed,
+                        ..
+                    }
+                ),
+                "{action} on a closed window must fail stale (removed), got {err:?}"
             );
         }
     }
@@ -2415,9 +2427,10 @@ mod tests {
                 let mut stale = self.stale_reads.lock().unwrap_or_else(|e| e.into_inner());
                 if *stale > 0 {
                     *stale -= 1;
-                    return Err(Error::ElementStale {
-                        selector: "web_area".to_string(),
-                    });
+                    return Err(Error::stale(
+                        crate::error::StaleReason::Removed,
+                        "web_area".to_string(),
+                    ));
                 }
             }
             Ok(match e.map(|e| e.handle) {

@@ -543,9 +543,9 @@ gives it selectors to resolve.
 | `enable_web_accessibility` | `app`, `pid` |
 | `tree` | `app`, `pid`, `shell`, `max_depth` |
 | `find` | `selector`, `app`, `pid`, `shell`, `limit` |
-| `action` | `action`, `selector`, `app`, `pid`, `shell`, `value`, `at`, `size` |
-| `text` | `op`, `selector`, `app`, `pid`, `shell`, `start`, `end`, `find`, `occurrence`, `offset`, `unit`, `limit` |
-| `table` | `op`, `selector`, `app`, `pid`, `shell`, `row`, `column`, `limit` |
+| `action` | `action`, `selector` or `ref`, `app`, `pid`, `shell`, `value`, `at`, `size` |
+| `text` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `start`, `end`, `find`, `occurrence`, `offset`, `unit`, `limit` |
+| `table` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `row`, `column`, `limit` |
 | `click` | `x`, `y`, `button`, `count`, `held` |
 | `move` | `x`, `y` |
 | `drag` | `from_x`, `from_y`, `to_x`, `to_y`, `button`, `duration_ms`, `held` |
@@ -564,6 +564,14 @@ gives it selectors to resolve.
 `action` accepts the same verbs as [`xa11y action`](#xa11y-action). `key`
 accepts the same key names as [`xa11y key`](#input-simulation). Selectors are
 the same syntax the library takes; see [Selectors](/reference/selectors/).
+
+Every `tree` node and `find` match carries a `ref` such as `c3:17`. `action`,
+`text` and `table` take one in place of `selector` (and then no `app`, `pid`
+or `shell`), and act on exactly that element. A ref is never re-resolved by
+selector: an element that was removed or replaced fails with `element_stale`
+and a `stale_reason`. The server keeps the refs of its 8 most recent `tree`
+and `find` results, and an older ref fails with `ref_expired`. The command
+line has no refs, because each invocation is a new process.
 
 `shell` takes a kind string, is mutually exclusive with `app`, and combines
 with `pid`. A kind matching several surfaces comes back as an

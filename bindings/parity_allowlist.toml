@@ -66,6 +66,8 @@ opaque = [
     { type = "Capability", reason = "Python exposes a frozen Capability class; JS returns a plain { name, description, support, note, since } object. Same split as Rect: members are covered by the per-binding tests (test_capabilities.py, capabilities.test.js)." },
     { type = "Platform", reason = "Crosses as the identically-spelled strings 'linux' | 'macos' | 'windows' via Platform::to_snake_case / Platform::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
     { type = "Support", reason = "Crosses as the identically-spelled strings 'supported' | 'partial' | 'unsupported' via Support::to_snake_case. See [[types.variant_coverage]]." },
+    { type = "StaleReason", reason = "Crosses as the identically-spelled snake_case strings 'removed' | 'process_exited' | 'process_restarted' | 'identity_changed' | 'evicted', as the `reason` attribute of ElementStaleError in both bindings and the `stale_reason` of an MCP `element_stale` failure. See [[types.variant_coverage]]." },
+    { type = "NodeIdentity", reason = "Not a binding class: Python exposes identity as Element.__eq__ / __hash__ / same_as, JS as Element.sameAs. The identity value itself is session-local and opaque." },
     { type = "Count", reason = "Crosses as an int (Python) / number (JS), or the string 'unknown' in both, matching its serde form." },
     { type = "HeaderKind", reason = "Crosses as the identically-spelled strings 'column' | 'row' via HeaderKind::to_snake_case. See [[types.variant_coverage]]." },
     { type = "TextRange", reason = "Python exposes a frozen, hashable TextRange class (and accepts (start, end) tuples); JS uses plain { start, end } objects. Same split as Rect." },
@@ -85,6 +87,7 @@ opaque = [
 internal = [
     # ── Provider-facing traits: implemented by backends, not called by users ──
     { type = "Provider", reason = "Implemented by platform backends; not user API." },
+    { type = "NativeObject", reason = "Implemented by backends to give a platform object (an AXUIElementRef) an identity; consumers only compare NodeIdentity values." },
     { type = "InputProvider", reason = "Implemented by platform backends; not user API." },
     { type = "ScreenshotProvider", reason = "Implemented by platform backends; not user API." },
     { type = "IntoPoint", reason = "Rust ergonomics trait for accepting (x, y) tuples or Points; bindings take plain numbers." },
@@ -327,6 +330,15 @@ files = [
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "TextScriptName" },
 ]
 [[types.variant_coverage]]
+type = "StaleReason"
+reason = "Each reason crosses as a hand-mapped string: ElementStaleError.reason in Python and JS, and the Python Literal / TypeScript union."
+files = [
+    "xa11y-python/src/lib.rs",
+    "xa11y-js/src/errors.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake", within = "StaleReasonName" },
+    { path = "xa11y-js/index.d.ts", spelling = "snake", within = "StaleReasonName" },
+]
+[[types.variant_coverage]]
 type = "Platform"
 reason = "Crosses as 'linux' | 'macos' | 'windows' through Platform::to_snake_case / Platform::parse; the Python Literal, the TypeScript union and the capability table's per-platform columns are hand-written."
 files = [
@@ -399,6 +411,7 @@ reason = "Both bindings surface the annotation legend on their Screenshot class 
 [python]
 # Core members deliberately not exposed to Python. key = "Type::member".
 rust_only = [
+    { method = "Element::identity", reason = "Identity crosses as Element.__eq__ / __hash__ (and same_as); the NodeIdentity value is opaque and not a binding class." },
     { method = "Capabilities::current", reason = "Folded into the module function capabilities(platform=None, os_version=None): with no arguments it is current(). One name per operation (AGENTS.md: options fold into the primary verb)." },
     { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities(platform, os_version): passing a platform or version is for_platform(). One name per operation." },
     { method = "Text::find_with", reason = "FindOptions folds into find()'s keyword-only occurrence / within parameters (AGENTS.md: options structs fold into the primary verb)." },
@@ -495,6 +508,7 @@ python_only = [
 
 [js]
 rust_only = [
+    { method = "Element::identity", reason = "Identity crosses as Element.sameAs; the NodeIdentity value is opaque and not a binding class." },
     { method = "Capabilities::current", reason = "Folded into the module function capabilities(options?): with no options it is current(). One name per operation (AGENTS.md: options fold into the primary verb)." },
     { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities({ platform, osVersion }). One name per operation." },
     { method = "Text::find_with", reason = "FindOptions folds into find()'s options object ({ occurrence, within }) (AGENTS.md: options structs fold into the primary verb)." },

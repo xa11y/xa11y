@@ -2747,9 +2747,10 @@ mod tests {
                     role: element.role,
                 }),
                 ScrollMode::NoEffect => Ok(()),
-                ScrollMode::StaleOnce if call == 0 => Err(Error::ElementStale {
-                    selector: "list_item".into(),
-                }),
+                ScrollMode::StaleOnce if call == 0 => Err(Error::stale(
+                    crate::error::StaleReason::Removed,
+                    "list_item",
+                )),
                 ScrollMode::StaleOnce => reveal(),
                 ScrollMode::Fails => Err(Error::Platform {
                     code: -1,

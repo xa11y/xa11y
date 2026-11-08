@@ -224,6 +224,20 @@ def test_capabilities_answers_without_touching_an_app(run_client):
     assert fullscreen["support"] == "unsupported" and fullscreen["note"], fullscreen
 
 
+def test_a_ref_and_a_selector_are_exclusive_and_a_stale_ref_is_ref_expired(run_client):
+    """Refs (#481): a malformed or unheld ref is something to fix, not a crash."""
+    both = run_client(
+        lambda c: c.call_tool("action", {"action": "press", "selector": "button", "ref": "c1:0"})
+    )
+    assert both.is_error is True
+    assert both.structured_content["kind"] == "invalid_arguments"
+    unheld = run_client(lambda c: c.call_tool("action", {"action": "press", "ref": "c999:0"}))
+    assert unheld.is_error is True
+    assert unheld.structured_content["kind"] == "ref_expired"
+    assert unheld.structured_content["ref"] == "c999:0"
+    assert unheld.structured_content["delivery"] == "not_delivered"
+
+
 def test_an_argument_mistake_is_reported_as_something_to_fix(run_client):
     """A missing argument should be retryable, not a hard protocol error."""
     result = run_client(lambda c: c.call_tool("find", {"app": "whatever"}))
@@ -436,7 +450,9 @@ def test_the_text_tool_states_its_unit_and_bounds(run_client):
     text = _tool(run_client, "text")
     assert "UTF-16 code unit" in text.description
     props = text.input_schema["properties"]
-    assert set(text.input_schema["required"]) == {"op", "selector"}
+    # `selector` and `ref` are alternatives, so only `op` is required.
+    assert set(text.input_schema["required"]) == {"op"}
+    assert {"selector", "ref"} <= props.keys()
     for key in ("start", "end", "offset", "occurrence", "limit"):
         assert props[key]["type"] == "integer", key
         assert "minimum" in props[key] and "maximum" in props[key], key

@@ -81,6 +81,19 @@ pub enum CliError {
         /// Handles that are open right now, in issue order.
         live: Vec<String>,
     },
+    /// An MCP element `ref` names a capture the server no longer keeps (or
+    /// one it never issued) — exit code 1.
+    ///
+    /// The server keeps the refs of its most recent `tree` / `find` results
+    /// only; `kept` names those captures so the recovery (call `tree` or
+    /// `find` again) is readable off the error (tenet 6). A ref is never
+    /// re-resolved by selector.
+    RefExpired {
+        /// The ref the caller passed.
+        reference: String,
+        /// Captures whose refs are still held, oldest first (`c7`, `c8`, ...).
+        kept: Vec<String>,
+    },
     /// An underlying xa11y operation failed — exit code 1.
     Xa11y(Error),
 }
@@ -94,6 +107,7 @@ impl CliError {
             | CliError::Ambiguous { .. }
             | CliError::AmbiguousShellSurface { .. }
             | CliError::NoSubscription { .. }
+            | CliError::RefExpired { .. }
             | CliError::Xa11y(_) => 1,
         }
     }
@@ -115,7 +129,8 @@ impl CliError {
             CliError::NotFound(_)
             | CliError::Ambiguous { .. }
             | CliError::AmbiguousShellSurface { .. }
-            | CliError::NoSubscription { .. } => Some(crate::Delivery::NotDelivered),
+            | CliError::NoSubscription { .. }
+            | CliError::RefExpired { .. } => Some(crate::Delivery::NotDelivered),
             CliError::Xa11y(e) => Some(e.delivery()),
         }
     }
@@ -163,6 +178,19 @@ impl std::fmt::Display for CliError {
                     f,
                     "subscription \"{id}\" {cause}. Start another with \
                      `events_start`; {open}"
+                )
+            }
+            CliError::RefExpired { reference, kept } => {
+                let held = if kept.is_empty() {
+                    "no captures are held".to_string()
+                } else {
+                    format!("refs are held for captures {}", kept.join(", "))
+                };
+                write!(
+                    f,
+                    "ref \"{reference}\" is not held: the server keeps the refs of its most \
+                     recent `tree` and `find` results only, and never re-resolves one by \
+                     selector. Call `tree` or `find` again for a fresh ref; {held}"
                 )
             }
             CliError::Xa11y(e) => write!(f, "{e}"),

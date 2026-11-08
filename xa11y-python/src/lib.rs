@@ -30,6 +30,7 @@ pyo3::create_exception!(_native, XA11yError, PyException);
 pyo3::create_exception!(_native, PermissionDeniedError, XA11yError);
 pyo3::create_exception!(_native, AccessibilityNotEnabledError, XA11yError);
 pyo3::create_exception!(_native, SelectorNotMatchedError, XA11yError);
+pyo3::create_exception!(_native, ElementStaleError, SelectorNotMatchedError);
 pyo3::create_exception!(_native, ActionNotSupportedError, XA11yError);
 pyo3::create_exception!(_native, TimeoutError, XA11yError);
 pyo3::create_exception!(_native, InvalidSelectorError, XA11yError);
@@ -121,6 +122,20 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
     })
 }
 
+/// The Python spelling of a stale reason (`ElementStaleError.reason`).
+fn stale_reason_name(reason: xa11y::StaleReason) -> &'static str {
+    match reason {
+        xa11y::StaleReason::Removed => "removed",
+        xa11y::StaleReason::ProcessExited => "process_exited",
+        xa11y::StaleReason::ProcessRestarted => "process_restarted",
+        xa11y::StaleReason::IdentityChanged => "identity_changed",
+        xa11y::StaleReason::Evicted => "evicted",
+        // `StaleReason` is `#[non_exhaustive]`; the parity check's variant
+        // coverage fails the build before a new one reaches this arm.
+        other => other.to_snake_case(),
+    }
+}
+
 fn map_to_py_err(e: xa11y::Error) -> PyErr {
     match e {
         xa11y::Error::PermissionDenied { instructions } => {
@@ -144,9 +159,25 @@ fn map_to_py_err(e: xa11y::Error) -> PyErr {
             let py_err = SelectorNotMatchedError::new_err(err.to_string());
             attach_diagnosis_attrs(py_err, Some(selector), None, err.diagnosis())
         }
-        xa11y::Error::ElementStale { selector } => {
-            let py_err = SelectorNotMatchedError::new_err(format!("Element stale: {selector}"));
-            attach_diagnosis_attrs(py_err, Some(selector), None, None)
+        xa11y::Error::ElementStale { reason, element } => {
+            let message = xa11y::Error::stale(reason, element.clone()).to_string();
+            let py_err =
+                attach_diagnosis_attrs(ElementStaleError::new_err(message), None, None, None);
+            // A subclass of SelectorNotMatchedError, so existing handlers keep
+            // catching it; `reason` and `element` say why and what.
+            Python::attach(|py| {
+                let value = py_err.value(py);
+                match value
+                    .setattr("reason", stale_reason_name(reason))
+                    .and_then(|()| value.setattr("element", element))
+                {
+                    Ok(()) => py_err,
+                    Err(set_failed) => {
+                        set_failed.set_cause(py, Some(py_err));
+                        set_failed
+                    }
+                }
+            })
         }
         xa11y::Error::ActionNotSupported { action, role } => {
             ActionNotSupportedError::new_err(format!("{action} not supported on {role}"))
@@ -461,6 +492,47 @@ struct Element {
 
 #[pymethods]
 impl Element {
+    /// Whether ``other`` names the same platform node. Two elements found
+    /// separately compare equal when they are one node; two that merely
+    /// share a role and name do not. ``==`` uses this.
+    ///
+    /// Raises :class:`ElementStaleError` (``reason="evicted"``) when either
+    /// handle is no longer held by the provider.
+    fn same_as(&self, py: Python<'_>, other: PyRef<'_, Element>) -> PyResult<bool> {
+        let a = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let b = xa11y::Element::new(other.inner_data.clone(), other.provider.clone());
+        py.detach(move || a.same_as(&b)).map_err(to_py_err)
+    }
+
+    /// Prove this element still names the node it was found as: the node
+    /// exists, its process is the same instance, and it reports the role it
+    /// had. Raises :class:`ElementStaleError` with the ``reason`` otherwise.
+    ///
+    /// Every action runs this check first, so call it only to test liveness
+    /// without acting.
+    fn check_alive(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.check_alive()).map_err(to_py_err)
+    }
+
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let Ok(other) = other.cast::<Element>() else {
+            return Ok(py.NotImplemented());
+        };
+        let same = self.same_as(py, other.borrow())?;
+        Ok(pyo3::types::PyBool::new(py, same)
+            .to_owned()
+            .into_any()
+            .unbind())
+    }
+
+    fn __hash__(&self, py: Python<'_>) -> PyResult<u64> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.identity())
+            .map(|identity| identity.hash_u64())
+            .map_err(to_py_err)
+    }
+
     /// Get direct children (lazy — each call queries the provider).
     fn children(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
         let provider = self.provider.clone();
@@ -3007,6 +3079,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_exception::<PermissionDeniedError>(m, "PermissionDeniedError")?;
     register_exception::<AccessibilityNotEnabledError>(m, "AccessibilityNotEnabledError")?;
     register_exception::<SelectorNotMatchedError>(m, "SelectorNotMatchedError")?;
+    register_exception::<ElementStaleError>(m, "ElementStaleError")?;
     register_exception::<ActionNotSupportedError>(m, "ActionNotSupportedError")?;
     register_exception::<TimeoutError>(m, "TimeoutError")?;
     register_exception::<InvalidSelectorError>(m, "InvalidSelectorError")?;
@@ -3033,6 +3106,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_stale_elements, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_table_locator, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_input, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_app, m)?)?;
@@ -3108,6 +3182,43 @@ fn _make_test_locator() -> PyResult<Locator> {
     Ok(Locator {
         inner: xa11y::Locator::new(provider as Arc<dyn xa11y::Provider>, None, "application"),
     })
+}
+
+/// An element from the mock tree, found by name, then made stale: the node
+/// is removed (``change="removed"``) or its handle reused for a node with a
+/// different role (``change="replaced"``). A second element of the same node
+/// found before the change is returned too, for identity tests.
+#[pyfunction]
+fn _make_test_stale_elements(
+    py: Python<'_>,
+    name: &str,
+    change: &str,
+) -> PyResult<(Py<Element>, Py<Element>)> {
+    let provider = xa11y::mock::build_provider();
+    let dyn_provider: Arc<dyn xa11y::Provider> = provider.clone();
+    let selector = format!("[name=\"{name}\"]");
+    let found = xa11y::Locator::new(dyn_provider.clone(), None, &selector)
+        .with_timeout(Duration::from_millis(0))
+        .element()
+        .map_err(to_py_err)?;
+    let again = xa11y::Locator::new(dyn_provider.clone(), None, &selector)
+        .with_timeout(Duration::from_millis(0))
+        .element()
+        .map_err(to_py_err)?;
+    match change {
+        "removed" => provider.remove_node(name),
+        "replaced" => provider.replace_node_role(name, xa11y::Role::TextField),
+        "none" => {}
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "change must be removed, replaced or none, got {other:?}"
+            )))
+        }
+    }
+    Ok((
+        make_py_element(py, found.data(), dyn_provider.clone())?,
+        make_py_element(py, again.data(), dyn_provider)?,
+    ))
 }
 
 #[pyfunction]

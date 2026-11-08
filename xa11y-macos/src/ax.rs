@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
 
 use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
@@ -183,6 +184,53 @@ impl Drop for AXElement {
         if !self.0.is_null() {
             unsafe { safe_cf_release(self.0) };
         }
+    }
+}
+
+/// An `AXUIElementRef` as an identity: `CFEqual` compares the underlying
+/// object (two `AXChildren` reads vend different pointers for one element),
+/// and `CFHash` is consistent with it.
+#[derive(Debug)]
+struct AxIdentity(AXElement);
+
+impl std::fmt::Debug for AXElement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AXElement({:p})", self.0)
+    }
+}
+
+impl xa11y_core::NativeObject for AxIdentity {
+    fn object_hash(&self) -> u64 {
+        unsafe { safe_cf_hash(self.0.as_ptr() as CFTypeRef) }
+    }
+    fn same_object(&self, other: &dyn xa11y_core::NativeObject) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<AxIdentity>()
+            .is_some_and(|o| unsafe {
+                safe_cf_equal(self.0.as_ptr() as CFTypeRef, o.0.as_ptr() as CFTypeRef)
+            })
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Whether process `pid` still answers AX at all: its application element
+/// reads `AXRole`. A dead process answers `kAXErrorInvalidUIElement` (or
+/// cannot be messaged).
+fn process_answers_ax(pid: i32) -> bool {
+    let app = AXElement::from_owned(unsafe { safe_ax_create_application(pid) });
+    if app.is_null() {
+        return false;
+    }
+    match read_raw_attr(app.as_ptr(), "AXRole") {
+        RawAttr::Value(v) => {
+            unsafe { safe_cf_release(v) };
+            true
+        }
+        RawAttr::Absent => true,
+        RawAttr::Unanswered(code) => code != AX_ERROR_INVALID_UI_ELEMENT,
     }
 }
 
@@ -3559,27 +3607,10 @@ fn screen_recording_gates_ax(major: u32) -> bool {
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 pub struct MacOSProvider {
-    /// Cached AXElement refs keyed by handle ID.
-    ///
-    /// The map is append-only: a handle is inserted with every snapshot this
-    /// provider builds and removed only when the provider itself drops. Core
-    /// abandons snapshots on several paths (a locator poll that matched but
-    /// was not actionable, `exists` / `count`, a `tree()` walk, and anything
-    /// a binding hands to its garbage collector), so a long-lived process
-    /// accumulates one retained `AXUIElement` per abandoned snapshot,
-    /// unbounded.
-    ///
-    /// There is no per-drop hook to evict from: `ElementData` is a plain
-    /// `Clone` value carrying only the `u64`, so the provider cannot see
-    /// when core is done with a handle. A future fix can either bound this
-    /// map (an LRU / capped cache catches every abandoned entry, at the cost
-    /// of evicting a still-held element under enough churn and making it
-    /// fail with `ElementStale`), or make ownership travel with the value (a
-    /// refcounted lease on `ElementData`, which releases on the last clone
-    /// and lets the map go entirely). Both are larger designs than this
-    /// fix; the leak is tracked as a known limitation here rather than
-    /// worked around with per-call-site release calls.
-    handle_cache: Mutex<HashMap<u64, AXElement>>,
+    /// Handle table: each handle's retained `AXUIElementRef`. Bounded (see
+    /// `xa11y_core::handle_cache`), so a long session cannot grow it without
+    /// limit; an evicted handle fails as `ElementStale` (`evicted`).
+    handle_cache: Mutex<BoundedHandleCache<AXElement>>,
 }
 
 /// Holds a shell-probe messaging-timeout bound, releasing it on drop.
@@ -3632,7 +3663,7 @@ impl MacOSProvider {
         set_global_messaging_timeout()?;
 
         Ok(Self {
-            handle_cache: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
         })
     }
 
@@ -3726,9 +3757,10 @@ impl MacOSProvider {
             .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
-            .ok_or(Error::ElementStale {
-                selector: format!("handle:{}", handle),
-            })
+            .ok_or(Error::stale(
+                xa11y_core::StaleReason::Evicted,
+                format!("handle:{}", handle),
+            ))
     }
 
     /// Build an ElementData from an AXElement, caching the AX handle.
@@ -4754,6 +4786,71 @@ impl MacOSProvider {
 }
 
 impl Provider for MacOSProvider {
+    fn identity(&self, element: &ElementData) -> Result<xa11y_core::NodeIdentity> {
+        let ax = self.get_cached(element.handle)?;
+        let process = element
+            .pid
+            .map_or_else(|| "-".to_string(), |pid| pid.to_string());
+        Ok(xa11y_core::NodeIdentity::from_object(
+            "ax",
+            process,
+            std::sync::Arc::new(AxIdentity(ax)),
+        ))
+    }
+
+    fn revalidate(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        let subject = xa11y_core::error::stale_subject(element);
+        let live_role = match read_raw_attr(ax.as_ptr(), "AXRole") {
+            RawAttr::Value(v) => {
+                let is_string = unsafe { safe_cf_get_type_id(v) == safe_cf_string_get_type_id() };
+                if is_string {
+                    // Adopts the +1 retain; released when the CFString drops.
+                    Some(unsafe { CFString::wrap_under_create_rule(v as *const _) }.to_string())
+                } else {
+                    unsafe { safe_cf_release(v) };
+                    None
+                }
+            }
+            RawAttr::Absent => None,
+            RawAttr::Unanswered(code) => {
+                return Err(match classify_element_churn_code(i64::from(code)) {
+                    ElementChurn::Gone => {
+                        let exited = element
+                            .pid
+                            .and_then(|pid| i32::try_from(pid).ok())
+                            .is_some_and(|pid| !process_answers_ax(pid));
+                        let reason = if exited {
+                            xa11y_core::StaleReason::ProcessExited
+                        } else {
+                            xa11y_core::StaleReason::Removed
+                        };
+                        Error::stale(reason, subject)
+                    }
+                    // A busy or wedged app is not a stale element: report it
+                    // as the platform failure it is.
+                    ElementChurn::Unreachable | ElementChurn::Fatal => Error::Platform {
+                        code: i64::from(code),
+                        message: format!("AXRole read for {subject} failed (AXError {code})"),
+                    },
+                });
+            }
+        };
+        // The guard compares the raw `AXRole` the snapshot stored
+        // (`ax_role`), not the mapped role, so a subrole refinement cannot
+        // make a live element look replaced.
+        match (
+            live_role,
+            element.raw.get("ax_role").and_then(|v| v.as_str()),
+        ) {
+            (Some(live), Some(captured)) if live != captured => Err(Error::stale(
+                xa11y_core::StaleReason::IdentityChanged,
+                format!("{subject}; the element now reports {live}, not {captured}"),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         match element {
             None => {
@@ -6662,9 +6759,10 @@ mod tests {
         );
         // Non-platform errors are never churn.
         assert_eq!(
-            classify_element_churn(&Error::ElementStale {
-                selector: "handle:1".to_string(),
-            }),
+            classify_element_churn(&Error::stale(
+                xa11y_core::StaleReason::Removed,
+                "handle:1".to_string()
+            )),
             ElementChurn::Fatal
         );
         // `kAXErrorNoValue` is not retryable on its own: the process

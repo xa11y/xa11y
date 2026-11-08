@@ -79,6 +79,21 @@ class SelectorNotMatchedError extends XA11yError {
   }
 }
 
+/**
+ * The element no longer names a live node, so nothing was done to it. A
+ * subclass of `SelectorNotMatchedError`, so existing handlers keep catching
+ * it. `reason` says why (`removed`, `process_exited`, `process_restarted`,
+ * `identity_changed`, `evicted`); `element` says what was captured.
+ */
+class ElementStaleError extends SelectorNotMatchedError {
+  constructor(message) {
+    super(message);
+    this.name = 'ElementStaleError';
+    /** @type {string | null} */ this.reason = null;
+    /** @type {string | null} */ this.element = null;
+  }
+}
+
 class ActionNotSupportedError extends XA11yError {
   constructor(message) {
     super(message);
@@ -155,7 +170,7 @@ const CODE_TO_CLASS = {
   XA11Y_PERMISSION_DENIED: PermissionDeniedError,
   XA11Y_ACCESSIBILITY_NOT_ENABLED: AccessibilityNotEnabledError,
   XA11Y_SELECTOR_NOT_MATCHED: SelectorNotMatchedError,
-  XA11Y_ELEMENT_STALE: SelectorNotMatchedError,
+  XA11Y_ELEMENT_STALE: ElementStaleError,
   XA11Y_ACTION_NOT_SUPPORTED: ActionNotSupportedError,
   XA11Y_TEXT_VALUE_NOT_SUPPORTED: ActionNotSupportedError,
   XA11Y_TIMEOUT: TimeoutError,
@@ -223,6 +238,10 @@ function toTypedError(err) {
     typed.candidates = Array.isArray(diagnosis.candidates) ? diagnosis.candidates : [];
     typed.scope = diagnosis.scope ?? null;
     typed.elapsedMs = diagnosis.elapsedMs ?? null;
+    if (typed instanceof ElementStaleError) {
+      typed.reason = diagnosis.reason ?? null;
+      typed.element = diagnosis.element ?? null;
+    }
     if (typed instanceof InvalidTextRangeError) {
       typed.start = diagnosis.start ?? null;
       typed.end = diagnosis.end ?? null;
@@ -915,6 +934,7 @@ const {
   _makeTestActionProbe,
   _makeDisconnectedSubscription,
   _makeTestTextEventSubscription,
+  _makeTestStaleElements,
 } = native;
 // Wrapped, unlike the helpers above: these lookups fail on purpose in the
 // shell tests (no such surface / an ambiguous shell), and a test asserting
@@ -947,6 +967,7 @@ module.exports = {
   PermissionDeniedError,
   AccessibilityNotEnabledError,
   SelectorNotMatchedError,
+  ElementStaleError,
   ActionNotSupportedError,
   TimeoutError,
   InvalidSelectorError,
@@ -962,6 +983,7 @@ module.exports = {
   _makeTestActionProbe,
   _makeDisconnectedSubscription,
   _makeTestTextEventSubscription,
+  _makeTestStaleElements,
   _makeTestShellSurfaces,
   _makeTestShellSurfaceByKind,
   _makeTestAmbiguousShellSurfaceByKind,

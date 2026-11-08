@@ -118,7 +118,9 @@ fn find_test_app_window(
         });
     let windows = match run("app_windows", &mut || provider.app_windows(app)) {
         Ok(windows) => windows,
-        Err(Error::ElementStale { selector }) => {
+        Err(Error::ElementStale {
+            element: selector, ..
+        }) => {
             panic!("{TEST_APP} exited during the test: {selector}")
         }
         Err(e) => panic!("reading {TEST_APP}'s windows failed: {e}"),

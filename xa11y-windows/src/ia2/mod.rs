@@ -48,9 +48,10 @@ fn native(error: windows::core::Error) -> Error {
     }
 }
 fn stale() -> Error {
-    Error::ElementStale {
-        selector: "MSAA/IA2 object identity or owning window".into(),
-    }
+    Error::stale(
+        xa11y_core::StaleReason::Removed,
+        "MSAA/IA2 object identity or owning window",
+    )
 }
 fn unsupported(e: &ElementData, action: &str) -> Error {
     Error::ActionNotSupported {
@@ -892,9 +893,10 @@ impl Ia2Provider {
                         context.role, context.pid, context.handle
                     ),
                 },
-                Error::ElementStale { selector } => Error::ElementStale {
-                    selector: format!("{}[name={name:?}] via IA2: {selector}", context.role),
-                },
+                Error::ElementStale { reason, element } => Error::stale(
+                    reason,
+                    format!("{}[name={name:?}] via IA2: {element}", context.role),
+                ),
                 error => error,
             }
         })

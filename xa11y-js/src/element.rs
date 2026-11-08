@@ -435,6 +435,29 @@ impl Element {
         self.elements_task(|el| el.selected_items())
     }
 
+    // ── Identity and liveness ───────────────────────────────────────────
+
+    /// Whether `other` names the same platform node. Two elements found
+    /// separately compare equal when they are one node; two that merely share
+    /// a role and name do not. Rejects with `ElementStaleError` (reason
+    /// `evicted`) when either handle is no longer held by the provider.
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn same_as(&self, other: &Element) -> AsyncTask<Blocking<bool>> {
+        let a = self.core();
+        let b = other.core();
+        AsyncTask::new(Blocking::new(move || a.same_as(&b)))
+    }
+
+    /// Prove this element still names the node it was found as: the node
+    /// exists, its process is the same instance, and it reports the role it
+    /// had. Rejects with `ElementStaleError` and the `reason` otherwise. Every
+    /// action runs this check first.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn check_alive(&self) -> AsyncTask<Blocking<()>> {
+        let el = self.core();
+        AsyncTask::new(Blocking::new(move || el.check_alive()))
+    }
+
     // ── Actions (act on the captured snapshot — do not re-resolve) ──────
 
     /// Click / invoke this element. Acts on the captured snapshot — does

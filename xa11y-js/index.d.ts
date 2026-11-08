@@ -658,6 +658,28 @@ export class SelectorNotMatchedError extends XA11yError {
   elapsedMs: number | null;
 }
 
+/** Why an element is stale (`ElementStaleError.reason`). */
+export type StaleReasonName =
+  | 'removed'
+  | 'process_exited'
+  | 'process_restarted'
+  | 'identity_changed'
+  | 'evicted';
+
+/**
+ * The element no longer names a live node, so nothing was done to it.
+ *
+ * A subclass of {@link SelectorNotMatchedError}, so existing handlers keep
+ * catching it. xa11y never re-matches a stale element by name: re-resolve with
+ * a locator to act on whatever is there now.
+ */
+export class ElementStaleError extends SelectorNotMatchedError {
+  /** Why the element is stale. */
+  reason: StaleReasonName | null;
+  /** What was captured: `role "name"`, or the handle when that is all the provider still has. */
+  element: string | null;
+}
+
 /** The requested action is not supported on the target element. */
 export class ActionNotSupportedError extends XA11yError {}
 

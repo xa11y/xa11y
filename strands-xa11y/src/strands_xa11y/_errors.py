@@ -53,6 +53,11 @@ _GUIDANCE = {
         "Offsets are UTF-16 code units; get them from find() or range_at() instead of counting characters."
     ),
     "InvalidActionDataError": "The action received an out-of-range value. Check offsets and numeric bounds.",
+    "ElementStaleError": (
+        "The element you read earlier is gone or was replaced ('reason' says which: removed, "
+        "process_exited, process_restarted, identity_changed, evicted), so nothing was done to it. "
+        "xa11y never retargets a similar element. Re-run 'snapshot' and act on what is there now."
+    ),
     "SelectorNotMatchedError": (
         "Nothing matched. The near misses above are the elements that came closest, and the search "
         "scope is what was actually there — usually the name is slightly off, or the element lives "
@@ -70,6 +75,7 @@ _GUIDANCE = {
 }
 
 # Fields carrying xa11y's structured diagnosis, in the order they read best.
+# `reason` / `element` come first for a stale element: they say what changed.
 # `hidden_reason` says why a matched element read visible=False ("scrolled_out",
 # "window_minimized", ...), which is what tells the model whether to scroll or to
 # restore a window. `auto_scroll` says whether the action already tried scrolling
@@ -78,6 +84,10 @@ _GUIDANCE = {
 # `delivery` says whether the failed action may already have taken effect, so
 # the model knows whether retrying is safe or could double-submit.
 _DIAGNOSIS_FIELDS = (
+    # `reason` and `element` are set by ElementStaleError only: why the element
+    # it names is stale, and what it was.
+    "reason",
+    "element",
     "condition",
     "selector",
     "last_observed",

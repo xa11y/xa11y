@@ -133,6 +133,26 @@ class SelectorNotMatchedError(XA11yError):
     """Always ``None`` for this class (present for attribute parity with
     :class:`TimeoutError`)."""
 
+StaleReasonName = Literal[
+    "removed", "process_exited", "process_restarted", "identity_changed", "evicted"
+]
+
+class ElementStaleError(SelectorNotMatchedError):
+    """The element no longer names a live node, so nothing was done to it.
+
+    A subclass of :class:`SelectorNotMatchedError`, so existing handlers keep
+    catching it. xa11y never re-matches a stale element by name: re-resolve
+    with a locator to act on whatever is there now."""
+
+    reason: StaleReasonName
+    """Why: ``"removed"`` (the node is gone), ``"process_exited"``,
+    ``"process_restarted"``, ``"identity_changed"`` (the platform id now
+    names a node with a different role) or ``"evicted"`` (the provider's
+    bounded handle table dropped it)."""
+    element: str
+    """What was captured: ``role "name"``, or the handle when that is all
+    the provider still has."""
+
 class ActionNotSupportedError(XA11yError):
     """The requested action is not supported on the target element."""
 
@@ -915,6 +935,17 @@ class Element:
     @property
     def fullscreen(self) -> bool | None:
         """Whether the window is fullscreen. ``None`` = unknown / not a window."""
+    def same_as(self, other: Element) -> bool:
+        """Whether ``other`` names the same platform node. ``==`` uses this.
+
+        Raises :class:`ElementStaleError` (``reason="evicted"``) when either
+        handle is no longer held by the provider."""
+    def check_alive(self) -> None:
+        """Prove this element still names the node it was found as. Raises
+        :class:`ElementStaleError` with the ``reason`` otherwise. Every action
+        runs this check first."""
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
     def children(self) -> list[Element]:
         """Get direct children (lazy — each call queries the provider)."""
     def parent(self) -> Element | None:

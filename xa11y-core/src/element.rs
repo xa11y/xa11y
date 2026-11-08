@@ -385,61 +385,102 @@ impl Element {
         Ok(out)
     }
 
+    // ── Identity and liveness ───────────────────────────────────────
+
+    /// The platform identity of this element's node. Two elements with equal
+    /// identities name the same node. See [`crate::identity`].
+    ///
+    /// Read from the provider's handle table; fails with
+    /// [`Error::ElementStale`] (reason `evicted`) when the handle is gone.
+    pub fn identity(&self) -> crate::error::Result<crate::identity::NodeIdentity> {
+        self.provider.identity(&self.data)
+    }
+
+    /// Whether `other` names the same platform node as this element.
+    ///
+    /// Elements from different captures of one node compare equal; two
+    /// elements that merely share a role and name do not.
+    pub fn same_as(&self, other: &Element) -> crate::error::Result<bool> {
+        Ok(self.identity()? == other.identity()?)
+    }
+
+    /// Prove this element still names the node it was captured from: the node
+    /// exists, its process is the same instance, and re-reading it gives the
+    /// captured role. Fails with [`Error::ElementStale`] and the reason.
+    ///
+    /// Every action runs this check first, so calling it is only needed to
+    /// test liveness without acting.
+    pub fn check_alive(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)
+    }
+
     // ── Actions ─────────────────────────────────────────────────────
     //
     // Element actions invoke the platform via the captured provider handle —
-    // they do **not** re-resolve the selector. If the underlying element has
-    // been destroyed since this snapshot was taken, the provider returns a
-    // platform-specific "gone" error. For resilient retry-on-change semantics,
-    // use the equivalent method on [`crate::Locator`] instead.
+    // they do **not** re-resolve the selector. Each one first asks the
+    // provider to prove the handle still names the captured node
+    // (`Provider::revalidate`), so a destroyed, replaced or evicted node
+    // fails with `Error::ElementStale` and a reason instead of acting on
+    // whatever the platform id names now. For retry-on-change semantics use
+    // the equivalent method on [`crate::Locator`], which re-resolves.
 
     /// Click / invoke this element via the accessibility action layer.
     pub fn press(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.press(&self.data)
     }
 
     /// Set keyboard focus to this element.
     pub fn focus(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.focus(&self.data)
     }
 
     /// Remove keyboard focus from this element.
     pub fn blur(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.blur(&self.data)
     }
 
     /// Toggle a two- or three-state control (checkbox, switch).
     pub fn toggle(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.toggle(&self.data)
     }
 
     /// Select this element (list item, tab, row).
     pub fn select(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.select(&self.data)
     }
 
     /// Expand a disclosure, menu, combo box, or tree item.
     pub fn expand(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.expand(&self.data)
     }
 
     /// Collapse an expanded element.
     pub fn collapse(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.collapse(&self.data)
     }
 
     /// Open this element's context menu or dropdown.
     pub fn show_menu(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.show_menu(&self.data)
     }
 
     /// Increment a numeric control (slider, spinner) by its platform step.
     pub fn increment(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.increment(&self.data)
     }
 
     /// Decrement a numeric control (slider, spinner) by its platform step.
     pub fn decrement(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.decrement(&self.data)
     }
 
@@ -449,12 +490,14 @@ impl Element {
     /// returns [`Error::ActionNotSupported`](crate::error::Error::ActionNotSupported)
     /// otherwise; `Component.ScrollTo` on Linux; `ScrollItemPattern` on Windows.
     pub fn scroll_into_view(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.scroll_into_view(&self.data)
     }
 
     /// Set the text value of this element. Replaces the entire value rather
     /// than inserting at the caret — use [`Element::type_text`] for insertion.
     pub fn set_value(&self, value: &str) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.set_value(&self.data, value)
     }
 
@@ -467,6 +510,7 @@ impl Element {
                 message: format!("set_numeric_value requires a finite value, got {}", value),
             });
         }
+        self.provider.revalidate(&self.data)?;
         self.provider.set_numeric_value(&self.data, value)
     }
 
@@ -474,6 +518,7 @@ impl Element {
     ///
     /// Uses the platform accessibility API — never simulates keyboard events.
     pub fn type_text(&self, text: &str) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.type_text(&self.data, text)
     }
 
@@ -484,6 +529,7 @@ impl Element {
     /// the text, or splitting a surrogate pair.
     pub fn select_text(&self, start: u32, end: u32) -> crate::error::Result<()> {
         crate::text_api::TextRange::new(start, end)?;
+        self.provider.revalidate(&self.data)?;
         self.provider.set_text_selection(&self.data, start, end)
     }
 
@@ -579,7 +625,10 @@ impl Element {
             // "move_to"/"resize_to" need payloads the generic path cannot
             // carry; the providers reject them surfaceably (InvalidActionData),
             // before any OS call.
-            _ => self.provider.perform_action(&self.data, action),
+            _ => {
+                self.provider.revalidate(&self.data)?;
+                self.provider.perform_action(&self.data, action)
+            }
         }
     }
 
@@ -641,12 +690,14 @@ impl Element {
     /// Activate this window: bring it to the foreground and give it focus.
     pub fn activate(&self) -> crate::error::Result<()> {
         self.require_window_like("activate")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.activate(&self.data)
     }
 
     /// Minimize this window.
     pub fn minimize(&self) -> crate::error::Result<()> {
         self.require_window_like("minimize")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.minimize(&self.data)
     }
 
@@ -659,6 +710,7 @@ impl Element {
     /// fullscreen.
     pub fn maximize(&self) -> crate::error::Result<()> {
         self.require_window_like("maximize")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.maximize(&self.data)
     }
 
@@ -671,6 +723,7 @@ impl Element {
     /// (Windows/Linux) report it as unsupported.
     pub fn enter_fullscreen(&self) -> crate::error::Result<()> {
         self.require_window_like("enter_fullscreen")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.enter_fullscreen(&self.data)
     }
 
@@ -678,12 +731,14 @@ impl Element {
     /// fullscreen).
     pub fn restore(&self) -> crate::error::Result<()> {
         self.require_window_like("restore")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.restore(&self.data)
     }
 
     /// Close this window.
     pub fn close(&self) -> crate::error::Result<()> {
         self.require_window_like("close")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.close(&self.data)
     }
 
@@ -691,6 +746,7 @@ impl Element {
     /// (physical pixels on Windows, logical points elsewhere).
     pub fn move_to(&self, x: i32, y: i32) -> crate::error::Result<()> {
         self.require_window_like("move_to")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.move_to(&self.data, x, y)
     }
 
@@ -706,6 +762,7 @@ impl Element {
             });
         }
         self.require_window_like("resize_to")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.resize_to(&self.data, width, height)
     }
 }
@@ -1642,5 +1699,85 @@ mod tests {
             let back: HiddenReason = serde_json::from_str(&json).expect("round-trips");
             assert_eq!(back, reason);
         }
+    }
+
+    // ── Identity and liveness (#481) ────────────────────────────────
+
+    #[test]
+    fn two_captures_of_one_node_are_the_same_and_others_are_not() {
+        let provider = build_provider();
+        let back = find_element(&provider, r#"button[name="Back"]"#);
+        let back_again = find_element(&provider, r#"[name="Back"]"#);
+        let forward = find_element(&provider, r#"button[name="Forward"]"#);
+        assert!(back.same_as(&back_again).expect("identity"));
+        assert!(!back.same_as(&forward).expect("identity"));
+        let set: std::collections::HashSet<_> = [&back, &back_again, &forward]
+            .iter()
+            .map(|e| e.identity().expect("identity"))
+            .collect();
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn an_action_on_a_removed_node_fails_stale_and_reaches_nothing() {
+        let provider = build_provider();
+        let back = find_element(&provider, r#"button[name="Back"]"#);
+        back.check_alive().expect("alive before removal");
+        let before = provider.actions().len();
+        provider.remove_node("Back");
+        let err = back.press().expect_err("removed node must not be pressed");
+        assert!(
+            matches!(
+                &err,
+                Error::ElementStale {
+                    reason: crate::error::StaleReason::Removed,
+                    element,
+                } if element.contains("Back")
+            ),
+            "{err:?}"
+        );
+        assert_eq!(err.delivery(), crate::error::Delivery::NotDelivered);
+        assert_eq!(
+            provider.actions().len(),
+            before,
+            "nothing reached the provider"
+        );
+        assert!(
+            err.to_string().starts_with("Element stale (removed)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_reused_id_with_another_role_is_identity_changed_not_retargeted() {
+        let provider = build_provider();
+        let back = find_element(&provider, r#"button[name="Back"]"#);
+        provider.replace_node_role("Back", Role::TextField);
+        let before = provider.actions().len();
+        for result in [back.press(), back.focus(), back.check_alive()] {
+            let err = result.expect_err("a different node must not be acted on");
+            assert!(
+                matches!(
+                    err,
+                    Error::ElementStale {
+                        reason: crate::error::StaleReason::IdentityChanged,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+        }
+        assert_eq!(provider.actions().len(), before);
+    }
+
+    #[test]
+    fn perform_action_checks_liveness_too() {
+        let provider = build_provider();
+        let back = find_element(&provider, r#"button[name="Back"]"#);
+        provider.remove_node("Back");
+        assert!(matches!(
+            back.perform_action("custom_thing"),
+            Err(Error::ElementStale { .. })
+        ));
     }
 }

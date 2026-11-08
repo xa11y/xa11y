@@ -76,6 +76,21 @@ fn diagnosis_json(
     })
 }
 
+/// The JS spelling of a stale reason (`ElementStaleError.reason`), the same
+/// snake_case string as Python's.
+fn stale_reason_name(reason: xa11y::StaleReason) -> &'static str {
+    match reason {
+        xa11y::StaleReason::Removed => "removed",
+        xa11y::StaleReason::ProcessExited => "process_exited",
+        xa11y::StaleReason::ProcessRestarted => "process_restarted",
+        xa11y::StaleReason::IdentityChanged => "identity_changed",
+        xa11y::StaleReason::Evicted => "evicted",
+        // `StaleReason` is `#[non_exhaustive]`; variant coverage in the
+        // parity check fails the build before a new one reaches this arm.
+        other => other.to_snake_case(),
+    }
+}
+
 /// Convert an `xa11y::Error` into a `napi::Error`. The `reason` field doubles
 /// as both the human-readable message (prefixed by the code tag) and a machine
 /// code that the JS wrapper parses out.
@@ -92,9 +107,7 @@ pub fn map_err(e: xa11y::Error) -> Error {
         // structured payload below carries the same fields for programmatic
         // access.
         xa11y::Error::SelectorNotMatched { .. } => (codes::SELECTOR_NOT_MATCHED, e.to_string()),
-        xa11y::Error::ElementStale { selector } => {
-            (codes::ELEMENT_STALE, format!("Element stale: {selector}"))
-        }
+        xa11y::Error::ElementStale { .. } => (codes::ELEMENT_STALE, e.to_string()),
         xa11y::Error::ActionNotSupported { action, role } => (
             codes::ACTION_NOT_SUPPORTED,
             format!("{action} not supported on {role}"),
@@ -145,8 +158,11 @@ pub fn map_err(e: xa11y::Error) -> Error {
             None,
             e.diagnosis(),
         )),
-        xa11y::Error::ElementStale { selector } => {
-            Some(diagnosis_json(delivery, Some(selector), None, None))
+        xa11y::Error::ElementStale { reason, element } => {
+            let mut payload = diagnosis_json(delivery, None, None, None);
+            payload["reason"] = serde_json::json!(stale_reason_name(*reason));
+            payload["element"] = serde_json::json!(element);
+            Some(payload)
         }
         xa11y::Error::Timeout { elapsed, .. } => {
             let d = e.diagnosis();

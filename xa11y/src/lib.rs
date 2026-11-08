@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 pub use xa11y_core::{
     App, AutoScrollOutcome, Delivery, Diagnosis, Element, ElementData, ElementState, Error, Event,
     EventKind, HiddenReason, Locator, PointerTargetDiagnosis, RawPlatformData, Rect, Result, Role,
-    ShellSurface, ShellSurfaceKind, StateFlag, StateSet, Subscription, SubscriptionIter,
-    TextChange, TextChangeKind, Toggled, TreeNode,
+    ShellSurface, ShellSurfaceKind, StaleReason, StateFlag, StateSet, Subscription,
+    SubscriptionIter, TextChange, TextChangeKind, Toggled, TreeNode,
 };
 
 // `#[doc(hidden)]`: the provider-side construction contracts. Re-exported so
@@ -43,6 +43,10 @@ pub use xa11y_core::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_V
 
 // Re-export the capability table (see `xa11y_core::capabilities`).
 pub use xa11y_core::{Capabilities, Capability, Platform, Support};
+
+// Element identity (see `xa11y_core::identity`).
+pub use xa11y_core::identity;
+pub use xa11y_core::{NativeObject, NodeIdentity};
 
 // Re-export input simulation surface.
 pub use xa11y_core::input;

@@ -119,6 +119,32 @@ impl MockProvider {
             .clone()
     }
 
+    /// Remove the node named `name` from the tree, as an app that destroyed
+    /// the widget would. An element captured before the call is then stale
+    /// ([`StaleReason::Removed`](crate::StaleReason::Removed)).
+    pub fn remove_node(&self, name: &str) {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = Self::index_named(&nodes, name);
+        nodes[idx].closed = true;
+    }
+
+    /// Give the node named `name` a different role under the same handle, as
+    /// a platform that reused the id for a new node would. An element captured
+    /// before the call is then stale
+    /// ([`StaleReason::IdentityChanged`](crate::StaleReason::IdentityChanged)).
+    pub fn replace_node_role(&self, name: &str, role: Role) {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = Self::index_named(&nodes, name);
+        nodes[idx].data.role = role;
+    }
+
+    fn index_named(nodes: &[MockNode], name: &str) -> usize {
+        nodes
+            .iter()
+            .position(|n| n.data.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("mock fixture has no node named {name:?}"))
+    }
+
     /// Script how the node named `name` looks to successive tree reads.
     ///
     /// Each time `get_children` reports the node, the next frame's bounds and
@@ -341,6 +367,44 @@ impl Provider for MockProvider {
             .iter()
             .map(|(kind, idx)| (*kind, nodes[*idx].data.clone()))
             .collect())
+    }
+
+    fn identity(&self, el: &ElementData) -> Result<crate::identity::NodeIdentity> {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        if el.handle as usize >= nodes.len() {
+            return Err(Error::stale(
+                crate::StaleReason::Evicted,
+                format!("handle:{}", el.handle),
+            ));
+        }
+        Ok(crate::identity::NodeIdentity::from_key(
+            "mock",
+            el.pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
+            el.handle.to_string(),
+        ))
+    }
+
+    fn revalidate(&self, el: &ElementData) -> Result<()> {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let described = crate::error::stale_subject(el);
+        let Some(node) = nodes.get(el.handle as usize) else {
+            return Err(Error::stale(crate::StaleReason::Evicted, described));
+        };
+        // A node under a closed window is gone with it.
+        let mut cursor = Some(el.handle as usize);
+        while let Some(i) = cursor {
+            if nodes[i].closed {
+                return Err(Error::stale(crate::StaleReason::Removed, described));
+            }
+            cursor = nodes[i].parent;
+        }
+        if node.data.role != el.role {
+            return Err(Error::stale(
+                crate::StaleReason::IdentityChanged,
+                format!("{described}; the handle now names a {}", node.data.role),
+            ));
+        }
+        Ok(())
     }
 
     fn press(&self, el: &ElementData) -> Result<()> {

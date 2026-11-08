@@ -333,3 +333,42 @@ pub fn make_test_text_event_subscription() -> NativeSubscription {
         provider as Arc<dyn xa11y::Provider>,
     )
 }
+
+/// Two elements of one mock node found by `name`, after `change` made the
+/// node stale: `removed`, `replaced` (same handle, different role) or `none`.
+/// Used only from the JS unit tests — not part of the public API.
+#[napi(js_name = "_makeTestStaleElements")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_stale_elements(
+    name: String,
+    change: String,
+) -> napi::Result<Vec<crate::element::Element>> {
+    let provider = xa11y::mock::build_provider();
+    let dyn_provider: Arc<dyn xa11y::Provider> = provider.clone();
+    let selector = format!("[name=\"{name}\"]");
+    let find = || {
+        xa11y::Locator::new(dyn_provider.clone(), None, &selector)
+            .with_timeout(std::time::Duration::from_millis(0))
+            .element()
+            .map_err(crate::map_err)
+    };
+    let (found, again) = (find()?, find()?);
+    match change.as_str() {
+        "removed" => provider.remove_node(&name),
+        "replaced" => provider.replace_node_role(&name, xa11y::Role::TextField),
+        "none" => {}
+        other => {
+            return Err(napi::Error::new(
+                napi::Status::InvalidArg,
+                format!("change must be removed, replaced or none, got {other:?}"),
+            ))
+        }
+    }
+    Ok(vec![
+        crate::element::Element::from_core(found),
+        crate::element::Element::from_core(again),
+    ])
+}

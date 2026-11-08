@@ -436,7 +436,9 @@ def test_the_text_tool_states_its_offset_unit_and_operations(mcp):
         "runs",
     ]
     assert props["unit"]["enum"] == ["character", "word", "line", "paragraph"]
-    assert set(text["inputSchema"]["required"]) == {"op", "selector"}
+    # `selector` and `ref` are alternatives, so only `op` is required.
+    assert set(text["inputSchema"]["required"]) == {"op"}
+    assert {"selector", "ref"} <= text["inputSchema"]["properties"].keys()
 
 
 def test_the_table_tool_lists_its_lookups(mcp):
@@ -1406,6 +1408,25 @@ def test_bounds_and_center_are_reported_together_or_not_at_all(mcp, app_pid):
         bounds, center = match["bounds"], match["center"]
         assert center["x"] == bounds["x"] + bounds["width"] // 2, match
         assert center["y"] == bounds["y"] + bounds["height"] // 2, match
+
+
+def test_an_action_by_ref_reaches_the_element_find_returned(mcp, app_pid):
+    """Refs (#481): a match's `ref` acts on exactly that element, with no wait
+    and no re-resolution, and `text`/`table` take one the same way."""
+    found = mcp.call_tool("find", {"pid": app_pid, "selector": "button", "limit": 1})["result"]
+    assert found["isError"] is False, found["content"]
+    match = found["structuredContent"]["matches"][0]
+    reference = match["ref"]
+    assert reference.startswith("c") and ":" in reference, match
+    pressed = mcp.call_tool("action", {"action": "focus", "ref": reference})["result"]
+    if pressed["isError"]:
+        # A button that cannot take focus is a legitimate answer; anything
+        # else (a stale or expired ref) is a failure of the ref itself.
+        assert pressed["structuredContent"]["kind"] == "action_not_supported", pressed
+    else:
+        assert pressed["structuredContent"] == {"ok": True, "action": "focus", "ref": reference}
+    tree = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 1})["result"]
+    assert tree["structuredContent"]["tree"]["ref"].startswith("c")
 
 
 def test_find_respects_its_limit_and_flags_the_truncation(mcp, app_pid):

@@ -5,6 +5,9 @@ pub mod element;
 pub mod error;
 pub mod event;
 pub mod event_provider;
+#[doc(hidden)]
+pub mod handle_cache;
+pub mod identity;
 pub mod input;
 pub mod locator;
 pub mod provider;
@@ -34,11 +37,14 @@ pub use element::{
 // the backend crates can reach it. Not public API — see its docs.
 #[doc(hidden)]
 pub use element::{ElementParts, StateParts};
-pub use error::{AutoScrollOutcome, Delivery, Diagnosis, Error, PointerTargetDiagnosis, Result};
+pub use error::{
+    AutoScrollOutcome, Delivery, Diagnosis, Error, PointerTargetDiagnosis, Result, StaleReason,
+};
 pub use event::{ElementState, Event, EventKind, StateFlag, TextChange, TextChangeKind};
 #[doc(hidden)]
 pub use event::{EventParts, TextChangeParts};
 pub use event_provider::{CancelHandle, EventReceiver, RecvStatus, Subscription, SubscriptionIter};
+pub use identity::{NativeObject, NodeIdentity};
 pub use input::{
     anchor_point, point_for, Anchor, ClickOptions, ClickTarget, DragOptions, InputProvider,
     InputSim, IntoPoint, Key, Keyboard, Mouse, MouseButton, Point, ScrollDelta,

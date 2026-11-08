@@ -577,10 +577,8 @@ fn error_display() {
     let err = Error::selector_not_matched("button[name=\"Submit\"]");
     assert!(format!("{}", err).contains("Submit"));
 
-    let err = Error::ElementStale {
-        selector: "button".to_string(),
-    };
-    assert!(format!("{}", err).contains("stale"));
+    let err = Error::stale(xa11y::StaleReason::Removed, "button");
+    assert_eq!(format!("{}", err), "Element stale (removed): button");
 
     let err = Error::ActionNotSupported {
         action: "toggle".to_string(),

@@ -77,6 +77,14 @@ refused with an `ambiguous_selector` failure that lists the candidates, and no
 element is touched. Narrow it with an attribute filter or pick one with
 `:nth(n)`.
 
+To act on an element you have already read, pass its `ref` instead of a
+selector. Every `tree` node and `find` match carries one, such as `c3:17`, and
+`action`, `text` and `table` accept it. A ref names exactly that element and
+acts at once, without the wait. Buttons that share the name "Save" keep
+different refs. When the element is gone or replaced, the call fails with
+`element_stale` and a `stale_reason` instead of finding a similar one. The server keeps the refs of its 8 most recent `tree`
+and `find` results.
+
 `action` auto-waits. It polls until the selector matches one element that is
 visible and enabled, then acts on that element. The window verbs and
 `scroll-into-view` wait only for enabled, because a minimized window or a
@@ -169,7 +177,8 @@ diagnosis before retrying.
 | `ambiguous_selector` | The selector matched several elements where one is required. | Narrow it with an attribute filter or `:nth(n)`. |
 | `ambiguous_shell_surface` | Several shell surfaces of the requested kind exist. | Pass the `pid` of the one you mean, from the candidates. |
 | `timeout` | An auto-wait ran out before its condition held. | Read `last_observed`. "never matched" means the selector is wrong. A state such as `visible=false` means the element exists and cannot be acted on yet. |
-| `element_stale` | The element vanished between being found and being acted on. | Run the lookup again. |
+| `element_stale` | The element is gone or replaced; `stale_reason` says which (`removed`, `process_exited`, `process_restarted`, `identity_changed`, `evicted`). Nothing was done to it. | Read the tree again and act on what is there now. |
+| `ref_expired` | The `ref` belongs to a `tree` or `find` result the server no longer keeps. | Call `tree` or `find` again for a fresh ref. |
 | `action_not_supported` | The element cannot perform this verb. | Pick another verb from the element's properties. |
 | `text_value_not_supported` | The platform cannot set text on this element. | Use `type-text`, or the `type` tool after focusing the element. |
 | `invalid_selector` | The selector failed to parse. | Fix the syntax the message points to. |
