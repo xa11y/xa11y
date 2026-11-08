@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 import xa11y
 
 
@@ -58,14 +60,15 @@ def test_the_depth_limit_cuts_with_the_real_child_count(app):
 
 
 def test_a_captured_element_is_the_node_read(app):
-    cap = app.capture(max_depth=6, max_nodes=2000)
-    buttons = [n for n in cap.nodes if n.role == "button"]
-    assert buttons, "the test app has buttons"
-    button = buttons[0].element
-    assert button.same_as(button)
-    button.check_alive()
-    found = app.locator("button").elements()
-    assert any(button.same_as(f) for f in found)
+    button = app.locator("button").elements()[0]
+    cap = app.capture(max_nodes=20000)
+    if cap.truncated.by_nodes:
+        pytest.skip("the app tree is larger than the capture limit")
+    matches = [n for n in cap.nodes if n.element.same_as(button)]
+    assert len(matches) == 1, "the capture holds the node the locator found, once"
+    captured = matches[0].element
+    assert captured.role == "button"
+    captured.check_alive()
 
 
 def test_text_detail_reads_document_text(app):
@@ -73,5 +76,7 @@ def test_text_detail_reads_document_text(app):
     texts = [n.text for n in cap.nodes if n.text is not None]
     for text in texts:
         assert len(text.content.encode()) <= 4096
-        assert text.truncated == (len(text.content.encode("utf-16-le")) // 2 < text.length)
+        assert text.truncated == (
+            len(text.content.encode("utf-16-le")) // 2 < text.length
+        )
     assert sum(len(t.content.encode()) for t in texts) <= 4096
