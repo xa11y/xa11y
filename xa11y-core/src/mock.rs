@@ -412,11 +412,16 @@ impl Provider for MockProvider {
         el: &ElementData,
         kinds: &[crate::semantics::RelationKind],
     ) -> Result<Vec<(crate::semantics::RelationKind, Vec<ElementData>)>> {
-        // The mock reports every kind except `linked`, so the unsupported path
-        // is testable too.
+        // The mock reports every kind except `linked` where the running
+        // platform's table says it is never reported (Linux, Windows), so the
+        // unsupported path is testable and "every supported kind" agrees with
+        // the table on each OS.
+        let linked_unsupported = crate::Capabilities::current()
+            .and_then(|c| c.support("relation:linked"))
+            .is_ok_and(|s| s == crate::Support::Unsupported);
         if let Some(kind) = kinds
             .iter()
-            .find(|k| **k == crate::semantics::RelationKind::Linked)
+            .find(|k| linked_unsupported && **k == crate::semantics::RelationKind::Linked)
         {
             return Err(Error::Unsupported {
                 feature: format!("relation {kind} on the mock provider"),

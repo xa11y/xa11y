@@ -10,6 +10,7 @@ const {
   InvalidActionDataError,
   InvalidSelectorError,
   _makeTestDocumentLocator,
+  capabilities,
 } = require('../../index.js');
 
 const one = (selector) => _makeTestDocumentLocator(selector).element();
@@ -49,6 +50,11 @@ test('relations come back by kind, in request order', async () => {
   assert.equal(rel[1].elements[0].name, 'Email address');
   assert.equal(rel[0].elements[0].name, 'We never share it');
   assert.deepEqual(rel[2].elements, []);
-  await assert.rejects(field.relations(['linked']), ActionNotSupportedError);
+  // `linked` is macOS-only; elsewhere the mock refuses it, as the platform would.
+  if (capabilities().support('relation:linked') === 'unsupported') {
+    await assert.rejects(field.relations(['linked']), ActionNotSupportedError);
+  } else {
+    assert.deepEqual(await field.relations(['linked']), [{ kind: 'linked', elements: [] }]);
+  }
   assert.throws(() => field.relations(['labeled_by']), InvalidActionDataError);
 });

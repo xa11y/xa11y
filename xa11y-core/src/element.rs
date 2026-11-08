@@ -1905,10 +1905,14 @@ mod tests {
         assert_eq!(rel[1].1[0].name.as_deref(), Some("Email address"));
         assert_eq!(rel[0].1[0].name.as_deref(), Some("We never share it"));
         assert!(rel[2].1.is_empty(), "supported but empty is an empty list");
-        assert!(matches!(
-            field.relations(&[K::Linked]),
-            Err(Error::Unsupported { .. })
-        ));
+        // `linked` is macOS-only; elsewhere the mock refuses it, as the
+        // platform would.
+        let linked = field.relations(&[K::Linked]);
+        if cfg!(target_os = "macos") {
+            assert!(linked.is_ok(), "{linked:?}");
+        } else {
+            assert!(matches!(linked, Err(Error::Unsupported { .. })));
+        }
         // The labelled-by target is actionable: it is an Element.
         rel[1].1[0].check_alive().expect("a live element");
     }

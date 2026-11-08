@@ -5777,6 +5777,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))] // `linked` is reported on macOS
     fn relations_of_an_unreported_kind_is_unsupported() {
         let err = tool_relations_parsed(
             &document_target(),

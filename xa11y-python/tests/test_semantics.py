@@ -48,7 +48,11 @@ def test_relations_by_kind_in_request_order():
 
 def test_relations_errors():
     field = one('text_field[name="Email"]')
-    with pytest.raises(xa11y.ActionNotSupportedError, match="linked"):
-        field.relations(["linked"])
+    # `linked` is macOS-only; elsewhere the mock refuses it, as the platform would.
+    if xa11y.capabilities().support("relation:linked") == "unsupported":
+        with pytest.raises(xa11y.ActionNotSupportedError, match="linked"):
+            field.relations(["linked"])
+    else:
+        assert field.relations(["linked"]) == {"linked": []}
     with pytest.raises(xa11y.InvalidActionDataError, match="labelled_by"):
         field.relations(["labeled_by"])
