@@ -1561,17 +1561,19 @@ pub(crate) fn resolve_target(opts: &Opts) -> CliResult<Target> {
 
 // ── Output helpers ──────────────────────────────────────────────────────────
 
+/// One element on one line. Text fields are quoted and escaped (`{:?}`), so
+/// a multi-line value cannot split a `tree` node across lines or forge one.
 pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     let mut parts = Vec::new();
 
     parts.push(el.role.to_snake_case().to_string());
 
     if let Some(name) = &el.name {
-        parts.push(format!("\"{}\"", name));
+        parts.push(format!("{name:?}"));
     }
 
     if let Some(value) = &el.value {
-        parts.push(format!("value=\"{}\"", value));
+        parts.push(format!("value={value:?}"));
     }
 
     if let Some(nv) = el.numeric_value {
@@ -1586,7 +1588,7 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     }
 
     if let Some(desc) = &el.description {
-        parts.push(format!("description=\"{}\"", desc));
+        parts.push(format!("description={desc:?}"));
     }
 
     // Table and collection positions, spelled as the selector attributes that
@@ -5641,6 +5643,18 @@ mod tests {
         el.value = Some("query".into());
         let out = format_element_oneline(&el);
         assert!(out.contains("value=\"query\""));
+    }
+
+    #[test]
+    fn format_element_keeps_multiline_text_on_one_line() {
+        let mut el = make_element(Role::TextArea, Some("Say \"hi\""));
+        el.value = Some("Line 1\nLine 2".into());
+        el.description = Some("a\tb".into());
+        let out = format_element_oneline(&el);
+        assert!(!out.contains('\n'), "{out}");
+        assert!(out.contains(r#""Say \"hi\"""#), "{out}");
+        assert!(out.contains(r#"value="Line 1\nLine 2""#), "{out}");
+        assert!(out.contains(r#"description="a\tb""#), "{out}");
     }
 
     #[test]
