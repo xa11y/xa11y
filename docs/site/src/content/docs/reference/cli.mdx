@@ -607,8 +607,8 @@ Every `tree` node, `find` match, `relations` target, `table` element, and
 re-resolved by selector: an element that was removed or replaced fails with
 `element_stale` and a `stale_reason`. The server keeps the refs of its 8 most
 recent results that returned elements, and an older ref fails with
-`ref_expired`. A ref the server never issued, such as an index past the end of
-its result, fails with `invalid_arguments`. `windows` results and event
+`ref_expired`. An index past the end of a result the server still holds was
+never issued, and fails with `invalid_arguments`. `windows` results and event
 targets carry no ref. The command line has no refs, because each invocation is
 a new process.
 

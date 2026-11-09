@@ -458,8 +458,8 @@ fn ref_property() -> Value {
              application restarted, or its id now names a different element, the call fails \
              with `element_stale` (and `stale_reason`) rather than finding a similar one. \
              The server keeps the refs of its {max} most recent results that returned \
-             elements; an older ref fails with `ref_expired`, and one it never issued with \
-             `invalid_arguments`.",
+             elements; an older ref fails with `ref_expired`, and an index past the end of a \
+             result it still holds with `invalid_arguments`.",
             issuers = super::refs::ISSUERS,
             max = super::refs::MAX_CAPTURES,
         ),

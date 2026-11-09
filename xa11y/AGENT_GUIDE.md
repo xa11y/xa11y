@@ -80,8 +80,8 @@ acts at once, without the wait. Buttons that share the name "Save" keep
 different refs. When the element is gone or replaced, the call fails with
 `element_stale` and a `stale_reason` instead of finding a similar one. The
 server keeps the refs of its 8 most recent results that returned elements; an
-older ref fails with `ref_expired`. A ref the server never issued, such as an
-index past the end of its result, fails with `invalid_arguments`. Elements in
+older ref fails with `ref_expired`. An index past the end of a result the
+server still holds was never issued, and fails with `invalid_arguments`. Elements in
 `windows` results and event targets carry no ref.
 
 `action` auto-waits. It polls until the selector matches one element that is
@@ -199,7 +199,7 @@ the same value on standard error, as a `delivery: not_delivered (...)` or
 
 | `kind` | Meaning | What to do |
 | --- | --- | --- |
-| `invalid_arguments` | An argument is missing or invalid (wrong type, out of range, an unknown `backend`, a reversed text range, a `ref` that was never issued). | Fix the argument the message names. |
+| `invalid_arguments` | An argument is missing or invalid (wrong type, out of range, an unknown `backend`, a reversed text range, a `ref` index past the end of a result the server still holds). | Fix the argument the message names. |
 | `no_match` | No application or element matched. | Read the candidates in the diagnosis, then correct the selector or target. |
 | `ambiguous_selector` | The selector matched several elements where one is required. | Narrow it with an attribute filter or `:nth(n)`. |
 | `ambiguous_shell_surface` | Several shell surfaces of the requested kind exist. | Pass the `pid` of the one you mean, from the candidates. |

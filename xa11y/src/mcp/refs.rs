@@ -9,8 +9,8 @@
 //! Bounded twice: the table keeps the refs of the last [`MAX_CAPTURES`]
 //! results that returned elements ([`ISSUERS`]; an older ref fails with
 //! `ref_expired`), and each capture is itself bounded by its tool's node or
-//! match cap. A ref this server never issued is a usage error, not an expired
-//! one. The CLI has no refs: each invocation is a new process with nothing to
+//! match cap. An index past the end of a capture the server still holds was
+//! never issued, which is a usage error rather than an expiry. The CLI has no refs: each invocation is a new process with nothing to
 //! resolve against.
 
 use std::collections::VecDeque;
@@ -89,17 +89,12 @@ impl RefTable {
             )));
         };
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        // A capture this server never started, or an index past the end of
-        // one it still holds, was never issued. Reporting either as expired
-        // would send the caller to re-read a tree for a ref that never
-        // existed rather than to the typo it made.
-        if capture == 0 || capture > state.next {
-            return Err(CliError::Usage(format!(
-                "\"ref\" {reference:?} was never issued: this server has issued refs for \
-                 captures up to c{} only. Refs come from {ISSUERS}",
-                state.next
-            )));
-        }
+        // An index past the end of a capture this server still holds was
+        // never issued: reporting it as expired would send the caller to
+        // re-read a tree for a ref that never existed. A capture id the table
+        // does not hold stays `ref_expired` even when it is past this
+        // server's counter, because a client that outlived an earlier server
+        // process holds exactly such refs, and re-reading is its fix.
         if let Some((_, elements)) = state.captures.iter().find(|(id, _)| *id == capture) {
             return match elements.get(index) {
                 Some(element) => Ok(element.clone()),
@@ -182,8 +177,6 @@ mod tests {
         for (bad, says) in [
             ("c1:2", "capture c1 holds c1:0 to c1:1"),
             ("c1:999", "capture c1 holds c1:0 to c1:1"),
-            ("c2:0", "captures up to c1 only"),
-            ("c0:0", "captures up to c1 only"),
         ] {
             match table.resolve(bad) {
                 Err(CliError::Usage(msg)) => {
@@ -193,6 +186,12 @@ mod tests {
                 other => panic!("{bad}: expected a usage error, got {:?}", other.err()),
             }
         }
+        // A capture this server does not hold (never started, perhaps by an
+        // earlier server process) is `ref_expired`, as is one that aged out.
+        assert!(matches!(
+            table.resolve("c2:0"),
+            Err(CliError::RefExpired { .. })
+        ));
         // An issued ref whose capture aged out is still `ref_expired`.
         for _ in 0..MAX_CAPTURES {
             let c = table.begin();
