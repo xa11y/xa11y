@@ -238,9 +238,13 @@ const AUTO_SCROLL_ATTEMPTS: u32 = 3;
 /// "nothing can scroll this" from "the scroll did not help".
 ///
 /// A refusal is sticky: the platform is asked once per wait. An accepted call
-/// earns one more poll even past the deadline, and is repeated at most
-/// [`AUTO_SCROLL_ATTEMPTS`] times while the target stays scrolled out. The
-/// outcome reaches the caller as [`Diagnosis::auto_scroll`] on the timeout.
+/// is repeated at most [`AUTO_SCROLL_ATTEMPTS`] times while the target stays
+/// scrolled out. With a zero timeout an accepted call earns one more poll,
+/// so the single attempt is judged on what the scroll did; any other timeout
+/// is a hard deadline (issue #531), and the scroll is re-checked only if time
+/// is left. The outcome reaches the caller as [`Diagnosis::auto_scroll`] on
+/// the timeout, and describes the latest scroll a poll observed: one the
+/// deadline cut off before its re-check is not reflected in it.
 #[derive(Default)]
 struct AutoScroll {
     /// `scroll_into_view` calls the platform accepted.
@@ -250,8 +254,9 @@ struct AutoScroll {
     /// and its toolkit, not about this instant.
     refused: Option<String>,
     /// A call was accepted and no poll has observed the element since. The
-    /// wait does not time out while this is set: the next poll's observation
-    /// decides `seen`, and no outcome is claimed without one.
+    /// next poll's observation decides `seen`, and no outcome is claimed
+    /// without one; if the deadline ends the wait first, `seen` keeps the
+    /// previous scroll's outcome (or none).
     unobserved: bool,
     /// What the first poll after the latest accepted call saw: `Revealed`
     /// when it read the element visible, `NoEffect` otherwise.
@@ -281,8 +286,8 @@ impl AutoScroll {
 
     /// Scroll `data` into view if the gate is blocked only by its being
     /// scrolled out, and there are attempts left. Returns whether the
-    /// platform accepted a call, in which case the caller must poll again
-    /// before it lets the wait time out.
+    /// platform accepted a call, in which case a zero-timeout wait polls
+    /// once more before it times out.
     ///
     /// The target must be enabled: a disabled control is not actionable
     /// wherever it is, so scrolling it would move the UI for nothing.
@@ -1230,8 +1235,9 @@ impl Locator {
             // time out on the observation taken before the scroll, which says
             // nothing about whether it worked. A non-zero timeout is a hard
             // deadline (issue #531), so there the scroll gets its re-check
-            // only if time is left, and the diagnosis's `auto_scroll` says
-            // that a scroll was made.
+            // only if time is left. A timeout before that re-check reports
+            // the previous scroll's outcome, or none for the first, since no
+            // poll observed what this one did.
             let elapsed = start.elapsed();
             if scrolled && timeout.is_zero() {
                 std::thread::sleep(poll_interval);
