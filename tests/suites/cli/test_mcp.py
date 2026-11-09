@@ -513,7 +513,7 @@ RELATION_KINDS = [
 
 def test_the_tree_tool_offers_its_detail(mcp):
     props = _tools_by_name(mcp)["tree"]["inputSchema"]["properties"]
-    assert props["detail"]["items"]["enum"] == ["text", "relations"]
+    assert props["detail"]["items"]["enum"] == ["text", "formatting", "relations"]
 
 
 @pytest.mark.parametrize("detail", [["styles"], "text", [1]])
