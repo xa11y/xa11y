@@ -1044,7 +1044,9 @@ impl Locator {
         // Reject n == 0 at the binding boundary instead of forwarding to
         // `Locator::nth`, which asserts and panics (crashes Python).
         if n == 0 {
-            return Err(to_py_err(xa11y::Error::invalid_action_data("Locator.nth is 1-based; got 0")));
+            return Err(to_py_err(xa11y::Error::invalid_action_data(
+                "Locator.nth is 1-based; got 0",
+            )));
         }
         Ok(Self {
             inner: self.inner.clone().nth(n),
