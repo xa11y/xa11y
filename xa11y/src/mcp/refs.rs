@@ -7,9 +7,11 @@
 //! re-resolved by name or selector.
 //!
 //! Bounded twice: the table keeps the refs of the last [`MAX_CAPTURES`]
-//! `tree` / `find` / `relations` results (an older ref fails with `ref_expired`), and each
-//! capture is itself bounded by its tool's node or match cap. The CLI has no
-//! refs: each invocation is a new process with nothing to resolve against.
+//! results that returned elements ([`ISSUERS`]; an older ref fails with
+//! `ref_expired`), and each capture is itself bounded by its tool's node or
+//! match cap. A ref this server never issued is a usage error, not an expired
+//! one. The CLI has no refs: each invocation is a new process with nothing to
+//! resolve against.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -19,6 +21,10 @@ use crate::Element;
 
 /// How many captures' refs the server holds at once.
 pub(crate) const MAX_CAPTURES: usize = 8;
+
+/// The results that issue refs, as error messages name them.
+pub(crate) const ISSUERS: &str =
+    "`tree`, `find`, `relations`, `table` and `text` `object-at` results";
 
 /// The refs of the most recent captures.
 #[derive(Default)]
@@ -32,7 +38,7 @@ struct State {
     captures: VecDeque<(u64, Vec<Element>)>,
 }
 
-/// One `tree` / `find` result's refs, filled while the result is built and
+/// One result's refs, filled while the result is built and
 /// kept by [`RefTable::keep`].
 pub(crate) struct Capture {
     id: u64,
@@ -78,27 +84,43 @@ impl RefTable {
             });
         let Some((capture, index)) = parsed else {
             return Err(CliError::Usage(format!(
-                "\"ref\" {reference:?} is not a ref: refs look like \"c3:17\", as `tree` and \
-                 `find` return them"
+                "\"ref\" {reference:?} is not a ref: refs look like \"c3:17\", as {ISSUERS} \
+                 return them"
             )));
         };
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let held = state
-            .captures
-            .iter()
-            .find(|(id, _)| *id == capture)
-            .and_then(|(_, elements)| elements.get(index));
-        match held {
-            Some(element) => Ok(element.clone()),
-            None => Err(CliError::RefExpired {
-                reference: reference.to_string(),
-                kept: state
-                    .captures
-                    .iter()
-                    .map(|(id, _)| format!("c{id}"))
-                    .collect(),
-            }),
+        // A capture this server never started, or an index past the end of
+        // one it still holds, was never issued. Reporting either as expired
+        // would send the caller to re-read a tree for a ref that never
+        // existed rather than to the typo it made.
+        if capture == 0 || capture > state.next {
+            return Err(CliError::Usage(format!(
+                "\"ref\" {reference:?} was never issued: this server has issued refs for \
+                 captures up to c{} only. Refs come from {ISSUERS}",
+                state.next
+            )));
         }
+        if let Some((_, elements)) = state.captures.iter().find(|(id, _)| *id == capture) {
+            return match elements.get(index) {
+                Some(element) => Ok(element.clone()),
+                None => Err(CliError::Usage(format!(
+                    "\"ref\" {reference:?} was never issued: capture c{capture} holds {}",
+                    match elements.len() {
+                        0 => "no refs".to_string(),
+                        1 => format!("only c{capture}:0"),
+                        n => format!("c{capture}:0 to c{capture}:{}", n - 1),
+                    }
+                ))),
+            };
+        }
+        Err(CliError::RefExpired {
+            reference: reference.to_string(),
+            kept: state
+                .captures
+                .iter()
+                .map(|(id, _)| format!("c{id}"))
+                .collect(),
+        })
     }
 }
 
@@ -148,9 +170,53 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn refs_that_were_never_issued_say_so() {
+        let table = RefTable::default();
+        let mut c = table.begin();
+        c.add(&element());
+        c.add(&element());
+        table.keep(c);
+        for (bad, says) in [
+            ("c1:2", "capture c1 holds c1:0 to c1:1"),
+            ("c1:999", "capture c1 holds c1:0 to c1:1"),
+            ("c2:0", "captures up to c1 only"),
+            ("c0:0", "captures up to c1 only"),
+        ] {
+            match table.resolve(bad) {
+                Err(CliError::Usage(msg)) => {
+                    assert!(msg.contains("never issued"), "{bad}: {msg}");
+                    assert!(msg.contains(says), "{bad}: {msg}");
+                }
+                other => panic!("{bad}: expected a usage error, got {:?}", other.err()),
+            }
+        }
+        // An issued ref whose capture aged out is still `ref_expired`.
+        for _ in 0..MAX_CAPTURES {
+            let c = table.begin();
+            table.keep(c);
+        }
         assert!(matches!(
-            table.resolve("c99:0"),
+            table.resolve("c1:0"),
             Err(CliError::RefExpired { .. })
         ));
+    }
+
+    #[test]
+    fn ref_messages_name_every_tool_that_issues_refs() {
+        let table = RefTable::default();
+        let malformed = table.resolve("x").expect_err("malformed").to_string();
+        let expired = CliError::RefExpired {
+            reference: "c1:0".into(),
+            kept: vec![],
+        }
+        .to_string();
+        for msg in [malformed, expired] {
+            for tool in ["tree", "find", "relations", "table", "object-at"] {
+                assert!(msg.contains(tool), "{tool} unnamed in {msg}");
+            }
+        }
     }
 }

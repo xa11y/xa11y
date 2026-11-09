@@ -188,9 +188,11 @@ impl std::fmt::Display for CliError {
                 };
                 write!(
                     f,
-                    "ref \"{reference}\" is not held: the server keeps the refs of its most \
-                     recent `tree` and `find` results only, and never re-resolves one by \
-                     selector. Call `tree` or `find` again for a fresh ref; {held}"
+                    "ref \"{reference}\" is not held: the server keeps the refs of its {} most \
+                     recent {} only, and never re-resolves one by selector. Call `tree` or \
+                     `find` again for a fresh ref; {held}",
+                    crate::mcp::refs::MAX_CAPTURES,
+                    crate::mcp::refs::ISSUERS,
                 )
             }
             CliError::Xa11y(e) => write!(f, "{e}"),
@@ -330,7 +332,7 @@ xa11y — accessibility tree explorer
 Usage:
 
 Accessibility tree:
-  xa11y apps                                List running applications
+  xa11y apps   [--backend B]                List running applications
   xa11y shell                               List OS shell surfaces: KIND PID NAME
   xa11y windows [--app NAME | --pid PID]    List top-level windows
   xa11y tree   [TARGET] [--max-nodes N] [--max-depth N]
@@ -347,7 +349,7 @@ Accessibility tree:
                                             [--at X,Y] [--size W,H]
                                             Perform an action on an element
   xa11y text   OP SELECTOR [TARGET] [--range START,END]
-                   [--find TEXT [--occurrence N]] [--offset N --unit U]
+                   [--find TEXT [--occurrence N]] [--offset N [--unit U]]
                    [--limit N]              Read an element's text by range;
                                             prints JSON; see Text below
   xa11y table  OP SELECTOR [TARGET] [--row N --column N]
@@ -385,6 +387,14 @@ TARGET — what tree/find/action search (--shell and --app are exclusive):
       status_items and dock are macOS only, taskbar is Windows only,
       panel is Linux only, desktop and flyout are macOS and Windows.
       `xa11y shell` lists what this machine actually has.
+  --backend B                               Accessibility source for an
+                                            application: {backends} (default:
+                                            XA11Y_ACCESSIBILITY_SOURCE, else
+                                            native; uia and ia2 are Windows
+                                            only). Every command that takes
+                                            --app takes it, and so does apps;
+                                            not with --shell
+  A flag a command does not take is a usage error, not ignored.
 
 Text (offsets are UTF-16 code units: an emoji outside the BMP is two):
   OP is one of {text_ops}.
@@ -394,7 +404,9 @@ Text (offsets are UTF-16 code units: an emoji outside the BMP is two):
   find       the --occurrence-th (0-based) exact match of --find, searched
              within --range when given; `found: false` when there is none
   range-at   the --unit (character, word, line, paragraph) at --offset
-  lines      rendered lines of --range, --limit per page (default {page})
+  object-at  the embedded control or link at --offset, as `object` (one line
+             in the form find prints), or null when there is none
+  lines     rendered lines of --range, --limit per page (default {page})
   bounds     screen rectangles of --range, one per rendered line
   runs       formatting runs of --range, --limit per page (default {page})
   read/lines/bounds/runs take their range as --range START,END or as
@@ -465,12 +477,19 @@ Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
 Exit codes:
   0  success
   1  operation failed (app not found, no selector match, platform error)
-  2  usage error (unknown flag value, missing or invalid argument)",
+  2  usage error (unknown flag, a flag the command does not take, bad flag
+     value, missing or invalid argument)
+
+When an action command (action, click, move, drag, scroll, key, type,
+enable-web-accessibility) fails with exit 1, a `delivery:` line follows the
+error on stderr: `not_delivered` (nothing reached the application, so a retry
+is safe) or `unknown` (it may have been applied: re-read the state first).",
         // Derived, not spelled out: see `shell_kind_names`.
         kinds = shell_kind_names().join(", "),
         text_ops = TEXT_OPS.join(", "),
         table_ops = TABLE_OPS.join(", "),
         relation_kinds = relation_kind_names().join(", "),
+        backends = BACKENDS.join(", "),
         read_default = TEXT_READ_DEFAULT_UNITS,
         read_max = TEXT_READ_MAX_UNITS,
         page = TEXT_PAGE_DEFAULT,
@@ -3253,9 +3272,25 @@ pub(crate) fn json_without_nulls<T: serde::Serialize>(
     Ok(v)
 }
 
+/// How the CLI's `text object-at` reports the element it found: the same
+/// one-line form `find`, `table` and `relations` print, as a JSON string.
+pub(crate) fn text_object_cli(element: &Element) -> serde_json::Value {
+    serde_json::Value::String(format_element_oneline(element))
+}
+
 /// Run a `text` operation against `text`, producing the result both surfaces
 /// report. Offsets everywhere are UTF-16 code units.
-pub(crate) fn run_text_op(text: &Text, op: &TextOp) -> CliResult<serde_json::Value> {
+///
+/// `render_object` encodes the element `object-at` finds, the way the calling
+/// surface renders every other element: [`text_object_cli`] on the CLI, and
+/// MCP's element encoding plus a `ref`. Serializing the raw `ElementData`
+/// instead leaked its PascalCase role, its platform `raw` blob and uncapped
+/// strings, and gave MCP nothing to act on.
+pub(crate) fn run_text_op(
+    text: &Text,
+    op: &TextOp,
+    render_object: &mut dyn FnMut(&Element) -> serde_json::Value,
+) -> CliResult<serde_json::Value> {
     use serde_json::json;
     Ok(match op {
         TextOp::Info => {
@@ -3320,8 +3355,11 @@ pub(crate) fn run_text_op(text: &Text, op: &TextOp) -> CliResult<serde_json::Val
             })
         }
         TextOp::ObjectAt { offset } => {
-            let object = text.object_at(*offset)?;
-            json!({ "offset": offset, "object": object.as_ref().map(|e| e.data()) })
+            let object = match text.object_at(*offset)? {
+                Some(element) => render_object(&element),
+                None => serde_json::Value::Null,
+            };
+            json!({ "offset": offset, "object": object })
         }
         TextOp::RangeAt { offset, unit } => {
             let r = text.range_at(*offset, *unit)?;
@@ -3422,7 +3460,7 @@ fn cmd_text(args: &[String]) -> CliResult<()> {
             }))
         }
     };
-    let result = run_text_op(&element.text()?, &op)?;
+    let result = run_text_op(&element.text()?, &op, &mut text_object_cli)?;
     let rendered = serde_json::to_string_pretty(&result).map_err(|e| {
         CliError::Xa11y(Error::Platform {
             code: -1,
@@ -3871,12 +3909,10 @@ pub(crate) fn clip_utf16(s: &str, max: u32) -> (&str, bool) {
     (s, false)
 }
 
-/// An event's [`TextChange`] as `events_poll` reports it: `kind`, `range`
-/// (`null` when the platform reported none), and `text` (`null` when not
-/// supplied), cut to [`RANGE_TEXT_MAX_UNITS`] UTF-16 units. A cut text says so
-/// with `text_truncated: true` and the full `text_length`, so a shortened
-/// string never reads as the whole edit.
-/// An announcement's payload as MCP reports it: each field only when set.
+/// An announcement's payload as `events_poll` reports it: `origin`, then each
+/// other field only when set. `text` is cut to [`RANGE_TEXT_MAX_UNITS`]
+/// UTF-16 units the way [`text_change_json`] cuts an edit's, and says so the
+/// same way, with `text_truncated: true` and the full `text_length`.
 pub(crate) fn announcement_json(a: &crate::AnnouncementInfo) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("origin".into(), a.origin.to_snake_case().into());
@@ -3885,6 +3921,7 @@ pub(crate) fn announcement_json(a: &crate::AnnouncementInfo) -> serde_json::Valu
         out.insert("text".into(), shown.into());
         if truncated {
             out.insert("text_truncated".into(), true.into());
+            out.insert("text_length".into(), utf16_units(text).into());
         }
     }
     if let Some(p) = a.politeness {
@@ -3899,6 +3936,11 @@ pub(crate) fn announcement_json(a: &crate::AnnouncementInfo) -> serde_json::Valu
     serde_json::Value::Object(out)
 }
 
+/// An event's [`TextChange`] as `events_poll` reports it: `kind`, `range`
+/// (`null` when the platform reported none), and `text` (`null` when not
+/// supplied), cut to [`RANGE_TEXT_MAX_UNITS`] UTF-16 units. A cut text says so
+/// with `text_truncated: true` and the full `text_length`, so a shortened
+/// string never reads as the whole edit.
 pub(crate) fn text_change_json(change: &TextChange) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("kind".into(), format_text_change_kind(change.kind).into());
@@ -5533,6 +5575,26 @@ mod tests {
     }
 
     #[test]
+    fn announcement_json_reports_the_full_length_of_a_cut_text() {
+        // The same contract as a text change: a shortened string never reads
+        // as the whole announcement.
+        let long = "😀".repeat(300);
+        let info: crate::AnnouncementInfo = crate::AnnouncementParts {
+            origin: crate::AnnouncementOrigin::Request,
+            text: Some(long),
+            politeness: None,
+            platform_priority: None,
+            activity_id: None,
+        }
+        .into();
+        let json = announcement_json(&info);
+        let shown = json["text"].as_str().expect("text");
+        assert_eq!(shown.encode_utf16().count(), RANGE_TEXT_MAX_UNITS as usize);
+        assert_eq!(json["text_truncated"], true);
+        assert_eq!(json["text_length"], 600);
+    }
+
+    #[test]
     fn clip_utf16_never_splits_a_surrogate_pair() {
         assert_eq!(clip_utf16("a😀", 2), ("a", true));
         assert_eq!(clip_utf16("a😀", 3), ("a😀", false));
@@ -6791,6 +6853,24 @@ mod tests {
     }
 
     #[test]
+    fn cli_text_object_at_renders_the_element_like_other_cli_output() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let target = Target::App(mock_app(&provider));
+        let element = resolve_table_element(&target, r#"table[name="Prices"]"#)
+            .expect("resolves")
+            .expect("one table");
+        let rendered = text_object_cli(&element);
+        assert_eq!(
+            rendered,
+            serde_json::Value::String(format_element_oneline(&element))
+        );
+        assert!(
+            rendered.as_str().expect("a line").starts_with("table "),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn cli_text_runs_through_the_shared_half_against_the_mock() {
         let provider = xa11y_core::mock::build_table_provider();
         let target = Target::App(mock_app(&provider));
@@ -6806,7 +6886,12 @@ mod tests {
             &CLI_TEXT_ARG_NAMES,
         )
         .expect("valid");
-        let out = run_text_op(&element.text().expect("has text"), &op).expect("reads");
+        let out = run_text_op(
+            &element.text().expect("has text"),
+            &op,
+            &mut text_object_cli,
+        )
+        .expect("reads");
         assert_eq!(out["match"]["text"], "line");
         assert_eq!(out["match"]["start"], 22);
     }

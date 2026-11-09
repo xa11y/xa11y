@@ -17,7 +17,7 @@
 //! reported in the payload — a silently shortened tree reads as a complete
 //! one, which is worse than no tree.
 
-use super::refs::RefTable;
+use super::refs::{Capture, RefTable};
 use serde_json::{json, Map, Value};
 
 use super::base64;
@@ -452,14 +452,16 @@ fn ref_property() -> Value {
     json!({
         "type": "string",
         "description": format!(
-            "An element `ref` from a recent `tree`, `find` or `relations` result (`c3:17`), in place of \
-             `selector`: give exactly one of the two, and no `app` / `pid` / `shell` with a \
-             ref. A ref names exactly that element. If it was removed, its application \
-             restarted, or its id now names a different element, the call fails with \
-             `element_stale` (and `stale_reason`) rather than finding a similar one. The \
-             server keeps the refs of its {} most recent `tree` / `find` / `relations` results; an older \
-             ref fails with `ref_expired`.",
-            super::refs::MAX_CAPTURES
+            "An element `ref` (`c3:17`) from a recent {issuers}, in place of \
+             `selector`: give exactly one of the two, and no `app` / `pid` / `shell` / \
+             `backend` with a ref. A ref names exactly that element. If it was removed, its \
+             application restarted, or its id now names a different element, the call fails \
+             with `element_stale` (and `stale_reason`) rather than finding a similar one. \
+             The server keeps the refs of its {max} most recent results that returned \
+             elements; an older ref fails with `ref_expired`, and one it never issued with \
+             `invalid_arguments`.",
+            issuers = super::refs::ISSUERS,
+            max = super::refs::MAX_CAPTURES,
         ),
     })
 }
@@ -619,8 +621,9 @@ fn tool_definition(name: &str) -> Value {
                  Each window reports its `name`, `bounds`, `states` (including \
                  `minimized` / `maximized` / `fullscreen` when the platform can \
                  report them) \
-                 and the actions it advertises — the same shape `find` returns \
-                 for elements. Results are capped at the `limit`, and \
+                 and the actions it advertises, in the element shape `find` \
+                 uses but without a `ref`: act on a window through `action` with \
+                 a window selector. Results are capped at the `limit`, and \
                  `truncated` in the result says whether anything was dropped. \
                  If one application cannot be enumerated, it is skipped and \
                  reported in `errors` (with `count` covering only the windows \
@@ -1105,7 +1108,10 @@ fn tool_definition(name: &str) -> Value {
                     "description": "What to read. `info`: `length`, `caret` and the \
                                     selected ranges. `read`: the text of the range. \
                                     `find`: the `occurrence`-th match of `find`. \
-                                    `range-at`: the `unit` containing `offset`. `lines`: \
+                                    `range-at`: the `unit` containing `offset`. \
+                                    `object-at`: the embedded control or link at \
+                                    `offset`, as `object` in the shape `find` returns, with a `ref`, or null when \
+                                    there is none. `lines`: \
                                     the rendered lines of the range. `bounds`: screen \
                                     rectangles of the range, one per rendered line. \
                                     `runs`: formatting runs of the range.",
@@ -1160,8 +1166,9 @@ fn tool_definition(name: &str) -> Value {
             props.insert(
                 "offset".into(),
                 TEXT_OFFSET.property(
-                    "For `range-at`: the offset, in UTF-16 code units. At the end of the \
-                     text it names the unit that ends there."
+                    "For `range-at` and `object-at`: the offset, in UTF-16 code units. \
+                     For `range-at`, at the end of the text it names the unit that ends \
+                     there."
                         .into(),
                 ),
             );
@@ -1196,7 +1203,8 @@ fn tool_definition(name: &str) -> Value {
                 &format!(
                     "Read an element's text by range: caret and selection, a range of \
                      text, an exact search, the word / line / paragraph at an offset, \
-                     rendered lines, their screen rectangles, and formatting runs. Use it \
+                     the embedded control or link at an offset, rendered lines, their \
+                     screen rectangles, and formatting runs. Use it \
                      instead of slicing `value`, which `tree` and `find` cut to \
                      {MAX_FIELD_BYTES} bytes.\n\n\
                      Every offset is a UTF-16 code unit, on input and output alike: an \
@@ -1333,7 +1341,7 @@ fn tool_definition(name: &str) -> Value {
                     "Ask a table about its structure: the cell at a row and column, the \
                      header cells of the table or of one cell, and what a list, tree or \
                      table has selected. Elements come back in the shape `find` returns, \
-                     including `cell` (`row`, `column`, `row_span`, `column_span`, \
+                     each with a `ref`, including `cell` (`row`, `column`, `row_span`, `column_span`, \
                      `header`), `table_row`, `table` (`row_count`, `column_count`) and \
                      `collection` (`index`, `size`, `depth`). Every index is 0-based. \
                      A count reads \"unknown\" when the platform says it does not know \
@@ -1510,13 +1518,21 @@ fn events_poll_description() -> String {
          Each event carries a `kind`, a `sequence` (monotonic, so a gap is exactly \
          what was dropped), `at_ms` since the subscription started, `time_ms` (when it was received, \
          milliseconds since the Unix epoch), and the `target` \
-         element in the same shape `find` returns — bounds, states and all. A \
+         element in the element shape `find` uses (bounds, states and all) but \
+         without a `ref`: it is a snapshot from when the event fired, so call \
+         `find` for an element to act on. A \
          `state_changed` event also carries `state_flag` and `state_value`. A \
          `text_changed` event carries `text_change` when the platform reports the \
          edit (Linux only): `kind` (`inserted` / `deleted`), `range` in UTF-16 units \
          or null when the platform counts in another unit, and `text` or null, cut \
          to {range_cap} units with `text_truncated` and `text_length` \
-         when longer. `text_selection_changed` means the caret or text selection \
+         when longer. An `announcement` event carries `announcement`: `origin` \
+         (`request` when the application asked for text to be spoken, \
+         `live_region` or `alert` when one changed or appeared, which carry no \
+         text: read the target), and when the platform reports them `text` (cut \
+         the same way, with `text_truncated` and `text_length`), `politeness` \
+         (`polite` / `assertive`), `platform_priority` as the platform spells it, \
+         and `activity_id` (Windows). `text_selection_changed` means the caret or text selection \
          moved; it carries no offsets, so read them with the `text` tool.\n\n\
          Two fields say what the events alone cannot. `dropped` counts events lost \
          to buffer eviction since the previous poll — poll more often, narrow \
@@ -2422,31 +2438,59 @@ fn tool_text(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     match subject {
         Subject::Selector(selector) => {
             let target = target(args)?;
-            tool_text_parsed(&target, selector, &op)
+            tool_text_parsed(&target, selector, &op, refs)
         }
         Subject::Ref(reference) => {
             let element = resolve_ref_for_read(refs, reference)?;
-            let result = cli::run_text_op(&element.text()?, &op)?;
             let mut out = Map::new();
             out.insert("ref".into(), json!(reference));
-            out.insert("units".into(), json!("utf16"));
-            out.insert("result".into(), result);
-            Ok(ToolOutput::json(Value::Object(out)))
+            text_output(out, &element, &op, refs)
         }
     }
 }
 
 /// The resolving half of [`tool_text`], against an explicit target, so the
 /// mock provider can drive it.
-fn tool_text_parsed(target: &Target, selector: &str, op: &cli::TextOp) -> CliResult<ToolOutput> {
+fn tool_text_parsed(
+    target: &Target,
+    selector: &str,
+    op: &cli::TextOp,
+    refs: &RefTable,
+) -> CliResult<ToolOutput> {
     let element = match cli::resolve_text_element(target, selector)? {
         Ok(element) => element,
         Err(matches) => return Err(ambiguous(selector, &matches)),
     };
-    let result = cli::run_text_op(&element.text()?, op)?;
     let mut out = Map::new();
     out.insert("selector".into(), json!(selector));
     target_fields(target, &mut out);
+    text_output(out, &element, op, refs)
+}
+
+/// The rest of a `text` result after its header fields.
+///
+/// The element `object-at` finds is encoded like every other element this
+/// server returns, with a `ref` so the model can act on the embedded control
+/// or link it found. A capture is started only when there is an element to
+/// hold, so the other operations never push an older result's refs out.
+fn text_output(
+    mut out: Map<String, Value>,
+    element: &Element,
+    op: &cli::TextOp,
+    refs: &RefTable,
+) -> CliResult<ToolOutput> {
+    let center = matches!(op, cli::TextOp::ObjectAt { .. }).then(cli::pointer_center);
+    let mut capture = None;
+    let usable = center.as_ref().is_some_and(cli::PointerCenter::is_usable);
+    let result = cli::run_text_op(&element.text()?, op, &mut |found| {
+        element_with_ref(&mut capture, refs, found, usable)
+    })?;
+    if let Some(capture) = capture {
+        refs.keep(capture);
+    }
+    if let Some(center) = &center {
+        note_center(&mut out, center);
+    }
     out.insert("units".into(), json!("utf16"));
     out.insert("result".into(), result);
     Ok(ToolOutput::json(Value::Object(out)))
@@ -2473,6 +2517,7 @@ fn tool_table(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
                 op,
                 limit,
                 &cli::pointer_center(),
+                refs,
             )
         }
         Subject::Ref(reference) => {
@@ -2488,6 +2533,7 @@ fn tool_table(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
                 &found,
                 limit,
                 &cli::pointer_center(),
+                refs,
             ))
         }
     }
@@ -2598,6 +2644,7 @@ fn tool_table_parsed(
     op: cli::TableOp,
     limit: usize,
     center: &cli::PointerCenter,
+    refs: &RefTable,
 ) -> CliResult<ToolOutput> {
     let element = match cli::resolve_table_element(target, selector)? {
         Ok(element) => element,
@@ -2608,11 +2655,30 @@ fn tool_table_parsed(
     out.insert("op".into(), json!(op_name));
     out.insert("selector".into(), json!(selector));
     target_fields(target, &mut out);
-    Ok(table_output(out, &element, op, &found, limit, center))
+    Ok(table_output(out, &element, op, &found, limit, center, refs))
+}
+
+/// Encode `element` like [`element_data_json`] plus a `ref` held in
+/// `capture`, which is started on the first element. A result that returns no
+/// element so starts no capture, and cannot push an older result's refs out
+/// of the table.
+fn element_with_ref(
+    capture: &mut Option<Capture>,
+    refs: &RefTable,
+    element: &Element,
+    center: bool,
+) -> Value {
+    let mut encoded = element_data_json(element, center);
+    let reference = capture.get_or_insert_with(|| refs.begin()).add(element);
+    if let Some(obj) = encoded.as_object_mut() {
+        obj.insert("ref".into(), json!(reference));
+    }
+    encoded
 }
 
 /// The rest of a `table` result after its header fields: the cell for
-/// `cell-at`, otherwise the bounded element list.
+/// `cell-at`, otherwise the bounded element list. Each element carries a
+/// `ref`, as `find`'s matches do.
 fn table_output(
     mut out: Map<String, Value>,
     element: &Element,
@@ -2620,15 +2686,21 @@ fn table_output(
     found: &[Element],
     limit: usize,
     center: &cli::PointerCenter,
+    refs: &RefTable,
 ) -> ToolOutput {
     note_center(&mut out, center);
+    let mut capture = None;
     if let cli::TableOp::CellAt { row, column } = op {
         out.insert("row".into(), json!(row));
         out.insert("column".into(), json!(column));
         out.insert("found".into(), json!(!found.is_empty()));
         match found.first() {
             Some(cell) => {
-                out.insert("cell".into(), element_data_json(cell, center.is_usable()));
+                let encoded = element_with_ref(&mut capture, refs, cell, center.is_usable());
+                out.insert("cell".into(), encoded);
+                if let Some(capture) = capture {
+                    refs.keep(capture);
+                }
             }
             None => {
                 out.insert("cell".into(), Value::Null);
@@ -2643,8 +2715,11 @@ fn table_output(
     let listed: Vec<Value> = found
         .iter()
         .take(limit)
-        .map(|el| element_data_json(el, center.is_usable()))
+        .map(|el| element_with_ref(&mut capture, refs, el, center.is_usable()))
         .collect();
+    if let Some(capture) = capture {
+        refs.keep(capture);
+    }
     out.insert("count".into(), json!(found.len()));
     out.insert("returned".into(), json!(listed.len()));
     out.insert("truncated".into(), json!(found.len() > listed.len()));
@@ -6167,7 +6242,8 @@ mod tests {
     /// Run a `text` call against the fixture and return its `result`.
     fn text_result(call: Value) -> Value {
         let op = text_op_from_args(&call).expect("valid text arguments");
-        let out = tool_text_parsed(&table_target(), NOTES, &op).expect("text call succeeds");
+        let out = tool_text_parsed(&table_target(), NOTES, &op, &RefTable::default())
+            .expect("text call succeeds");
         let structured = out.structured.expect("structured result");
         assert_eq!(structured["units"], "utf16");
         structured["result"].clone()
@@ -6175,7 +6251,8 @@ mod tests {
 
     fn text_err(call: Value) -> CliError {
         let op = text_op_from_args(&call).expect("valid text arguments");
-        tool_text_parsed(&table_target(), NOTES, &op).expect_err("text call fails")
+        tool_text_parsed(&table_target(), NOTES, &op, &RefTable::default())
+            .expect_err("text call fails")
     }
 
     #[test]
@@ -6318,10 +6395,16 @@ mod tests {
     fn text_refuses_ambiguity_and_elements_without_text() {
         let target = table_target();
         let op = cli::TextOp::Info;
-        let err = tool_text_parsed(&target, "table_cell", &op).expect_err("several cells");
+        let err = tool_text_parsed(&target, "table_cell", &op, &RefTable::default())
+            .expect_err("several cells");
         assert_eq!(failure_kind(&err), "ambiguous_selector");
-        let err = tool_text_parsed(&target, r#"table_cell[name="Price"]"#, &op)
-            .expect_err("a cell with no value has no text interface");
+        let err = tool_text_parsed(
+            &target,
+            r#"table_cell[name="Price"]"#,
+            &op,
+            &RefTable::default(),
+        )
+        .expect_err("a cell with no value has no text interface");
         assert_eq!(failure_kind(&err), "action_not_supported");
     }
 
@@ -6387,6 +6470,7 @@ mod tests {
             parsed,
             limit,
             &cli::PointerCenter::Usable,
+            &RefTable::default(),
         )
         .expect("table call succeeds")
         .structured
@@ -6440,6 +6524,69 @@ mod tests {
     }
 
     #[test]
+    fn element_with_ref_encodes_like_find_and_starts_a_capture_lazily() {
+        // `text object-at` renders its element through this; it used to
+        // serialize `ElementData` whole (PascalCase role, the `raw` blob, no
+        // ref). No mock provider answers `object_at`, so the encoding is held
+        // here.
+        let refs = RefTable::default();
+        let mut capture = None;
+        let element = cli::resolve_table_element(&table_target(), PRICES)
+            .expect("resolves")
+            .expect("one table");
+        let encoded = element_with_ref(&mut capture, &refs, &element, true);
+        assert_eq!(encoded["role"], "table");
+        assert!(encoded.get("raw").is_none(), "{encoded}");
+        assert!(encoded.get("handle").is_none(), "{encoded}");
+        let r = encoded["ref"].as_str().expect("a ref").to_owned();
+        refs.keep(capture.expect("the first element starts a capture"));
+        assert_eq!(
+            refs.resolve(&r).expect("resolves").name.as_deref(),
+            Some("Prices")
+        );
+    }
+
+    #[test]
+    fn table_elements_carry_refs_that_resolve() {
+        // The `table` description promises find's shape, and find's matches
+        // carry a ref; without one a model could see a cell and not act on it.
+        let refs = RefTable::default();
+        let call = |op: &str, selector: &str, row, column| {
+            let parsed =
+                cli::parse_table_op(op, row, column, "\"row\"", "\"column\"").expect("valid op");
+            tool_table_parsed(
+                &table_target(),
+                selector,
+                op,
+                parsed,
+                50,
+                &cli::PointerCenter::Usable,
+                &refs,
+            )
+            .expect("table call succeeds")
+            .structured
+            .expect("structured")
+        };
+        let cell = call("cell-at", PRICES, Some(0), Some(2));
+        let r = cell["cell"]["ref"]
+            .as_str()
+            .expect("the cell carries a ref");
+        assert_eq!(
+            refs.resolve(r).expect("resolves").name.as_deref(),
+            Some("Price")
+        );
+        let headers = call("column-headers", PRICES, None, None);
+        for el in headers["elements"].as_array().expect("elements") {
+            let r = el["ref"].as_str().expect("each element carries a ref");
+            assert!(refs.resolve(r).is_ok(), "{r}");
+        }
+        // A miss starts no capture, so it cannot age out an earlier one.
+        let before = call("cell-at", PRICES, Some(9), Some(0));
+        assert_eq!(before["cell"], Value::Null);
+        assert!(refs.resolve(r).is_ok());
+    }
+
+    #[test]
     fn table_arguments_are_checked_before_anything_resolves() {
         let err = cli::parse_table_op("cell-at", Some(1), None, "\"row\"", "\"column\"")
             .expect_err("column missing");
@@ -6457,6 +6604,7 @@ mod tests {
             cli::TableOp::Headers(crate::HeaderKind::Column),
             50,
             &cli::PointerCenter::Usable,
+            &RefTable::default(),
         )
         .expect_err("a text area is not a table");
         assert_eq!(failure_kind(&err), "action_not_supported");

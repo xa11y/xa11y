@@ -35,7 +35,7 @@
 mod base64;
 mod events;
 mod protocol;
-mod refs;
+pub(crate) mod refs;
 mod tools;
 mod transport;
 
