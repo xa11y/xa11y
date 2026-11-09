@@ -20,7 +20,11 @@
 import { EventEmitter } from 'node:events';
 
 // Re-export Rust-generated classes (except App and _NativeSubscription,
-// which are shadowed by the JS wrapper classes below).
+// which are shadowed by the JS wrapper classes below). `Element.subscribe`
+// is replaced on the prototype by index.js; its generated declaration in
+// native.d.ts already names the public shape (`SubscribeOptions` in,
+// `Subscription` out, both imported from this file), identical to
+// `App.subscribe`.
 export {
   CancelToken,
   Capabilities,
@@ -92,10 +96,13 @@ export type {
   TextRuns,
   TextScriptName,
   TextUnitName,
+  TimeoutOptions,
+  DefaultTimeout,
 } from './native.js';
 import type {
   AnchorName,
   AutoScrollOutcomeName,
+  DefaultTimeout,
   Capture,
   CaptureOptions,
   Element,
@@ -621,26 +628,30 @@ export interface ScreenshotOptions {
 export declare function screenshot(options?: ScreenshotOptions): Promise<Screenshot>;
 
 /**
- * Set the process-wide default timeout, in seconds.
+ * Set the process-wide default timeout, in milliseconds:
+ * `setDefaultTimeout({ timeout: 30000 })`.
  *
  * Becomes the default for every auto-waiting action method, `wait*` call,
  * and app lookup (`App.byName` / `App.byPid` / `App.find`) that doesn't
  * pass an explicit timeout. An explicit per-call timeout always wins. Takes
  * precedence over the `XA11Y_DEFAULT_TIMEOUT` environment variable
- * (seconds, read once on first use).
+ * (seconds, read once on first use, shared with the other bindings).
  *
- * Pass `0` for "single attempt, no polling" semantics; negative or
- * non-finite values throw.
+ * Pass `{ timeout: 0 }` for "single attempt, no polling" semantics. A bare
+ * number (this used to take seconds), a missing `timeout`, or one that is
+ * not a non-negative whole number of milliseconds throws
+ * `InvalidActionDataError`.
  */
-export declare function setDefaultTimeout(seconds: number): void;
+export declare function setDefaultTimeout(options: DefaultTimeout): void;
 
 /**
- * Get the effective process-wide default timeout, in seconds.
+ * Get the effective process-wide default timeout as `{ timeout: ms }`, the
+ * shape {@link setDefaultTimeout} takes.
  *
  * Resolution order: the {@link setDefaultTimeout} value, else the
- * `XA11Y_DEFAULT_TIMEOUT` environment variable, else the built-in 5.
+ * `XA11Y_DEFAULT_TIMEOUT` environment variable, else the built-in 5000 ms.
  */
-export declare function getDefaultTimeout(): number;
+export declare function getDefaultTimeout(): DefaultTimeout;
 
 // ── JS-only: typed error hierarchy ─────────────────────────────────────────
 

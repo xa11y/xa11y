@@ -376,7 +376,7 @@ Object.defineProperty(native.Locator.prototype, 'waitUntil', {
   value: async function waitUntil(predicate, opts = {}) {
     // Default resolves from the process-wide setting (setDefaultTimeout /
     // XA11Y_DEFAULT_TIMEOUT, else 5s); an explicit opts.timeout wins.
-    const { timeout = native.getDefaultTimeout() * 1000, signal } = opts;
+    const { timeout = native.getDefaultTimeout().timeout, signal } = opts;
     const deadline = Date.now() + timeout;
 
     if (signal && signal.aborted) {
@@ -563,6 +563,76 @@ class Subscription extends EventEmitter {
   }
 }
 
+// ── subscribe() (shared by App and Element) ────────────────────────────────
+
+// Captured after `patchPrototypeMethods`, so rejections are already typed.
+const nativeAppSubscribe = native.App.prototype.subscribe;
+const nativeElementSubscribe = native.Element.prototype.subscribe;
+
+/**
+ * Open a native subscription on `target` and wrap it in the EventEmitter
+ * `Subscription`. One code path for `App.subscribe` and
+ * `Element.subscribe`, so the two cannot drift apart in shape.
+ *
+ * @param {Function} nativeSubscribe - the native `(kinds, buffer)` method
+ * @param {object} target - the native App or Element it is called on
+ * @param {{ kinds?: string[], buffer?: number, signal?: AbortSignal }} [opts]
+ * @param {number} extraArgs - how many arguments followed `opts`
+ * @returns {Promise<Subscription>}
+ */
+async function subscribeWith(nativeSubscribe, target, opts, extraArgs) {
+  // The old Element shape was positional `(kinds, buffer)`. Read as options,
+  // `subscribe(['focusChanged'])` would find no `kinds` and
+  // `subscribe(null, 16)` no `buffer`, and both would silently subscribe to
+  // everything with the default buffer. Refuse them instead.
+  if (
+    extraArgs > 0 ||
+    (opts !== undefined && opts !== null && (typeof opts !== 'object' || Array.isArray(opts)))
+  ) {
+    throw new InvalidActionDataError(
+      `subscribe: pass an options object { kinds, buffer, signal }, got ${
+        extraArgs > 0
+          ? `${extraArgs + 1} positional arguments`
+          : Array.isArray(opts)
+            ? 'an array'
+            : typeof opts
+      }`,
+    );
+  }
+  if (opts === undefined || opts === null) opts = {};
+  const nativeSub = await nativeSubscribe.call(target, opts.kinds, opts.buffer);
+  const sub = new Subscription(nativeSub);
+
+  if (opts.signal) {
+    const signal = opts.signal;
+    if (signal.aborted) {
+      sub.close();
+      return sub;
+    }
+    const onAbort = () => sub.close();
+    signal.addEventListener('abort', onAbort, { once: true });
+    // Clean up the abort listener when the sub is closed independently.
+    const origClose = sub.close.bind(sub);
+    sub.close = function () {
+      signal.removeEventListener('abort', onAbort);
+      origClose();
+    };
+  }
+
+  return sub;
+}
+
+// The native method resolves to the internal `_NativeSubscription`; the
+// public one takes the same options object as `App.subscribe` and resolves
+// to the EventEmitter `Subscription`.
+Object.defineProperty(native.Element.prototype, 'subscribe', {
+  configurable: true,
+  writable: true,
+  value: function subscribe(opts, ...extra) {
+    return subscribeWith(nativeElementSubscribe, this, opts, extra.length);
+  },
+});
+
 // ── App wrapper ────────────────────────────────────────────────────────────
 
 // Keep App.find's failure snapshot aligned with the native app lookup
@@ -672,7 +742,7 @@ class App extends native.App {
     // Default resolves from the process-wide setting (setDefaultTimeout /
     // XA11Y_DEFAULT_TIMEOUT, else 5s); an explicit options.timeout wins.
     const {
-      timeout = native.getDefaultTimeout() * 1000,
+      timeout = native.getDefaultTimeout().timeout,
       condition = 'application matching predicate',
       signal,
     } = options;
@@ -715,34 +785,13 @@ class App extends native.App {
    * Subscribe to accessibility events from this application.
    *
    * @param {object} [opts]
+   * @param {string[]} [opts.kinds] - Keep only these event types
+   * @param {number} [opts.buffer] - Most events to buffer (default 4096)
    * @param {AbortSignal} [opts.signal] - Abort signal; closes the sub on abort
    * @returns {Promise<Subscription>}
    */
-  async subscribe(opts = {}) {
-    let nativeSub;
-    try {
-      nativeSub = await native.App.prototype.subscribe.call(this, opts.kinds, opts.buffer);
-    } catch (err) {
-      throw toTypedError(err);
-    }
-    const sub = new Subscription(nativeSub);
-
-    if (opts.signal) {
-      if (opts.signal.aborted) {
-        sub.close();
-        return sub;
-      }
-      const onAbort = () => sub.close();
-      opts.signal.addEventListener('abort', onAbort, { once: true });
-      // Clean up the abort listener when the sub is closed independently.
-      const origClose = sub.close.bind(sub);
-      sub.close = function () {
-        opts.signal.removeEventListener('abort', onAbort);
-        origClose();
-      };
-    }
-
-    return sub;
+  subscribe(opts, ...extra) {
+    return subscribeWith(nativeAppSubscribe, this, opts, extra.length);
   }
 
   /**
@@ -822,28 +871,31 @@ function locator(selector) {
 }
 
 /**
- * Set the process-wide default timeout, in seconds.
+ * Set the process-wide default timeout: `setDefaultTimeout({ timeout: ms })`.
  *
  * Becomes the default for every auto-waiting action method, `wait*` call,
  * and app lookup (`App.byName` / `App.byPid`) that doesn't pass an explicit
  * timeout. An explicit per-call timeout always wins. Takes precedence over
- * the `XA11Y_DEFAULT_TIMEOUT` environment variable. Pass `0` for "single
- * attempt, no polling" semantics; negative or non-finite values throw.
+ * the `XA11Y_DEFAULT_TIMEOUT` environment variable (which stays in seconds).
+ * Pass `{ timeout: 0 }` for "single attempt, no polling" semantics. A bare
+ * number, a missing `timeout`, or one that is not a non-negative whole
+ * number of milliseconds throws `InvalidActionDataError`.
  *
- * @param {number} seconds
+ * @param {{ timeout: number }} options
  */
-function setDefaultTimeout(seconds) {
-  return wrap(native.setDefaultTimeout)(seconds);
+function setDefaultTimeout(options) {
+  return wrap(native.setDefaultTimeout)(options);
 }
 
 /**
- * Get the effective process-wide default timeout, in seconds.
+ * Get the effective process-wide default timeout as `{ timeout: ms }`, the
+ * shape `setDefaultTimeout` takes.
  *
  * Resolution order: the `setDefaultTimeout()` value, else the
  * `XA11Y_DEFAULT_TIMEOUT` environment variable (seconds, read once on first
- * use), else the built-in 5.
+ * use), else the built-in 5000 ms.
  *
- * @returns {number}
+ * @returns {{ timeout: number }}
  */
 function getDefaultTimeout() {
   return wrap(native.getDefaultTimeout)();

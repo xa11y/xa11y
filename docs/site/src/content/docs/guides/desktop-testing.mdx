@@ -37,7 +37,7 @@ xa11y.set_default_timeout(30.0)        # Python (seconds)
 ```
 
 ```js
-setDefaultTimeout(30);                 // JavaScript (seconds)
+setDefaultTimeout({ timeout: 30000 }); // JavaScript (milliseconds)
 ```
 
 ```rust
@@ -209,7 +209,7 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
         const calc = await App.byName('Calculator');
 
         // Wait for the app to be ready
-        await calc.locator('window').waitVisible(5);
+        await calc.locator('window').waitVisible({ timeout: 5000 });
 
         // Press 7 × 8 =
         await calc.locator("button[name='7']").press();

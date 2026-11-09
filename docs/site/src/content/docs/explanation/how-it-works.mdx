@@ -410,7 +410,7 @@ interface.
     console.log(element.name);
 
     // Wait for state changes (polls until condition met)
-    await btn.waitEnabled(5);
+    await btn.waitEnabled({ timeout: 5000 });
 
     // Get all matching elements
     const buttons = await calc.locator('button').elements();

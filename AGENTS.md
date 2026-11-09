@@ -532,6 +532,8 @@ The exception is an enum *payload* flattened onto a struct at the boundary: `Eve
 
 **Seconds in Python, milliseconds in JS** — `duration=0.15` vs `duration: 150`, matching `set_default_timeout(seconds)` and `timeout: 5000`. This is a deliberate split of the same kind as `event_type` / `type`: someone porting a script is already renaming, and a Python API in milliseconds would be the odd one out in its own binding. Say so in the docstring, as `InputSim.drag` does.
 
+This holds for every timing argument; in JS a timeout is always `{ timeout }` (ms) in an options object, never a bare number (`waitVisible({ timeout: 5000 })`, `setDefaultTimeout({ timeout: 30000 })`).
+
 ### Polymorphic parameters beat method proliferation
 
 A parameter may accept more than one shape when the alternative is two methods: `target` takes a tuple/array **or** an `Element`; `anchor` takes a name **or** a `(dx, dy)` offset. Parse the union in the binding and hand core a single concrete type.

@@ -54,7 +54,7 @@ test('subscribe refuses a bad buffer', async () => {
       `buffer: ${value}`,
     );
     await assert.rejects(
-      eventsApp().asElement().subscribe(null, value),
+      eventsApp().asElement().subscribe({ buffer: value }),
       InvalidActionDataError,
       `Element.subscribe buffer: ${value}`,
     );
@@ -172,5 +172,5 @@ test('a screenshot region refuses coerced numbers before capturing', async () =>
 });
 
 test('setDefaultTimeout refuses a value too large for a duration', () => {
-  assert.throws(() => setDefaultTimeout(1e30));
+  assert.throws(() => setDefaultTimeout({ timeout: 1e30 }));
 });

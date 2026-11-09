@@ -249,10 +249,12 @@ impl App {
     }
 
     /// Subscribe to accessibility events from this application. See
-    /// `Element.subscribe` for `kinds` and `buffer`.
+    /// `Element.subscribe` for the options. The public `App` class in
+    /// `index.js` overrides this; the native function takes `(kinds, buffer)`
+    /// positionally and resolves to the internal `_NativeSubscription`.
     #[napi(
-        ts_args_type = "kinds?: Array<EventTypeName> | null, buffer?: number | null",
-        ts_return_type = "Promise<_NativeSubscription>"
+        ts_args_type = "options?: SubscribeOptions | null",
+        ts_return_type = "Promise<Subscription>"
     )]
     pub fn subscribe(
         &self,

@@ -37,29 +37,6 @@ fn provider() -> napi::Result<Arc<dyn xa11y::Provider>> {
     xa11y::provider().map_err(map_err)
 }
 
-/// Resolve an optional per-call timeout (seconds) to a `Duration`: an
-/// explicit value wins; `None` falls back to the process-wide default (see
-/// [`set_default_timeout`] / the `XA11Y_DEFAULT_TIMEOUT` environment
-/// variable).
-pub(crate) fn effective_timeout_secs(
-    timeout_seconds: Option<f64>,
-) -> napi::Result<std::time::Duration> {
-    // `try_from_secs_f64` rather than `from_secs_f64`: the latter panics on
-    // a finite value too large for a `Duration` (`1e30`), which would abort
-    // Node. Negative and non-finite values fail the same way.
-    match timeout_seconds {
-        Some(secs) => std::time::Duration::try_from_secs_f64(secs).map_err(|_| {
-            napi::Error::new(
-                napi::Status::InvalidArg,
-                format!(
-                    "timeoutSeconds must be a non-negative, finite number of seconds, got {secs}"
-                ),
-            )
-        }),
-        None => xa11y::default_timeout().map_err(map_err),
-    }
-}
-
 /// Validate a JS-supplied desktop window coordinate.
 ///
 /// The napi `i32` conversion applies JavaScript `ToInt32` *before* Rust sees
@@ -101,37 +78,48 @@ pub(crate) fn checked_window_dimension(value: f64, what: &str) -> napi::Result<u
     }
 }
 
-/// Set the process-wide default timeout, in seconds.
+/// Set the process-wide default timeout: `setDefaultTimeout({ timeout: ms })`.
 ///
 /// Becomes the default for every auto-waiting action method, `wait*` call,
 /// and app lookup (`App.byName` / `App.byPid`) that doesn't pass an explicit
 /// timeout. An explicit per-call timeout always wins. Takes precedence over
 /// the `XA11Y_DEFAULT_TIMEOUT` environment variable (seconds, read once on
-/// first use).
+/// first use, shared with the other language bindings).
 ///
-/// Pass `0` for "single attempt, no polling" semantics. Throws for negative
-/// or non-finite values.
-#[napi(js_name = "setDefaultTimeout")]
-pub fn set_default_timeout(seconds: f64) -> napi::Result<()> {
-    // `try_from_secs_f64` also refuses a finite value too large for a
-    // `Duration`, where `from_secs_f64` would panic.
-    let timeout = std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
-        napi::Error::new(
-            napi::Status::InvalidArg,
-            format!("seconds must be a non-negative, finite number, got {seconds}"),
-        )
-    })?;
+/// Pass `{ timeout: 0 }` for "single attempt, no polling" semantics. Throws
+/// `InvalidActionDataError` for a bare number (this used to take seconds), a
+/// missing `timeout`, or one that is not a non-negative whole number of
+/// milliseconds.
+#[napi(
+    js_name = "setDefaultTimeout",
+    ts_args_type = "options: DefaultTimeout"
+)]
+pub fn set_default_timeout(options: napi::Either<f64, types::TimeoutOptions>) -> napi::Result<()> {
+    let timeout = types::parse_timeout_options(Some(options), "setDefaultTimeout")
+        .map_err(map_err)?
+        .ok_or_else(|| {
+            map_err(xa11y::Error::InvalidActionData {
+                message: "setDefaultTimeout: { timeout: ms } is required".to_string(),
+            })
+        })?;
     xa11y::set_default_timeout(timeout);
     Ok(())
 }
 
-/// Get the effective process-wide default timeout, in seconds.
+/// Get the effective process-wide default timeout as `{ timeout: ms }`, the
+/// shape `setDefaultTimeout` takes.
 ///
 /// Resolution order: the [`set_default_timeout`] value, else the
-/// `XA11Y_DEFAULT_TIMEOUT` environment variable, else the built-in 5.0.
+/// `XA11Y_DEFAULT_TIMEOUT` environment variable, else the built-in 5000 ms.
+/// A sub-millisecond remainder (only reachable through the environment
+/// variable) is truncated.
 #[napi(js_name = "getDefaultTimeout")]
-pub fn get_default_timeout() -> napi::Result<f64> {
-    Ok(xa11y::default_timeout().map_err(map_err)?.as_secs_f64())
+pub fn get_default_timeout() -> napi::Result<types::DefaultTimeout> {
+    let timeout = xa11y::default_timeout().map_err(map_err)?;
+    // u128 -> f64: exact for any timeout below 2^53 ms (~285,000 years).
+    Ok(types::DefaultTimeout {
+        timeout: timeout.as_millis() as f64,
+    })
 }
 
 /// CLI entry point called from the `xa11y` bin script.

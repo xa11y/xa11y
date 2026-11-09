@@ -391,14 +391,20 @@ impl Element {
         })
     }
 
-    /// Subscribe to accessibility events for this element (typically an app).
-    /// `kinds` keeps only those event types (`'announcement'`,
-    /// `'focusChanged'`); a type this platform never sends rejects with
-    /// `ActionNotSupportedError` at once. `buffer` bounds the queue (default
-    /// 4096 events, oldest dropped first).
+    /// Subscribe to accessibility events for this element (typically an app),
+    /// with the same options and result as `App.subscribe`: resolves to an
+    /// EventEmitter `Subscription`. `options.kinds` keeps only those event
+    /// types (`'announcement'`, `'focusChanged'`); a type this platform never
+    /// sends rejects with `ActionNotSupportedError` at once. `options.buffer`
+    /// bounds the queue (default 4096 events, oldest dropped first).
+    /// `options.signal` closes the subscription when aborted.
+    ///
+    /// `index.js` replaces this method on the prototype; the native function
+    /// it wraps takes `(kinds, buffer)` positionally and resolves to the
+    /// internal `_NativeSubscription`.
     #[napi(
-        ts_args_type = "kinds?: Array<EventTypeName> | null, buffer?: number | null",
-        ts_return_type = "Promise<_NativeSubscription>"
+        ts_args_type = "options?: SubscribeOptions | null",
+        ts_return_type = "Promise<Subscription>"
     )]
     pub fn subscribe(
         &self,

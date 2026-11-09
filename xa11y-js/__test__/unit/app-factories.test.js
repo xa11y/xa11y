@@ -78,7 +78,7 @@ require.cache[nativePath] = {
     _makeDisconnectedSubscription: () => new NativeSubscriptionStub(),
     locator: () => {},
     // App.find resolves its default timeout from the process-wide setting.
-    getDefaultTimeout: () => 5,
+    getDefaultTimeout: () => ({ timeout: 5000 }),
   },
 };
 

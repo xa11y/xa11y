@@ -358,12 +358,12 @@ test('waitStable resolves with the bounds a slide ends at', async (t) => {
   const app = await slideApp(t);
   if (!app) return;
   const target = app.locator(SLIDE_TARGET);
-  const rest = (await target.waitStable(10)).bounds;
+  const rest = (await target.waitStable({ timeout: 10000 })).bounds;
   assert.ok(rest, 'the slide target reports no bounds');
 
   await app.locator(START_SLIDE).press();
   const started = Date.now();
-  const settled = await target.waitStable(10);
+  const settled = await target.waitStable({ timeout: 10000 });
   const waitedMs = Date.now() - started;
   assert.deepEqual(settled.bounds, rest, `waitStable returned mid-slide after ${waitedMs} ms`);
   // The 1.5 s floor leaves the rest of the 3 s slide for press latency.
@@ -374,13 +374,13 @@ test('waitStable times out naming the moving bounds', async (t) => {
   const app = await slideApp(t);
   if (!app) return;
   const target = app.locator(SLIDE_TARGET);
-  await target.waitStable(10);
+  await target.waitStable({ timeout: 10000 });
 
   await app.locator(START_SLIDE).press();
   try {
     // 1.5 s leaves room for several polls where a resolve is slow (UIA on
     // Windows fit only one poll into 0.6 s), and still ends inside the slide.
-    await assert.rejects(target.waitStable(1.5), (err) => {
+    await assert.rejects(target.waitStable({ timeout: 1500 }), (err) => {
       assert.ok(err instanceof TimeoutError, String(err));
       assert.ok(err.condition.includes('750 ms'), err.condition);
       // A slow native read can consume the remaining deadline after only
@@ -394,6 +394,6 @@ test('waitStable times out naming the moving bounds', async (t) => {
     });
   } finally {
     // Leave the target at rest for whatever test runs next.
-    await target.waitStable(10);
+    await target.waitStable({ timeout: 10000 });
   }
 });

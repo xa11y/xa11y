@@ -92,7 +92,7 @@ async function main() {
     // 4. Locators auto-wait and re-resolve on every call, so they stay correct
     //    even if the UI mutates between operations.
     const submit = app.locator('button[name="Submit"]');
-    await submit.waitVisible(5); // timeout in seconds for native wait helpers
+    await submit.waitVisible({ timeout: 5000 }); // JS timeouts are milliseconds
 
     // 5. Read element fields via .element().
     const button = await submit.element();

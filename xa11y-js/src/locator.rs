@@ -1,10 +1,10 @@
 //! JS `Locator` class: resilient element reference with auto-wait.
 
-use napi::bindgen_prelude::{AsyncTask, Env, Task};
+use napi::bindgen_prelude::{AsyncTask, Either, Env, Task};
 
 use crate::element::Element;
 use crate::map_err;
-use crate::types::TreeNode;
+use crate::types::{parse_timeout_options, TimeoutOptions, TreeNode};
 
 /// A resilient element reference that re-queries on each interaction.
 ///
@@ -23,7 +23,7 @@ use crate::types::TreeNode;
 /// const app = await App.byName('MyApp');
 /// const save = app.locator("button[name='Save']");
 /// await save.press();                  // auto-waits, then presses
-/// await save.waitEnabled(10);          // wait up to 10 seconds
+/// await save.waitEnabled({ timeout: 10000 }); // wait up to 10 seconds
 /// ```
 #[napi]
 pub struct Locator {
@@ -463,116 +463,138 @@ impl Locator {
     // ── Waits ──────────────────────────────────────────────────────────
     //
     // Each wait polls the provider until its condition is satisfied or
-    // `timeoutSeconds` elapses. When `timeoutSeconds` is omitted, the
-    // process-wide default applies — 5s unless overridden via
+    // `options.timeout` (milliseconds) elapses. When it is omitted, the
+    // process-wide default applies — 5000 ms unless overridden via
     // `setDefaultTimeout()` or the `XA11Y_DEFAULT_TIMEOUT` environment
     // variable. Waits that expect the element to be present resolve with the
     // matched `Element`; waits that expect it to be gone resolve with
-    // `undefined`.
+    // `undefined`. A bare number (the old seconds argument) or an invalid
+    // `timeout` rejects with `InvalidActionDataError` before any polling.
 
     /// Wait for a matching element to become visible.
-    /// Rejects with `TimeoutError` if still hidden after `timeoutSeconds`.
+    /// Rejects with `TimeoutError` if still hidden after `options.timeout` ms.
     #[napi(
-        ts_args_type = "timeoutSeconds?: number",
+        ts_args_type = "options?: TimeoutOptions | null",
         ts_return_type = "Promise<Element>"
     )]
-    pub fn wait_visible(&self, timeout_seconds: Option<f64>) -> AsyncTask<WaitTask> {
+    pub fn wait_visible(
+        &self,
+        options: Option<Either<f64, TimeoutOptions>>,
+    ) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Visible,
-            timeout_seconds,
+            parse_timeout_options(options, "waitVisible"),
         ))
     }
 
     /// Wait for a matching element to exist in the tree (may not be visible).
-    /// Rejects with `TimeoutError` if no match appears within `timeoutSeconds`.
+    /// Rejects with `TimeoutError` if no match appears within `options.timeout` ms.
     #[napi(
-        ts_args_type = "timeoutSeconds?: number",
+        ts_args_type = "options?: TimeoutOptions | null",
         ts_return_type = "Promise<Element>"
     )]
-    pub fn wait_attached(&self, timeout_seconds: Option<f64>) -> AsyncTask<WaitTask> {
+    pub fn wait_attached(
+        &self,
+        options: Option<Either<f64, TimeoutOptions>>,
+    ) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Attached,
-            timeout_seconds,
+            parse_timeout_options(options, "waitAttached"),
         ))
     }
 
     /// Wait for the matching element to be removed from the tree.
     #[napi(
-        ts_args_type = "timeoutSeconds?: number",
+        ts_args_type = "options?: TimeoutOptions | null",
         ts_return_type = "Promise<void>"
     )]
-    pub fn wait_detached(&self, timeout_seconds: Option<f64>) -> AsyncTask<WaitTask> {
+    pub fn wait_detached(
+        &self,
+        options: Option<Either<f64, TimeoutOptions>>,
+    ) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask::absent(
             self.inner.clone(),
             WaitKind::Detached,
-            timeout_seconds,
+            parse_timeout_options(options, "waitDetached"),
         ))
     }
 
     /// Wait for the matching element to become enabled (interactive).
     #[napi(
-        ts_args_type = "timeoutSeconds?: number",
+        ts_args_type = "options?: TimeoutOptions | null",
         ts_return_type = "Promise<Element>"
     )]
-    pub fn wait_enabled(&self, timeout_seconds: Option<f64>) -> AsyncTask<WaitTask> {
+    pub fn wait_enabled(
+        &self,
+        options: Option<Either<f64, TimeoutOptions>>,
+    ) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Enabled,
-            timeout_seconds,
+            parse_timeout_options(options, "waitEnabled"),
         ))
     }
 
     /// Wait for the matching element to be hidden or removed.
     #[napi(
-        ts_args_type = "timeoutSeconds?: number",
+        ts_args_type = "options?: TimeoutOptions | null",
         ts_return_type = "Promise<void>"
     )]
-    pub fn wait_hidden(&self, timeout_seconds: Option<f64>) -> AsyncTask<WaitTask> {
+    pub fn wait_hidden(&self, options: Option<Either<f64, TimeoutOptions>>) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask::absent(
             self.inner.clone(),
             WaitKind::Hidden,
-            timeout_seconds,
+            parse_timeout_options(options, "waitHidden"),
         ))
     }
 
     /// Wait for the matching element to become disabled (non-interactive).
     #[napi(
-        ts_args_type = "timeoutSeconds?: number",
+        ts_args_type = "options?: TimeoutOptions | null",
         ts_return_type = "Promise<Element>"
     )]
-    pub fn wait_disabled(&self, timeout_seconds: Option<f64>) -> AsyncTask<WaitTask> {
+    pub fn wait_disabled(
+        &self,
+        options: Option<Either<f64, TimeoutOptions>>,
+    ) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Disabled,
-            timeout_seconds,
+            parse_timeout_options(options, "waitDisabled"),
         ))
     }
 
     /// Wait for the matching element to receive keyboard focus.
     #[napi(
-        ts_args_type = "timeoutSeconds?: number",
+        ts_args_type = "options?: TimeoutOptions | null",
         ts_return_type = "Promise<Element>"
     )]
-    pub fn wait_focused(&self, timeout_seconds: Option<f64>) -> AsyncTask<WaitTask> {
+    pub fn wait_focused(
+        &self,
+        options: Option<Either<f64, TimeoutOptions>>,
+    ) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Focused,
-            timeout_seconds,
+            parse_timeout_options(options, "waitFocused"),
         ))
     }
 
     /// Wait for the matching element to lose keyboard focus.
     #[napi(
-        ts_args_type = "timeoutSeconds?: number",
+        ts_args_type = "options?: TimeoutOptions | null",
         ts_return_type = "Promise<Element>"
     )]
-    pub fn wait_unfocused(&self, timeout_seconds: Option<f64>) -> AsyncTask<WaitTask> {
+    pub fn wait_unfocused(
+        &self,
+        options: Option<Either<f64, TimeoutOptions>>,
+    ) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Unfocused,
-            timeout_seconds,
+            parse_timeout_options(options, "waitUnfocused"),
         ))
     }
 
@@ -588,14 +610,14 @@ impl Locator {
     /// differing bounds, a match that is not visible, or a selector that
     /// never matched.
     #[napi(
-        ts_args_type = "timeoutSeconds?: number",
+        ts_args_type = "options?: TimeoutOptions | null",
         ts_return_type = "Promise<Element>"
     )]
-    pub fn wait_stable(&self, timeout_seconds: Option<f64>) -> AsyncTask<WaitTask> {
+    pub fn wait_stable(&self, options: Option<Either<f64, TimeoutOptions>>) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Stable,
-            timeout_seconds,
+            parse_timeout_options(options, "waitStable"),
         ))
     }
 }
@@ -882,10 +904,10 @@ pub enum WaitKind {
 pub struct WaitTask {
     inner: xa11y::Locator,
     kind: WaitKind,
-    /// Explicit timeout in seconds; `None` resolves to the process-wide
-    /// default in `compute` (validation happens there too, so a negative
-    /// value rejects the promise instead of panicking).
-    timeout_seconds: Option<f64>,
+    /// The parsed `{ timeout }` option: `Ok(None)` resolves to the
+    /// process-wide default in `compute`, and a parse error is carried here
+    /// so it rejects the promise rather than throwing synchronously.
+    timeout: xa11y::Result<Option<std::time::Duration>>,
     /// Whether the JS caller expects the resolved value to be an Element or
     /// undefined. Absent-state waits (Detached/Hidden) always resolve to
     /// undefined.
@@ -893,19 +915,27 @@ pub struct WaitTask {
 }
 
 impl WaitTask {
-    fn returning(inner: xa11y::Locator, kind: WaitKind, timeout_seconds: Option<f64>) -> Self {
+    fn returning(
+        inner: xa11y::Locator,
+        kind: WaitKind,
+        timeout: xa11y::Result<Option<std::time::Duration>>,
+    ) -> Self {
         Self {
             inner,
             kind,
-            timeout_seconds,
+            timeout,
             returns_element: true,
         }
     }
-    fn absent(inner: xa11y::Locator, kind: WaitKind, timeout_seconds: Option<f64>) -> Self {
+    fn absent(
+        inner: xa11y::Locator,
+        kind: WaitKind,
+        timeout: xa11y::Result<Option<std::time::Duration>>,
+    ) -> Self {
         Self {
             inner,
             kind,
-            timeout_seconds,
+            timeout,
             returns_element: false,
         }
     }
@@ -916,7 +946,10 @@ impl Task for WaitTask {
     type JsValue = Option<Element>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        let timeout = crate::effective_timeout_secs(self.timeout_seconds)?;
+        let timeout = match std::mem::replace(&mut self.timeout, Ok(None)).map_err(map_err)? {
+            Some(timeout) => timeout,
+            None => xa11y::default_timeout().map_err(map_err)?,
+        };
         let r = match self.kind {
             WaitKind::Visible => self.inner.wait_visible(timeout).map(Some),
             WaitKind::Attached => self.inner.wait_attached(timeout).map(Some),

@@ -83,6 +83,11 @@ Each polls until the condition holds or the timeout expires, then raises
 `Timeout` with a diagnosis. `wait_until()` takes a predicate over the resolved
 element, which is `None` when the selector did not match.
 
+The timeout is seconds in Python (`wait_visible(timeout=5.0)`) and an options
+object in milliseconds in JavaScript (`waitVisible({ timeout: 5000 })`). A
+bare number in JavaScript throws `InvalidActionDataError` rather than being
+read in either unit.
+
 `wait_stable(timeout)` (`waitStable` in JS) returns the element once its
 bounds are observed unchanged for at least 750 ms while visible. It is
 about geometry and unrelated to an element's `stable_id`. Call it before
@@ -315,6 +320,10 @@ specific: an explicit per-call `timeout` argument, then
 `set_default_timeout()`, then the `XA11Y_DEFAULT_TIMEOUT` environment variable
 (seconds, read once at startup), then the built-in 5 seconds. A timeout of `0`
 means a single attempt with no polling.
+
+In JavaScript the setter takes the same options object as the waits,
+`setDefaultTimeout({ timeout: 30000 })`, and `getDefaultTimeout()` returns
+that shape. The environment variable is seconds in every language.
 
 An unparsable `XA11Y_DEFAULT_TIMEOUT` raises `InvalidConfig`. See
 [Errors](/reference/errors/).

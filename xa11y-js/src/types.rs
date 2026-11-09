@@ -377,6 +377,49 @@ pub fn checked_millis(value: f64, what: &str) -> xa11y::Result<std::time::Durati
     }
 }
 
+/// Options for the `Locator.wait*` methods and `setDefaultTimeout`.
+#[napi(object)]
+pub struct TimeoutOptions {
+    /// Timeout in milliseconds: a finite, non-negative whole number. `0`
+    /// means a single attempt with no polling. Omitted, the wait uses the
+    /// process-wide default (see `setDefaultTimeout`).
+    pub timeout: Option<f64>,
+}
+
+/// The process-wide default timeout, as `getDefaultTimeout()` reports it.
+/// The same shape `setDefaultTimeout` takes, so the two round-trip.
+#[napi(object)]
+pub struct DefaultTimeout {
+    /// The default timeout in whole milliseconds.
+    pub timeout: f64,
+}
+
+/// Parse a JS `{ timeout }` options argument into an optional duration.
+///
+/// A bare number is refused rather than read as milliseconds: these methods
+/// used to take seconds, and a caller still passing `5` must fail loudly
+/// instead of waiting 5 ms (or, read the other way, 1000× longer than they
+/// meant). Returned as a core error so a wait can carry it into its task and
+/// reject before its first OS call.
+pub fn parse_timeout_options(
+    options: Option<napi::Either<f64, TimeoutOptions>>,
+    method: &str,
+) -> xa11y::Result<Option<std::time::Duration>> {
+    match options {
+        None => Ok(None),
+        Some(napi::Either::A(n)) => Err(xa11y::Error::InvalidActionData {
+            message: format!(
+                "{method}: pass {{ timeout: ms }} — a bare number ({n}) is not accepted; \
+                 timeouts are milliseconds in an options object"
+            ),
+        }),
+        Some(napi::Either::B(TimeoutOptions { timeout: None })) => Ok(None),
+        Some(napi::Either::B(TimeoutOptions { timeout: Some(ms) })) => {
+            checked_millis(ms, "timeout").map(Some)
+        }
+    }
+}
+
 /// Parse `selectText`'s polymorphic arguments: `(start, end)` or one range
 /// object. Shared by `Element.selectText` and `Locator.selectText`.
 pub fn parse_select_range(
