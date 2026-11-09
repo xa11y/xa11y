@@ -27,11 +27,12 @@
 //! [`Capture::finished`]. A node that disappears while its children are read
 //! is dropped and counted in [`Capture::vanished`]. A read that fails for
 //! another reason is recorded on the node ([`CapturedNode::errors`]) and the
-//! walk continues. A node met twice (a cycle, which broken web trees have) is
-//! detected by [`NodeIdentity`] where the platform reports one, and cut with
-//! an error on its parent.
+//! walk continues. A cycle (a node that is its own ancestor, which broken web
+//! trees have) is detected by [`NodeIdentity`] where the platform reports
+//! one, and cut with an error on its parent. A node listed under two parents
+//! is not a cycle and is captured under each.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::element::Element;
@@ -362,8 +363,10 @@ pub(crate) fn capture_from(
     let mut raw = vec![Raw::new(root, None, 0)];
     // Cycle detection needs identities; a platform without them (the IA2
     // source) walks without it.
-    let mut seen: Option<HashSet<NodeIdentity>> = Some(HashSet::new());
-    note_identity(&mut raw[0], &mut seen);
+    let mut identities = true;
+    let root = raw.pop().expect("the root was just pushed");
+    let (_, root) = note_identity(&raw, root, &mut identities);
+    raw.push(root);
 
     let mut root_children = Some(root_children);
     let mut queue = VecDeque::from([0usize]);
@@ -409,16 +412,16 @@ pub(crate) fn capture_from(
                 truncated.by_nodes = true;
                 break;
             }
-            let mut node = Raw::new(kid, Some(i), depth);
-            if !note_identity(&mut node, &mut seen) {
+            let (fresh, node) = note_identity(&raw, Raw::new(kid, Some(i), depth), &mut identities);
+            if !fresh {
                 let subject = crate::error::stale_subject(&node.element);
                 raw[i].fail(
                     CaptureStep::Cycle,
                     Error::Platform {
                         code: 0,
                         message: format!(
-                            "child {subject} is a node already captured higher up; the \
-                             platform tree has a cycle here, so it was left out"
+                            "child {subject} is one of its own ancestors; the platform \
+                             tree has a cycle here, so it was left out"
                         ),
                     },
                 );
@@ -455,24 +458,30 @@ pub(crate) fn capture_from(
     })
 }
 
-/// Record `node`'s identity. `false` when it was already seen (a cycle).
-fn note_identity(node: &mut Raw, seen: &mut Option<HashSet<NodeIdentity>>) -> bool {
-    let Some(set) = seen.as_mut() else {
-        return true;
-    };
+/// Record `node`'s identity, and whether it is new on its path: `false`
+/// when it is one of its own ancestors (a cycle). A node reachable under two
+/// parents is not a cycle, and is captured under each.
+fn note_identity(raw: &[Raw], mut node: Raw, identities: &mut bool) -> (bool, Raw) {
+    if !*identities {
+        return (true, node);
+    }
     match node.element.identity() {
         Ok(id) => {
-            if !set.insert(id.clone()) {
-                return false;
+            let mut ancestor = node.parent;
+            while let Some(a) = ancestor {
+                if raw[a].identity.as_ref() == Some(&id) {
+                    return (false, node);
+                }
+                ancestor = raw[a].parent;
             }
             node.identity = Some(id);
         }
         // This platform has no identities: no cycle detection, and
         // relations resolve to elements outside the capture.
-        Err(Error::Unsupported { .. }) => *seen = None,
+        Err(Error::Unsupported { .. }) => *identities = false,
         Err(e) => node.fail(CaptureStep::Identity, e),
     }
-    true
+    (true, node)
 }
 
 fn read_texts(
@@ -571,10 +580,14 @@ fn into_pre_order(raw: Vec<Raw>) -> Vec<CapturedNode> {
         .enumerate()
         .map(|(new, &old)| (old, new))
         .collect();
-    let by_identity: HashMap<NodeIdentity, usize> = order
-        .iter()
-        .filter_map(|&old| raw[old].identity.clone().map(|id| (id, new_index[&old])))
-        .collect();
+    // A node captured under two parents resolves to its first (pre-order)
+    // appearance.
+    let mut by_identity: HashMap<NodeIdentity, usize> = HashMap::new();
+    for &old in &order {
+        if let Some(id) = raw[old].identity.clone() {
+            by_identity.entry(id).or_insert(new_index[&old]);
+        }
+    }
     let resolve = |target: Element| -> RelationTarget {
         match target.identity() {
             Ok(id) => match by_identity.get(&id) {
@@ -765,6 +778,35 @@ mod tests {
                 assert_eq!(cap.nodes[child].parent, Some(node.index));
             }
         }
+    }
+
+    #[test]
+    fn a_shared_node_is_captured_under_each_parent_and_a_cycle_is_cut() {
+        // Shared: Back listed under Content too. Not a cut.
+        let shared = build_provider();
+        shared.link_child("Content", "Back");
+        let cap = app(shared)
+            .capture(&CaptureOptions::new())
+            .expect("capture");
+        assert!(!cap.truncated.any(), "{:?}", cap.truncated);
+        assert_eq!(names(&cap).iter().filter(|n| *n == "Back").count(), 2);
+        assert!(cap.nodes.iter().all(|n| !n.children_truncated));
+
+        // Cycle: Navigation listed under its own child Back.
+        let cyclic = build_provider();
+        cyclic.link_child("Back", "Navigation");
+        let cap = app(cyclic)
+            .capture(&CaptureOptions::new())
+            .expect("capture");
+        let back = cap
+            .nodes
+            .iter()
+            .find(|n| n.name.as_deref() == Some("Back"))
+            .expect("Back");
+        assert_eq!(back.errors.len(), 1, "{:?}", back.errors);
+        assert_eq!(back.errors[0].step, CaptureStep::Cycle);
+        assert!(back.children_truncated);
+        assert_eq!(names(&cap).iter().filter(|n| *n == "Navigation").count(), 1);
     }
 
     #[test]

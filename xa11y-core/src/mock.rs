@@ -149,6 +149,16 @@ impl MockProvider {
         nodes[idx].data.role = role;
     }
 
+    /// List the node named `child` as a child of the node named `parent` as
+    /// well, as a platform that shares a node between two parents does (or,
+    /// when `child` is an ancestor of `parent`, as a cyclic tree does).
+    pub fn link_child(&self, parent: &str, child: &str) {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let p = Self::index_named(&nodes, parent);
+        let c = Self::index_named(&nodes, child);
+        nodes[p].children.push(c);
+    }
+
     /// Make `subscribe` succeed with a scripted [`announcement_events`]
     /// stream. Without it, `subscribe` fails with a platform error, which the
     /// binding error-mapping tests rely on.
