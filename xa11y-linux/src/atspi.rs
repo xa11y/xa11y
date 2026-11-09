@@ -70,7 +70,7 @@ pub struct LinuxProvider {
     /// Cached AT-SPI accessible refs keyed by handle ID. Shared with every
     /// event subscription (see [`HandleRegistrar`]), so an event's target is
     /// a handle into this same cache.
-    handle_cache: Arc<Mutex<BoundedHandleCache<AccessibleRef>>>,
+    handle_cache: Arc<Mutex<HandleTable>>,
     /// Cached AT-SPI2 action indices keyed by element handle.
     /// Maps each action name (snake_case) to the integer index used by `DoAction(i)`.
     action_indices: Arc<Mutex<BoundedHandleCache<HashMap<String, i32>>>>,
@@ -205,31 +205,147 @@ pub(crate) fn read_actions(proxy: &Proxy<'_>) -> (Vec<String>, HashMap<String, i
 /// revalidates it first, and a reconnect forgets it with the rest.
 #[derive(Clone)]
 pub(crate) struct HandleRegistrar {
-    handle_cache: Arc<Mutex<BoundedHandleCache<AccessibleRef>>>,
+    handle_cache: Arc<Mutex<HandleTable>>,
     action_indices: Arc<Mutex<BoundedHandleCache<HashMap<String, i32>>>>,
 }
 
 impl HandleRegistrar {
-    /// Register `aref` and the action indices read for it, returning the
-    /// new handle. An empty `action_indices` stores nothing, as
-    /// `build_element_data` stores nothing for an element without actions.
+    /// Register `aref` and the action indices read for it, returning its
+    /// handle: the one it already has if the table still holds it (see
+    /// [`HandleTable`]), so a busy subscription re-reports the same widget
+    /// under one handle instead of minting a cache entry per event.
     pub(crate) fn register(
         &self,
         aref: AccessibleRef,
+        role: Role,
         action_indices: HashMap<String, i32>,
     ) -> u64 {
-        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        self.handle_cache
+        let handle = self
+            .handle_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(handle, aref);
-        if !action_indices.is_empty() {
-            self.action_indices
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(handle, action_indices);
+            .intern(aref, role);
+        store_action_indices(&self.action_indices, handle, action_indices);
+        handle
+    }
+}
+
+/// Record the `DoAction` indices just read for `handle`.
+///
+/// An empty map stores nothing for a handle the table has never seen, as
+/// before handles were reused; for a reused handle it empties the earlier
+/// map, so actions the object no longer reports cannot be dispatched by
+/// their old index.
+fn store_action_indices(
+    cache: &Mutex<BoundedHandleCache<HashMap<String, i32>>>,
+    handle: u64,
+    indices: HashMap<String, i32>,
+) {
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if !indices.is_empty() {
+        cache.insert(handle, indices);
+    } else if let Some(previous) = cache.get_mut(&handle) {
+        previous.clear();
+    }
+}
+
+/// The provider's handle table: handle → [`AccessibleRef`], bounded by
+/// [`BoundedHandleCache`], plus the reverse map that gives one platform
+/// object, keyed by `(bus name, object path)`, one handle for as long as it
+/// stays resident.
+///
+/// Without the reverse map every query result and every event target minted
+/// a fresh handle, so a busy event subscription (or repeated polling) pushed
+/// the elements a caller still held out of the table, and their actions
+/// failed `ElementStale { Evicted }`. Reusing the handle refreshes the one
+/// entry instead.
+///
+/// Reuse changes nothing a handle resolves to: two handles for the same
+/// `(bus, path)` already addressed the same D-Bus object. Liveness is still
+/// decided per call (`ensure_attached`, `revalidate_atspi`), never by handle
+/// freshness. An evicted handle is never re-minted, because its reverse
+/// entry is dropped in the same insert that evicts it, so the object's next
+/// registration takes a new number.
+///
+/// Windows and dialogs are the exception and always take a fresh handle
+/// (see [`handle_is_reusable`]).
+#[derive(Debug)]
+pub(crate) struct HandleTable {
+    refs: BoundedHandleCache<AccessibleRef>,
+    by_ref: HashMap<(String, String), u64>,
+}
+
+impl HandleTable {
+    /// A table holding at most `capacity` objects.
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            refs: BoundedHandleCache::new(capacity),
+            by_ref: HashMap::new(),
+        }
+    }
+
+    /// The handle for `aref`, an object of `role`: its resident handle
+    /// refreshed, or a new one. A role [`handle_is_reusable`] rules out
+    /// always gets a new one.
+    pub(crate) fn intern(&mut self, aref: AccessibleRef, role: Role) -> u64 {
+        let key = handle_is_reusable(role).then(|| (aref.bus_name.clone(), aref.path.clone()));
+        let handle = match key.as_ref().and_then(|key| self.by_ref.get(key)) {
+            // Invariant: `by_ref` only names handles `refs` holds (evictions
+            // below and `clear` keep them in step), so this is a refresh.
+            Some(&handle) => handle,
+            None => NEXT_HANDLE.fetch_add(1, Ordering::Relaxed),
+        };
+        for (evicted, old) in self.refs.insert_evicting(handle, aref) {
+            let old_key = (old.bus_name, old.path);
+            if self.by_ref.get(&old_key) == Some(&evicted) {
+                self.by_ref.remove(&old_key);
+            }
+        }
+        if let Some(key) = key {
+            self.by_ref.insert(key, handle);
         }
         handle
+    }
+
+    /// The object `handle` names, if the table still holds it.
+    pub(crate) fn get(&self, handle: &u64) -> Option<&AccessibleRef> {
+        self.refs.get(handle)
+    }
+
+    /// Forget every handle (see [`LinuxProvider::connection_with`]).
+    pub(crate) fn clear(&mut self) {
+        self.refs.clear();
+        self.by_ref.clear();
+    }
+}
+
+/// Whether an object of `role` may keep its handle across registrations.
+///
+/// Not a window or dialog: the native window manager binds a window's
+/// handle to the X11 / Sway window it resolved at first use and never
+/// rebinds it (`window::X11WindowBackend::bind`), so that an old handle to a
+/// destroyed window is stale rather than silently retargeted. A window
+/// hidden and shown again keeps its accessible path but gets a new native
+/// window; with a reused handle every later read would carry the dead
+/// binding. Windows are few, so minting them fresh costs the cache nothing.
+fn handle_is_reusable(role: Role) -> bool {
+    !matches!(role, Role::Window | Role::Dialog)
+}
+
+/// A table filled with fixed `(handle, ref)` pairs, for test fixtures that
+/// address objects by known handles. Later registrations of the same object
+/// reuse the fixture's handle.
+#[cfg(test)]
+impl FromIterator<(u64, AccessibleRef)> for HandleTable {
+    fn from_iter<I: IntoIterator<Item = (u64, AccessibleRef)>>(iter: I) -> Self {
+        let mut table = Self::new(MAX_CACHED_ELEMENTS);
+        for (handle, aref) in iter {
+            table
+                .by_ref
+                .insert((aref.bus_name.clone(), aref.path.clone()), handle);
+            table.refs.insert(handle, aref);
+        }
+        table
     }
 }
 
@@ -245,7 +361,7 @@ impl LinuxProvider {
         let a11y_bus = Self::connect_a11y_bus()?;
         Ok(Self {
             a11y_bus: Mutex::new(a11y_bus),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
@@ -1353,14 +1469,13 @@ impl LinuxProvider {
         None
     }
 
-    /// Cache an AccessibleRef and return a new handle ID.
-    fn cache_element(&self, aref: AccessibleRef) -> u64 {
-        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    /// Cache an AccessibleRef of `role` and return its handle (the one it
+    /// already has while resident; see [`HandleTable`]).
+    fn cache_element(&self, aref: AccessibleRef, role: Role) -> u64 {
         self.handle_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(handle, aref);
-        handle
+            .intern(aref, role)
     }
 
     /// A [`HandleRegistrar`] minting handles into this provider's caches,
@@ -1609,13 +1724,8 @@ impl LinuxProvider {
         let value = xa11y_core::text::strip_bidi_opt(value);
         let description = xa11y_core::text::strip_bidi_opt(description);
 
-        let handle = self.cache_element(aref.clone());
-        if !action_index_map.is_empty() {
-            self.action_indices
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(handle, action_index_map);
-        }
+        let handle = self.cache_element(aref.clone(), role);
+        store_action_indices(&self.action_indices, handle, action_index_map);
 
         let bounds = match &bounds_read {
             Ok(bounds) => *bounds,
@@ -6147,7 +6257,7 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
@@ -6354,7 +6464,7 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
@@ -6679,7 +6789,7 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = std::sync::Arc::new(LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
@@ -6793,7 +6903,7 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
@@ -7163,7 +7273,7 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = std::sync::Arc::new(LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
@@ -7355,7 +7465,7 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
@@ -7406,7 +7516,7 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
@@ -7484,7 +7594,7 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
@@ -7534,6 +7644,122 @@ mod tests {
         }
     }
 
+    fn aref(bus: &str, path: &str) -> AccessibleRef {
+        AccessibleRef {
+            bus_name: bus.into(),
+            path: path.into(),
+        }
+    }
+
+    /// One platform object keeps one handle while resident, keyed by bus
+    /// name *and* path, so repeated reads and events stop evicting the
+    /// handles a caller holds.
+    #[test]
+    fn handle_table_reuses_a_resident_handle_per_bus_and_path() {
+        let mut table = HandleTable::new(MAX_CACHED_ELEMENTS);
+        let first = table.intern(aref(":1.7", "/a/1"), Role::Button);
+        assert_eq!(table.intern(aref(":1.7", "/a/1"), Role::Button), first);
+        let other_path = table.intern(aref(":1.7", "/a/2"), Role::Button);
+        let other_bus = table.intern(aref(":1.8", "/a/1"), Role::Button);
+        assert_ne!(first, other_path);
+        assert_ne!(first, other_bus);
+        assert_ne!(other_path, other_bus);
+        assert_eq!(table.get(&first).map(|r| r.path.as_str()), Some("/a/1"));
+        assert_eq!(
+            table.get(&other_bus).map(|r| r.bus_name.as_str()),
+            Some(":1.8")
+        );
+    }
+
+    /// Re-registering resident objects never evicts one of them, however
+    /// often it happens: the busy-subscription case (#480 follow-up).
+    #[test]
+    fn handle_table_refreshes_do_not_evict_resident_handles() {
+        let mut table = HandleTable::new(3);
+        let held: Vec<u64> = (0..3)
+            .map(|i| table.intern(aref(":1.7", &format!("/a/{i}")), Role::Button))
+            .collect();
+        for _ in 0..10_000 {
+            for (i, &handle) in held.iter().enumerate() {
+                assert_eq!(
+                    table.intern(aref(":1.7", &format!("/a/{i}")), Role::Button),
+                    handle
+                );
+            }
+        }
+        for handle in &held {
+            assert!(table.get(handle).is_some());
+        }
+    }
+
+    /// Eviction drops the reverse entry with the handle: the next
+    /// registration of the evicted object mints a new handle (never the
+    /// evicted one), and every reverse entry names a resident handle.
+    #[test]
+    fn handle_table_eviction_keeps_the_reverse_map_consistent() {
+        let mut table = HandleTable::new(2);
+        let a = table.intern(aref(":1.7", "/a"), Role::Button);
+        let b = table.intern(aref(":1.7", "/b"), Role::Button);
+        let c = table.intern(aref(":1.7", "/c"), Role::Button); // evicts a
+        assert!(table.get(&a).is_none());
+        assert!(!table.by_ref.values().any(|h| *h == a));
+        let a2 = table.intern(aref(":1.7", "/a"), Role::Button); // evicts b
+        assert_ne!(a2, a, "an evicted handle is never handed out again");
+        assert!(table.get(&b).is_none());
+        assert_eq!(table.intern(aref(":1.7", "/c"), Role::Button), c);
+        assert_eq!(table.by_ref.len(), 2);
+        for handle in table.by_ref.values() {
+            assert!(
+                table.get(handle).is_some(),
+                "reverse hit {handle} not resident"
+            );
+        }
+        table.clear();
+        assert!(table.by_ref.is_empty());
+        assert!(table.get(&c).is_none());
+    }
+
+    /// Windows and dialogs never reuse a handle: the window manager binds
+    /// a handle to one native window for good, and a window shown again
+    /// is a new native window under the same accessible path.
+    #[test]
+    fn handle_table_mints_windows_fresh() {
+        let mut table = HandleTable::new(MAX_CACHED_ELEMENTS);
+        for role in [Role::Window, Role::Dialog] {
+            let first = table.intern(aref(":1.7", "/w"), role);
+            let second = table.intern(aref(":1.7", "/w"), role);
+            assert_ne!(first, second, "{role:?}");
+            assert!(
+                table.get(&first).is_some(),
+                "the earlier handle still resolves"
+            );
+        }
+        assert!(table.by_ref.is_empty());
+    }
+
+    /// A reused handle takes the latest action indices; an empty read
+    /// empties the earlier map rather than leaving its indices callable.
+    #[test]
+    fn reused_handle_takes_the_latest_action_indices() {
+        let cache = Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS));
+        store_action_indices(&cache, 5, HashMap::new());
+        assert!(
+            cache.lock().expect("lock").get(&5).is_none(),
+            "no entry for nothing"
+        );
+        store_action_indices(&cache, 5, HashMap::from([("press".to_string(), 0)]));
+        store_action_indices(&cache, 5, HashMap::from([("expand".to_string(), 1)]));
+        let map = cache.lock().expect("lock").get(&5).cloned().expect("entry");
+        assert_eq!(map, HashMap::from([("expand".to_string(), 1)]));
+        store_action_indices(&cache, 5, HashMap::new());
+        assert!(cache
+            .lock()
+            .expect("lock")
+            .get(&5)
+            .expect("entry")
+            .is_empty());
+    }
+
     /// #480: a handle an event subscription mints through its registrar
     /// is one the provider resolves, with its action indices, and a
     /// reconnect forgets it like any other.
@@ -7542,7 +7768,7 @@ mod tests {
         let (server, client) = p2p_pair();
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(client.clone()),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
@@ -7554,6 +7780,7 @@ mod tests {
                 bus_name: ":1.7".into(),
                 path: "/org/a11y/atspi/accessible/3".into(),
             },
+            Role::Button,
             HashMap::from([("press".to_string(), 2)]),
         );
         let inert = registrar.register(
@@ -7561,16 +7788,32 @@ mod tests {
                 bus_name: ":1.7".into(),
                 path: "/org/a11y/atspi/accessible/4".into(),
             },
+            Role::StaticText,
             HashMap::new(),
         );
         assert_ne!(pressable, 0, "0 is the snapshot sentinel");
         assert_ne!(pressable, inert);
         // Handles share the provider's counter, so a query never reuses one.
-        let queried = provider.cache_element(AccessibleRef {
-            bus_name: ":1.7".into(),
-            path: "/org/a11y/atspi/accessible/5".into(),
-        });
+        let queried = provider.cache_element(
+            AccessibleRef {
+                bus_name: ":1.7".into(),
+                path: "/org/a11y/atspi/accessible/5".into(),
+            },
+            Role::Button,
+        );
         assert!(queried > inert);
+        // A query that reaches an object an event already registered gets
+        // the event's handle, not a second one.
+        assert_eq!(
+            provider.cache_element(
+                AccessibleRef {
+                    bus_name: ":1.7".into(),
+                    path: "/org/a11y/atspi/accessible/3".into(),
+                },
+                Role::Button
+            ),
+            pressable
+        );
 
         let aref = provider.get_cached(pressable).expect("registered handle");
         assert_eq!(aref.path, "/org/a11y/atspi/accessible/3");
@@ -7599,6 +7842,7 @@ mod tests {
                 bus_name: ":1.8".into(),
                 path: "/org/a11y/atspi/accessible/1".into(),
             },
+            Role::StaticText,
             HashMap::new(),
         );
         assert!(provider.get_cached(after).is_ok());
@@ -7609,15 +7853,18 @@ mod tests {
         let (server, client) = p2p_pair();
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(client.clone()),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
-        let handle = provider.cache_element(AccessibleRef {
-            bus_name: ":1.7".into(),
-            path: "/org/a11y/atspi/accessible/3".into(),
-        });
+        let handle = provider.cache_element(
+            AccessibleRef {
+                bus_name: ":1.7".into(),
+                path: "/org/a11y/atspi/accessible/3".into(),
+            },
+            Role::Button,
+        );
         provider
             .action_indices
             .lock()
@@ -7798,7 +8045,7 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
             action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),

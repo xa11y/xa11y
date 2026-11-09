@@ -274,9 +274,16 @@ impl EventContext {
     /// (issue #480). A target that already has a handle is returned as is.
     ///
     /// Runs only for a target that is about to be emitted, never for the
-    /// many signals that map to no event: each call mints a cache entry and,
-    /// for a role that carries actions, reads them. The actions are read
-    /// here rather than in [`build_event_snapshot`] for the same reason.
+    /// many signals that map to no event: each call registers a cache entry
+    /// and, for a role that carries actions, reads them. An object already
+    /// resident keeps its handle (`HandleTable`), so a busy subscription
+    /// refreshes one entry per widget instead of evicting the handles a
+    /// caller holds. The actions are still read on every call: a widget's
+    /// action set can change between events (a menu entry gaining `press`,
+    /// an expander's `expand` becoming `collapse`), and nothing in the cache
+    /// says when the stored indices went out of date. They are read here
+    /// rather than in [`build_event_snapshot`] so that only emitted targets
+    /// pay for them.
     /// They are read so that `actions` and the stored `DoAction` indices
     /// come from the same evidence, as they do for a queried element: a
     /// target that advertised nothing but accepted `press` would be the
@@ -300,7 +307,7 @@ impl EventContext {
         // action (`refine_menu_role`), and the target must agree with it.
         target.role = refine_menu_role(target.role, &actions);
         target.actions = actions;
-        target.handle = self.registrar.register(aref.clone(), indices);
+        target.handle = self.registrar.register(aref.clone(), target.role, indices);
         target
     }
 
