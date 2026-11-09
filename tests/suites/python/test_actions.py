@@ -685,7 +685,7 @@ def test_wait_stable_returns_where_a_slide_ends(app, app_config):
 
 
 def test_wait_stable_timeout_names_the_moving_bounds(app, app_config):
-    """A slide outlasting the timeout fails with both rectangles named."""
+    """A timeout names moving bounds, or the one frame before a cut read."""
     target, _ = _slide_app(app, app_config)
     app.locator(_START_SLIDE).press()
     try:
@@ -695,9 +695,17 @@ def test_wait_stable_timeout_names_the_moving_bounds(app, app_config):
             target.wait_stable(timeout=1.5)
         err = info.value
         assert "750 ms" in err.condition, err.condition
-        assert err.last_observed.startswith("bounds still changing:"), (
-            err.last_observed
+        # A cut native read after one frame cannot prove movement. Require
+        # its pending call and the bounds that were actually observed.
+        cut_after_one_frame = (
+            bool(err.pending)
+            and err.last_observed.startswith("bounds {")
+            and "observed unchanged for" in err.last_observed
         )
+        assert (
+            err.last_observed.startswith("bounds still changing:")
+            or cut_after_one_frame
+        ), err.last_observed
     finally:
         # Leave the target at rest for whatever test runs next.
         target.wait_stable(timeout=10)

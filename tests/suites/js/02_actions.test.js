@@ -383,7 +383,13 @@ test('waitStable times out naming the moving bounds', async (t) => {
     await assert.rejects(target.waitStable(1.5), (err) => {
       assert.ok(err instanceof TimeoutError, String(err));
       assert.ok(err.condition.includes('750 ms'), err.condition);
-      assert.ok(err.lastObserved.startsWith('bounds still changing:'), err.lastObserved);
+      // A slow native read can consume the remaining deadline after only
+      // one frame. That proves neither motion nor stability; require its
+      // pending-call diagnosis instead of inventing a second rectangle.
+      const cutAfterOneFrame = Boolean(err.pending)
+        && err.lastObserved.startsWith('bounds {')
+        && err.lastObserved.includes('observed unchanged for');
+      assert.ok(err.lastObserved.startsWith('bounds still changing:') || cutAfterOneFrame, err.lastObserved);
       return true;
     });
   } finally {
