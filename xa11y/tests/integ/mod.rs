@@ -30,6 +30,8 @@
 //! * `rich` — tables, collections and text by range (Linux-only: most of it
 //!   drives the GTK 3 fixture `test-apps/rich/rich.py`, not the AccessKit
 //!   app).
+//! * `stale` — every action on a destroyed GTK 3 widget fails as stale
+//!   (Linux-only: drives the GTK 3 fixture `test-apps/stale/stale.py`).
 //!
 //! The helpers in this file (`app_root`, `one`, `named`, `act`, `try_act`)
 //! are reached from submodule tests via `use crate::integ as h;`.
@@ -65,6 +67,9 @@ pub mod unresponsive_linux;
 
 #[cfg(target_os = "linux")]
 pub mod rich;
+
+#[cfg(target_os = "linux")]
+pub mod stale;
 
 #[cfg(target_os = "windows")]
 pub mod rich_windows;

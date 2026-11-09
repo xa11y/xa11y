@@ -412,6 +412,9 @@ Compose a11y + input/screenshot via `find -o bounds|center`:
   xa11y screenshot --region \"$region\" --out button.png
   xa11y click --at \"$(xa11y find 'button[name=\"OK\"]' --app Safari -o center)\"
   Add --stable to that find when the target may still be animating into place.
+  On Linux with the uinput input backend (Wayland sessions), element bounds
+  are not screen coordinates: `-o center` fails there, and the way to act on
+  an element is `xa11y action press SELECTOR ...` instead of a click.
 
 Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
   scroll-into-view, increment, decrement,
@@ -1777,6 +1780,13 @@ fn cmd_find(args: &[String]) -> CliResult<()> {
             "unknown -o format: {fmt} (expected pretty|bounds|center)"
         )));
     }
+    // Before the target is resolved, for the same reason: on a backend where
+    // element bounds are not screen coordinates (Wayland), `-o center` exists
+    // only to feed `click --at`, which would then land somewhere else. Refuse
+    // it rather than print a point that is not one (issue #573).
+    if fmt == "center" {
+        check_center_output(element_bounds_are_pointer_targets())?;
+    }
 
     let target = resolve_target(&opts)?;
     let elements = if opts.stable {
@@ -1970,6 +1980,86 @@ fn format_center_opt(el: &ElementData) -> Option<String> {
     let cx = b.x + (b.width as i32) / 2;
     let cy = b.y + (b.height as i32) / 2;
     Some(format!("{cx},{cy}"))
+}
+
+/// Whether an element's center is a valid pointer target for the active input
+/// backend — the value-producing decision behind `find -o center` and the
+/// `center` the MCP tools precompute (issue #573).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PointerCenter {
+    /// Element bounds are screen coordinates: a center is a click target.
+    Usable,
+    /// Element bounds are not usable as pointer targets; the reason says why.
+    Unavailable(String),
+}
+
+impl PointerCenter {
+    /// Build from [`element_bounds_are_pointer_targets`]'s answer, or the
+    /// failure to get one (an invalid `XA11Y_LINUX_INPUT_BACKEND`), which
+    /// leaves the coordinate space unknown.
+    pub(crate) fn from_capability(capability: Result<bool>) -> Self {
+        match capability {
+            Ok(true) => Self::Usable,
+            Ok(false) => Self::Unavailable(ELEMENT_BOUNDS_NOT_SCREEN.to_string()),
+            Err(e) => Self::Unavailable(format!(
+                "could not tell whether element bounds are screen coordinates: {e}"
+            )),
+        }
+    }
+
+    pub(crate) fn is_usable(&self) -> bool {
+        matches!(self, Self::Usable)
+    }
+}
+
+/// Why an element's center is withheld on a backend whose bounds are not
+/// screen coordinates. Mirrors the library's own refusal of element-targeted
+/// pointer actions there (`InputProvider::element_bounds_are_screen_coordinates`).
+pub(crate) const ELEMENT_BOUNDS_NOT_SCREEN: &str =
+    "element bounds are not screen coordinates with this input backend (Linux \
+     uinput, used on Wayland): applications do not know their global position, \
+     so a point computed from an element's bounds would land somewhere else. Use \
+     a semantic action (press, focus, ...) on the element instead";
+
+/// Whether element bounds are screen coordinates, so a center computed from
+/// them is a pointer target.
+///
+/// The same decision [`Mouse`](crate::input::Mouse) refuses element targets
+/// by, read without building an input backend: on macOS and Windows bounds
+/// are always screen coordinates, and on Linux it is the session the input
+/// backend is chosen from (X11 yes, Wayland no). A machine that cannot
+/// simulate input still reports correct centers; only the session decides.
+pub(crate) fn element_bounds_are_pointer_targets() -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        xa11y_linux::LinuxInputProvider::selected_backend_uses_screen_coordinates()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(true)
+    }
+}
+
+/// The [`PointerCenter`] for this process's input backend.
+pub(crate) fn pointer_center() -> PointerCenter {
+    PointerCenter::from_capability(element_bounds_are_pointer_targets())
+}
+
+/// The `find -o center` refusal, or `Ok` when centers are pointer targets.
+///
+/// An operation failure (exit 1), not a usage error: the invocation is
+/// well-formed, and it is the session that cannot honour it.
+fn check_center_output(capability: Result<bool>) -> CliResult<()> {
+    match capability {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(CliError::Xa11y(Error::Unsupported {
+            feature: format!(
+                "find -o center: {ELEMENT_BOUNDS_NOT_SCREEN}, e.g. \
+                 `xa11y action press SELECTOR --app NAME`"
+            ),
+        })),
+        Err(e) => Err(CliError::Xa11y(e)),
+    }
 }
 
 fn cmd_action(args: &[String]) -> CliResult<()> {
@@ -5332,6 +5422,63 @@ mod tests {
             format_center_line(&el),
             Err(Error::NoElementBounds)
         ));
+    }
+
+    // ── `-o center` on a backend whose bounds are not screen coordinates ────
+
+    #[test]
+    fn center_output_is_allowed_where_bounds_are_screen_coordinates() {
+        assert!(check_center_output(Ok(true)).is_ok());
+    }
+
+    #[test]
+    fn center_output_is_refused_where_bounds_are_not_screen_coordinates() {
+        let err = check_center_output(Ok(false)).expect_err("must refuse");
+        // An operation failure (exit 1), not a usage error (exit 2).
+        let CliError::Xa11y(Error::Unsupported { feature }) = &err else {
+            panic!("expected Unsupported, got {err:?}");
+        };
+        assert!(feature.contains("not screen coordinates"), "{feature}");
+        assert!(feature.contains("xa11y action press"), "{feature}");
+    }
+
+    #[test]
+    fn center_output_propagates_an_input_backend_failure() {
+        let err = check_center_output(Err(Error::PermissionDenied {
+            instructions: "join the input group".into(),
+        }))
+        .expect_err("must propagate");
+        assert!(
+            matches!(err, CliError::Xa11y(Error::PermissionDenied { .. })),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn pointer_center_follows_the_backend_capability() {
+        assert_eq!(
+            PointerCenter::from_capability(Ok(true)),
+            PointerCenter::Usable
+        );
+        let PointerCenter::Unavailable(reason) = PointerCenter::from_capability(Ok(false)) else {
+            panic!("bounds that are not screen coordinates must withhold the center");
+        };
+        assert!(reason.contains("not screen coordinates"), "{reason}");
+        let PointerCenter::Unavailable(reason) =
+            PointerCenter::from_capability(Err(Error::InvalidActionData {
+                message: "invalid XA11Y_LINUX_INPUT_BACKEND value \"xyz\"".into(),
+            }))
+        else {
+            panic!("an unknown coordinate space must withhold the center");
+        };
+        assert!(reason.contains("XA11Y_LINUX_INPUT_BACKEND"), "{reason}");
+    }
+
+    #[test]
+    fn usage_states_the_wayland_center_caveat() {
+        let usage = usage_text();
+        assert!(usage.contains("not screen coordinates"), "{usage}");
+        assert!(usage.contains("`-o center` fails there"), "{usage}");
     }
 
     // ── Flags → ClickOptions / DragOptions round-trip ───────────────────────

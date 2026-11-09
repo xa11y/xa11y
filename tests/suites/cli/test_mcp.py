@@ -1330,11 +1330,40 @@ def test_an_uncut_tree_marks_no_node(mcp, app_pid):
         assert node["children_count"] > len(node.get("children", [])), node
 
 
+def _element_bounds_are_pointer_targets() -> bool:
+    """Whether this session's input backend takes element bounds as screen points.
+
+    Mirrors the input-simulation branch of `select_backend_from` in
+    `xa11y-linux/src/session.rs`: Linux uses uinput, whose element bounds are
+    not screen coordinates, on a Wayland session or with no X display at all
+    (#573). Every other platform shares one coordinate space between bounds
+    and pointer.
+    """
+    if not sys.platform.startswith("linux"):
+        return True
+    forced = os.environ.get("XA11Y_LINUX_INPUT_BACKEND", "").strip().lower()
+    if forced not in ("", "auto"):
+        return forced == "x11"
+    session = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
+    wayland = bool(os.environ.get("WAYLAND_DISPLAY"))
+    x11 = bool(os.environ.get("DISPLAY"))
+    if session == "wayland" and wayland:
+        return False
+    if session == "x11" and x11:
+        return True
+    return x11 and not wayland
+
+
 def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     """Named, because `button` alone leads with window chrome on Windows.
 
     Title-bar buttons report no bounds at all, so indexing `matches[0]` was a
     `KeyError` there rather than the assertion this test means to make.
+
+    Where element bounds are not screen coordinates (Wayland, #573) the
+    center is withheld and the result says why instead. The integ cells this
+    suite runs in are X11, macOS and Windows, so that branch is asserted by
+    `xa11y/tests/integ/mcp.rs` in the native Wayland job.
     """
     result = mcp.call_tool("find", {"pid": app_pid, "selector": 'button[name="OK"]'})[
         "result"
@@ -1345,6 +1374,11 @@ def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     first = structured["matches"][0]
     assert first["role"] == "button"
     bounds = first["bounds"]
+    if not _element_bounds_are_pointer_targets():
+        assert "center" not in first, first
+        assert "not screen coordinates" in structured["center_unavailable"], structured
+        return
+    assert "center_unavailable" not in structured, structured
     center = first["center"]
     assert center["x"] == bounds["x"] + bounds["width"] // 2
     assert center["y"] == bounds["y"] + bounds["height"] // 2
@@ -1399,6 +1433,10 @@ def test_bounds_and_center_are_reported_together_or_not_at_all(mcp, app_pid):
         "structuredContent"
     ]
     assert structured["match_count"] >= 1
+    if not _element_bounds_are_pointer_targets():
+        assert "center_unavailable" in structured, structured
+        assert all("center" not in m for m in structured["matches"]), structured
+        return
     for match in structured["matches"]:
         assert ("bounds" in match) == ("center" in match), match
         if "bounds" not in match:
@@ -2264,6 +2302,40 @@ def _stable_find(mcp, app_pid, selector: str) -> dict:
     return mcp.call_tool(
         "find", {"pid": app_pid, "selector": selector, "stable": True}
     )["result"]
+
+
+def test_the_coordinate_descriptions_qualify_center_for_wayland(mcp):
+    """`center` is not a click target where element bounds are not screen
+    coordinates (#573), and a description that promised it everywhere would
+    be a contract the handler cannot keep."""
+    tools = {t["name"]: t for t in mcp.request(1, "tools/list")["result"]["tools"]}
+    for name in ("find", "tree"):
+        description = tools[name]["description"]
+        assert "not screen coordinates" in description, name
+        assert "`center_unavailable`" in description, name
+        assert "`action`" in description, name
+    click = tools["click"]["description"]
+    assert "Wayland" in click, click
+    assert "`action`" in click, click
+
+
+def test_find_o_center_is_refused_or_printed_per_input_backend(entry_point, app_pid):
+    """The CLI half of #573: `-o center` feeds `click --at`, so on a backend
+    whose element bounds are not screen coordinates it fails (exit 1) rather
+    than printing a point that is not one."""
+    proc = subprocess.run(
+        [*entry_point, "find", "button", "--pid", str(app_pid), "-o", "center"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if _element_bounds_are_pointer_targets():
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip(), "a match with bounds must print its center"
+    else:
+        assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+        assert proc.stdout == "", proc.stdout
 
 
 def test_the_find_description_states_what_stable_costs_and_requires(mcp):

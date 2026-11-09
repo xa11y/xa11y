@@ -25,6 +25,12 @@ impl LinuxInputProvider {
     }
 }
 
+impl LinuxInputProvider {
+    pub fn selected_backend_uses_screen_coordinates() -> Result<bool> {
+        Err(unavailable("selected_backend_uses_screen_coordinates"))
+    }
+}
+
 impl InputProvider for LinuxInputProvider {
     fn pointer_move(&self, _: Point) -> Result<()> {
         Err(unavailable("pointer_move"))

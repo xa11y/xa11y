@@ -29,7 +29,8 @@ instead. Use them for what has no accessibility action, such as a drag. They
 take screen coordinates, which `find` reports as each match's `bounds` and
 `center`. If the target may still be moving, call `find` with `stable: true`
 first. It waits for the one match to hold still, so the coordinates are where
-it comes to rest.
+it comes to rest. On Wayland an element's bounds are not screen coordinates,
+so `find` reports no `center` there. See the platform notes.
 
 OS shell UI is reached the same way. `shell` lists the surfaces on screen,
 such as the taskbar, the dock, panels, the menu bar, status items and open
@@ -197,6 +198,11 @@ the tree again to see the current state.
 - `capabilities` says what this platform can report at all. Call it before
   waiting on an event kind or relying on a field: `event:menu_opened` is
   `unsupported` on Linux, so a wait for it there can only time out.
+- Linux with the uinput input backend, which Wayland sessions use: an
+  application does not know where it sits on screen, so element bounds are
+  not screen coordinates. Elements then carry no `center`, and the result's
+  `center_unavailable` field says why. Act on elements with `action`; the
+  coordinate tools would land somewhere else.
 - Element handles go stale whenever the application rebuilds its UI.
   Selectors re-resolve on every call, so address elements by selector and not
   by remembered position.

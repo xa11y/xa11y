@@ -27,6 +27,12 @@ tagged `GtkTextView` that the harness launches with the panel's interpreter
 (and fails without). Collection positions are the exception and come from
 the AccessKit app, because GTK 3 sets no `posinset` / `setsize`.
 
+`test-apps/stale/stale.py` is the third: the bug it shows belongs to the
+toolkit. GTK 3 keeps a destroyed widget's accessible answering for ~15–20 s
+and reports writes to it as performed, which neither GTK 4 nor AccessKit
+does, so `xa11y/tests/integ/stale.rs` rebuilds its widgets and asserts that
+every action on an old handle is `ElementStale` (#586).
+
 On macOS the same coverage is `tests/suites/python/test_cocoa_rich.py`,
 against the Cocoa test app's "Rich" box (an attributed `NSTextView` and an
 `NSOutlineView`) and its "Users Table". It is a Python suite rather than a
