@@ -19,11 +19,12 @@ table is available at run time from `xa11y.capabilities()` in Python,
 Pass a platform to read another platform's column, and an OS version to
 narrow the answers to that release.
 
-The table describes each platform's default accessibility source. On
-Windows with `XA11Y_ACCESSIBILITY_SOURCE=ia2` selected, the run-time call for
-the running platform fails as unsupported instead of answering for UIA. The
-IA2 source's own mapping is under
-[Explicit IA2 source on Windows](#explicit-ia2-source-on-windows).
+The Windows columns describe UIA and the explicit IA2 source separately.
+Pass `backend="ia2"` in Python, `{ backend: "ia2" }` in JavaScript,
+`--backend ia2` to the CLI or `backend: "ia2"` to MCP to read the IA2
+column. With no backend option, the current-platform query uses
+`XA11Y_ACCESSIBILITY_SOURCE`. Every result names its `backend`.
+See [Explicit IA2 source on Windows](#explicit-ia2-source-on-windows).
 
 - **Supported**: reported whenever the app exposes it. A missing value means
   that element has none.
@@ -34,68 +35,69 @@ IA2 source's own mapping is under
 
 {/* BEGIN GENERATED: capabilities. Edit xa11y-core/src/capabilities.rs, then run `cargo xtask sync-capabilities`. */}
 
-| Feature | What it is | Linux (AT-SPI) | macOS | Windows (UIA) |
-| --- | --- | --- | --- | --- |
-| `event:focus_changed` | Keyboard focus moved to another element. | Supported | Supported | Supported |
-| `event:value_changed` | An element's value changed. | Supported | Supported | Supported |
-| `event:name_changed` | An element's name changed. | Supported | Supported | Supported |
-| `event:state_changed` | A state flag changed (checked, expanded, enabled, ...). | Supported | Supported | Supported |
-| `event:structure_changed` | Children were added to or removed from an element. | Supported | Supported | Supported |
-| `event:window_opened` | A window opened. | Supported | Supported | Supported |
-| `event:window_closed` | A window closed. | Supported | Supported | Supported |
-| `event:window_activated` | A window became the active window. | Supported (`Window:Activate` and `Window:Restore`) | Supported (AXFocusedWindowChanged) | Unsupported (no UIA handler is registered for window activation) |
-| `event:window_deactivated` | A window stopped being the active window. | Supported (`Window:Deactivate` and `Window:Minimize`) | Unsupported (AX reports the newly focused window, not the one that lost focus) | Unsupported (no UIA handler is registered for window activation) |
-| `event:selection_changed` | The selected items of a list, table or other container changed. | Supported | Supported | Supported |
-| `event:menu_opened` | A menu opened. | Unsupported (the AT-SPI backend maps no menu event) | Supported (AXMenuOpened) | Supported (UIA MenuOpened) |
-| `event:menu_closed` | A menu closed. | Unsupported (the AT-SPI backend maps no menu event) | Supported (AXMenuClosed) | Supported (UIA MenuClosed) |
-| `event:text_changed` | Text in an editable element changed. | Supported | Supported | Supported |
-| `event:text_selection_changed` | The caret moved or the text selection changed. | Supported | Supported | Supported |
-| `event:announcement` | The app asked for an announcement, or a live region or alert changed (`Event.announcement` says which). | Supported (Object:Announcement) | Supported (AXAnnouncementRequested and AXLiveRegionChanged) | Supported (UIA Notification, LiveRegionChanged and SystemAlert) |
-| `event:announcement:text` | An announcement request carries the text to announce (`announcement.text`). | Supported (the `any_data` of Object:Announcement) | Supported (`AXAnnouncementKey` in the notification's `userInfo`) | Supported (the `displayString` of a UIA Notification, read through `IUIAutomation5::AddNotificationEventHandler`, since 10.0.16299) |
-| `event:announcement:live_region` | A live region's change raises an announcement with `origin` `live_region`. | Unsupported (AT-SPI has no live-region signal; an `aria-live` update arrives as text and children changes) | Supported (AXLiveRegionChanged) | Supported (UIA LiveRegionChanged) |
-| `event:text_change` | A `text_changed` event says what was inserted or deleted (`Event.text_change`). | Partial (inserted or deleted text from Object:TextChanged; the UTF-16 range only for Qt, which counts UTF-16 natively) | Unsupported (AXValueChanged carries no delta) | Unsupported (UIA text-change events carry no delta) |
-| `property:heading_level` | A heading's level (`ElementData.heading_level`). | Partial (the `level` object attribute, where the toolkit sets it (web engines, GTK 4)) | Supported (the `AXValue` of an `AXHeading`) | Supported (UIA `HeadingLevel`, since 10.0.17134) |
-| `property:landmark_type` | Which landmark a `landmark` element is (`ElementData.landmark_type`). | Supported (`ROLE_LANDMARK` and the `xml-roles` attribute) | Supported (the `AXLandmark*` subroles) | Supported (UIA `LandmarkType` (`LocalizedLandmarkType` for the custom kinds), or the `AriaRole` of a group that sets none, since 10.0.15063) |
-| `property:web_role` | The ARIA role web content declares (`ElementData.web_role`). | Partial (the `xml-roles` attribute, in web content) | Unsupported (AX reports no ARIA role) | Partial (UIA `AriaRole`, set by web content and some frameworks) |
-| `property:link_url` | A link's target (`ElementData.link_url`). | Supported (`Hyperlink.GetURI`) | Supported (`AXURL`) | Partial (the value of a Hyperlink, which browsers set to the URL; UIA has no URL property) |
-| `property:live_region` | Live-region politeness, atomic and relevant (`ElementData.live_region`). | Partial (the `live`, `atomic` and `relevant` attributes (and their `container-` forms), which web engines set) | Partial (`AXARIALive`, `AXARIAAtomic` and `AXARIARelevant`, which web content sets) | Supported (UIA `LiveSetting`; `atomic` and `relevant` from `AriaProperties`, which only web content sets) |
-| `relation:labelled_by` | The elements that label this one. | Supported (`LABELLED_BY`) | Supported (`AXTitleUIElement`, set only when exactly one element labels it) | Supported (UIA `LabeledBy`, a single element) |
-| `relation:label_for` | The elements this one labels. | Supported (`LABEL_FOR`) | Supported (`AXServesAsTitleForUIElements`) | Unsupported (UIA has no reverse of `LabeledBy`) |
-| `relation:described_by` | The elements that describe this one. | Supported (`DESCRIBED_BY`) | Unsupported (AX exposes a description as text only) | Unsupported (UIA `FullDescription` is text; UIA `DescribedBy` carries `aria-details`, read it as `details`) |
-| `relation:description_for` | The elements this one describes. | Supported (`DESCRIPTION_FOR`) | Unsupported (AX has no reverse description relation) | Unsupported (UIA has no reverse description relation) |
-| `relation:details` | Extended details for this element. | Supported (`DETAILS`) | Supported (`AXDetailsElements`) | Supported (UIA `DescribedBy`, which carries `aria-details`) |
-| `relation:details_for` | The elements this one provides details for. | Supported (`DETAILS_FOR`) | Unsupported (AX has no reverse details relation) | Unsupported (UIA has no reverse details relation) |
-| `relation:controls` | The elements this one controls. | Supported (`CONTROLLER_FOR`) | Unsupported (`AXLinkedUIElements` mixes controls and flows-to; read it as `linked`) | Supported (UIA `ControllerFor`, which also carries `aria-errormessage` targets) |
-| `relation:controlled_by` | The elements that control this one. | Supported (`CONTROLLED_BY`) | Unsupported (AX has no reverse controls relation) | Unsupported (UIA has no reverse of `ControllerFor`) |
-| `relation:flows_to` | The next elements in reading order. | Supported (`FLOWS_TO`) | Unsupported (`AXLinkedUIElements` mixes controls and flows-to; read it as `linked`) | Supported (UIA `FlowsTo`) |
-| `relation:flows_from` | The previous elements in reading order. | Supported (`FLOWS_FROM`) | Unsupported (AX has no reverse reading-order relation) | Supported (UIA `FlowsFrom`) |
-| `relation:error_message` | The element holding this one's error message. | Supported (`ERROR_MESSAGE`) | Supported (`AXErrorMessageElements`) | Unsupported (UIA carries `aria-errormessage` targets inside `ControllerFor`; read it as `controls`) |
-| `relation:error_for` | The elements this one is the error message for. | Supported (`ERROR_FOR`) | Unsupported (AX has no reverse error-message relation) | Unsupported (UIA has no reverse error-message relation) |
-| `relation:owns` | Elements this one owns outside its own subtree. | Unsupported (AT-SPI rebuilds the tree for `aria-owns`, so owned elements are children) | Supported (`AXOwns`) | Unsupported (UIA rebuilds the tree for `aria-owns`, so owned elements are children) |
-| `relation:member_of` | The group this element is a member of. | Supported (`MEMBER_OF`) | Unsupported (AX has no membership relation) | Unsupported (UIA has no membership relation) |
-| `relation:linked` | macOS linked elements: `aria-controls` and `aria-flowto` targets together. | Unsupported (AT-SPI reports controls and flows-to separately) | Supported (`AXLinkedUIElements`) | Unsupported (UIA reports controls and flows-to separately) |
-| `action:blur` | Remove keyboard focus from an element (`Element.blur`). | Supported (focuses the parent with Component.GrabFocus; fails if the parent cannot take focus) | Supported (sets AXFocused to false) | Supported (focuses the desktop root) |
-| `app:enable_web_accessibility` | Ask a Chromium or Electron app to build its web accessibility tree (`App.enable_web_accessibility`). | Unsupported (a launch-time switch on Linux; relaunch the app with `--force-renderer-accessibility`) | Supported (sets AXManualAccessibility, then AXEnhancedUserInterface) | Unsupported (not needed; Chromium builds the tree when a UI Automation client connects) |
-| `window:activate` | Bring a window to the foreground and focus it. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported | Supported |
-| `window:minimize` | Send a window to the taskbar or dock (`Element.minimize`). | Partial (X11 only; unsupported on Wayland) | Supported | Supported |
-| `window:maximize` | Make a window fill the screen without entering fullscreen (`Element.maximize`). | Partial (X11 only; unsupported on Wayland) | Unsupported (AX has no zoom state to read or set) | Supported |
-| `window:enter_fullscreen` | Put a window in native fullscreen. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported (AXFullScreen) | Unsupported (UIA has no fullscreen API) |
-| `window:restore` | Restore a window from minimized, maximized or fullscreen. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported | Supported |
-| `window:close` | Close a window. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported | Supported |
-| `window:move_to` | Move a window. | Partial (X11, and floating windows on Sway; other Wayland compositors: unsupported) | Supported | Supported |
-| `window:resize_to` | Resize a window. | Partial (X11, and floating windows on Sway; other Wayland compositors: unsupported) | Supported | Supported |
-| `state:minimized` | Read whether a window is minimized. | Partial (X11, and the AT-SPI `ICONIFIED` state on Wayland compositors other than Sway; unknown on Sway) | Supported (AXMinimized) | Supported (WindowPattern visual state) |
-| `state:maximized` | Read whether a window is maximized. | Partial (X11 only; unsupported on Wayland) | Unsupported (AX has no zoom state; always unknown) | Supported (WindowPattern visual state) |
-| `state:fullscreen` | Read whether a window is fullscreen. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported (AXFullScreen) | Unsupported (UIA has no fullscreen state; always unknown) |
-| `table:row_index` | The index of a table row element (`Element.table_row`). | Unsupported (AT-SPI has no row-index call for a row object; read the row from a cell) | Supported (AXIndex) | Partial (when the row object reports a GridItem row) |
-| `table:cell_header` | Whether a cell is a column or row header (`CellInfo.header`). | Supported (the column header and row header roles) | Unsupported (AX marks no cell as a header) | Supported |
-| `table:row_headers` | The row header cells of a table or cell. | Supported | Partial (AppKit tables report no row headers) | Supported |
-| `table:collection` | Position and size of an item in a list, tree, tab list or radio group (`Element.collection`). | Partial (toolkits that set the `posinset`, `setsize` and `level` attributes (GTK, Chromium); Qt sets none) | Partial (rows, tabs and radio buttons; web list items are groups in AX and report none) | Supported |
-| `text:range_at:character` | `Text.range_at` with the character unit. | Supported | Supported | Supported |
-| `text:range_at:word` | `Text.range_at` with the word unit. | Partial (where the toolkit reports word boundaries) | Unsupported (AX has no word boundary API) | Supported |
-| `text:range_at:line` | `Text.range_at` with the line unit. | Supported | Supported (AXLineForIndex and AXRangeForLine) | Supported |
-| `text:range_at:paragraph` | `Text.range_at` with the paragraph unit. | Partial (where the toolkit reports paragraph boundaries; the GTK 3 text view does not) | Unsupported (AX has no paragraph boundary API) | Supported |
-| `text:attribute:script` | Superscript and subscript in text runs (`TextAttributes.script`). | Unsupported (AT-SPI text attributes carry no script position) | Supported | Supported |
+| Feature | What it is | Linux (AT-SPI) | macOS | Windows (UIA) | Windows (IA2) |
+| --- | --- | --- | --- | --- | --- |
+| `text:object_at` | The embedded control or link at a UTF-16 text offset. | Unsupported (AT-SPI embedded-object mapping is not implemented) | Unsupported (AX embedded-object mapping is not implemented) | Unsupported (UIA embedded-object mapping is not implemented; use the explicit IA2 backend) | Supported (IAccessibleHypertext::hyperlinkIndex and hyperlink) |
+| `event:focus_changed` | Keyboard focus moved to another element. | Supported | Supported | Supported | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:value_changed` | An element's value changed. | Supported | Supported | Supported | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:name_changed` | An element's name changed. | Supported | Supported | Supported | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:state_changed` | A state flag changed (checked, expanded, enabled, ...). | Supported | Supported | Supported | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:structure_changed` | Children were added to or removed from an element. | Supported | Supported | Supported | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:window_opened` | A window opened. | Supported | Supported | Supported | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:window_closed` | A window closed. | Supported | Supported | Supported | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:window_activated` | A window became the active window. | Supported (`Window:Activate` and `Window:Restore`) | Supported (AXFocusedWindowChanged) | Unsupported (no UIA handler is registered for window activation) | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:window_deactivated` | A window stopped being the active window. | Supported (`Window:Deactivate` and `Window:Minimize`) | Unsupported (AX reports the newly focused window, not the one that lost focus) | Unsupported (no UIA handler is registered for window activation) | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:selection_changed` | The selected items of a list, table or other container changed. | Supported | Supported | Supported | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:menu_opened` | A menu opened. | Unsupported (the AT-SPI backend maps no menu event) | Supported (AXMenuOpened) | Supported (UIA MenuOpened) | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:menu_closed` | A menu closed. | Unsupported (the AT-SPI backend maps no menu event) | Supported (AXMenuClosed) | Supported (UIA MenuClosed) | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:text_changed` | Text in an editable element changed. | Supported | Supported | Supported | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:text_selection_changed` | The caret moved or the text selection changed. | Supported | Supported | Supported | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:announcement` | The app asked for an announcement, or a live region or alert changed (`Event.announcement` says which). | Supported (Object:Announcement) | Supported (AXAnnouncementRequested and AXLiveRegionChanged) | Supported (UIA Notification, LiveRegionChanged and SystemAlert) | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:announcement:text` | An announcement request carries the text to announce (`announcement.text`). | Supported (the `any_data` of Object:Announcement) | Supported (`AXAnnouncementKey` in the notification's `userInfo`) | Supported (the `displayString` of a UIA Notification, read through `IUIAutomation5::AddNotificationEventHandler`, since 10.0.16299) | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:announcement:live_region` | A live region's change raises an announcement with `origin` `live_region`. | Unsupported (AT-SPI has no live-region signal; an `aria-live` update arrives as text and children changes) | Supported (AXLiveRegionChanged) | Supported (UIA LiveRegionChanged) | Unsupported (IA2 event subscriptions are not implemented) |
+| `event:text_change` | A `text_changed` event says what was inserted or deleted (`Event.text_change`). | Partial (inserted or deleted text from Object:TextChanged; the UTF-16 range only for Qt, which counts UTF-16 natively) | Unsupported (AXValueChanged carries no delta) | Unsupported (UIA text-change events carry no delta) | Unsupported (IA2 event subscriptions are not implemented) |
+| `property:heading_level` | A heading's level (`ElementData.heading_level`). | Partial (the `level` object attribute, where the toolkit sets it (web engines, GTK 4)) | Supported (the `AXValue` of an `AXHeading`) | Supported (UIA `HeadingLevel`, since 10.0.17134) | Partial (IA2 heading role and level object attribute) |
+| `property:landmark_type` | Which landmark a `landmark` element is (`ElementData.landmark_type`). | Supported (`ROLE_LANDMARK` and the `xml-roles` attribute) | Supported (the `AXLandmark*` subroles) | Supported (UIA `LandmarkType` (`LocalizedLandmarkType` for the custom kinds), or the `AriaRole` of a group that sets none, since 10.0.15063) | Partial (IA2 xml-roles object attribute) |
+| `property:web_role` | The ARIA role web content declares (`ElementData.web_role`). | Partial (the `xml-roles` attribute, in web content) | Unsupported (AX reports no ARIA role) | Partial (UIA `AriaRole`, set by web content and some frameworks) | Partial (IA2 xml-roles object attribute) |
+| `property:link_url` | A link's target (`ElementData.link_url`). | Supported (`Hyperlink.GetURI`) | Supported (`AXURL`) | Partial (the value of a Hyperlink, which browsers set to the URL; UIA has no URL property) | Partial (IAccessibleHyperlink::anchorTarget when it returns a URI string) |
+| `property:live_region` | Live-region politeness, atomic and relevant (`ElementData.live_region`). | Partial (the `live`, `atomic` and `relevant` attributes (and their `container-` forms), which web engines set) | Partial (`AXARIALive`, `AXARIAAtomic` and `AXARIARelevant`, which web content sets) | Supported (UIA `LiveSetting`; `atomic` and `relevant` from `AriaProperties`, which only web content sets) | Partial (IA2 live/atomic/relevant object attributes and container forms) |
+| `relation:labelled_by` | The elements that label this one. | Supported (`LABELLED_BY`) | Supported (`AXTitleUIElement`, set only when exactly one element labels it) | Supported (UIA `LabeledBy`, a single element) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:label_for` | The elements this one labels. | Supported (`LABEL_FOR`) | Supported (`AXServesAsTitleForUIElements`) | Unsupported (UIA has no reverse of `LabeledBy`) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:described_by` | The elements that describe this one. | Supported (`DESCRIBED_BY`) | Unsupported (AX exposes a description as text only) | Unsupported (UIA `FullDescription` is text; UIA `DescribedBy` carries `aria-details`, read it as `details`) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:description_for` | The elements this one describes. | Supported (`DESCRIPTION_FOR`) | Unsupported (AX has no reverse description relation) | Unsupported (UIA has no reverse description relation) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:details` | Extended details for this element. | Supported (`DETAILS`) | Supported (`AXDetailsElements`) | Supported (UIA `DescribedBy`, which carries `aria-details`) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:details_for` | The elements this one provides details for. | Supported (`DETAILS_FOR`) | Unsupported (AX has no reverse details relation) | Unsupported (UIA has no reverse details relation) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:controls` | The elements this one controls. | Supported (`CONTROLLER_FOR`) | Unsupported (`AXLinkedUIElements` mixes controls and flows-to; read it as `linked`) | Supported (UIA `ControllerFor`, which also carries `aria-errormessage` targets) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:controlled_by` | The elements that control this one. | Supported (`CONTROLLED_BY`) | Unsupported (AX has no reverse controls relation) | Unsupported (UIA has no reverse of `ControllerFor`) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:flows_to` | The next elements in reading order. | Supported (`FLOWS_TO`) | Unsupported (`AXLinkedUIElements` mixes controls and flows-to; read it as `linked`) | Supported (UIA `FlowsTo`) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:flows_from` | The previous elements in reading order. | Supported (`FLOWS_FROM`) | Unsupported (AX has no reverse reading-order relation) | Supported (UIA `FlowsFrom`) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:error_message` | The element holding this one's error message. | Supported (`ERROR_MESSAGE`) | Supported (`AXErrorMessageElements`) | Unsupported (UIA carries `aria-errormessage` targets inside `ControllerFor`; read it as `controls`) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:error_for` | The elements this one is the error message for. | Supported (`ERROR_FOR`) | Unsupported (AX has no reverse error-message relation) | Unsupported (UIA has no reverse error-message relation) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:owns` | Elements this one owns outside its own subtree. | Unsupported (AT-SPI rebuilds the tree for `aria-owns`, so owned elements are children) | Supported (`AXOwns`) | Unsupported (UIA rebuilds the tree for `aria-owns`, so owned elements are children) | Unsupported (IA2 represents ownership in the accessible tree) |
+| `relation:member_of` | The group this element is a member of. | Supported (`MEMBER_OF`) | Unsupported (AX has no membership relation) | Unsupported (UIA has no membership relation) | Supported (IAccessibleRelation with bounded target enumeration) |
+| `relation:linked` | macOS linked elements: `aria-controls` and `aria-flowto` targets together. | Unsupported (AT-SPI reports controls and flows-to separately) | Supported (`AXLinkedUIElements`) | Unsupported (UIA reports controls and flows-to separately) | Unsupported (IA2 reports controls and flows-to separately) |
+| `action:blur` | Remove keyboard focus from an element (`Element.blur`). | Supported (focuses the parent with Component.GrabFocus; fails if the parent cannot take focus) | Supported (sets AXFocused to false) | Supported (focuses the desktop root) | Unsupported (IA2 has no semantic blur operation) |
+| `app:enable_web_accessibility` | Ask a Chromium or Electron app to build its web accessibility tree (`App.enable_web_accessibility`). | Unsupported (a launch-time switch on Linux; relaunch the app with `--force-renderer-accessibility`) | Supported (sets AXManualAccessibility, then AXEnhancedUserInterface) | Unsupported (not needed; Chromium builds the tree when a UI Automation client connects) | Unsupported (launch Chromium with `--force-renderer-accessibility=complete` before attaching IA2) |
+| `window:activate` | Bring a window to the foreground and focus it. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
+| `window:minimize` | Send a window to the taskbar or dock (`Element.minimize`). | Partial (X11 only; unsupported on Wayland) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
+| `window:maximize` | Make a window fill the screen without entering fullscreen (`Element.maximize`). | Partial (X11 only; unsupported on Wayland) | Unsupported (AX has no zoom state to read or set) | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
+| `window:enter_fullscreen` | Put a window in native fullscreen. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported (AXFullScreen) | Unsupported (UIA has no fullscreen API) | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
+| `window:restore` | Restore a window from minimized, maximized or fullscreen. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
+| `window:close` | Close a window. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
+| `window:move_to` | Move a window. | Partial (X11, and floating windows on Sway; other Wayland compositors: unsupported) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
+| `window:resize_to` | Resize a window. | Partial (X11, and floating windows on Sway; other Wayland compositors: unsupported) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
+| `state:minimized` | Read whether a window is minimized. | Partial (X11, and the AT-SPI `ICONIFIED` state on Wayland compositors other than Sway; unknown on Sway) | Supported (AXMinimized) | Supported (WindowPattern visual state) | Unsupported (IA2 reports no window visual state; always unknown) |
+| `state:maximized` | Read whether a window is maximized. | Partial (X11 only; unsupported on Wayland) | Unsupported (AX has no zoom state; always unknown) | Supported (WindowPattern visual state) | Unsupported (IA2 reports no window visual state; always unknown) |
+| `state:fullscreen` | Read whether a window is fullscreen. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported (AXFullScreen) | Unsupported (UIA has no fullscreen state; always unknown) | Unsupported (IA2 reports no window visual state; always unknown) |
+| `table:row_index` | The index of a table row element (`Element.table_row`). | Unsupported (AT-SPI has no row-index call for a row object; read the row from a cell) | Supported (AXIndex) | Partial (when the row object reports a GridItem row) | Unsupported (IA2 has no row-index interface on row objects; read a cell) |
+| `table:cell_header` | Whether a cell is a column or row header (`CellInfo.header`). | Supported (the column header and row header roles) | Unsupported (AX marks no cell as a header) | Supported | Supported (MSAA column/row header roles) |
+| `table:row_headers` | The row header cells of a table or cell. | Supported | Partial (AppKit tables report no row headers) | Supported | Supported (IAccessibleTable2 and IAccessibleTableCell) |
+| `table:collection` | Position and size of an item in a list, tree, tab list or radio group (`Element.collection`). | Partial (toolkits that set the `posinset`, `setsize` and `level` attributes (GTK, Chromium); Qt sets none) | Partial (rows, tabs and radio buttons; web list items are groups in AX and report none) | Supported | Partial (IA2 `posinset`, `setsize` and `level` object attributes when published) |
+| `text:range_at:character` | `Text.range_at` with the character unit. | Supported | Supported | Supported | Supported (IAccessibleText native UTF-16 boundaries) |
+| `text:range_at:word` | `Text.range_at` with the word unit. | Partial (where the toolkit reports word boundaries) | Unsupported (AX has no word boundary API) | Supported | Supported (IAccessibleText native UTF-16 boundaries) |
+| `text:range_at:line` | `Text.range_at` with the line unit. | Supported | Supported (AXLineForIndex and AXRangeForLine) | Supported | Supported (IAccessibleText native UTF-16 boundaries) |
+| `text:range_at:paragraph` | `Text.range_at` with the paragraph unit. | Partial (where the toolkit reports paragraph boundaries; the GTK 3 text view does not) | Unsupported (AX has no paragraph boundary API) | Supported | Supported (IAccessibleText native UTF-16 boundaries) |
+| `text:attribute:script` | Superscript and subscript in text runs (`TextAttributes.script`). | Unsupported (AT-SPI text attributes carry no script position) | Supported | Supported | Supported (IA2 text-position attribute) |
 
 {/* END GENERATED: capabilities */}
 
@@ -536,20 +538,28 @@ run need not address an endpoint inside the cluster. UIA text-change events have
 
 #### Explicit IA2 source on Windows
 
+Select the source per attachment with
+`App.by_pid(pid, backend="ia2")` / `App.by_name(name, backend="ia2")` in
+Python or `App.byPid(pid, { backend: "ia2" })` / `App.byName` in JavaScript.
+Rust passes `xa11y::provider_for_backend("ia2")?` to
+`App::by_pid_with` or `App::by_name_with`. Application operations in the CLI
+accept `--backend ia2`; MCP application tools accept `backend: "ia2"`.
+An explicit selection overrides `XA11Y_ACCESSIBILITY_SOURCE` without changing
+other attachments. `foreground` supports the same option in both bindings.
+Application listings use the environment default.
+
 Set `XA11Y_ACCESSIBILITY_SOURCE=ia2` before the first accessibility call to
-select the MSAA/IAccessible2 source. The setting applies to Rust's umbrella
-provider and the Python, JavaScript, CLI and MCP surfaces. Rust can also
-construct `xa11y_windows::Ia2Provider` directly. The default `native` source
-uses UIA on Windows, and `uia` selects that source explicitly. Other values
+change the process default across Rust, Python, JavaScript, CLI and MCP.
+`native` uses UIA on Windows, and `uia` selects it explicitly. Unknown values
 fail. IA2 and UIA selections on other operating systems fail as unsupported.
 
-An IA2 result carries `raw.accessibility_backend = "ia2"`. Text fields also
-report the `ia2_text` and `ia2_text2` interface capability flags. This source never
-substitutes UIA operations. An absent native interface raises
-`ActionNotSupported` and an unavailable capability raises `Unsupported`.
-MSAA provides navigation and standard role/name/state properties. Additional
-IA2 document semantics, relationships and hypertext object mapping remain
-work under [#483](https://github.com/xa11y/xa11y/issues/483).
+An IA2 result carries `raw.accessibility_backend = "ia2"`. Its
+`NodeIdentity` and captures also report `ia2`. A UIA identity never compares
+equal to an IA2 identity. Text fields report `ia2_text` and `ia2_text2`
+interface flags. The source never substitutes UIA operations. An absent
+native interface raises `ActionNotSupported`; an unmapped capability raises
+`Unsupported`. Native failures preserve their HRESULT and operation context.
+MSAA provides navigation and standard role/name/state properties.
 
 | IA2 capability | Mapping and limits |
 | --- | --- |
@@ -564,7 +574,10 @@ work under [#483](https://github.com/xa11y/xa11y/issues/483).
 | Cell headers | `TableCell.columnHeaderCells` / `rowHeaderCells`, preserving signed native identities |
 | Table headers | Collect the cell header relationships, keeping each native identity once. Requires a known table size of at most 256 cells |
 | Selected items | `Table2.selectedCells`, at most 4096. List selection enumeration remains unsupported |
-| Collection position and row metadata | Not mapped by this source. Table cell coordinates remain available |
+| Document semantics | Heading role and `level`, landmarks and `web_role` from `xml-roles`, live-region settings from object attributes, link URLs from `Hyperlink.anchorTarget` |
+| Relations | Shared relation kinds from `IAccessibleRelation`. At most 256 relations and 1024 targets per request. `owns` and `linked` are unsupported |
+| Embedded objects | `Text.object_at(offset)` / `objectAt(offset)` returns the live control or link at a UTF-16 offset. `None` / `null` means no object. CLI/MCP `text object-at` returns a snapshot with the same fields; obtain an MCP ref for actions through `find` or `tree` |
+| Collection position | `posinset`, `setsize` and `level` attributes, converted to shared zero-based indices. Row objects have no index mapping; cell coordinates remain available |
 | Actions | MSAA default action for `press`, `accSelect` for `focus` / `select`, and `put_accValue` (at most 1 Mi UTF-16 units). Mutation requires a retained IA2 identity |
 | Events and window operations | Unsupported on this source |
 
@@ -572,7 +585,11 @@ The owned browser fixture verifies Chrome 156 on Windows with
 `--force-renderer-accessibility=complete` and
 `--disable-backgrounding-occluded-windows`. It checks two active tabs
 separately, UTF-16 text and formatting, native parent/header identity,
-merged cells and removed objects. Firefox and older Chromium versions have
+merged cells and removed objects. It also verifies headings, landmarks, link
+URLs, relations, embedded controls that accept actions, identity equality and bounded
+capture across both tabs. A separate probe pauses the owned browser with the
+Windows debug API and verifies the five-second stall bound and disabled-worker
+refusal, then detaches before fixture cleanup. Firefox and older Chromium versions have
 not been verified. Chrome exposes Text, without Text2, in this fixture.
 The Text2 ABI and mapping have been reviewed but have no live fixture evidence.
 The existing UIA source remains available for those apps.
@@ -583,9 +600,10 @@ at most 8192 handles, expiring them after five minutes. Expired or evicted
 handles fail as stale. Signed IDs are validated against their event window
 and owning process generation, without resolving a replacement by name.
 
-Each native request has a five-second caller deadline. Validation and loops
-check the deadline before issuing further native writes. A timeout disables
-the worker and requests COM cancellation. Cancellation is best effort, so
+Each request has a five-second stall bound. A shorter caller deadline stops
+waiting and prevents queued work or later writes from starting; it leaves
+the worker usable. The five-second stall bound disables the worker and
+requests COM cancellation. Cancellation is best effort, so
 native cleanup may continue after the caller returns. An in-flight action
 has unknown delivery. Restart the host before issuing further IA2 requests.
 An initialization failure also disables this process's IA2 source.

@@ -131,6 +131,11 @@ mod tests {
                 "state:minimized" => check_state(name, cap, window.states.minimized),
                 "state:maximized" => check_state(name, cap, window.states.maximized),
                 "state:fullscreen" => check_state(name, cap, window.states.fullscreen),
+                "text:object_at" => check_call(
+                    name,
+                    cap,
+                    entry.provider().text_object_at(entry.data(), 0).map(|_| ()),
+                ),
                 _ if name.starts_with("text:range_at:") => {
                     // The AccessKit text field has no text interface here:
                     // accesskit_unix implements no AT-SPI Text, and

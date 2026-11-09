@@ -700,6 +700,10 @@ class Text:
     ) -> TextRange | None:
         """The ``occurrence``-th (0-based) exact match of ``needle``, searching
         ``within`` if given. Case-sensitive, no Unicode normalization."""
+    def object_at(self, offset: int) -> Element | None:
+        """Live embedded object at a UTF-16 offset; unsupported on default backends."""
+        ...
+
     def range_at(self, offset: int, unit: TextUnitName) -> TextRange:
         """The ``unit`` (``"character"``, ``"word"``, ``"line"``,
         ``"paragraph"``) containing ``offset``. ``"line"`` is the rendered line."""
@@ -872,7 +876,7 @@ class App:
             :class:`DeprecationWarning`.
         """
     @staticmethod
-    def by_name(name: str, *, timeout: float | None = None) -> App:
+    def by_name(name: str, *, timeout: float | None = None, backend: str | None = None) -> App:
         """Find an application by exact name.
 
         Polls the accessibility API until the app appears or ``timeout``
@@ -884,7 +888,7 @@ class App:
         fail fast.
         """
     @staticmethod
-    def by_pid(pid: int, *, timeout: float | None = None) -> App:
+    def by_pid(pid: int, *, timeout: float | None = None, backend: str | None = None) -> App:
         """Find an application by process ID.
 
         This is the supported way to *wait* for a freshly launched process
@@ -919,7 +923,7 @@ class App:
             )
         """
     @staticmethod
-    def foreground(*, timeout: float | None = None) -> App:
+    def foreground(*, timeout: float | None = None, backend: str | None = None) -> App:
         """Resolve the application that currently holds the system foreground.
 
         Queries the platform's foreground mechanism directly rather than
@@ -1904,6 +1908,8 @@ class Capability:
     def __repr__(self) -> str: ...
 
 class Capabilities:
+    @property
+    def backend(self) -> str: ...
     """Every feature's answer on one platform. Get one from
     :func:`xa11y.capabilities`.
 
@@ -1965,7 +1971,10 @@ def get_default_timeout() -> float:
     """
 
 def capabilities(
-    platform: PlatformName | None = None, os_version: str | None = None
+    platform: PlatformName | None = None,
+    os_version: str | None = None,
+    *,
+    backend: str | None = None,
 ) -> Capabilities:
     """What a platform's backend can report: one answer per feature, read from
     a static table without connecting to any app.

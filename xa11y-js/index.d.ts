@@ -126,6 +126,7 @@ export interface SubscribeOptions {
 }
 
 export interface AppLookupOptions {
+  backend?: "native" | "uia" | "ia2";
   /**
    * Poll the accessibility API until the app appears, up to this many
    * milliseconds. Defaults to the process-wide default timeout (see

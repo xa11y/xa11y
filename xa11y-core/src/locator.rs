@@ -1565,6 +1565,7 @@ impl Locator {
         let mut ever_matched = false;
         let mut stability = StableBounds::default();
         let mut previous: Option<ElementData> = None;
+        let mut previous_elapsed = Duration::ZERO;
 
         loop {
             let matched = match crate::deadline::distrust(self.resolve_data()) {
@@ -1582,7 +1583,7 @@ impl Locator {
                             previous.as_ref(),
                             ever_matched,
                             stability.last_change,
-                            stability.unchanged_for(elapsed),
+                            stability.unchanged_for(previous_elapsed),
                         );
                         if let Error::Timeout {
                             diagnosis: Some(d), ..
@@ -1625,6 +1626,7 @@ impl Locator {
                 ));
             }
             previous = matched;
+            previous_elapsed = elapsed;
         }
     }
 
@@ -3194,6 +3196,93 @@ mod wait_stable_tests {
             .expect("a stability timeout carries a diagnosis");
         assert_eq!(d.condition.as_deref(), Some(STABLE_CONDITION));
         d.last_observed.clone().expect("last observation recorded")
+    }
+
+    #[test]
+    fn a_cut_second_read_does_not_count_unobserved_time_as_unchanged() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CutSecondRead {
+            inner: Arc<MockProvider>,
+            reads: AtomicUsize,
+        }
+        macro_rules! delegate {
+            ($($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+                $(fn $name(&self, e: &ElementData $(, $arg: $ty)*) -> Result<$ret> {
+                    self.inner.$name(e $(, $arg)*)
+                })*
+            };
+        }
+        impl Provider for CutSecondRead {
+            fn focused_app(&self) -> Result<ElementData> {
+                self.inner.focused_app()
+            }
+            fn list_shell_surfaces(
+                &self,
+            ) -> Result<Vec<(crate::shell::ShellSurfaceKind, ElementData)>> {
+                self.inner.list_shell_surfaces()
+            }
+
+            fn list_apps(&self) -> Result<Vec<ElementData>> {
+                self.inner.list_apps()
+            }
+            fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
+                self.inner.get_children(e)
+            }
+            fn get_parent(&self, e: &ElementData) -> Result<Option<ElementData>> {
+                self.inner.get_parent(e)
+            }
+            fn find_elements_group(
+                &self,
+                root: &ElementData,
+                group: &SelectorGroup,
+                limit: Option<usize>,
+                depth: Option<u32>,
+            ) -> Result<Vec<ElementData>> {
+                if self.reads.fetch_add(1, Ordering::SeqCst) > 0 {
+                    let deadline = crate::Deadline::current().expect("wait opens a deadline");
+                    std::thread::sleep(deadline.remaining());
+                    return Err(deadline.expired(Some("scripted second read".into())));
+                }
+                self.inner.find_elements_group(root, group, limit, depth)
+            }
+            delegate! {
+                press() -> (); focus() -> (); blur() -> (); toggle() -> (); select() -> ();
+                expand() -> (); collapse() -> (); show_menu() -> (); increment() -> ();
+                decrement() -> (); scroll_into_view() -> (); set_value(v: &str) -> ();
+                set_numeric_value(v: f64) -> (); type_text(t: &str) -> ();
+                set_text_selection(s: u32, f: u32) -> (); perform_action(a: &str) -> ();
+                activate() -> (); minimize() -> (); maximize() -> (); enter_fullscreen() -> ();
+                restore() -> (); close() -> (); move_to(x: i32, y: i32) -> ();
+                resize_to(w: u32, h: u32) -> ();
+                subscribe() -> crate::event_provider::Subscription;
+            }
+        }
+        let inner = build_provider();
+        let root = inner
+            .list_apps()
+            .expect("mock apps")
+            .into_iter()
+            .next()
+            .expect("mock app exists");
+        let provider = Arc::new(CutSecondRead {
+            inner,
+            reads: AtomicUsize::new(0),
+        });
+        let loc = Locator::new_for_app(provider, root, BACK);
+        let err = loc
+            .wait_stable(Duration::from_secs(3))
+            .expect_err("second read is cut");
+        assert!(
+            observed(&err).contains("observed unchanged for 0 ms"),
+            "{err}"
+        );
+        assert_eq!(
+            err.diagnosis()
+                .expect("diagnosed timeout")
+                .pending
+                .as_deref(),
+            Some("scripted second read")
+        );
     }
 
     #[test]

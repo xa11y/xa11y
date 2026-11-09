@@ -541,8 +541,8 @@ fn walk(
     let mut stats = CaptureStats::default();
     let mut vanished = 0usize;
 
-    // Cycle detection needs identities; a platform without them (the IA2
-    // source) walks without it.
+    // Cycle detection needs identities; a custom provider without them
+    // walks without it.
     let mut identities = true;
     let (_, root) = note_identity(&[], Raw::new(root, None, 0), &mut identities, &mut stats);
     let backend = root.identity.as_ref().map(NodeIdentity::backend);

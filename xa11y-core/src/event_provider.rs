@@ -498,7 +498,7 @@ pub fn subscribe_with(
     let kinds = if options.kinds.is_empty() {
         None
     } else {
-        let caps = crate::Capabilities::current()?;
+        let caps = provider.capabilities()?;
         let mut names = Vec::with_capacity(options.kinds.len());
         for kind in &options.kinds {
             let Some(name) = KIND_NAMES.iter().find(|n| **n == kind.as_str()) else {

@@ -595,6 +595,12 @@ pub trait Provider: Send + Sync {
         })
     }
 
+    /// Embedded control or link at a UTF-16 offset. `None` means no object
+    /// there; a backend without this mapping returns `Unsupported`.
+    fn text_object_at(&self, _element: &ElementData, _offset: u32) -> Result<Option<ElementData>> {
+        Err(unsupported("text_object_at"))
+    }
+
     /// The `unit` containing `offset`.
     fn text_range_at(
         &self,
@@ -639,6 +645,11 @@ pub trait Provider: Send + Sync {
     }
 
     // ── Identity and liveness ───────────────────────────────────────
+
+    /// Capability table for this provider instance and its selected backend.
+    fn capabilities(&self) -> Result<crate::Capabilities> {
+        crate::Capabilities::current()
+    }
 
     /// The platform identity of `element`'s node, for equality (see
     /// [`crate::identity`]). Read from the provider's handle table, without a
@@ -871,6 +882,9 @@ impl<T: Provider + ?Sized> Provider for &T {
     ) -> Result<Option<TextRange>> {
         (**self).text_find(e, needle, options)
     }
+    fn text_object_at(&self, e: &ElementData, offset: u32) -> Result<Option<ElementData>> {
+        (**self).text_object_at(e, offset)
+    }
     fn text_range_at(&self, e: &ElementData, offset: u32, unit: TextUnit) -> Result<TextRange> {
         (**self).text_range_at(e, offset, unit)
     }
@@ -886,6 +900,9 @@ impl<T: Provider + ?Sized> Provider for &T {
         kinds: &[crate::semantics::RelationKind],
     ) -> Result<Vec<(crate::semantics::RelationKind, Vec<ElementData>)>> {
         (**self).relations(e, kinds)
+    }
+    fn capabilities(&self) -> Result<crate::Capabilities> {
+        (**self).capabilities()
     }
     fn identity(&self, e: &ElementData) -> Result<crate::identity::NodeIdentity> {
         (**self).identity(e)

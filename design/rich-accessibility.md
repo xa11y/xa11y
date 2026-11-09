@@ -864,12 +864,9 @@ the toolkit and display server, which the notes name), so a version for Linux
 is an error rather than ignored. No row is version-gated yet; the first will
 be UIA `HeadingLevel` (Windows 10 1803) and the Notification text (1709).
 
-**Sources.** The table describes each platform's default accessibility
-source. Since #659, Windows can select IA2 with
-`XA11Y_ACCESSIBILITY_SOURCE=ia2`, whose capabilities differ (no events, no
-window verbs). Describing the running machine with IA2 selected fails as
-unsupported rather than answering for UIA; a per-source column is the
-follow-up when #483 lands the rest of the adapter.
+**Sources.** The table includes an explicit Windows IA2 column. A backend
+option selects it on every interface; the runtime default follows
+`XA11Y_ACCESSIBILITY_SOURCE`. `Capabilities.backend` names the source.
 
 Names are `<area>:<name>`: `event:`, `action:`, `app:`, `window:`, `state:`,
 `table:`, `text:`. Today's table has 38 rows.
@@ -952,21 +949,27 @@ out of scope.
 
 ### #483 IA2
 
-Stage one (private IA2 COM layer, #642) is merged. To plug it into the
-shared contracts without a Windows-shaped public API:
+Implemented through the shared contracts. Per-attachment backend selection
+is available in Python/JS and CLI/MCP application operations; Rust constructs
+`provider_for_backend("ia2")` and passes it to the existing `App::*_with`
+factories. The environment variable remains the default. `native` stays UIA
+on Windows; selecting IA2 elsewhere is `Unsupported`.
 
-- Backend selection is explicit at attach time:
-  `App.by_name("chrome", backend="ia2")`. Default stays UIA. On macOS and
-  Linux, `backend="ia2"` is `Unsupported`. No automatic switching on failure.
-- `Element.backend` reports which backend produced it. `NodeIdentity`
-  includes the backend, so a UIA element and an IA2 element are never equal,
-  even for the same DOM node.
-- IA2 fills the same fields and methods: `IAccessible2::attributes` →
-  `heading_level` / `landmark` / `live_region` / `web_role`;
-  `IAccessibleRelation` → `relations` (IA2's kinds map 1:1 to the AT-SPI
-  column above); `IAccessibleHyperlink::anchorTarget` → `link.url`; negative
-  `uniqueID` + window + process → `NodeIdentity`; IA2 events → section 4
-  kinds. `capabilities()` returns the IA2 table when `backend="ia2"`.
+IA2 provides shared identity, semantics, relations, bounded capture, text,
+formatting, tables and semantic actions. `Text.object_at(offset)` maps
+hypertext to live elements, with explicit unsupported paths in UIA, AX and
+AT-SPI. CLI/MCP return an object snapshot for this operation; MCP refs remain
+issued by tree/find/relations. The generated capability matrix includes IA2.
+
+Intentional omissions: IA2 event subscriptions and window-manager verbs,
+Firefox/toolkit compatibility claims, and live Text2 evidence. Those paths
+are documented as unsupported or unverified. The real Chrome fixture covers
+two tabs, negative IDs, repeated identity, semantics/relations, embedded
+controls, text/caret/selection/formatting, tables, removal and reparenting.
+The owned Chrome fixture pauses its browser process with the Windows debug
+API and proves that an actual nonresponding provider returns within the
+five-second stall bound and disables further requests. COM cancellation is
+best effort; it does not promise termination of the provider process.
 
 ---
 

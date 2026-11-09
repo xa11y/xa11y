@@ -37,6 +37,8 @@ impl App {
 /// Options for `App.byName` / `App.byPid`.
 #[napi(object)]
 pub struct AppLookupOptions {
+    /// Explicit accessibility source; overrides XA11Y_ACCESSIBILITY_SOURCE.
+    pub backend: Option<String>,
     /// Poll the accessibility API until the app appears or this many
     /// milliseconds elapse. When omitted, the process-wide default applies —
     /// 5000ms (5 seconds) unless overridden via `setDefaultTimeout()` or the
@@ -74,7 +76,8 @@ impl App {
     pub fn by_name(name: String, options: Option<AppLookupOptions>) -> AsyncTask<FindByNameTask> {
         AsyncTask::new(FindByNameTask {
             name,
-            timeout_ms: options.and_then(|o| o.timeout),
+            timeout_ms: options.as_ref().and_then(|o| o.timeout),
+            backend: options.and_then(|o| o.backend),
         })
     }
 
@@ -85,7 +88,8 @@ impl App {
     pub fn by_pid(pid: u32, options: Option<AppLookupOptions>) -> AsyncTask<FindByPidTask> {
         AsyncTask::new(FindByPidTask {
             pid,
-            timeout_ms: options.and_then(|o| o.timeout),
+            timeout_ms: options.as_ref().and_then(|o| o.timeout),
+            backend: options.and_then(|o| o.backend),
         })
     }
 
@@ -103,7 +107,8 @@ impl App {
     #[napi(ts_return_type = "Promise<App>")]
     pub fn foreground(options: Option<AppLookupOptions>) -> AsyncTask<ForegroundTask> {
         AsyncTask::new(ForegroundTask {
-            timeout_ms: options.and_then(|o| o.timeout),
+            timeout_ms: options.as_ref().and_then(|o| o.timeout),
+            backend: options.and_then(|o| o.backend),
         })
     }
 
@@ -337,6 +342,7 @@ pub(crate) fn effective_timeout_ms(timeout_ms: Option<u32>) -> napi::Result<Dura
 }
 
 pub struct FindByNameTask {
+    backend: Option<String>,
     name: String,
     timeout_ms: Option<u32>,
 }
@@ -347,7 +353,10 @@ impl Task for FindByNameTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         let timeout = effective_timeout_ms(self.timeout_ms)?;
-        let provider = crate::provider()?;
+        let provider = match self.backend.as_deref() {
+            Some(b) => xa11y::provider_for_backend(b).map_err(map_err)?,
+            None => crate::provider()?,
+        };
         xa11y::App::by_name_with(provider, &self.name, timeout).map_err(map_err)
     }
 
@@ -357,6 +366,7 @@ impl Task for FindByNameTask {
 }
 
 pub struct FindByPidTask {
+    backend: Option<String>,
     pid: u32,
     timeout_ms: Option<u32>,
 }
@@ -367,7 +377,10 @@ impl Task for FindByPidTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         let timeout = effective_timeout_ms(self.timeout_ms)?;
-        let provider = crate::provider()?;
+        let provider = match self.backend.as_deref() {
+            Some(b) => xa11y::provider_for_backend(b).map_err(map_err)?,
+            None => crate::provider()?,
+        };
         xa11y::App::by_pid_with(provider, self.pid, timeout).map_err(map_err)
     }
 
@@ -377,6 +390,7 @@ impl Task for FindByPidTask {
 }
 
 pub struct ForegroundTask {
+    backend: Option<String>,
     timeout_ms: Option<u32>,
 }
 
@@ -386,7 +400,10 @@ impl Task for ForegroundTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         let timeout = effective_timeout_ms(self.timeout_ms)?;
-        let provider = crate::provider()?;
+        let provider = match self.backend.as_deref() {
+            Some(b) => xa11y::provider_for_backend(b).map_err(map_err)?,
+            None => crate::provider()?,
+        };
         xa11y::App::foreground_with(provider, timeout).map_err(map_err)
     }
 

@@ -159,6 +159,8 @@ pub struct Capability {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Capabilities {
+    /// Accessibility source described: `atspi`, `ax`, `uia`, or `ia2`.
+    pub backend: &'static str,
     /// The platform described.
     pub platform: Platform,
     /// The OS version the answers were narrowed to, or `None` when no version
@@ -205,6 +207,39 @@ impl Capabilities {
         Ok(Self::build(platform, os_version.map(str::to_string)))
     }
 
+    /// Describe a selected accessibility backend. `native` selects the
+    /// platform default; `uia` and `ia2` require Windows. No app is contacted.
+    pub fn for_backend(
+        platform: Platform,
+        os_version: Option<&str>,
+        backend: &str,
+    ) -> Result<Self> {
+        let mut caps = Self::for_platform(platform, os_version)?;
+        match backend {
+            "native" => return Ok(caps),
+            "uia" if platform == Platform::Windows => return Ok(caps),
+            "ia2" if platform == Platform::Windows => {}
+            "uia" | "ia2" => {
+                return Err(Error::Unsupported {
+                    feature: format!("backend {backend:?} on {platform}"),
+                })
+            }
+            _ => {
+                return Err(Error::InvalidActionData {
+                    message: format!("unknown backend {backend:?}; expected native, uia, or ia2"),
+                })
+            }
+        }
+        caps.backend = "ia2";
+        for cap in &mut caps.entries {
+            let entry = ia2_entry(cap.name)?;
+            cap.support = entry.support;
+            cap.note = entry.note.map(str::to_string);
+            cap.since = None;
+        }
+        Ok(caps)
+    }
+
     fn build(platform: Platform, os_version: Option<String>) -> Capabilities {
         let entries = ROWS
             .iter()
@@ -220,6 +255,11 @@ impl Capabilities {
             })
             .collect();
         Capabilities {
+            backend: match platform {
+                Platform::Linux => "atspi",
+                Platform::Macos => "ax",
+                Platform::Windows => "uia",
+            },
             platform,
             os_version,
             entries,
@@ -490,7 +530,69 @@ const X11_ONLY: &str = "X11 only; unsupported on Wayland";
 const X11_SWAY_FLOATING: &str =
     "X11, and floating windows on Sway; other Wayland compositors: unsupported";
 
+fn ia2_entry(name: &str) -> Result<Entry> {
+    Ok(match name {
+        name if name.starts_with("event:") => no("IA2 event subscriptions are not implemented"),
+        name if name.starts_with("window:") => {
+            no("IA2 is a document source; window-manager verbs are unavailable")
+        }
+        "state:minimized" | "state:maximized" | "state:fullscreen" => {
+            no("IA2 reports no window visual state; always unknown")
+        }
+        "action:blur" => no("IA2 has no semantic blur operation"),
+        "app:enable_web_accessibility" => no(
+            "launch Chromium with `--force-renderer-accessibility=complete` before attaching IA2",
+        ),
+        "property:heading_level" => partial("IA2 heading role and level object attribute"),
+        "property:landmark_type" | "property:web_role" => partial("IA2 xml-roles object attribute"),
+        "property:link_url" => {
+            partial("IAccessibleHyperlink::anchorTarget when it returns a URI string")
+        }
+        "property:live_region" => {
+            partial("IA2 live/atomic/relevant object attributes and container forms")
+        }
+        "relation:owns" => no("IA2 represents ownership in the accessible tree"),
+        "relation:linked" => no("IA2 reports controls and flows-to separately"),
+        "relation:labelled_by"
+        | "relation:label_for"
+        | "relation:described_by"
+        | "relation:description_for"
+        | "relation:details"
+        | "relation:details_for"
+        | "relation:controls"
+        | "relation:controlled_by"
+        | "relation:flows_to"
+        | "relation:flows_from"
+        | "relation:error_message"
+        | "relation:error_for"
+        | "relation:member_of" => yes_by("IAccessibleRelation with bounded target enumeration"),
+        "table:row_index" => no("IA2 has no row-index interface on row objects; read a cell"),
+        "table:cell_header" => yes_by("MSAA column/row header roles"),
+        "table:row_headers" => yes_by("IAccessibleTable2 and IAccessibleTableCell"),
+        "table:collection" => {
+            partial("IA2 `posinset`, `setsize` and `level` object attributes when published")
+        }
+        "text:range_at:character"
+        | "text:range_at:word"
+        | "text:range_at:line"
+        | "text:range_at:paragraph" => yes_by("IAccessibleText native UTF-16 boundaries"),
+        "text:object_at" => yes_by("IAccessibleHypertext::hyperlinkIndex and hyperlink"),
+        "text:attribute:script" => yes_by("IA2 text-position attribute"),
+        _ => {
+            return Err(Error::InvalidActionData {
+                message: format!("capability {name:?} needs an explicit IA2 mapping"),
+            })
+        }
+    })
+}
+
 const ROWS: &[Row] = &[
+    Row {
+        name: "text:object_at", description: "The embedded control or link at a UTF-16 text offset.",
+        linux: no("AT-SPI embedded-object mapping is not implemented"),
+        macos: no("AX embedded-object mapping is not implemented"),
+        windows: no("UIA embedded-object mapping is not implemented; use the explicit IA2 backend"),
+    },
     // ── Events ──
     event("event:focus_changed", "Keyboard focus moved to another element."),
     event("event:value_changed", "An element's value changed."),
@@ -865,6 +967,37 @@ const ROWS: &[Row] = &[
 mod tests {
     use super::*;
     use crate::event::StateFlag;
+
+    #[test]
+    fn ia2_has_an_explicit_answer_for_every_row() {
+        let caps = Capabilities::for_backend(Platform::Windows, Some("10.0.10000"), "ia2").unwrap();
+        assert_eq!(caps.backend, "ia2");
+        assert_eq!(caps.entries().len(), ROWS.len());
+        assert_eq!(
+            caps.support("event:focus_changed").unwrap(),
+            Support::Unsupported
+        );
+        assert_eq!(
+            caps.support("relation:controlled_by").unwrap(),
+            Support::Supported
+        );
+        assert_eq!(caps.support("text:object_at").unwrap(), Support::Supported);
+        assert_eq!(
+            caps.support("property:heading_level").unwrap(),
+            Support::Partial
+        );
+        assert!(caps.entries().iter().all(|c| c.since.is_none()));
+        for p in [Platform::Linux, Platform::Macos] {
+            assert!(matches!(
+                Capabilities::for_backend(p, None, "ia2"),
+                Err(Error::Unsupported { .. })
+            ));
+        }
+        assert!(matches!(
+            Capabilities::for_backend(Platform::Windows, None, "typo"),
+            Err(Error::InvalidActionData { .. })
+        ));
+    }
 
     #[test]
     fn names_are_unique_and_well_formed() {

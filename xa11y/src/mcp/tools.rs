@@ -429,6 +429,7 @@ fn app_properties() -> Map<String, Value> {
                             `pid`, or `shell`.",
         }),
     );
+    props.insert("backend".into(), json!({"type":"string", "enum":["native","uia","ia2"], "description":"Accessibility source for this attachment; default: server environment. IA2 requires Windows."}));
     props.insert(
         "pid".into(),
         PID.property(
@@ -532,6 +533,7 @@ fn tool_definition(name: &str) -> Value {
         ),
         "capabilities" => {
             let mut props = Map::new();
+            props.insert("backend".into(), json!({"type":"string", "enum":["native","uia","ia2"]}));
             props.insert(
                 "platform".into(),
                 json!({
@@ -1421,6 +1423,7 @@ fn tool_definition(name: &str) -> Value {
 /// a schema advertises but a handler refuses is worse than one that is absent.
 fn events_start_properties() -> Map<String, Value> {
     let mut props = Map::new();
+    props.insert("backend".into(), json!({"type":"string", "enum":["native","uia","ia2"], "description":"Explicit accessibility source; IA2 event subscriptions are unsupported."}));
     props.insert(
         "app".into(),
         json!({
@@ -1786,6 +1789,7 @@ fn pid_arg(args: &Value) -> CliResult<Option<u32>> {
 /// surfaces cannot drift on what `app` or `shell` means.
 fn target(args: &Value) -> CliResult<Target> {
     let opts = Opts {
+        backend: opt_str(args, "backend")?.map(str::to_string),
         app: opt_str(args, "app")?.map(str::to_string),
         pid: pid_arg(args)?,
         shell: opt_str(args, "shell")?.map(str::to_string),
@@ -1815,6 +1819,7 @@ fn target(args: &Value) -> CliResult<Target> {
 /// / `resolve_apps`, so the two surfaces cannot drift on what `app` means.
 fn target_opts(args: &Value) -> CliResult<Opts> {
     let opts = Opts {
+        backend: opt_str(args, "backend")?.map(str::to_string),
         app: opt_str(args, "app")?.map(str::to_string),
         pid: pid_arg(args)?,
         ..Default::default()
@@ -1887,7 +1892,14 @@ fn tool_capabilities(args: &Value) -> CliResult<ToolOutput> {
             .collect::<CliResult<_>>()?,
         Some(_) => return Err(usage("\"names\" must be an array of strings".to_string())),
     };
-    let caps = crate::cli::resolve_capabilities(platform, os_version)?;
+    let caps = match opt_str(args, "backend")? {
+        Some(b) => crate::capabilities_for_backend(
+            platform.map(crate::Platform::parse).transpose()?,
+            os_version,
+            Some(b),
+        )?,
+        None => crate::cli::resolve_capabilities(platform, os_version)?,
+    };
     let selected = crate::cli::select_capabilities(&caps, &names)?;
     let listed: Vec<Value> = selected
         .iter()
@@ -1895,6 +1907,7 @@ fn tool_capabilities(args: &Value) -> CliResult<ToolOutput> {
         .collect();
     Ok(ToolOutput::json(json!({
         "platform": caps.platform.to_snake_case(),
+        "backend": caps.backend,
         "os_version": caps.os_version,
         "count": listed.len(),
         "capabilities": listed,
@@ -2214,7 +2227,7 @@ fn subject(args: &Value) -> CliResult<Subject<'_>> {
     match (opt_str(args, "selector")?, opt_str(args, "ref")?) {
         (Some(selector), None) => Ok(Subject::Selector(selector)),
         (None, Some(r)) => {
-            if let Some(key) = ["app", "pid", "shell"]
+            if let Some(key) = ["app", "pid", "shell", "backend"]
                 .into_iter()
                 .find(|k| args.get(*k).is_some_and(|v| !v.is_null()))
             {
@@ -2659,7 +2672,10 @@ fn tool_windows(args: &Value) -> CliResult<ToolOutput> {
         // against listing the same process twice.
         cli::resolve_apps(&target_opts(args)?)?
     } else {
-        App::list()?
+        App::list_with(match opt_str(args, "backend")? {
+            Some(b) => crate::provider_for_backend(b)?,
+            None => crate::provider()?,
+        })?
     };
     tool_windows_with(&apps, limit, &cli::pointer_center())
 }
@@ -3061,6 +3077,7 @@ fn events_app(args: &Value) -> CliResult<crate::App> {
         ));
     }
     let opts = Opts {
+        backend: opt_str(args, "backend")?.map(str::to_string),
         app: opt_str(args, "app")?.map(str::to_string),
         pid: pid_arg(args)?,
         ..Default::default()
@@ -6085,6 +6102,24 @@ mod tests {
             matches!(err, CliError::Xa11y(crate::Error::Unsupported { .. })),
             "{err}"
         );
+    }
+
+    #[test]
+    fn text_object_mapping_reports_unsupported_and_checks_arguments() {
+        let error = text_err(json!({"op":"object-at", "offset":0}));
+        assert!(matches!(
+            error,
+            CliError::Xa11y(crate::Error::Unsupported { .. })
+        ));
+        assert!(matches!(
+            text_op_from_args(&json!({"op":"object-at"})).expect_err("missing offset"),
+            CliError::Usage(_)
+        ));
+        assert!(matches!(
+            text_op_from_args(&json!({"op":"object-at", "offset":0, "unit":"word"}))
+                .expect_err("extraneous unit"),
+            CliError::Usage(_)
+        ));
     }
 
     /// Run a `text` call against the fixture and return its `result`.

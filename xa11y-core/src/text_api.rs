@@ -476,6 +476,28 @@ impl Text {
         el.provider().text_find(el.data(), needle, options)
     }
 
+    /// The embedded control or link at `offset`, in UTF-16 code units.
+    /// Returns a live element that can be compared, navigated and acted on.
+    /// `None` means the character has no object. `offset == length` and
+    /// offsets past it are invalid. Backends without an object mapping
+    /// return `Unsupported` rather than an empty result.
+    pub fn object_at(&self, offset: u32) -> Result<Option<crate::Element>> {
+        let el = self.target()?;
+        let length = el.provider().text_length(el.data())?;
+        if offset >= length {
+            return Err(Error::InvalidTextRange {
+                start: offset,
+                end: offset,
+                length: Some(length),
+                message: "object offset must be inside the text".into(),
+            });
+        }
+        Ok(el
+            .provider()
+            .text_object_at(el.data(), offset)?
+            .map(|data| crate::Element::new(data, el.provider().clone())))
+    }
+
     /// The `unit` (character, word, rendered line, paragraph) containing
     /// `offset`. At `offset == length`, the unit that ends there.
     pub fn range_at(&self, offset: u32, unit: TextUnit) -> Result<TextRange> {
@@ -1019,6 +1041,18 @@ mod api_tests {
 
     fn r(start: u32, end: u32) -> TextRange {
         TextRange { start, end }
+    }
+
+    #[test]
+    fn embedded_object_mapping_distinguishes_unsupported_and_invalid_offsets() {
+        let p = build_table_provider();
+        let field = locator(p, "text_area").element().expect("mock text field");
+        let text = field.text().expect("mock text");
+        assert!(matches!(text.object_at(0), Err(Error::Unsupported { .. })));
+        assert!(matches!(
+            text.object_at(text.length().unwrap()),
+            Err(Error::InvalidTextRange { .. })
+        ));
     }
 
     #[test]

@@ -1862,12 +1862,22 @@ impl App {
     /// with no waiting. Only "not found" errors trigger a retry; other
     /// errors fail fast.
     #[staticmethod]
-    #[pyo3(signature = (name, *, timeout=None))]
-    fn by_name(py: Python<'_>, name: &str, timeout: Option<f64>) -> PyResult<Self> {
+    #[pyo3(signature = (name, *, timeout=None, backend=None))]
+    fn by_name(
+        py: Python<'_>,
+        name: &str,
+        timeout: Option<f64>,
+        backend: Option<&str>,
+    ) -> PyResult<Self> {
         // Validate `timeout` before touching the provider so callers get a
         // crisp `ValueError` regardless of whether accessibility is set up.
         let timeout = effective_timeout(timeout)?;
-        let provider = get_provider()?;
+        let provider = match backend {
+            Some(b) => py
+                .detach(|| xa11y::provider_for_backend(b))
+                .map_err(to_py_err)?,
+            None => get_provider()?,
+        };
         let app = py
             .detach(move || xa11y::App::by_name_with(provider, name, timeout))
             .map_err(to_py_err)?;
@@ -1891,10 +1901,20 @@ impl App {
     ///
     /// See [`by_name`] for `timeout` semantics.
     #[staticmethod]
-    #[pyo3(signature = (pid, *, timeout=None))]
-    fn by_pid(py: Python<'_>, pid: u32, timeout: Option<f64>) -> PyResult<Self> {
+    #[pyo3(signature = (pid, *, timeout=None, backend=None))]
+    fn by_pid(
+        py: Python<'_>,
+        pid: u32,
+        timeout: Option<f64>,
+        backend: Option<&str>,
+    ) -> PyResult<Self> {
         let timeout = effective_timeout(timeout)?;
-        let provider = get_provider()?;
+        let provider = match backend {
+            Some(b) => py
+                .detach(|| xa11y::provider_for_backend(b))
+                .map_err(to_py_err)?,
+            None => get_provider()?,
+        };
         let app = py
             .detach(move || xa11y::App::by_pid_with(provider, pid, timeout))
             .map_err(to_py_err)?;
@@ -1914,10 +1934,15 @@ impl App {
     /// see `by_name` for timeout semantics. The returned app has
     /// `is_foreground == True`.
     #[staticmethod]
-    #[pyo3(signature = (*, timeout=None))]
-    fn foreground(py: Python<'_>, timeout: Option<f64>) -> PyResult<Self> {
+    #[pyo3(signature = (*, timeout=None, backend=None))]
+    fn foreground(py: Python<'_>, timeout: Option<f64>, backend: Option<&str>) -> PyResult<Self> {
         let timeout = effective_timeout(timeout)?;
-        let provider = get_provider()?;
+        let provider = match backend {
+            Some(b) => py
+                .detach(|| xa11y::provider_for_backend(b))
+                .map_err(to_py_err)?,
+            None => get_provider()?,
+        };
         let app = py
             .detach(move || xa11y::App::foreground_with(provider, timeout))
             .map_err(to_py_err)?;

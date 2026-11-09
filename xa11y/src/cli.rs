@@ -364,7 +364,7 @@ Accessibility tree:
                                             Turn on a Chromium/Electron app's
                                             web content tree (macOS) and wait
                                             for it to appear
-  xa11y capabilities [NAME | AREA: ...] [--platform linux|macos|windows]
+  xa11y capabilities [NAME | AREA: ...] [--backend native|uia|ia2] [--platform linux|macos|windows]
                    [--os-version V] [--json]
                                             What this platform (or another)
                                             can report: supported, partial or
@@ -556,6 +556,7 @@ fn print_usage() {
 // Debug is needed so tests can `expect_err` on `parse_opts` results.
 #[derive(Debug, Default)]
 pub(crate) struct Opts {
+    pub backend: Option<String>,
     pub app: Option<String>,
     pub pid: Option<u32>,
     /// Shell surface kind, as its snake_case spelling. Mutually exclusive with
@@ -648,6 +649,10 @@ pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--backend" => {
+                i += 1;
+                opts.backend = Some(flag_value(args, i, "--backend")?.to_string());
+            }
             "--app" => {
                 i += 1;
                 opts.app = Some(flag_value(args, i, "--app")?.to_string());
@@ -950,11 +955,26 @@ pub(crate) fn parse_button(raw: &str) -> CliResult<MouseButton> {
     }
 }
 
+fn selected_provider(opts: &Opts) -> CliResult<std::sync::Arc<dyn Provider>> {
+    Ok(match opts.backend.as_deref() {
+        Some(b) => crate::provider_for_backend(b)?,
+        None => crate::provider()?,
+    })
+}
+
 pub(crate) fn resolve_app(opts: &Opts) -> CliResult<App> {
     if let Some(name) = &opts.app {
-        Ok(App::by_name(name, std::time::Duration::ZERO)?)
+        Ok(App::by_name_with(
+            selected_provider(opts)?,
+            name,
+            std::time::Duration::ZERO,
+        )?)
     } else if let Some(pid) = opts.pid {
-        Ok(App::by_pid(pid, std::time::Duration::ZERO)?)
+        Ok(App::by_pid_with(
+            selected_provider(opts)?,
+            pid,
+            std::time::Duration::ZERO,
+        )?)
     } else {
         Err(CliError::Usage("specify --app NAME or --pid PID".into()))
     }
@@ -971,13 +991,21 @@ pub(crate) fn resolve_app(opts: &Opts) -> CliResult<App> {
 /// not-matched error, surfaced rather than an empty listing.
 pub(crate) fn resolve_apps(opts: &Opts) -> CliResult<Vec<App>> {
     if let Some(name) = &opts.app {
-        Ok(vec![App::by_name(name, std::time::Duration::ZERO)?])
+        Ok(vec![App::by_name_with(
+            selected_provider(opts)?,
+            name,
+            std::time::Duration::ZERO,
+        )?])
     } else if let Some(pid) = opts.pid {
         // `App::list` would run an unrelated foreground query (focused_app)
         // whose failure could reject a PID whose app and windows are
         // otherwise accessible, and would re-run the same-pid merge once per
         // matching entry. The direct lookup needs neither.
-        Ok(vec![App::by_pid(pid, std::time::Duration::ZERO)?])
+        Ok(vec![App::by_pid_with(
+            selected_provider(opts)?,
+            pid,
+            std::time::Duration::ZERO,
+        )?])
     } else {
         Err(CliError::Usage("specify --app NAME or --pid PID".into()))
     }
@@ -1209,6 +1237,11 @@ impl Target {
 /// `--shell` and `--app` name two different things to search, so passing both
 /// is a usage error rather than one of them silently winning.
 pub(crate) fn resolve_target(opts: &Opts) -> CliResult<Target> {
+    if opts.shell.is_some() && opts.backend.is_some() {
+        return Err(CliError::Usage(
+            "backend selection applies to application attachments, not shell surfaces".into(),
+        ));
+    }
     match (&opts.shell, &opts.app) {
         (Some(_), Some(_)) => Err(CliError::Usage(
             "--shell and --app are mutually exclusive: --shell targets an OS shell surface, \
@@ -1509,12 +1542,17 @@ pub(crate) fn capability_json(c: &Capability) -> serde_json::Value {
 /// `platform:` header line; `--json` prints one object.
 fn cmd_capabilities(args: &[String]) -> CliResult<()> {
     let mut platform = None;
+    let mut backend = None;
     let mut os_version = None;
     let mut json = false;
     let mut filters = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--backend" => {
+                i += 1;
+                backend = Some(flag_value(args, i, "--backend")?);
+            }
             "--platform" => {
                 i += 1;
                 platform = Some(flag_value(args, i, "--platform")?);
@@ -1526,7 +1564,7 @@ fn cmd_capabilities(args: &[String]) -> CliResult<()> {
             "--json" => json = true,
             flag if flag.starts_with("--") => {
                 return Err(CliError::Usage(format!(
-                    "unknown flag {flag} for capabilities; expected --platform, \
+                    "unknown flag {flag} for capabilities; expected --backend, --platform, \
                      --os-version or --json"
                 )));
             }
@@ -1534,11 +1572,19 @@ fn cmd_capabilities(args: &[String]) -> CliResult<()> {
         }
         i += 1;
     }
-    let caps = resolve_capabilities(platform, os_version)?;
+    let caps = match backend {
+        Some(b) => crate::capabilities_for_backend(
+            platform.map(Platform::parse).transpose()?,
+            os_version,
+            Some(b),
+        )?,
+        None => resolve_capabilities(platform, os_version)?,
+    };
     let selected = select_capabilities(&caps, &filters)?;
     if json {
         let out = serde_json::json!({
             "platform": caps.platform.to_snake_case(),
+            "backend": caps.backend,
             "os_version": caps.os_version,
             "capabilities": selected.iter().map(|c| capability_json(c)).collect::<Vec<_>>(),
         });
@@ -1696,7 +1742,7 @@ fn cmd_windows(args: &[String]) -> CliResult<()> {
     let apps = if opts.app.is_some() || opts.pid.is_some() {
         resolve_apps(&opts)?
     } else {
-        App::list()?
+        App::list_with(selected_provider(&opts)?)?
     };
 
     // One Application node per process on every platform (the unified
@@ -2554,7 +2600,14 @@ pub(crate) fn parse_text_range(raw: &str) -> CliResult<(u32, u32)> {
 /// Every `text` operation, in the order the CLI help and the MCP schema list
 /// them. One list, so the two surfaces cannot disagree on which exist.
 pub(crate) const TEXT_OPS: &[&str] = &[
-    "info", "read", "find", "range-at", "lines", "bounds", "runs",
+    "info",
+    "read",
+    "find",
+    "range-at",
+    "object-at",
+    "lines",
+    "bounds",
+    "runs",
 ];
 
 /// UTF-16 code units `text read` returns when no `limit` is given.
@@ -2592,6 +2645,9 @@ pub(crate) enum RangeSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TextOp {
     Info,
+    ObjectAt {
+        offset: u32,
+    },
     Read {
         range: RangeSpec,
         limit: usize,
@@ -2714,6 +2770,17 @@ pub(crate) fn parse_text_op(op: &str, a: &TextArgs<'_>, names: &TextArgNames) ->
                 needle: needle.to_string(),
                 occurrence: a.occurrence.unwrap_or(0),
                 within: a.range,
+            }
+        }
+        "object-at" => {
+            refuse(a.range.is_some(), names.range)?;
+            refuse(a.find.is_some(), names.find)?;
+            refuse(a.unit.is_some(), names.unit)?;
+            refuse(a.limit.is_some(), names.limit)?;
+            TextOp::ObjectAt {
+                offset: a.offset.ok_or_else(|| {
+                    CliError::Usage(format!("text object-at requires {}", names.offset))
+                })?,
             }
         }
         "range-at" => {
@@ -2992,6 +3059,10 @@ pub(crate) fn run_text_op(text: &Text, op: &TextOp) -> CliResult<serde_json::Val
                 "found": found.is_some(),
                 "match": found.map(|r| range_json(text, r)).transpose()?,
             })
+        }
+        TextOp::ObjectAt { offset } => {
+            let object = text.object_at(*offset)?;
+            json!({ "offset": offset, "object": object.as_ref().map(|e| e.data()) })
         }
         TextOp::RangeAt { offset, unit } => {
             let r = text.range_at(*offset, *unit)?;

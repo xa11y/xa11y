@@ -42,6 +42,8 @@ impl From<&xa11y::Capability> for Capability {
     reason = "Constructed by napi-derive from the JS caller's options; the lib-test clippy build doesn't see it"
 )]
 pub struct CapabilitiesOptions {
+    /// Explicit source: native, uia or ia2.
+    pub backend: Option<String>,
     /// `linux`, `macos` or `windows`; defaults to the running platform.
     pub platform: Option<String>,
     /// Dotted OS version (`14.5`, `10.0.19045`) to narrow the answers to.
@@ -57,6 +59,11 @@ pub struct Capabilities {
 
 #[napi]
 impl Capabilities {
+    /// The accessibility source described.
+    #[napi(getter)]
+    pub fn backend(&self) -> String {
+        self.inner.backend.into()
+    }
     /// Every feature name the table knows, in table order.
     #[napi]
     pub fn names() -> Vec<String> {
@@ -123,15 +130,17 @@ impl Capabilities {
     reason = "Exported via napi-derive; clippy on the Rust-only build can't see the JS-side caller"
 )]
 pub fn capabilities(options: Option<CapabilitiesOptions>) -> napi::Result<Capabilities> {
-    let (platform, os_version) = match options {
-        Some(o) => (o.platform, o.os_version),
-        None => (None, None),
+    let (platform, os_version, backend) = match options {
+        Some(o) => (o.platform, o.os_version, o.backend),
+        None => (None, None, None),
     };
     let platform = platform
         .as_deref()
         .map(xa11y::Platform::parse)
         .transpose()
         .map_err(map_err)?;
-    let inner = xa11y::capabilities_with(platform, os_version.as_deref()).map_err(map_err)?;
+    let inner =
+        xa11y::capabilities_for_backend(platform, os_version.as_deref(), backend.as_deref())
+            .map_err(map_err)?;
     Ok(Capabilities { inner })
 }

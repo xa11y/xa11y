@@ -182,6 +182,20 @@ impl Text {
         })))
     }
 
+    /// Live embedded object or link at a UTF-16 offset; null for plain text.
+    #[napi(ts_return_type = "Promise<Element | null>")]
+    pub fn object_at(
+        &self,
+        offset: f64,
+    ) -> napi::Result<AsyncTask<Blocking<Option<crate::element::Element>>>> {
+        let offset = checked_offset(offset, "offset")?;
+        let t = self.inner.clone();
+        Ok(AsyncTask::new(Blocking::new(move || {
+            Ok(t.object_at(offset)?
+                .map(|e| crate::element::Element::new(e.data().clone(), e.provider().clone())))
+        })))
+    }
+
     /// The `unit` (`'character'`, `'word'`, `'line'` — a rendered line — or
     /// `'paragraph'`) containing `offset`. At `offset === length`, the unit
     /// that ends there. An unknown unit throws `InvalidActionDataError`.

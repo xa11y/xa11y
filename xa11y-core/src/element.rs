@@ -439,7 +439,7 @@ impl Element {
         kinds: &[crate::semantics::RelationKind],
     ) -> crate::error::Result<Vec<(crate::semantics::RelationKind, Vec<Element>)>> {
         let kinds: Vec<crate::semantics::RelationKind> = if kinds.is_empty() {
-            supported_relation_kinds()?
+            supported_relation_kinds(self.provider.as_ref())?
         } else {
             kinds.to_vec()
         };
@@ -835,8 +835,10 @@ impl Element {
 
 /// The relation kinds the running platform reports, from the capability
 /// table, so an empty `kinds` never asks a backend for one it would refuse.
-fn supported_relation_kinds() -> crate::error::Result<Vec<crate::semantics::RelationKind>> {
-    let caps = crate::Capabilities::current()?;
+fn supported_relation_kinds(
+    provider: &dyn crate::Provider,
+) -> crate::error::Result<Vec<crate::semantics::RelationKind>> {
+    let caps = provider.capabilities()?;
     Ok(crate::semantics::RelationKind::ALL
         .into_iter()
         .filter(|k| {
