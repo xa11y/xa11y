@@ -886,8 +886,13 @@ def test_windows_lists_the_test_apps_windows(mcp, app_pid, app_name):
         assert w["ref"], "a listed window carries a ref, as `find` matches do"
 
     # The ref names that window: `relations` resolves it without a selector.
+    # Whether the platform can then answer for a window is a separate question
+    # (Electron on macOS answers AXTitleUIElement with kAXErrorFailure, which
+    # is reported as a platform error rather than as no relations), so only a
+    # failure of the ref itself fails this test.
     by_ref = mcp.call_tool("relations", {"ref": windows[0]["ref"]})["result"]
-    assert by_ref["isError"] is False, by_ref["content"]
+    if by_ref["isError"]:
+        assert by_ref["structuredContent"]["kind"] == "platform", by_ref["content"]
 
     # The unfiltered listing must contain the same window set; names are
     # matched when present, since the pid filter is not carried in the
