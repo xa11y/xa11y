@@ -475,6 +475,10 @@ def test_select_text_takes_start_and_end_like_the_text_tool(mcp):
 @pytest.mark.parametrize(
     "arguments, needle",
     [
+        ({"action": "press", "value": "x"}, '"value" applies only to set-value'),
+        ({"action": "press", "at": "1,2"}, '"at" applies only to move-to, not press'),
+        ({"action": "move-to", "at": "1,2", "size": "3,4"}, '"size" applies only to resize-to'),
+        ({"action": "resize-to", "size": "3,4", "value": "x"}, '"value" applies only'),
         ({"action": "select-text", "start": 1}, "together"),
         ({"action": "select-text", "end": 1}, "together"),
         ({"action": "select-text", "start": 0, "end": 2, "value": "0,2"}, "not both"),
@@ -2183,6 +2187,33 @@ def test_range_on_another_action_is_a_usage_error(entry_point):
     )
     assert result.returncode == 2, result.stderr
     assert "applies only to select-text" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(
+    "verb, flag, given, readers",
+    [
+        ("press", "--value", "x", "set-value, set-numeric-value, type-text, select-text"),
+        ("set-value", "--at", "1,2", "move-to"),
+        ("move-to", "--size", "640,480", "resize-to"),
+        ("type-text", "--range", "0,2", "select-text"),
+    ],
+)
+def test_a_flag_the_verb_does_not_read_exits_two_naming_its_verbs(
+    entry_point, verb, flag, given, readers
+):
+    """An ignored flag used to be dropped, so `press --value x` just pressed."""
+    result = _run(
+        entry_point,
+        "action",
+        verb,
+        "button",
+        "--app",
+        "NoSuchApplicationHere",
+        flag,
+        given,
+    )
+    assert result.returncode == 2, result.stderr
+    assert f"{flag} applies only to {readers}, not {verb}" in result.stderr, result.stderr
 
 
 def test_an_unknown_tree_detail_exits_two_before_any_lookup(entry_point):

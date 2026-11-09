@@ -259,6 +259,14 @@ xa11y action move-to "window[name='Dialog']" --pid 1234 --at 100,200
 xa11y action resize-to "window[name='Dialog']" --pid 1234 --size 640,480
 ```
 
+Each of these flags applies only to the verbs listed for it. `--value` goes
+with `set-value`, `set-numeric-value`, `type-text`, and `select-text`;
+`--range` with `select-text`; `--at` with `move-to`; `--size` with
+`resize-to`. Given to any other verb, the flag is a usage error (exit 2)
+naming the verbs that take it, so `xa11y action press button --value x`
+fails instead of pressing. The MCP `action` tool refuses `value`, `start`,
+`end`, `at`, and `size` the same way, with `invalid_arguments`.
+
 `set-value` writes text. A slider, spin button, or progress bar carries a
 number instead, and rejects text with `TextValueNotSupported`; use
 `set-numeric-value`, which takes any finite number and does in one call what

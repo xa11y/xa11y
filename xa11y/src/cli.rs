@@ -478,6 +478,8 @@ Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
     --value START,END is accepted too, but not both),
   minimize, maximize, enter-fullscreen, restore, close, activate,
   move-to (requires --at X,Y), resize-to (requires --size W,H)
+  --value, --range, --at and --size are refused on any verb not listed
+  with them here.
 
 Exit codes:
   0  success
@@ -2795,6 +2797,10 @@ pub(crate) struct ActionArgNames {
     /// How a caller writes a range in that argument, for the message that
     /// says one is missing (`--range START,END`, MCP `"start" and "end"`).
     pub range_form: &'static str,
+    /// The `move-to` point (`--at`, MCP `"at"`).
+    pub at: &'static str,
+    /// The `resize-to` size (`--size`, MCP `"size"`).
+    pub size: &'static str,
 }
 
 /// The CLI's flag spellings.
@@ -2802,7 +2808,29 @@ pub(crate) const CLI_ACTION_ARG_NAMES: ActionArgNames = ActionArgNames {
     value: "--value",
     range: "--range",
     range_form: "--range START,END",
+    at: "--at",
+    size: "--size",
 };
+
+/// Verbs that read `--value` (MCP `value`): the value verbs, plus
+/// `select-text`, which takes its range there as `START,END`.
+const ACTIONS_READING_VALUE: &[&str] =
+    &["set-value", "set-numeric-value", "type-text", "select-text"];
+
+/// Refuses an argument given to a verb that does not read it.
+///
+/// An argument the verb would ignore is refused rather than dropped: a caller
+/// who passed `value` to `press` expected it to do something, and silently
+/// pressing reads as having done it.
+fn refuse_unread_arg(action: &str, given: bool, name: &str, readers: &[&str]) -> CliResult<()> {
+    if given && !readers.contains(&action) {
+        return Err(CliError::Usage(format!(
+            "{name} applies only to {}, not {action}",
+            readers.join(", ")
+        )));
+    }
+    Ok(())
+}
 
 /// Parsed action payload, built up front by [`parse_action_args`] so the
 /// callers can validate it before resolving the target.
@@ -2844,11 +2872,18 @@ pub(crate) fn parse_action_args(
     size: Option<&str>,
     names: &ActionArgNames,
 ) -> CliResult<ActionArgs> {
-    if range.is_some() && action != "select-text" {
-        return Err(CliError::Usage(format!(
-            "{} applies only to select-text, not {action}",
-            names.range
-        )));
+    // An unknown verb is reported as unknown by the dispatcher, not as a
+    // verb that does not take this argument.
+    if ACTION_NAMES.contains(&action) {
+        refuse_unread_arg(action, value.is_some(), names.value, ACTIONS_READING_VALUE)?;
+        refuse_unread_arg(
+            action,
+            range.is_some(),
+            names.range,
+            ACTIONS_REQUIRING_RANGE,
+        )?;
+        refuse_unread_arg(action, at.is_some(), names.at, ACTIONS_REQUIRING_AT)?;
+        refuse_unread_arg(action, size.is_some(), names.size, ACTIONS_REQUIRING_SIZE)?;
     }
     let need_value = |verb: &str| -> CliResult<&str> {
         value.ok_or_else(|| CliError::Usage(format!("{verb} requires a value")))
@@ -2893,14 +2928,15 @@ pub(crate) fn parse_action_args(
             });
         }
         "move-to" => {
-            let raw = at.ok_or_else(|| CliError::Usage(format!("{action} requires --at X,Y")))?;
-            let pt = parse_point_arg(raw, "--at")?;
+            let raw =
+                at.ok_or_else(|| CliError::Usage(format!("{action} requires {} X,Y", names.at)))?;
+            let pt = parse_point_arg(raw, names.at)?;
             args.at = Some((pt.x, pt.y));
         }
         "resize-to" => {
-            let raw =
-                size.ok_or_else(|| CliError::Usage(format!("{action} requires --size W,H")))?;
-            args.size = Some(parse_size_arg(raw, "--size")?);
+            let raw = size
+                .ok_or_else(|| CliError::Usage(format!("{action} requires {} W,H", names.size)))?;
+            args.size = Some(parse_size_arg(raw, names.size)?);
         }
         _ => {}
     }
@@ -7211,6 +7247,80 @@ mod tests {
         assert!(
             lines.iter().any(|l| l.contains("cut by the text limit):")),
             "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn every_action_argument_is_refused_on_a_verb_that_does_not_read_it() {
+        let range = Some(TextRange { start: 0, end: 1 });
+        for verb in ACTION_NAMES {
+            let value_ok = ACTIONS_READING_VALUE.contains(verb);
+            let cases: [(&str, bool, CliResult<ActionArgs>); 4] = [
+                (
+                    "--value",
+                    value_ok,
+                    parse_action_args(verb, Some("1"), None, None, None, &CLI_ACTION_ARG_NAMES),
+                ),
+                (
+                    "--range",
+                    ACTIONS_REQUIRING_RANGE.contains(verb),
+                    parse_action_args(verb, None, range, None, None, &CLI_ACTION_ARG_NAMES),
+                ),
+                (
+                    "--at",
+                    ACTIONS_REQUIRING_AT.contains(verb),
+                    parse_action_args(verb, None, None, Some("1,2"), None, &CLI_ACTION_ARG_NAMES),
+                ),
+                (
+                    "--size",
+                    ACTIONS_REQUIRING_SIZE.contains(verb),
+                    parse_action_args(verb, None, None, None, Some("3,4"), &CLI_ACTION_ARG_NAMES),
+                ),
+            ];
+            for (flag, reads, result) in cases {
+                match result {
+                    Err(CliError::Usage(msg))
+                        if msg.starts_with(&format!("{flag} applies only to")) =>
+                    {
+                        assert!(!reads, "{verb} reads {flag} but refused it: {msg}");
+                        assert!(msg.ends_with(&format!(", not {verb}")), "{msg}");
+                    }
+                    // A verb that reads the flag may still refuse this payload
+                    // for another reason (e.g. a reversed range, a missing
+                    // companion), but never as "applies only to".
+                    _ => assert!(reads, "{verb} accepted {flag}, which it never reads"),
+                }
+            }
+        }
+        // An unknown verb stays an unknown verb, not one that "does not take"
+        // the argument.
+        parse_action_args(
+            "frobnicate",
+            Some("x"),
+            None,
+            None,
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("unknown verbs are refused by the dispatcher");
+    }
+
+    #[test]
+    fn cli_action_refuses_an_unread_flag_before_the_target_is_resolved() {
+        let err = cmd_action(&strs(&[
+            "press",
+            "button",
+            "--app",
+            "NoSuchAppAnywhere",
+            "--value",
+            "x",
+        ]))
+        .expect_err("refused");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "usage error: --value applies only to set-value, set-numeric-value, type-text, \
+             select-text, not press",
         );
     }
 

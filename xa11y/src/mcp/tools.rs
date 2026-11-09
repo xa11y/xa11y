@@ -866,7 +866,7 @@ fn tool_definition(name: &str) -> Value {
                                     \"88\", within the element's `min_value`..`max_value`). \
                                     `select-text` also accepts its range here as `START,END` \
                                     in UTF-16 code units, in place of `start` / `end` and \
-                                    never together with them.",
+                                    never together with them. Refused on any other verb.",
                 }),
             );
             for (key, which) in [("start", "first"), ("end", "one past the last")] {
@@ -887,7 +887,7 @@ fn tool_definition(name: &str) -> Value {
                 json!({
                     "type": "string",
                     "description": "`X,Y` desktop coordinates (physical pixels on Windows, logical points elsewhere) for `move-to`. \
-                                    Required for `move-to`; ignored otherwise.",
+                                    Required for `move-to`; refused on any other verb.",
                 }),
             );
             props.insert(
@@ -895,7 +895,7 @@ fn tool_definition(name: &str) -> Value {
                 json!({
                     "type": "string",
                     "description": "`W,H` desktop dimensions (physical pixels on Windows, logical points elsewhere) for `resize-to`, both positive. \
-                                    Required for `resize-to`; ignored otherwise.",
+                                    Required for `resize-to`; refused on any other verb.",
                 }),
             );
             props.insert("ref".into(), ref_property());
@@ -912,6 +912,11 @@ fn tool_definition(name: &str) -> Value {
                      what it matched, rather than applied to the first of them. Pass a \
                      `ref` from `tree` or `find` instead to act on exactly the element \
                      you read: it acts at once (no wait) or fails `element_stale`.\n\n\
+                     A verb takes only its own arguments: `value` goes with the value \
+                     verbs and `select-text`, `start` / `end` with `select-text`, `at` \
+                     with `move-to`, `size` with `resize-to`. Any of them on another \
+                     verb is refused with `invalid_arguments` naming the verbs that take \
+                     it, before anything is looked up, rather than ignored.\n\n\
                      Auto-waits for the selector to match an element that is visible and \
                      enabled, re-resolving as it polls, and only then acts. The window verbs \
                      (`activate`, `minimize`, `maximize`, `enter-fullscreen`, `restore`, \
@@ -2295,6 +2300,8 @@ const MCP_ACTION_ARG_NAMES: cli::ActionArgNames = cli::ActionArgNames {
     value: "\"value\"",
     range: "\"start\"/\"end\"",
     range_form: "\"start\" and \"end\"",
+    at: "\"at\"",
+    size: "\"size\"",
 };
 
 fn tool_action(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
@@ -5521,8 +5528,10 @@ mod tests {
             }),
             &RefTable::default(),
         )
-        .expect_err("malformed --at must be refused");
-        assert!(tool_err.to_string().contains("--at"), "{tool_err}");
+        .expect_err("malformed at must be refused");
+        // Named in the tool's own spelling: there are no flags on this surface.
+        assert!(tool_err.to_string().contains("in \"at\""), "{tool_err}");
+        assert!(!tool_err.to_string().contains("--"), "{tool_err}");
     }
 
     #[test]
@@ -5800,6 +5809,44 @@ mod tests {
                 "{verb}: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_argument_the_verb_does_not_read_is_refused_in_mcp_spelling() {
+        let refs = RefTable::default();
+        for (call, expected) in [
+            (
+                json!({ "action": "press", "value": "x" }),
+                "\"value\" applies only to set-value, set-numeric-value, type-text, \
+                 select-text, not press",
+            ),
+            (
+                json!({ "action": "activate", "at": "1,2" }),
+                "\"at\" applies only to move-to, not activate",
+            ),
+            (
+                json!({ "action": "move-to", "at": "1,2", "size": "3,4" }),
+                "\"size\" applies only to resize-to, not move-to",
+            ),
+        ] {
+            let mut call = call;
+            call["selector"] = json!("button");
+            call["app"] = json!("NoSuchAppAnywhere");
+            let err = tool_action(&call, &refs).expect_err("refused");
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{call}: {err}");
+            assert!(err.to_string().ends_with(expected), "{call}: {err}");
+            assert!(
+                !err.to_string().contains("--"),
+                "no flags on this surface: {err}"
+            );
+        }
+        // The geometry messages name the MCP argument too.
+        let err = tool_action(
+            &json!({ "action": "move-to", "selector": "window", "app": "NoSuchAppAnywhere" }),
+            &refs,
+        )
+        .expect_err("needs at");
+        assert!(err.to_string().contains("requires \"at\" X,Y"), "{err}");
     }
 
     #[test]

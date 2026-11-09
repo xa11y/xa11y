@@ -541,6 +541,35 @@ def test_select_text_takes_the_text_tools_start_and_end(run_client):
 
 
 @pytest.mark.parametrize(
+    "arguments, needle",
+    [
+        ({"action": "press", "value": "x"}, '"value" applies only to'),
+        ({"action": "activate", "at": "1,2"}, '"at" applies only to move-to'),
+        ({"action": "press", "size": "1,2"}, '"size" applies only to resize-to'),
+    ],
+)
+def test_an_argument_the_verb_does_not_read_is_a_fixable_error(run_client, arguments, needle):
+    """Checked before the target resolves, so no desktop is needed."""
+    result = run_client(
+        lambda c: c.call_tool("action", {"selector": "button", "app": "X", **arguments})
+    )
+    assert result.is_error is True
+    structured = result.structured_content
+    assert structured["kind"] == "invalid_arguments"
+    assert needle in structured["message"], structured["message"]
+    assert "--" not in structured["message"], "there are no flags on this surface"
+
+
+def test_the_action_tool_says_unread_arguments_are_refused(run_client):
+    action = _tool(run_client, "action")
+    assert "A verb takes only its own arguments" in action.description
+    for key in ("value", "at", "size"):
+        description = action.input_schema["properties"][key]["description"]
+        assert "refused on any other verb" in description.lower(), key
+        assert "ignored" not in description, key
+
+
+@pytest.mark.parametrize(
     "extra, needle",
     [
         ({"start": 0}, "together"),

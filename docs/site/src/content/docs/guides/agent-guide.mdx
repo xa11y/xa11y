@@ -78,6 +78,12 @@ These are the rules agents get wrong most often:
 `activate`, `minimize`, `maximize`, `enter-fullscreen`, `restore`, `close`,
 `move-to` and `resize-to`.
 
+A verb takes only its own arguments. `value` goes with `set-value`,
+`set-numeric-value`, `type-text` and `select-text`; `start` and `end` with
+`select-text`; `at` with `move-to`; `size` with `resize-to`. Any of them on
+another verb fails with `invalid_arguments` naming the verbs that take it,
+before anything is looked up, instead of being ignored.
+
 The selector must match exactly one element. A selector matching several is
 refused with an `ambiguous_selector` failure that lists the candidates, and no
 element is touched. Narrow it with an attribute filter or pick one with
