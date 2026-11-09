@@ -110,6 +110,7 @@ def test_auto_scroll_says_whether_scrolling_was_already_tried():
         (fake_xa11y.InvalidTextRangeError("range"), "UTF-16 code units"),
         (fake_xa11y.PlatformError("busy"), "modal"),
         (fake_xa11y.SelectorNotMatchedError("no match"), "near misses above"),
+        (fake_xa11y.ElementStaleError("gone", element='button "Save"'), "never retargets"),
         (fake_xa11y.TimeoutError("timed out"), "last observed"),
     ],
 )
@@ -251,3 +252,10 @@ def test_consent_summary_names_the_target(editor, monkeypatch):
 def test_missing_element_target_is_a_schema_error_not_a_crash():
     with pytest.raises(Exception, match="exactly one"):
         ElementTarget()
+
+
+def test_a_stale_element_names_why_and_what():
+    message = describe(fake_xa11y.ElementStaleError("Element stale (removed): x", element='button "Save"'))
+    assert message.startswith("ElementStaleError: Element stale (removed)")
+    assert "reason: removed" in message
+    assert 'element: button "Save"' in message

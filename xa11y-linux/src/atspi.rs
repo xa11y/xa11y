@@ -3,6 +3,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
+use xa11y_core::RelationKind;
 
 use rayon::prelude::*;
 use xa11y_core::{
@@ -63,10 +65,10 @@ pub struct LinuxProvider {
     /// bus closed can be replaced; see [`LinuxProvider::connection`].
     a11y_bus: Mutex<Connection>,
     /// Cached AT-SPI accessible refs keyed by handle ID.
-    handle_cache: Mutex<HashMap<u64, AccessibleRef>>,
+    handle_cache: Mutex<BoundedHandleCache<AccessibleRef>>,
     /// Cached AT-SPI2 action indices keyed by element handle.
     /// Maps each action name (snake_case) to the integer index used by `DoAction(i)`.
-    action_indices: Mutex<HashMap<u64, HashMap<String, i32>>>,
+    action_indices: Mutex<BoundedHandleCache<HashMap<String, i32>>>,
     /// Native X11/Wayland window-manager channel, selected independently of
     /// the AT-SPI accessibility connection.
     window_manager: WindowManager,
@@ -125,6 +127,7 @@ pub(crate) struct Interfaces {
     pub(crate) table: bool,
     pub(crate) table_cell: bool,
     pub(crate) selection: bool,
+    pub(crate) hyperlink: bool,
 }
 
 impl Interfaces {
@@ -137,6 +140,7 @@ impl Interfaces {
             table: has("org.a11y.atspi.Table"),
             table_cell: has("org.a11y.atspi.TableCell"),
             selection: has("org.a11y.atspi.Selection"),
+            hyperlink: has("org.a11y.atspi.Hyperlink"),
         }
     }
 }
@@ -169,8 +173,8 @@ impl LinuxProvider {
         let a11y_bus = Self::connect_a11y_bus()?;
         Ok(Self {
             a11y_bus: Mutex::new(a11y_bus),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         })
@@ -1294,9 +1298,10 @@ impl LinuxProvider {
             .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
-            .ok_or(Error::ElementStale {
-                selector: format!("handle:{}", handle),
-            })
+            .ok_or(Error::stale(
+                xa11y_core::StaleReason::Evicted,
+                format!("handle:{}", handle),
+            ))
     }
 
     /// Build an ElementData from an AccessibleRef, caching the ref for later lookup.
@@ -1556,6 +1561,11 @@ impl LinuxProvider {
         };
 
         let mut data: ElementData = ElementParts {
+            heading_level: meta.semantics.heading_level,
+            landmark_type: meta.semantics.landmark_type,
+            web_role: meta.semantics.web_role,
+            link_url: meta.link_url,
+            live_region: meta.semantics.live_region,
             role,
             name,
             value,
@@ -1818,9 +1828,10 @@ impl LinuxProvider {
                 // `UnknownMethod` "Object does not exist at path". Stale,
                 // like `children_call_error`; every other failure stays one.
                 if is_absent_member(&e) {
-                    Error::ElementStale {
-                        selector: format!("{}{}", aref.bus_name, aref.path),
-                    }
+                    Error::stale(
+                        xa11y_core::StaleReason::Removed,
+                        format!("{}{}", aref.bus_name, aref.path),
+                    )
                 } else {
                     Error::Platform {
                         code: -1,
@@ -2074,8 +2085,11 @@ impl LinuxProvider {
     fn ensure_attached(&self, aref: &AccessibleRef) -> Result<()> {
         const DEFUNCT: u64 = 1 << 6;
         const MANAGES_DESCENDANTS: u64 = 1 << 31;
-        let stale = || Error::ElementStale {
-            selector: format!("{}{}", aref.bus_name, aref.path),
+        let stale = || {
+            Error::stale(
+                xa11y_core::StaleReason::Removed,
+                format!("{}{}", aref.bus_name, aref.path),
+            )
         };
         let parent = match self.read_parent_ref(aref) {
             Ok(parent) => parent,
@@ -2158,6 +2172,153 @@ impl LinuxProvider {
                     aref.bus_name, aref.path
                 ),
             })
+    }
+
+    /// Whether `bus_name` still has an owner on the accessibility bus. A
+    /// unique name (`:1.42`) is never reused within one bus lifetime, so
+    /// `false` means the process that served it is gone.
+    fn bus_has_owner(&self, bus_name: &str) -> Result<bool> {
+        let proxy = self.make_proxy(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+        )?;
+        let reply = proxy
+            .call_method("NameHasOwner", &(bus_name,))
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("NameHasOwner({bus_name}) failed: {e}"),
+            })?;
+        reply
+            .body()
+            .deserialize::<bool>()
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("NameHasOwner({bus_name}) reply did not decode: {e}"),
+            })
+    }
+
+    /// The stale error for an object that stopped answering: its process
+    /// exited when its bus name has no owner, otherwise the object was
+    /// removed.
+    fn gone(&self, aref: &AccessibleRef, subject: String) -> Error {
+        match self.bus_has_owner(&aref.bus_name) {
+            Ok(false) => Error::stale(xa11y_core::StaleReason::ProcessExited, subject),
+            Ok(true) => Error::stale(xa11y_core::StaleReason::Removed, subject),
+            Err(e) => e,
+        }
+    }
+
+    /// [`Provider::revalidate`] for AT-SPI: the object answers, is still
+    /// attached to its parent (GTK 3 keeps destroyed widgets answering, issue
+    /// #491), and reports the role it was captured with.
+    fn revalidate_atspi(&self, element: &ElementData) -> Result<()> {
+        let aref = self.get_cached(element.handle)?;
+        let subject = xa11y_core::error::stale_subject(element);
+        // Every AT-SPI object answers GetRole, so it doubles as the
+        // existence check.
+        let Some(role_num) = self.attach_call::<u32>(&aref, "GetRole", ())? else {
+            return Err(self.gone(&aref, subject));
+        };
+        match self.ensure_attached(&aref) {
+            Ok(()) => {}
+            Err(Error::ElementStale { .. }) => {
+                return Err(Error::stale(xa11y_core::StaleReason::Removed, subject))
+            }
+            Err(e) => return Err(e),
+        }
+        // The guard compares the raw role read the same way the snapshot
+        // read it (`atspi_role`: the role name, or `role_num:N` when the
+        // toolkit has no GetRoleName), so it cannot disagree with a mapping
+        // refinement. Partial data with no raw role carries nothing to
+        // compare.
+        let Some(serde_json::Value::String(captured)) = element.raw.get("atspi_role") else {
+            return Ok(());
+        };
+        let live = match captured.strip_prefix("role_num:") {
+            Some(_) => format!("role_num:{role_num}"),
+            None => match self.attach_call::<String>(&aref, "GetRoleName", ())? {
+                Some(name) if !name.is_empty() => name,
+                Some(_) => format!("role_num:{role_num}"),
+                None => return Err(self.gone(&aref, subject)),
+            },
+        };
+        if &live == captured {
+            Ok(())
+        } else {
+            Err(Error::stale(
+                xa11y_core::StaleReason::IdentityChanged,
+                format!(
+                    "{subject}; {}{} now reports role {live}",
+                    aref.bus_name, aref.path
+                ),
+            ))
+        }
+    }
+
+    /// [`Provider::relations`] over `GetRelationSet`, which returns every
+    /// relation in one call; the requested kinds are picked out of it.
+    fn relations_atspi(
+        &self,
+        element: &ElementData,
+        kinds: &[RelationKind],
+    ) -> Result<Vec<(RelationKind, Vec<ElementData>)>> {
+        // Refuse an unsupported kind before any IPC, naming it (tenet 6).
+        let codes: Vec<(RelationKind, u32)> = kinds
+            .iter()
+            .map(|k| {
+                atspi_relation_code(*k)
+                    .map(|c| (*k, c))
+                    .ok_or_else(|| Error::Unsupported {
+                        feature: format!(
+                            "relation {k} on AT-SPI: {}",
+                            match k {
+                                RelationKind::Owns =>
+                                    "AT-SPI rebuilds the tree for aria-owns, so \
+                                                   owned elements are children",
+                                _ =>
+                                    "AT-SPI reports controls and flows-to separately; ask for \
+                                  controls or flows_to",
+                            }
+                        ),
+                    })
+            })
+            .collect::<Result<_>>()?;
+        let aref = self.get_cached(element.handle)?;
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = proxy
+            .call_method("GetRelationSet", &())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!(
+                    "GetRelationSet on {}{} failed: {e}",
+                    aref.bus_name, aref.path
+                ),
+            })?;
+        let set: Vec<(u32, Vec<(String, zbus::zvariant::OwnedObjectPath)>)> =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetRelationSet reply did not decode: {e}"),
+            })?;
+        Ok(codes
+            .into_iter()
+            .map(|(kind, code)| {
+                let targets = set
+                    .iter()
+                    .filter(|(c, _)| *c == code)
+                    .flat_map(|(_, targets)| targets.iter())
+                    .filter(|(_, path)| path.as_str() != "/org/a11y/atspi/null")
+                    .map(|(bus, path)| {
+                        let target = AccessibleRef {
+                            bus_name: bus.clone(),
+                            path: path.as_str().to_string(),
+                        };
+                        self.build_element_data(&target, element.pid)
+                    })
+                    .collect();
+                (kind, targets)
+            })
+            .collect())
     }
 
     /// Perform an AT-SPI2 action by its integer index (from discovery).
@@ -2567,6 +2728,30 @@ impl LinuxProvider {
 }
 
 impl Provider for LinuxProvider {
+    fn identity(&self, element: &ElementData) -> Result<xa11y_core::NodeIdentity> {
+        let aref = self.get_cached(element.handle)?;
+        // A unique bus name is never reused within one bus lifetime, and the
+        // handle table is cleared when the bus restarts, so the name is the
+        // process key and the object path the node key.
+        Ok(xa11y_core::NodeIdentity::from_key(
+            "atspi",
+            aref.bus_name,
+            aref.path,
+        ))
+    }
+
+    fn revalidate(&self, element: &ElementData) -> Result<()> {
+        self.revalidate_atspi(element)
+    }
+
+    fn relations(
+        &self,
+        element: &ElementData,
+        kinds: &[RelationKind],
+    ) -> Result<Vec<(RelationKind, Vec<ElementData>)>> {
+        self.relations_atspi(element, kinds)
+    }
+
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         match element {
             None => {
@@ -3382,9 +3567,10 @@ impl Provider for LinuxProvider {
             Err(e) if is_absent_member(&e) => {
                 return match self.scan_state_bits(&target) {
                     Ok(Some(_)) => Err(not_supported()),
-                    Ok(None) => Err(Error::ElementStale {
-                        selector: format!("{}{}", target.bus_name, target.path),
-                    }),
+                    Ok(None) => Err(Error::stale(
+                        xa11y_core::StaleReason::Removed,
+                        format!("{}{}", target.bus_name, target.path),
+                    )),
                     Err(Error::Timeout { .. }) => Err(self.unresponsive_peer(
                         &target,
                         &format!(
@@ -3404,9 +3590,10 @@ impl Provider for LinuxProvider {
                 return Err(self.unresponsive_peer(&target, "Component.ScrollTo"))
             }
             Err(e) if is_peer_gone(&e) => {
-                return Err(Error::ElementStale {
-                    selector: format!("{}{}", target.bus_name, target.path),
-                })
+                return Err(Error::stale(
+                    xa11y_core::StaleReason::ProcessExited,
+                    format!("{}{}", target.bus_name, target.path),
+                ))
             }
             Err(zbus::Error::MethodError(name, _, _))
                 if name.as_str() == "org.freedesktop.DBus.Error.NotSupported" =>
@@ -4031,7 +4218,7 @@ fn try_map_atspi_role(role_name: &str) -> Option<Role> {
         "split pane" => Role::SplitGroup,
         "tooltip" | "tool tip" => Role::Tooltip,
         "status bar" | "statusbar" => Role::Status,
-        "landmark" | "navigation" => Role::Navigation,
+        "landmark" | "navigation" => Role::Landmark,
         _ => return None,
     })
 }
@@ -4167,9 +4354,9 @@ pub(crate) fn try_map_atspi_role_number(role: u32) -> Option<Role> {
         103 => Role::ProgressBar, // LevelBar (GtkLevelBar)
         104 => Role::Group,       // TitleBar (mirrors UIA TitleBar)
         105 => Role::Group,       // BlockQuote
-        110 => Role::Navigation,  // Landmark
-        116 => Role::StaticText,  // Static
-        129 => Role::Button,      // PushButtonMenu
+        110 => Role::Landmark,
+        116 => Role::StaticText, // Static
+        129 => Role::Button,     // PushButtonMenu
         _ => return None,
     })
 }
@@ -4393,6 +4580,27 @@ pub(crate) fn is_listable_top_level(bits: u64) -> bool {
     bits & (VISIBLE | ICONIFIED) != 0
 }
 
+/// The `AtspiRelationType` number for a relation kind, or `None` for a kind
+/// AT-SPI does not report (see the capability table).
+fn atspi_relation_code(kind: RelationKind) -> Option<u32> {
+    Some(match kind {
+        RelationKind::LabelFor => 1,
+        RelationKind::LabelledBy => 2,
+        RelationKind::Controls => 3,
+        RelationKind::ControlledBy => 4,
+        RelationKind::MemberOf => 5,
+        RelationKind::FlowsTo => 10,
+        RelationKind::FlowsFrom => 11,
+        RelationKind::DescriptionFor => 17,
+        RelationKind::DescribedBy => 18,
+        RelationKind::Details => 19,
+        RelationKind::DetailsFor => 20,
+        RelationKind::ErrorMessage => 21,
+        RelationKind::ErrorFor => 22,
+        RelationKind::Owns | RelationKind::Linked => return None,
+    })
+}
+
 /// The D-Bus error a peer answers for an object path it no longer serves.
 const UNKNOWN_OBJECT: &str = "org.freedesktop.DBus.Error.UnknownObject";
 
@@ -4402,11 +4610,10 @@ const UNKNOWN_OBJECT: &str = "org.freedesktop.DBus.Error.UnknownObject";
 /// live traversals prune it through `live_atspi_children`.
 fn children_call_error(err: zbus::Error, aref: &AccessibleRef) -> Error {
     match &err {
-        zbus::Error::MethodError(name, ..) if name.as_str() == UNKNOWN_OBJECT => {
-            Error::ElementStale {
-                selector: format!("{}{}", aref.bus_name, aref.path),
-            }
-        }
+        zbus::Error::MethodError(name, ..) if name.as_str() == UNKNOWN_OBJECT => Error::stale(
+            xa11y_core::StaleReason::Removed,
+            format!("{}{}", aref.bus_name, aref.path),
+        ),
         _ => Error::Platform {
             code: -1,
             message: format!("GetChildren failed: {err}"),
@@ -5650,7 +5857,7 @@ mod tests {
             method_error("org.freedesktop.DBus.Error.UnknownObject"),
             &aref,
         );
-        assert!(matches!(err, Error::ElementStale { selector }
+        assert!(matches!(err, Error::ElementStale { element: selector, .. }
             if selector.contains(&aref.bus_name) && selector.contains(&aref.path)));
         for name in [
             "org.freedesktop.DBus.Error.UnknownMethod",
@@ -5767,8 +5974,8 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -5974,8 +6181,8 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -5993,7 +6200,7 @@ mod tests {
             .do_atspi_action_by_index(&at("/zombie"), 0)
             .expect_err("a detached object is stale");
         assert!(
-            matches!(&err, Error::ElementStale { selector } if selector == "org.test.Attach/zombie"),
+            matches!(&err, Error::ElementStale { element: selector, .. } if selector == "org.test.Attach/zombie"),
             "{err:?}"
         );
         for path in ["/gtk3_zombie", "/usurped", "/dead_cell", "/gone"] {
@@ -6136,7 +6343,7 @@ mod tests {
                     })
                     .collect(),
             ),
-            action_indices: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -6156,7 +6363,7 @@ mod tests {
         }
         let result = scroll("/gone");
         assert!(
-            matches!(&result, Err(Error::ElementStale { selector }) if selector == "org.test.Scroll/gone"),
+            matches!(&result, Err(Error::ElementStale { element: selector, .. }) if selector == "org.test.Scroll/gone"),
             "{result:?}"
         );
         let result = scroll("/broken");
@@ -6299,8 +6506,8 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = std::sync::Arc::new(LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         });
@@ -6413,8 +6620,8 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -6783,8 +6990,8 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = std::sync::Arc::new(LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         });
@@ -6975,8 +7182,8 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -7049,8 +7256,8 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -7104,8 +7311,8 @@ mod tests {
         let (server, client) = p2p_pair();
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(client.clone()),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -7293,8 +7500,8 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };

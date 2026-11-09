@@ -10,7 +10,8 @@ Design proposal for the open children of #475:
 | #480 | Text, selection and live-region events | [4](#4-events-480) |
 | #483, #531 | IA2 backend selection, one deadline | [5](#5-cross-cutting-capabilities-deadline-ia2) |
 
-Status: proposal. Nothing here is implemented. Platform facts are from the
+Status: every section is implemented, with the gaps listed in each
+section's "Implemented" notes. Platform facts are from the
 current code (file references are to `main` at `3603341`) and from
 [Core-AAM 1.2](https://www.w3.org/TR/core-aam-1.2/) §3.4–3.5.
 
@@ -198,6 +199,28 @@ seen = {toolbar_save, focused}          # hashable
 toolbar_save.check_alive()              # raises ElementStaleError, or returns None
 ```
 
+### Implemented
+
+Built as designed, with these specifics:
+
+- `Provider::revalidate` runs before every `Element` action (so `Locator`,
+  the bindings, the CLI and MCP all get it). Its default is no check; the
+  Linux, macOS and Windows backends and the mock implement it. The IA2 source
+  keeps its own retained-identity checks and the default.
+- Role guard compares the *raw* platform role the snapshot stored
+  (`atspi_role`, `ax_role`, `control_type_id`), so a mapping refinement cannot
+  report a live node as replaced.
+- Windows does not compare `ElementData::pid` with the element's process: for
+  hosted windows (UWP frames) it is the owning app's pid, not the element's.
+- macOS process key is the pid alone (no `libc`); `process_exited` is told
+  from `removed` by asking the pid's application element whether it answers.
+- `ElementStale` changed shape: `{ reason, element }` replaces `{ selector }`
+  (breaking for code that matches the variant's fields). Python and JS raise
+  `ElementStaleError`, a subclass of `SelectorNotMatchedError`.
+- Known limit, documented in `xa11y_core::identity` and the integ test: a
+  platform that reuses an id for a new node with the same role (AccessKit on
+  Linux and Windows reuses a `NodeId` for a re-added item) passes the check.
+
 ### Decided
 
 - Bounded cache now (65,536, insertion-order eviction, `evicted` reason).
@@ -382,11 +405,39 @@ except xa11y.ActionNotSupportedError as e:
     print(e)                             # "relation 'described_by' is not exposed by UIA"
 ```
 
+### Implemented
+
+Built as designed, with these specifics:
+
+- Fields: `heading_level`, `landmark_type`, `web_role`, `link_url` and
+  `live_region` on `ElementData` / `ElementParts`, in `xa11y_core::semantics`
+  with `Landmark`, `Politeness`, `LiveRegionInfo` and `RelationKind`.
+  `Role::Navigation` is now `Role::Landmark`, and the selector `navigation`
+  fails with `InvalidSelector` naming `landmark[landmark_type="navigation"]`.
+- Selector attributes: `heading_level` (numeric, `=` only), `landmark_type`,
+  `web_role`, `url` and `live` (the politeness).
+- `Element::relations(kinds)` returns each requested kind once, in request
+  order. An empty `kinds` means every kind the capability table does not mark
+  unsupported, so the table and the call cannot disagree. `capabilities()`
+  gained `property:*` and `relation:*` rows.
+- Linux reads one `GetAttributes` per node, gated by role (headings,
+  landmarks, links, live regions and the web roles that carry them), and
+  shares it with the table read. Answer to open question 1: a role list.
+- Windows marks a group as a landmark from its UIA `LandmarkType` or, when it
+  has none, from a landmark `AriaRole`. AccessKit, and other frameworks
+  without `LandmarkType`, set only the latter.
+- Surfaces: Python and JS getters and `relations()`, the CLI's element line
+  and `xa11y relations SELECTOR [KIND...]`, the MCP element JSON and a
+  `relations` tool whose targets carry refs.
+- The AccessKit adapters publish little of this (see
+  `xa11y/tests/integ/semantics.rs`): no heading level anywhere, landmark kinds
+  on macOS and Windows only, live regions on Windows only, and only
+  `controls` among relations.
+
 ### Open questions
 
-1. Linux `GetAttributes` gating list: accept a role list, or always fetch and
-   eat the cost?
-2. `web_role`: worth exposing raw, or is it a `raw` key?
+1. `web_role`: worth exposing raw, or is it a `raw` key? Exposed as a field
+   for now.
 
 ---
 
@@ -514,13 +565,42 @@ for target in email.relations["labelled_by"]:
 cap.find('button[name="Save"]')[0].element().press()
 ```
 
+### Implemented
+
+Built as designed, with these specifics:
+
+- `xa11y_core::capture`: `CaptureOptions` (chained setters), `Capture`,
+  `CapturedNode`, `Truncation`, `CapturedText`, `CaptureError` (a `step` and
+  the `Error`) and `RelationTarget`. `Element`, `App`, `Locator` and
+  `ShellSurface` have `capture(&options)`. A captured node holds its
+  `Element`, so acting on it reaches that node or fails stale.
+- No `CaptureId` and no `backend` field: refs in MCP carry their own
+  capture ids, and `capabilities()` already names the platform.
+- Detail is `text` and `relations`. `formatting` (runs) is not built yet.
+- The walk is core-only for now: there is no `Provider::capture` hook and no
+  backend override, so nothing has been measured against
+  `FindAllBuildCache(TreeScope_Subtree)` or `Cache.GetItems`, and there is
+  no `bench-capture` target yet. Those are the next step if capture cost
+  shows up.
+- A node whose children read fails with `ElementStale` is dropped and
+  counted in `vanished`; any other failure is a `CaptureError` on the node.
+  A repeated identity is a `cycle` error on the parent.
+- MCP `tree` is rebuilt on capture (breadth-first now, so a node cut keeps
+  the top of the tree) and gains `detail`. CLI `xa11y tree` is rebuilt on
+  it with `--max-nodes` (default 2,000) and `--max-depth`, and prints where
+  and why it cut. `Element.tree()` / `dump()` are unchanged and unbounded,
+  which answers open question 1: they stay frozen and `capture()` is the
+  bounded form.
+- Python and JS expose `capture(...)` with the options folded in (keywords,
+  options object); nodes refer to each other by index, so Python holds no
+  reference cycles.
+
 ### Open questions
 
 Decided: default `max_nodes` is 2,000 on every surface, the same as MCP.
+Decided: `tree()` stays as it is (see Implemented).
 
-1. Should `tree()`'s dict gain `truncated` now, or stay frozen and point
-   users at `capture()`?
-2. `Capture.find(selector)`: run the selector engine over captured data
+1. `Capture.find(selector)`: run the selector engine over captured data
    (cheap, offline), or leave querying to the caller?
 
 ---
@@ -672,12 +752,40 @@ if caps.support("event:announcement:live_region") == "unsupported":   # Linux
     ...  # watch text_changed on the region instead
 ```
 
+### Implemented
+
+Built as designed, with these specifics and gaps:
+
+- `Event.announcement: Option<AnnouncementInfo>` (`origin`, `text`,
+  `politeness`, `platform_priority`, `activity_id`) and `Event.sequence`.
+  Linux reads `any_data` and `detail1` of `Object:Announcement`. macOS moved
+  to `AXObserverCreateWithInfoCallback` for `AXAnnouncementKey` /
+  `AXPriorityKey` and registers `AXLiveRegionChanged`. Windows reports the
+  origin and politeness of its three events.
+- **Not done:** Windows notification text. It needs
+  `AddNotificationEventHandler` (IUIAutomation5) wired through per-window
+  registration, reconciliation and cleanup; `capabilities()` says so in
+  `event:announcement:text`.
+- 4d: `event_channel()` in core, a bounded ring (4,096, drop-oldest) that
+  numbers events as they are queued, with `Subscription::dropped`. Every
+  backend sends through it. `EventReceiver::new` over a plain channel
+  remains for tests and adapters.
+- 4c: `App::subscribe_with(SubscribeOptions { kinds, buffer })` checks each
+  kind against the capability table and fails `Unsupported` before
+  subscribing. The filter runs at the channel, so other kinds never take a
+  buffer slot. Backends still register every handler; skipping
+  registrations is a later optimisation. Bindings fold the options into
+  `subscribe(kinds=, buffer=)` / `subscribe({ kinds, buffer })`, the CLI
+  takes `--kinds`, and MCP `events_start` passes its `kinds` through.
+- 4b: `sequence` is exposed in the bindings and MCP. **Not done:** a binding
+  `timestamp` (still Rust-only) and actionable Linux event targets (still
+  handle-0 snapshots).
+- MCP keeps its own 1,024-event poll buffer on top of the core one.
+
 ### Open questions
 
 Decided: no live-region event on Linux (not derived).
-
-1. Default buffer size, and drop-oldest?
-2. One `announcement` kind with `origin` (recommended, 4a) or a split?
+Decided: 4,096 events, drop-oldest; one `announcement` kind with `origin`.
 
 ---
 
@@ -851,10 +959,7 @@ Made:
 - **#480** `LiveRegionChanged` is unsupported on Linux.
 - **#482** Default `max_nodes` is 2,000 everywhere.
 - **All** `xa11y.capabilities()`, with a platform and OS-version option:
-  implemented on this branch (section 5).
-
-Recommended, awaiting sign-off:
-
+  implemented in #660 (section 5).
 - **#476** `Role::Landmark` for every landmark plus `landmark_type`;
   `Role::Navigation` removed with a loud selector error (2a-bis).
 - **#480** One `announcement` kind on every platform with `origin`

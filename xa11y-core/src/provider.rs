@@ -617,6 +617,51 @@ pub trait Provider: Send + Sync {
         Err(unsupported("text_attributes_at"))
     }
 
+    // ── Relations ───────────────────────────────────────────────────
+
+    /// The elements `element` is related to, by kind (see
+    /// [`crate::semantics`]). Each requested kind appears once in the result,
+    /// in request order, with an empty list when the element has none.
+    ///
+    /// A kind this platform never reports fails the whole call with
+    /// [`Error::Unsupported`] naming it, so "unsupported" is never read as
+    /// "no relations". Backends report the kind the platform itself reports:
+    /// macOS `AXLinkedUIElements` is [`RelationKind::Linked`], not a guess at
+    /// controls or flows-to.
+    ///
+    /// [`RelationKind::Linked`]: crate::semantics::RelationKind::Linked
+    fn relations(
+        &self,
+        _element: &ElementData,
+        _kinds: &[crate::semantics::RelationKind],
+    ) -> Result<Vec<(crate::semantics::RelationKind, Vec<ElementData>)>> {
+        Err(unsupported("relations"))
+    }
+
+    // ── Identity and liveness ───────────────────────────────────────
+
+    /// The platform identity of `element`'s node, for equality (see
+    /// [`crate::identity`]). Read from the provider's handle table, without a
+    /// round trip where the platform allows. A handle the table no longer
+    /// holds fails with [`Error::ElementStale`] (`Evicted`).
+    fn identity(&self, _element: &ElementData) -> Result<crate::identity::NodeIdentity> {
+        Err(unsupported("identity"))
+    }
+
+    /// Prove `element` still names the node it was captured from, before an
+    /// action reaches it. [`crate::Element`] calls this ahead of every action.
+    ///
+    /// Fails with [`Error::ElementStale`] carrying the reason: the node was
+    /// removed, its process exited or was replaced, the handle was evicted,
+    /// or re-reading the node gives a role other than `element.role` (the
+    /// platform id now names a different node). Never re-matches by name.
+    ///
+    /// The default performs no check. Every real backend overrides it; a
+    /// provider without one (test fixtures) acts on the handle as given.
+    fn revalidate(&self, _element: &ElementData) -> Result<()> {
+        Ok(())
+    }
+
     // ── Events ──────────────────────────────────────────────────────
 
     /// Subscribe to all accessibility events for an application.
@@ -819,6 +864,19 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn text_attributes_at(&self, e: &ElementData, offset: u32) -> Result<TextRun> {
         (**self).text_attributes_at(e, offset)
+    }
+    fn relations(
+        &self,
+        e: &ElementData,
+        kinds: &[crate::semantics::RelationKind],
+    ) -> Result<Vec<(crate::semantics::RelationKind, Vec<ElementData>)>> {
+        (**self).relations(e, kinds)
+    }
+    fn identity(&self, e: &ElementData) -> Result<crate::identity::NodeIdentity> {
+        (**self).identity(e)
+    }
+    fn revalidate(&self, e: &ElementData) -> Result<()> {
+        (**self).revalidate(e)
     }
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
         (**self).subscribe(element)

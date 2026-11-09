@@ -603,6 +603,18 @@ impl App {
         self.provider.subscribe(&self.data)
     }
 
+    /// Subscribe to some kinds of event, or with another buffer size.
+    ///
+    /// A kind this platform never sends fails [`Error::Unsupported`]
+    /// (`crate::Error`) at once, with the capability table's reason, rather
+    /// than leaving a wait for it to time out.
+    pub fn subscribe_with(
+        &self,
+        options: &crate::event_provider::SubscribeOptions,
+    ) -> Result<Subscription> {
+        crate::event_provider::subscribe_with(&*self.provider, &self.data, options)
+    }
+
     /// Get direct children (typically windows) of this application.
     pub fn children(&self) -> Result<Vec<Element>> {
         let mut children = Vec::new();
@@ -633,6 +645,17 @@ impl App {
             }
         }
         Ok(tree)
+    }
+
+    /// Read the application's accessibility tree into a bounded, flat
+    /// [`Capture`](crate::capture::Capture), rooted at the application
+    /// element. The root's children are those of every native registration
+    /// of the process, as in [`Self::children`].
+    pub fn capture(
+        &self,
+        options: &crate::capture::CaptureOptions,
+    ) -> Result<crate::capture::Capture> {
+        crate::capture::capture_from(self.as_element(), || self.children(), options)
     }
 
     /// Render the application's accessibility tree as an indented string,
@@ -1003,6 +1026,11 @@ mod tests {
         /// The Application node for the shared process (pid 42).
         fn app(handle: u64) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: Role::Application,
                 name: Some("SharedApp".to_string()),
                 value: None,
@@ -1029,6 +1057,11 @@ mod tests {
         /// window actually in the foreground reports it.
         fn window(name: &str, handle: u64, active: bool) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: Role::Window,
                 name: Some(name.to_string()),
                 value: None,
@@ -1202,6 +1235,11 @@ mod tests {
         /// window is actually in the foreground reports it.
         fn app(name: &str, handle: u64, active: bool) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: Role::Application,
                 name: Some(name.to_string()),
                 value: None,
@@ -1371,6 +1409,11 @@ mod tests {
 
         fn app(handle: u64) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: Role::Application,
                 name: Some("SharedApp".to_string()),
                 value: None,
@@ -1394,6 +1437,11 @@ mod tests {
 
         fn window(name: &str, handle: u64, stable_id: &str) -> ElementData {
             ElementData {
+                heading_level: None,
+                landmark_type: None,
+                web_role: None,
+                link_url: None,
+                live_region: None,
                 role: Role::Window,
                 name: Some(name.to_string()),
                 value: None,
@@ -2064,8 +2112,14 @@ mod tests {
             "a closed window's descendant must not resolve a parent"
         );
         assert!(
-            matches!(button.press(), Err(Error::Platform { .. })),
-            "a closed window's descendant must not remain actionable"
+            matches!(
+                button.press(),
+                Err(Error::ElementStale {
+                    reason: crate::error::StaleReason::Removed,
+                    ..
+                })
+            ),
+            "a closed window's descendant must fail stale, not act"
         );
         // `windows_with` on a window is a role error after the app-node
         // unification (a window is not an Application, and the self-inclusion
@@ -2121,8 +2175,14 @@ mod tests {
                 _ => unreachable!(),
             };
             assert!(
-                matches!(err, Error::Platform { .. }),
-                "{action} on a closed window must fail with Platform, got {err:?}"
+                matches!(
+                    err,
+                    Error::ElementStale {
+                        reason: crate::error::StaleReason::Removed,
+                        ..
+                    }
+                ),
+                "{action} on a closed window must fail stale (removed), got {err:?}"
             );
         }
     }
@@ -2415,9 +2475,10 @@ mod tests {
                 let mut stale = self.stale_reads.lock().unwrap_or_else(|e| e.into_inner());
                 if *stale > 0 {
                     *stale -= 1;
-                    return Err(Error::ElementStale {
-                        selector: "web_area".to_string(),
-                    });
+                    return Err(Error::stale(
+                        crate::error::StaleReason::Removed,
+                        "web_area".to_string(),
+                    ));
                 }
             }
             Ok(match e.map(|e| e.handle) {

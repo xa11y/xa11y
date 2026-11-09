@@ -379,6 +379,7 @@ def test_tools_list_is_complete_and_deterministic(mcp):
         "action",
         "text",
         "table",
+        "relations",
         "click",
         "move",
         "drag",
@@ -436,7 +437,9 @@ def test_the_text_tool_states_its_offset_unit_and_operations(mcp):
         "runs",
     ]
     assert props["unit"]["enum"] == ["character", "word", "line", "paragraph"]
-    assert set(text["inputSchema"]["required"]) == {"op", "selector"}
+    # `selector` and `ref` are alternatives, so only `op` is required.
+    assert set(text["inputSchema"]["required"]) == {"op"}
+    assert {"selector", "ref"} <= text["inputSchema"]["properties"].keys()
 
 
 def test_the_table_tool_lists_its_lookups(mcp):
@@ -487,6 +490,65 @@ def test_cell_at_without_a_column_is_refused_before_any_lookup(mcp):
     assert result["isError"] is True
     assert result["structuredContent"]["kind"] == "invalid_arguments"
     assert 'requires "row" and "column"' in result["structuredContent"]["message"]
+
+
+RELATION_KINDS = [
+    "labelled_by",
+    "label_for",
+    "described_by",
+    "description_for",
+    "details",
+    "details_for",
+    "controls",
+    "controlled_by",
+    "flows_to",
+    "flows_from",
+    "error_message",
+    "error_for",
+    "owns",
+    "member_of",
+    "linked",
+]
+
+
+def test_the_tree_tool_offers_its_detail(mcp):
+    props = _tools_by_name(mcp)["tree"]["inputSchema"]["properties"]
+    assert props["detail"]["items"]["enum"] == ["text", "relations"]
+
+
+@pytest.mark.parametrize("detail", [["formatting"], "text", [1]])
+def test_a_tree_detail_mistake_is_refused_before_any_lookup(mcp, detail):
+    result = mcp.call_tool("tree", {"app": "no-such-app", "detail": detail})["result"]
+    assert result["isError"] is True
+    assert result["structuredContent"]["kind"] == "invalid_arguments", result
+
+
+def test_the_relations_tool_lists_its_kinds(mcp):
+    relations = _tools_by_name(mcp)["relations"]
+    props = relations["inputSchema"]["properties"]
+    assert props["kinds"]["items"]["enum"] == RELATION_KINDS
+    # `selector` and `ref` are alternatives; nothing else is required.
+    assert not relations["inputSchema"].get("required")
+    assert {"selector", "ref", "kinds", "limit"} <= props.keys()
+    assert "empty list" in relations["description"]
+
+
+@pytest.mark.parametrize(
+    "kinds, needle",
+    [
+        (["labeled_by"], "unknown relation kind"),
+        ([], "omit it"),
+        ("labelled_by", "array of strings"),
+    ],
+)
+def test_relation_kind_mistakes_are_refused_before_any_lookup(mcp, kinds, needle):
+    result = mcp.call_tool(
+        "relations", {"selector": "text_field", "app": "no-such-app", "kinds": kinds}
+    )["result"]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "invalid_arguments", structured
+    assert needle in structured["message"], structured["message"]
 
 
 # ── Shell surfaces ───────────────────────────────────────────────────────────
@@ -1444,6 +1506,30 @@ def test_bounds_and_center_are_reported_together_or_not_at_all(mcp, app_pid):
         bounds, center = match["bounds"], match["center"]
         assert center["x"] == bounds["x"] + bounds["width"] // 2, match
         assert center["y"] == bounds["y"] + bounds["height"] // 2, match
+
+
+def test_an_action_by_ref_reaches_the_element_find_returned(mcp, app_pid):
+    """Refs (#481): a match's `ref` acts on exactly that element, with no wait
+    and no re-resolution, and `text`/`table` take one the same way."""
+    found = mcp.call_tool("find", {"pid": app_pid, "selector": "button", "limit": 1})["result"]
+    assert found["isError"] is False, found["content"]
+    match = found["structuredContent"]["matches"][0]
+    reference = match["ref"]
+    assert reference.startswith("c") and ":" in reference, match
+    pressed = mcp.call_tool("action", {"action": "focus", "ref": reference})["result"]
+    if pressed["isError"]:
+        # The platform may refuse to focus the button (egui on Windows fails
+        # UIA SetFocus with a platform error). That still shows the ref
+        # reached an element; a failure of the ref itself is one of these.
+        assert pressed["structuredContent"]["kind"] not in {
+            "element_stale",
+            "ref_expired",
+            "invalid_arguments",
+        }, pressed
+    else:
+        assert pressed["structuredContent"] == {"ok": True, "action": "focus", "ref": reference}
+    tree = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 1})["result"]
+    assert tree["structuredContent"]["tree"]["ref"].startswith("c")
 
 
 def test_find_respects_its_limit_and_flags_the_truncation(mcp, app_pid):

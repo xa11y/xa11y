@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from types import TracebackType
 from typing import Literal, TypedDict
 
@@ -132,6 +132,26 @@ class SelectorNotMatchedError(XA11yError):
     elapsed: float | None
     """Always ``None`` for this class (present for attribute parity with
     :class:`TimeoutError`)."""
+
+StaleReasonName = Literal[
+    "removed", "process_exited", "process_restarted", "identity_changed", "evicted"
+]
+
+class ElementStaleError(SelectorNotMatchedError):
+    """The element no longer names a live node, so nothing was done to it.
+
+    A subclass of :class:`SelectorNotMatchedError`, so existing handlers keep
+    catching it. xa11y never re-matches a stale element by name: re-resolve
+    with a locator to act on whatever is there now."""
+
+    reason: StaleReasonName
+    """Why: ``"removed"`` (the node is gone), ``"process_exited"``,
+    ``"process_restarted"``, ``"identity_changed"`` (the platform id now
+    names a node with a different role) or ``"evicted"`` (the provider's
+    bounded handle table dropped it)."""
+    element: str
+    """What was captured: ``role "name"``, or the handle when that is all
+    the provider still has."""
 
 class ActionNotSupportedError(XA11yError):
     """The requested action is not supported on the target element."""
@@ -289,6 +309,180 @@ class CollectionInfo:
     @property
     def depth(self) -> int | None:
         """0-based nesting depth."""
+    def __repr__(self) -> str: ...
+
+# ── Document semantics ───────────────────────────────────────────────────────
+
+LandmarkName = Literal[
+    "banner",
+    "complementary",
+    "contentinfo",
+    "form",
+    "main",
+    "navigation",
+    "region",
+    "search",
+    "unknown",
+]
+PolitenessName = Literal["off", "polite", "assertive"]
+RelationKindName = Literal[
+    "labelled_by",
+    "label_for",
+    "described_by",
+    "description_for",
+    "details",
+    "details_for",
+    "controls",
+    "controlled_by",
+    "flows_to",
+    "flows_from",
+    "error_message",
+    "error_for",
+    "owns",
+    "member_of",
+    "linked",
+]
+
+class LiveRegionInfo:
+    """Live-region settings of an element. Every field is ``None`` when the
+    platform did not report it."""
+
+    @property
+    def politeness(self) -> PolitenessName | None:
+        """``"off"``, ``"polite"`` or ``"assertive"``."""
+    @property
+    def atomic(self) -> bool | None:
+        """Whether the whole region is announced when part of it changes."""
+    @property
+    def relevant(self) -> str | None:
+        """Which changes are announced, as the platform spells it
+        (``"additions text"``)."""
+    def __repr__(self) -> str: ...
+
+# ── Bounded capture ──────────────────────────────────────────────────────────
+
+CaptureDetailName = Literal["text", "relations"]
+CaptureStepName = Literal["children", "identity", "text", "relations", "cycle"]
+
+class Truncation:
+    """Which limits dropped something. A limit that was reached without
+    dropping anything is not reported."""
+
+    @property
+    def by_depth(self) -> bool:
+        """Children below ``max_depth`` were left out."""
+    @property
+    def by_nodes(self) -> bool:
+        """Nodes past ``max_nodes`` were left out."""
+    @property
+    def by_text(self) -> bool:
+        """Text past ``max_text_bytes`` was left out."""
+    @property
+    def by_time(self) -> bool:
+        """The time budget ran out before the walk finished."""
+    def any(self) -> bool:
+        """Whether any limit dropped something."""
+    def __bool__(self) -> bool: ...
+    def __repr__(self) -> str: ...
+
+class CapturedText:
+    """An element's text, as far as the capture's text budget reached."""
+
+    @property
+    def content(self) -> str:
+        """The text read, from offset 0."""
+    @property
+    def length(self) -> int:
+        """The element's full text length, in UTF-16 code units."""
+    @property
+    def truncated(self) -> bool:
+        """Whether ``content`` stops short of ``length``."""
+    def __repr__(self) -> str: ...
+
+class CaptureError:
+    """A read of one node that failed. The capture continued past it."""
+
+    @property
+    def step(self) -> CaptureStepName:
+        """What was being read: ``"children"``, ``"identity"``, ``"text"``,
+        ``"relations"`` or ``"cycle"``."""
+    @property
+    def error(self) -> XA11yError:
+        """The exception the read raised, as an xa11y exception instance."""
+    def __repr__(self) -> str: ...
+
+class CapturedNode:
+    """One node of a :class:`Capture`."""
+
+    @property
+    def index(self) -> int:
+        """Index in ``Capture.nodes``, which is pre-order. 0-based."""
+    @property
+    def parent(self) -> int | None:
+        """The parent's index; ``None`` on the root."""
+    @property
+    def depth(self) -> int:
+        """Depth below the root, which is 0."""
+    @property
+    def element(self) -> Element:
+        """The element, which names exactly this node: actions on it reach it or
+        raise :class:`ElementStaleError`, never a look-alike."""
+    @property
+    def children(self) -> list[int]:
+        """Indices of the children in the capture, in platform order."""
+    @property
+    def children_count(self) -> int | None:
+        """How many children the node has, including ones the capture left out.
+        ``None`` when they were not read."""
+    @property
+    def children_truncated(self) -> bool:
+        """Whether children of this node are missing from the capture."""
+    @property
+    def errors(self) -> list[CaptureError]:
+        """Reads of this node that failed."""
+    @property
+    def text(self) -> CapturedText | None:
+        """The node's text, with ``detail={"text"}``, when it has a text
+        interface."""
+    @property
+    def relations(self) -> dict[RelationKindName, list[int | Element]]:
+        """With ``detail={"relations"}``: kind → targets, each an ``int`` index
+        into ``Capture.nodes`` when inside the capture, or an ``Element``
+        when outside it. Every kind the platform reports appears, ``[]`` when
+        it has no targets."""
+    @property
+    def role(self) -> str:
+        """Shortcut for ``element.role``."""
+    @property
+    def name(self) -> str | None:
+        """Shortcut for ``element.name``."""
+    def __repr__(self) -> str: ...
+
+class Capture:
+    """A bounded read of a subtree: every node read, pre-order, and which limits
+    cut it. See ``Element.capture``."""
+
+    @property
+    def nodes(self) -> list[CapturedNode]:
+        """Every node read, pre-order. The root is index 0."""
+    @property
+    def truncated(self) -> Truncation:
+        """Which limits dropped something."""
+    @property
+    def vanished(self) -> int:
+        """Nodes that disappeared while the capture read them, and were dropped."""
+    @property
+    def started(self) -> float:
+        """When the walk began, in seconds since the epoch."""
+    @property
+    def finished(self) -> float:
+        """When the walk ended, in seconds since the epoch."""
+    def root(self) -> CapturedNode:
+        """The root node."""
+    def subtree(self, index: int) -> list[CapturedNode]:
+        """The nodes of ``index``'s subtree, itself first, in pre-order. Empty
+        when ``index`` is out of range."""
+    def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
 
 # ── Text by range ────────────────────────────────────────────────────────────
@@ -513,6 +707,36 @@ class Event:
         delta. A ``text_selection_changed`` event carries no offsets: read
         ``Text.caret()`` / ``Text.selections()`` on the target.
         """
+    @property
+    def sequence(self) -> int:
+        """Position in this subscription's stream, from 0. A gap means events
+        were dropped because the buffer was full (see ``Subscription.dropped``)."""
+    @property
+    def announcement(self) -> AnnouncementInfo | None:
+        """For announcement events: the origin and, where sent, the text."""
+    def __repr__(self) -> str: ...
+
+AnnouncementOriginName = Literal["request", "live_region", "alert"]
+
+class AnnouncementInfo:
+    """What an ``announcement`` event carries (``Event.announcement``)."""
+
+    @property
+    def origin(self) -> AnnouncementOriginName:
+        """``"request"`` (an app asked for text to be spoken), ``"live_region"``
+        or ``"alert"`` (a region changed: read the target)."""
+    @property
+    def text(self) -> str | None:
+        """The text to announce, for a request where the platform sends it."""
+    @property
+    def politeness(self) -> PolitenessName | None:
+        """``"polite"`` or ``"assertive"``, normalised across platforms."""
+    @property
+    def platform_priority(self) -> str | None:
+        """The platform's own priority, as it spells it."""
+    @property
+    def activity_id(self) -> str | None:
+        """UIA's ``activityId`` (Windows only)."""
     def __repr__(self) -> str: ...
 
 # ── Subscription ─────────────────────────────────────────────────────────────
@@ -520,6 +744,10 @@ class Event:
 class Subscription:
     """A live event subscription."""
 
+    @property
+    def dropped(self) -> int:
+        """How many events the buffer has dropped, in total, because it was full.
+        A dropped event leaves a gap in ``Event.sequence``."""
     def try_recv(self) -> Event | None: ...
     def recv(self, timeout: float = 5.0) -> Event: ...
     def wait_for(
@@ -647,8 +875,20 @@ class App:
         """
     def locator(self, selector: str) -> Locator:
         """Create a Locator scoped to this application's accessibility tree."""
-    def subscribe(self) -> Subscription:
-        """Subscribe to accessibility events from this application."""
+    def subscribe(
+        self,
+        *,
+        kinds: Iterable[str] | None = None,
+        buffer: int | None = None,
+    ) -> Subscription:
+        """Subscribe to accessibility events from this application.
+
+        ``kinds`` keeps only those event kinds (``["announcement",
+        "focus_changed"]``); a kind this platform never sends raises
+        :class:`ActionNotSupportedError` at once rather than never arriving.
+        ``buffer`` bounds the queue (default 4096 events, oldest dropped
+        first; see ``Subscription.dropped``).
+        """
     def children(self) -> list[Element]:
         """Get direct children (typically windows) of this application."""
     def windows(self) -> list[Element]:
@@ -697,6 +937,25 @@ class App:
 
         Useful for invoking Element-level methods (``children()``,
         ``parent()``, etc.) without going through a locator.
+        """
+    def capture(
+        self,
+        *,
+        max_depth: int | None = None,
+        max_nodes: int = 2000,
+        max_text_bytes: int = 65536,
+        detail: Iterable[CaptureDetailName] | None = None,
+        timeout: float | None = None,
+    ) -> Capture:
+        """Read the subtree into a bounded :class:`Capture`: every node read,
+        pre-order, with which limits cut it. Read breadth-first, so when
+        ``max_nodes`` cuts, the top of the tree is complete.
+
+        ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+        counts the root; ``detail`` adds ``"text"`` (full text within
+        ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+        (seconds) returns what was read when it runs out, with
+        ``truncated.by_time``. Releases the GIL while it reads.
         """
     def tree(self, max_depth: int | None = None) -> dict:
         """Capture this application's accessibility tree as a recursive dict.
@@ -790,6 +1049,25 @@ class ShellSurface:
 
         Useful for invoking Element-level methods (``children()``,
         ``parent()``, etc.) without going through a locator.
+        """
+    def capture(
+        self,
+        *,
+        max_depth: int | None = None,
+        max_nodes: int = 2000,
+        max_text_bytes: int = 65536,
+        detail: Iterable[CaptureDetailName] | None = None,
+        timeout: float | None = None,
+    ) -> Capture:
+        """Read the subtree into a bounded :class:`Capture`: every node read,
+        pre-order, with which limits cut it. Read breadth-first, so when
+        ``max_nodes`` cuts, the top of the tree is complete.
+
+        ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+        counts the root; ``detail`` adds ``"text"`` (full text within
+        ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+        (seconds) returns what was read when it runs out, with
+        ``truncated.by_time``. Releases the GIL while it reads.
         """
     def tree(self, max_depth: int | None = None) -> dict:
         """Capture this surface's accessibility tree as a recursive dict.
@@ -915,10 +1193,40 @@ class Element:
     @property
     def fullscreen(self) -> bool | None:
         """Whether the window is fullscreen. ``None`` = unknown / not a window."""
+    def same_as(self, other: Element) -> bool:
+        """Whether ``other`` names the same platform node. ``==`` uses this.
+
+        Raises :class:`ElementStaleError` (``reason="evicted"``) when either
+        handle is no longer held by the provider."""
+    def check_alive(self) -> None:
+        """Prove this element still names the node it was found as. Raises
+        :class:`ElementStaleError` with the ``reason`` otherwise. Every action
+        runs this check first."""
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
     def children(self) -> list[Element]:
         """Get direct children (lazy — each call queries the provider)."""
     def parent(self) -> Element | None:
         """Get parent element (lazy — each call queries the provider)."""
+    def capture(
+        self,
+        *,
+        max_depth: int | None = None,
+        max_nodes: int = 2000,
+        max_text_bytes: int = 65536,
+        detail: Iterable[CaptureDetailName] | None = None,
+        timeout: float | None = None,
+    ) -> Capture:
+        """Read the subtree into a bounded :class:`Capture`: every node read,
+        pre-order, with which limits cut it. Read breadth-first, so when
+        ``max_nodes`` cuts, the top of the tree is complete.
+
+        ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+        counts the root; ``detail`` adds ``"text"`` (full text within
+        ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+        (seconds) returns what was read when it runs out, with
+        ``truncated.by_time``. Releases the GIL while it reads.
+        """
     def tree(self, max_depth: int | None = None) -> dict:
         """Capture the subtree rooted at this element as a recursive dict snapshot.
 
@@ -941,8 +1249,20 @@ class Element:
 
         For the same output from the shell, use ``xa11y tree --app NAME``.
         """
-    def subscribe(self) -> Subscription:
-        """Subscribe to accessibility events for this element (typically an app)."""
+    def subscribe(
+        self,
+        *,
+        kinds: Iterable[str] | None = None,
+        buffer: int | None = None,
+    ) -> Subscription:
+        """Subscribe to accessibility events for this element (typically an app).
+
+        ``kinds`` keeps only those event kinds (``["announcement",
+        "focus_changed"]``); a kind this platform never sends raises
+        :class:`ActionNotSupportedError` at once rather than never arriving.
+        ``buffer`` bounds the queue (default 4096 events, oldest dropped
+        first; see ``Subscription.dropped``).
+        """
     def press(self) -> None:
         """Click / invoke this element."""
     def focus(self) -> None:
@@ -989,6 +1309,31 @@ class Element:
     def collection(self) -> CollectionInfo | None:
         """Position in a list, tree, tab list or radio group (0-based index and
         depth); ``None`` otherwise."""
+    @property
+    def heading_level(self) -> int | None:
+        """A heading's level, ``1`` for a top-level heading (a level, not an
+        index); ``None`` on a non-heading or when not reported."""
+    @property
+    def landmark_type(self) -> LandmarkName | None:
+        """Which landmark a ``landmark`` element is, as its ARIA role;
+        ``None`` on every other role."""
+    @property
+    def web_role(self) -> str | None:
+        """The ARIA role web content declares, verbatim; ``None`` outside web
+        content and on macOS."""
+    @property
+    def link_url(self) -> str | None:
+        """A link's target URL; ``None`` on a non-link or when not reported."""
+    @property
+    def live_region(self) -> LiveRegionInfo | None:
+        """Live-region settings; ``None`` when the element has none."""
+    def relations(
+        self, kinds: list[RelationKindName] | None = None
+    ) -> dict[RelationKindName, list[Element]]:
+        """The elements this one is related to, by kind, in the order asked
+        for. ``kinds=None`` asks for every kind this platform reports. A kind
+        it never reports raises :class:`ActionNotSupportedError` naming it; a
+        reported kind with no targets maps to ``[]``."""
     def text(self) -> Text:
         """This element's text, read by range (UTF-16 offsets). Raises
         ``ActionNotSupportedError`` when the element has no text interface."""
@@ -1074,6 +1419,25 @@ class Locator:
         """Get a single Element handle for the matched element."""
     def elements(self) -> list[Element]:
         """Get all matching elements."""
+    def capture(
+        self,
+        *,
+        max_depth: int | None = None,
+        max_nodes: int = 2000,
+        max_text_bytes: int = 65536,
+        detail: Iterable[CaptureDetailName] | None = None,
+        timeout: float | None = None,
+    ) -> Capture:
+        """Read the subtree into a bounded :class:`Capture`: every node read,
+        pre-order, with which limits cut it. Read breadth-first, so when
+        ``max_nodes`` cuts, the top of the tree is complete.
+
+        ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+        counts the root; ``detail`` adds ``"text"`` (full text within
+        ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+        (seconds) returns what was read when it runs out, with
+        ``truncated.by_time``. Releases the GIL while it reads.
+        """
     def tree(self, max_depth: int | None = None) -> dict:
         """Capture the subtree rooted at the matched element as a recursive dict.
 

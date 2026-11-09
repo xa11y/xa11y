@@ -349,6 +349,26 @@ CFTypeID safe_cf_string_get_type_id(void) {
     }
 }
 
+CFTypeID safe_cf_url_get_type_id(void) {
+    @try {
+        return CFURLGetTypeID();
+    } @catch (NSException *e) {
+        return 0;
+    }
+}
+
+/// The URL's string, borrowed from the URL (Get rule); NULL on failure.
+CFStringRef safe_cf_url_get_string(CFTypeRef url) {
+    @try {
+        if (url != NULL) {
+            return CFURLGetString((CFURLRef)url);
+        }
+        return NULL;
+    } @catch (NSException *e) {
+        return NULL;
+    }
+}
+
 CFTypeID safe_cf_number_get_type_id(void) {
     @try {
         return CFNumberGetTypeID();
@@ -401,6 +421,19 @@ Boolean safe_ax_is_process_trusted(void) {
 int safe_ax_observer_create(pid_t pid, AXObserverCallback callback, AXObserverRef *outObserver) {
     @try {
         return AXObserverCreate(pid, callback, outObserver);
+    } @catch (NSException *e) {
+        *outObserver = NULL;
+        return -9999;
+    }
+}
+
+// Create an AXObserver whose callback also receives the notification's
+// userInfo dictionary (AXAnnouncementKey / AXPriorityKey for
+// AXAnnouncementRequested).
+int safe_ax_observer_create_with_info(pid_t pid, AXObserverCallbackWithInfo callback,
+                                      AXObserverRef *outObserver) {
+    @try {
+        return AXObserverCreateWithInfoCallback(pid, callback, outObserver);
     } @catch (NSException *e) {
         *outObserver = NULL;
         return -9999;

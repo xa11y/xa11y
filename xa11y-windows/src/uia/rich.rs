@@ -545,9 +545,10 @@ mod tests {
             assert!(matches!(result, Err(Error::Unsupported { .. })));
         }
         let error = seek_endpoint(1, 1, |_| {
-            Err(Error::ElementStale {
-                selector: "native endpoint".into(),
-            })
+            Err(Error::stale(
+                xa11y_core::StaleReason::Removed,
+                "native endpoint",
+            ))
         });
         assert!(matches!(error, Err(Error::ElementStale { .. })));
     }

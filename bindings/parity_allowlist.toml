@@ -66,6 +66,24 @@ opaque = [
     { type = "Capability", reason = "Python exposes a frozen Capability class; JS returns a plain { name, description, support, note, since } object. Same split as Rect: members are covered by the per-binding tests (test_capabilities.py, capabilities.test.js)." },
     { type = "Platform", reason = "Crosses as the identically-spelled strings 'linux' | 'macos' | 'windows' via Platform::to_snake_case / Platform::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
     { type = "Support", reason = "Crosses as the identically-spelled strings 'supported' | 'partial' | 'unsupported' via Support::to_snake_case. See [[types.variant_coverage]]." },
+    { type = "StaleReason", reason = "Crosses as the identically-spelled snake_case strings 'removed' | 'process_exited' | 'process_restarted' | 'identity_changed' | 'evicted', as the `reason` attribute of ElementStaleError in both bindings and the `stale_reason` of an MCP `element_stale` failure. See [[types.variant_coverage]]." },
+    { type = "NodeIdentity", reason = "Not a binding class: Python exposes identity as Element.__eq__ / __hash__ / same_as, JS as Element.sameAs. The identity value itself is session-local and opaque." },
+    { type = "Landmark", reason = "Crosses as the ARIA landmark role string ('main', 'navigation', 'contentinfo', ...) as Element.landmark_type / landmarkType, identically spelled in both bindings. See [[types.variant_coverage]]." },
+    { type = "Politeness", reason = "Crosses as the strings 'off' | 'polite' | 'assertive' (LiveRegionInfo.politeness). See [[types.variant_coverage]]." },
+    { type = "RelationKind", reason = "Crosses as identically-spelled snake_case strings ('labelled_by', 'flows_to', ...): the keys of Element.relations() in Python, the `kind` of each entry in JS, and the accepted names of its `kinds` argument, parsed by RelationKind::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
+    { type = "AnnouncementInfo", reason = "Event.announcement: Python exposes a frozen AnnouncementInfo class; JS returns a plain { origin, text, politeness, platformPriority, activityId } object. Same split as LiveRegionInfo: covered by test_events_bounded.py and events-bounded.test.js." },
+    { type = "AnnouncementOrigin", reason = "Crosses as the strings 'request' | 'live_region' | 'alert' (AnnouncementInfo.origin). See [[types.variant_coverage]]." },
+    { type = "SubscribeOptions", reason = "Options struct for App::subscribe_with; its fields are the optional `kinds` / `buffer` parameters of the bindings' subscribe() (Python keywords, JS options object), per the options-struct fold." },
+    { type = "EventSender", reason = "Provider-side half of event_channel(); backends send events through it, bindings only receive." },
+    { type = "EventSendError", reason = "Returned to a backend by EventSender::send once the subscription is gone; never reaches a binding." },
+    { type = "Capture", reason = "Python exposes a frozen Capture class (started/finished as epoch seconds); JS returns a plain object (epoch milliseconds). Same split as Rect: members are covered by the per-binding tests (test_capture.py, capture.test.js)." },
+    { type = "CapturedNode", reason = "Python exposes a frozen CapturedNode class; JS returns a plain object. Both carry the node's Element as `element`. Same split as Rect: covered by test_capture.py and capture.test.js." },
+    { type = "CapturedText", reason = "Python exposes a frozen CapturedText class; JS returns a plain { content, length, truncated } object. Same split as Rect." },
+    { type = "CaptureError", reason = "Python exposes a frozen CaptureError class whose `error` is the xa11y exception instance; JS returns a plain { step, code, message } object, since a rejected Error cannot be held as a value in a resolved one." },
+    { type = "Truncation", reason = "Python exposes a frozen Truncation class (truthy when any limit cut); JS returns a plain { byDepth, byNodes, byText, byTime } object. Same split as Rect." },
+    { type = "CaptureStep", reason = "Crosses as identically-spelled snake_case strings ('children', 'identity', 'text', 'relations', 'cycle') via CaptureStep::to_snake_case, as CaptureError.step in both bindings; no binding matches on its variants." },
+    { type = "RelationTarget", reason = "Crosses as an int (Python) / number (JS) index into Capture.nodes for a target inside the capture, or an Element for one outside it." },
+    { type = "LiveRegionInfo", reason = "Python exposes a frozen LiveRegionInfo class; JS returns a plain { politeness, atomic, relevant } object. Same split as Rect: members are covered by the per-binding tests (test_semantics.py, semantics.test.js)." },
     { type = "Count", reason = "Crosses as an int (Python) / number (JS), or the string 'unknown' in both, matching its serde form." },
     { type = "HeaderKind", reason = "Crosses as the identically-spelled strings 'column' | 'row' via HeaderKind::to_snake_case. See [[types.variant_coverage]]." },
     { type = "TextRange", reason = "Python exposes a frozen, hashable TextRange class (and accepts (start, end) tuples); JS uses plain { start, end } objects. Same split as Rect." },
@@ -85,6 +103,7 @@ opaque = [
 internal = [
     # ── Provider-facing traits: implemented by backends, not called by users ──
     { type = "Provider", reason = "Implemented by platform backends; not user API." },
+    { type = "NativeObject", reason = "Implemented by backends to give a platform object (an AXUIElementRef) an identity; consumers only compare NodeIdentity values." },
     { type = "InputProvider", reason = "Implemented by platform backends; not user API." },
     { type = "ScreenshotProvider", reason = "Implemented by platform backends; not user API." },
     { type = "IntoPoint", reason = "Rust ergonomics trait for accepting (x, y) tuples or Points; bindings take plain numbers." },
@@ -115,6 +134,7 @@ internal = [
     # ── Input geometry / option structs: bindings take plain params ──
     { type = "Point", reason = "Bindings take plain x/y numbers." },
     { type = "ScrollDelta", reason = "Bindings take plain dx/dy numbers." },
+    { type = "CaptureOptions", reason = "Options struct for capture(); its fields are the optional parameters of the bindings' capture() (Python keywords, JS options object), per the options-struct fold." },
     { type = "ClickOptions", reason = "Options struct for Mouse::click_with; its fields are the optional params of the bindings' click() (Python keywords, JS options object)." },
     { type = "DragOptions", reason = "Options struct for Mouse::drag_with; its fields are the optional params of the bindings' drag() (Python keywords, JS options object)." },
     { type = "FindOptions", reason = "Options struct for Text::find_with; its fields are the optional params of the bindings' find() (Python keywords, JS options object)." },
@@ -327,6 +347,49 @@ files = [
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "TextScriptName" },
 ]
 [[types.variant_coverage]]
+type = "Landmark"
+reason = "Each kind crosses as a hand-mapped ARIA role string in both bindings and in the Python Literal / TypeScript union."
+files = [
+    "xa11y-python/src/semantics.rs",
+    "xa11y-js/src/types.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake", within = "LandmarkName", exclude = ["ContentInfo"] },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "LandmarkName", exclude = ["ContentInfo"] },
+]
+[[types.variant_coverage]]
+type = "Politeness"
+reason = "Each value crosses as a hand-mapped string in both bindings and in the Python Literal / TypeScript union."
+files = [
+    "xa11y-python/src/semantics.rs",
+    "xa11y-js/src/types.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake", within = "PolitenessName" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "PolitenessName" },
+]
+[[types.variant_coverage]]
+type = "AnnouncementOrigin"
+reason = "Each origin crosses as a hand-mapped string in both bindings and in the Python Literal / TypeScript union."
+files = [
+    "xa11y-python/src/semantics.rs",
+    "xa11y-js/src/subscription.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake", within = "AnnouncementOriginName" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "AnnouncementOriginName" },
+]
+[[types.variant_coverage]]
+type = "RelationKind"
+reason = "RelationKind::parse / to_snake_case do the conversion; the Python Literal and the TypeScript union are hand-written lists a new kind must join."
+files = [
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake", within = "RelationKindName" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "RelationKindName" },
+]
+[[types.variant_coverage]]
+type = "StaleReason"
+reason = "Each reason crosses as a hand-mapped string: ElementStaleError.reason in Python and JS, and the Python Literal / TypeScript union."
+files = [
+    "xa11y-python/src/lib.rs",
+    "xa11y-js/src/errors.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake", within = "StaleReasonName" },
+    { path = "xa11y-js/index.d.ts", spelling = "snake", within = "StaleReasonName" },
+]
+[[types.variant_coverage]]
 type = "Platform"
 reason = "Crosses as 'linux' | 'macos' | 'windows' through Platform::to_snake_case / Platform::parse; the Python Literal, the TypeScript union and the capability table's per-platform columns are hand-written."
 files = [
@@ -399,6 +462,7 @@ reason = "Both bindings surface the annotation legend on their Screenshot class 
 [python]
 # Core members deliberately not exposed to Python. key = "Type::member".
 rust_only = [
+    { method = "Element::identity", reason = "Identity crosses as Element.__eq__ / __hash__ (and same_as); the NodeIdentity value is opaque and not a binding class." },
     { method = "Capabilities::current", reason = "Folded into the module function capabilities(platform=None, os_version=None): with no arguments it is current(). One name per operation (AGENTS.md: options fold into the primary verb)." },
     { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities(platform, os_version): passing a platform or version is for_platform(). One name per operation." },
     { method = "Text::find_with", reason = "FindOptions folds into find()'s keyword-only occurrence / within parameters (AGENTS.md: options structs fold into the primary verb)." },
@@ -434,6 +498,7 @@ rust_only = [
     { method = "Element::handle", reason = "Opaque provider handle; not part of the user-visible API." },
     { method = "Element::states", reason = "Python flattens StateSet into individual getters (enabled, visible, ...) rather than exposing the nested struct. The individual booleans ARE required — see [[types.flatten]]." },
     { method = "Subscription::new", reason = "Internal Rust constructor; bindings create Subscriptions via App.subscribe() / Element.subscribe()." },
+    { method = "App::subscribe_with", reason = "Folded into subscribe(kinds=, buffer=) / subscribe({ kinds, buffer }): one name per operation (options fold into the primary verb)." },
     { method = "InputSim::new", reason = "Internal Rust constructor; bindings obtain an InputSim via the module-level input_sim()." },
 
     # Event field naming / representation.
@@ -495,6 +560,7 @@ python_only = [
 
 [js]
 rust_only = [
+    { method = "Element::identity", reason = "Identity crosses as Element.sameAs; the NodeIdentity value is opaque and not a binding class." },
     { method = "Capabilities::current", reason = "Folded into the module function capabilities(options?): with no options it is current(). One name per operation (AGENTS.md: options fold into the primary verb)." },
     { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities({ platform, osVersion }). One name per operation." },
     { method = "Text::find_with", reason = "FindOptions folds into find()'s options object ({ occurrence, within }) (AGENTS.md: options structs fold into the primary verb)." },
@@ -527,6 +593,7 @@ rust_only = [
     { method = "Element::handle", reason = "Opaque provider handle; not part of the user-visible API." },
     { method = "Element::states", reason = "JS flattens StateSet into individual getters (enabled, visible, ...) rather than exposing the nested object. The individual booleans ARE required — see [[types.flatten]]." },
     { method = "Subscription::new", reason = "Internal Rust constructor; bindings create Subscriptions via App.subscribe() / Element.subscribe()." },
+    { method = "App::subscribe_with", reason = "Folded into subscribe(kinds=, buffer=) / subscribe({ kinds, buffer }): one name per operation (options fold into the primary verb)." },
     { method = "InputSim::new", reason = "Internal Rust constructor; bindings obtain an InputSim via the module-level inputSim()." },
 
     # Event field naming / representation. `type` here, `event_type` in

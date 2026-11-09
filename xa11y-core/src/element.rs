@@ -195,6 +195,33 @@ reader_writer_pair! {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub collection: Option<crate::table::CollectionInfo>,
 
+        /// Heading level, `1` for a top-level heading (a level, not an index:
+        /// `1` is h1). `None` on a non-heading, or when the platform does not
+        /// report it. See [`crate::semantics`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub heading_level: Option<u32>,
+
+        /// Which landmark a [`Role::Landmark`] element is (`main`,
+        /// `navigation`, ...). `None` on every other role.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub landmark_type: Option<crate::semantics::Landmark>,
+
+        /// The web (ARIA) role the platform reports, verbatim (`"tab"`,
+        /// `"main"`): UIA `AriaRole`, AT-SPI `xml-roles`. `None` outside web
+        /// content and on macOS, which reports no ARIA role.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub web_role: Option<String>,
+
+        /// A link's target URL. `None` on a non-link, or when the platform
+        /// does not report it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub link_url: Option<String>,
+
+        /// Live-region settings (politeness, atomic, relevant). `None` when
+        /// the element has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub live_region: Option<crate::semantics::LiveRegionInfo>,
+
         /// Platform-assigned stable identifier for cross-snapshot correlation.
         /// - macOS: `AXIdentifier`
         /// - Windows: native window handle (`hwnd:0x…`) for top-level windows,
@@ -251,6 +278,11 @@ impl ElementData {
             cell: None,
             table_row: None,
             collection: None,
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             stable_id: None,
             pid: None,
             raw: RawPlatformData::new(),
@@ -385,61 +417,136 @@ impl Element {
         Ok(out)
     }
 
+    /// Read the subtree rooted at this element into a bounded, flat
+    /// [`Capture`](crate::capture::Capture). See [`crate::capture`] for the
+    /// budgets, the order and what a capture does and does not promise.
+    pub fn capture(
+        &self,
+        options: &crate::capture::CaptureOptions,
+    ) -> crate::error::Result<crate::capture::Capture> {
+        crate::capture::capture_from(self.clone(), || self.children(), options)
+    }
+
+    /// The elements this one is related to, by kind: who labels it, what it
+    /// controls, where reading flows next. See [`crate::semantics`].
+    ///
+    /// Each requested kind appears once in the result, in request order,
+    /// with an empty list when there are none. An empty `kinds` asks for every
+    /// kind this platform reports (per [`crate::Capabilities`]). A kind the
+    /// platform never reports fails with [`Error::Unsupported`] naming it.
+    pub fn relations(
+        &self,
+        kinds: &[crate::semantics::RelationKind],
+    ) -> crate::error::Result<Vec<(crate::semantics::RelationKind, Vec<Element>)>> {
+        let kinds: Vec<crate::semantics::RelationKind> = if kinds.is_empty() {
+            supported_relation_kinds()?
+        } else {
+            kinds.to_vec()
+        };
+        Ok(self
+            .provider
+            .relations(&self.data, &kinds)?
+            .into_iter()
+            .map(|(kind, targets)| (kind, targets.into_iter().map(|d| self.wrap(d)).collect()))
+            .collect())
+    }
+
+    // ── Identity and liveness ───────────────────────────────────────
+
+    /// The platform identity of this element's node. Two elements with equal
+    /// identities name the same node. See [`crate::identity`].
+    ///
+    /// Read from the provider's handle table; fails with
+    /// [`Error::ElementStale`] (reason `evicted`) when the handle is gone.
+    pub fn identity(&self) -> crate::error::Result<crate::identity::NodeIdentity> {
+        self.provider.identity(&self.data)
+    }
+
+    /// Whether `other` names the same platform node as this element.
+    ///
+    /// Elements from different captures of one node compare equal; two
+    /// elements that merely share a role and name do not.
+    pub fn same_as(&self, other: &Element) -> crate::error::Result<bool> {
+        Ok(self.identity()? == other.identity()?)
+    }
+
+    /// Prove this element still names the node it was captured from: the node
+    /// exists, its process is the same instance, and re-reading it gives the
+    /// captured role. Fails with [`Error::ElementStale`] and the reason.
+    ///
+    /// Every action runs this check first, so calling it is only needed to
+    /// test liveness without acting.
+    pub fn check_alive(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)
+    }
+
     // ── Actions ─────────────────────────────────────────────────────
     //
     // Element actions invoke the platform via the captured provider handle —
-    // they do **not** re-resolve the selector. If the underlying element has
-    // been destroyed since this snapshot was taken, the provider returns a
-    // platform-specific "gone" error. For resilient retry-on-change semantics,
-    // use the equivalent method on [`crate::Locator`] instead.
+    // they do **not** re-resolve the selector. Each one first asks the
+    // provider to prove the handle still names the captured node
+    // (`Provider::revalidate`), so a destroyed, replaced or evicted node
+    // fails with `Error::ElementStale` and a reason instead of acting on
+    // whatever the platform id names now. For retry-on-change semantics use
+    // the equivalent method on [`crate::Locator`], which re-resolves.
 
     /// Click / invoke this element via the accessibility action layer.
     pub fn press(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.press(&self.data)
     }
 
     /// Set keyboard focus to this element.
     pub fn focus(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.focus(&self.data)
     }
 
     /// Remove keyboard focus from this element.
     pub fn blur(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.blur(&self.data)
     }
 
     /// Toggle a two- or three-state control (checkbox, switch).
     pub fn toggle(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.toggle(&self.data)
     }
 
     /// Select this element (list item, tab, row).
     pub fn select(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.select(&self.data)
     }
 
     /// Expand a disclosure, menu, combo box, or tree item.
     pub fn expand(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.expand(&self.data)
     }
 
     /// Collapse an expanded element.
     pub fn collapse(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.collapse(&self.data)
     }
 
     /// Open this element's context menu or dropdown.
     pub fn show_menu(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.show_menu(&self.data)
     }
 
     /// Increment a numeric control (slider, spinner) by its platform step.
     pub fn increment(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.increment(&self.data)
     }
 
     /// Decrement a numeric control (slider, spinner) by its platform step.
     pub fn decrement(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.decrement(&self.data)
     }
 
@@ -449,12 +556,14 @@ impl Element {
     /// returns [`Error::ActionNotSupported`](crate::error::Error::ActionNotSupported)
     /// otherwise; `Component.ScrollTo` on Linux; `ScrollItemPattern` on Windows.
     pub fn scroll_into_view(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.scroll_into_view(&self.data)
     }
 
     /// Set the text value of this element. Replaces the entire value rather
     /// than inserting at the caret — use [`Element::type_text`] for insertion.
     pub fn set_value(&self, value: &str) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.set_value(&self.data, value)
     }
 
@@ -467,6 +576,7 @@ impl Element {
                 message: format!("set_numeric_value requires a finite value, got {}", value),
             });
         }
+        self.provider.revalidate(&self.data)?;
         self.provider.set_numeric_value(&self.data, value)
     }
 
@@ -474,6 +584,7 @@ impl Element {
     ///
     /// Uses the platform accessibility API — never simulates keyboard events.
     pub fn type_text(&self, text: &str) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data)?;
         self.provider.type_text(&self.data, text)
     }
 
@@ -484,6 +595,7 @@ impl Element {
     /// the text, or splitting a surrogate pair.
     pub fn select_text(&self, start: u32, end: u32) -> crate::error::Result<()> {
         crate::text_api::TextRange::new(start, end)?;
+        self.provider.revalidate(&self.data)?;
         self.provider.set_text_selection(&self.data, start, end)
     }
 
@@ -579,7 +691,10 @@ impl Element {
             // "move_to"/"resize_to" need payloads the generic path cannot
             // carry; the providers reject them surfaceably (InvalidActionData),
             // before any OS call.
-            _ => self.provider.perform_action(&self.data, action),
+            _ => {
+                self.provider.revalidate(&self.data)?;
+                self.provider.perform_action(&self.data, action)
+            }
         }
     }
 
@@ -641,12 +756,14 @@ impl Element {
     /// Activate this window: bring it to the foreground and give it focus.
     pub fn activate(&self) -> crate::error::Result<()> {
         self.require_window_like("activate")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.activate(&self.data)
     }
 
     /// Minimize this window.
     pub fn minimize(&self) -> crate::error::Result<()> {
         self.require_window_like("minimize")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.minimize(&self.data)
     }
 
@@ -659,6 +776,7 @@ impl Element {
     /// fullscreen.
     pub fn maximize(&self) -> crate::error::Result<()> {
         self.require_window_like("maximize")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.maximize(&self.data)
     }
 
@@ -671,6 +789,7 @@ impl Element {
     /// (Windows/Linux) report it as unsupported.
     pub fn enter_fullscreen(&self) -> crate::error::Result<()> {
         self.require_window_like("enter_fullscreen")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.enter_fullscreen(&self.data)
     }
 
@@ -678,12 +797,14 @@ impl Element {
     /// fullscreen).
     pub fn restore(&self) -> crate::error::Result<()> {
         self.require_window_like("restore")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.restore(&self.data)
     }
 
     /// Close this window.
     pub fn close(&self) -> crate::error::Result<()> {
         self.require_window_like("close")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.close(&self.data)
     }
 
@@ -691,6 +812,7 @@ impl Element {
     /// (physical pixels on Windows, logical points elsewhere).
     pub fn move_to(&self, x: i32, y: i32) -> crate::error::Result<()> {
         self.require_window_like("move_to")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.move_to(&self.data, x, y)
     }
 
@@ -706,8 +828,22 @@ impl Element {
             });
         }
         self.require_window_like("resize_to")?;
+        self.provider.revalidate(&self.data)?;
         self.provider.resize_to(&self.data, width, height)
     }
+}
+
+/// The relation kinds the running platform reports, from the capability
+/// table, so an empty `kinds` never asks a backend for one it would refuse.
+fn supported_relation_kinds() -> crate::error::Result<Vec<crate::semantics::RelationKind>> {
+    let caps = crate::Capabilities::current()?;
+    Ok(crate::semantics::RelationKind::ALL
+        .into_iter()
+        .filter(|k| {
+            caps.support(&k.feature_name())
+                .is_ok_and(|s| s != crate::Support::Unsupported)
+        })
+        .collect())
 }
 
 fn build_tree_node(
@@ -1642,5 +1778,142 @@ mod tests {
             let back: HiddenReason = serde_json::from_str(&json).expect("round-trips");
             assert_eq!(back, reason);
         }
+    }
+
+    // ── Identity and liveness (#481) ────────────────────────────────
+
+    #[test]
+    fn two_captures_of_one_node_are_the_same_and_others_are_not() {
+        let provider = build_provider();
+        let back = find_element(&provider, r#"button[name="Back"]"#);
+        let back_again = find_element(&provider, r#"[name="Back"]"#);
+        let forward = find_element(&provider, r#"button[name="Forward"]"#);
+        assert!(back.same_as(&back_again).expect("identity"));
+        assert!(!back.same_as(&forward).expect("identity"));
+        let set: std::collections::HashSet<_> = [&back, &back_again, &forward]
+            .iter()
+            .map(|e| e.identity().expect("identity"))
+            .collect();
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn an_action_on_a_removed_node_fails_stale_and_reaches_nothing() {
+        let provider = build_provider();
+        let back = find_element(&provider, r#"button[name="Back"]"#);
+        back.check_alive().expect("alive before removal");
+        let before = provider.actions().len();
+        provider.remove_node("Back");
+        let err = back.press().expect_err("removed node must not be pressed");
+        assert!(
+            matches!(
+                &err,
+                Error::ElementStale {
+                    reason: crate::error::StaleReason::Removed,
+                    element,
+                } if element.contains("Back")
+            ),
+            "{err:?}"
+        );
+        assert_eq!(err.delivery(), crate::error::Delivery::NotDelivered);
+        assert_eq!(
+            provider.actions().len(),
+            before,
+            "nothing reached the provider"
+        );
+        assert!(
+            err.to_string().starts_with("Element stale (removed)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_reused_id_with_another_role_is_identity_changed_not_retargeted() {
+        let provider = build_provider();
+        let back = find_element(&provider, r#"button[name="Back"]"#);
+        provider.replace_node_role("Back", Role::TextField);
+        let before = provider.actions().len();
+        for result in [back.press(), back.focus(), back.check_alive()] {
+            let err = result.expect_err("a different node must not be acted on");
+            assert!(
+                matches!(
+                    err,
+                    Error::ElementStale {
+                        reason: crate::error::StaleReason::IdentityChanged,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+        }
+        assert_eq!(provider.actions().len(), before);
+    }
+
+    #[test]
+    fn perform_action_checks_liveness_too() {
+        let provider = build_provider();
+        let back = find_element(&provider, r#"button[name="Back"]"#);
+        provider.remove_node("Back");
+        assert!(matches!(
+            back.perform_action("custom_thing"),
+            Err(Error::ElementStale { .. })
+        ));
+    }
+
+    // ── Document semantics (#476) ───────────────────────────────────
+
+    #[test]
+    fn document_semantics_are_fields_and_selector_attributes() {
+        let provider = crate::mock::build_document_provider();
+        let main = find_element(&provider, r#"landmark[landmark_type="main"]"#);
+        assert_eq!(main.name.as_deref(), Some("Article"));
+        assert_eq!(main.web_role.as_deref(), Some("main"));
+        let h2 = find_element(&provider, r#"heading[heading_level="2"]"#);
+        assert_eq!(h2.name.as_deref(), Some("Section"));
+        let link = find_element(&provider, r#"link[url*="example.com"]"#);
+        assert_eq!(link.link_url.as_deref(), Some("https://example.com/docs"));
+        let live = find_element(&provider, r#"[live="polite"]"#);
+        let region = live.live_region.as_ref().expect("live region");
+        assert_eq!(region.atomic, Some(true));
+        assert_eq!(region.relevant.as_deref(), Some("additions text"));
+    }
+
+    #[test]
+    fn navigation_is_refused_with_its_replacement() {
+        let err = Selector::parse("navigation").expect_err("no longer a role");
+        assert!(
+            matches!(&err, Error::InvalidSelector { message, .. }
+                if message.contains(r#"landmark[landmark_type="navigation"]"#)),
+            "{err:?}"
+        );
+        assert!(
+            Selector::parse("navigation_bar").is_ok(),
+            "other names are untouched"
+        );
+    }
+
+    #[test]
+    fn relations_come_back_in_request_order_and_unsupported_kinds_fail() {
+        use crate::semantics::RelationKind as K;
+        let provider = crate::mock::build_document_provider();
+        let field = find_element(&provider, r#"text_field[name="Email"]"#);
+        let rel = field
+            .relations(&[K::DescribedBy, K::LabelledBy, K::Controls])
+            .expect("relations");
+        let kinds: Vec<_> = rel.iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds, [K::DescribedBy, K::LabelledBy, K::Controls]);
+        assert_eq!(rel[1].1[0].name.as_deref(), Some("Email address"));
+        assert_eq!(rel[0].1[0].name.as_deref(), Some("We never share it"));
+        assert!(rel[2].1.is_empty(), "supported but empty is an empty list");
+        // `linked` is macOS-only; elsewhere the mock refuses it, as the
+        // platform would.
+        let linked = field.relations(&[K::Linked]);
+        if cfg!(target_os = "macos") {
+            assert!(linked.is_ok(), "{linked:?}");
+        } else {
+            assert!(matches!(linked, Err(Error::Unsupported { .. })));
+        }
+        // The labelled-by target is actionable: it is an Element.
+        rel[1].1[0].check_alive().expect("a live element");
     }
 }

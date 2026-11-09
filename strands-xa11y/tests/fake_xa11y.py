@@ -40,6 +40,13 @@ class SelectorNotMatchedError(XA11yError):
         self.elapsed = None
 
 
+class ElementStaleError(SelectorNotMatchedError):
+    def __init__(self, message: str = "", reason: str = "removed", element: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.element = element
+
+
 class ActionNotSupportedError(XA11yError):
     pass
 

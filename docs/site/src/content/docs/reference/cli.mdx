@@ -126,10 +126,13 @@ the command exits 1 with guidance for that platform. See
 
 ### `xa11y tree`
 
-Print the full accessibility tree for an application.
+Print the accessibility tree for an application, read breadth-first up to
+2,000 nodes. `--max-nodes N` raises or lowers that limit, and `--max-depth N`
+stops at depth N (the application is depth 0).
 
 ```bash
 xa11y tree --app Calculator
+xa11y tree --app Firefox --max-nodes 10000 --max-depth 8
 ```
 
 ```
@@ -145,6 +148,12 @@ application "Calculator" [enabled visible]
 ```
 
 This is the fastest way to understand an app's structure. Every element shows its role, name, value, states, bounds, and available actions.
+
+A node whose children were cut ends with a line such as `… 12 more (cut by
+--max-nodes)`, and a cut tree ends with a summary line,
+`(truncated: 2000 nodes shown, cut by the node limit of 2000 (--max-nodes))`.
+A subtree whose children could not be read shows `<error: …>` in their place
+and the rest of the tree still prints.
 
 The same output is available in-code via `Element.dump()` (and `Element.tree()` for a structured snapshot) in every language binding. See [Find the right selector](/guides/debug-selectors/#read-the-tree-from-code-instead) for examples.
 
@@ -325,6 +334,23 @@ Indices count from 0. A cell by position is also a selector,
 `row`, `column`, `index`, `size`, and related positions under the same names
 the selector uses.
 
+### `xa11y relations`
+
+List the elements one element is related to, grouped by kind. Name the kinds
+to read, or give none for every kind this platform reports.
+
+```bash
+xa11y relations "text_field[name='Email']" labelled_by described_by --app Firefox
+xa11y relations "button[name='Menu']" --app Firefox
+```
+
+The selector must match one element. Each kind prints a header with its count,
+then its elements indented, one per line as `find` prints them. A kind with no
+targets prints a count of 0. A kind the platform never reports is an error.
+The kinds are `labelled_by`, `label_for`, `described_by`, `description_for`,
+`details`, `details_for`, `controls`, `controlled_by`, `flows_to`,
+`flows_from`, `error_message`, `error_for`, `owns`, `member_of` and `linked`.
+
 ### `xa11y events`
 
 Stream accessibility events in real time. Runs until you press ctrl-c.
@@ -345,7 +371,11 @@ Event type names are `snake_case`, matching the roles in the same output and
 the `event_type` strings the Python binding reports. See
 [Events](/reference/events/) for the full list. A target that could not be
 resolved prints as `-`, and a `state_changed` line appends the flag and its
-new value.
+new value. An `announcement` line appends its origin, politeness and text.
+
+`--kinds announcement,focus_changed` prints only those kinds. An unknown name is
+a usage error, and a kind this platform never sends fails at once with the
+capability table's reason.
 
 Useful for understanding what events fire when you interact with an app, or for debugging event subscriptions in your code.
 
@@ -543,11 +573,12 @@ gives it selectors to resolve.
 | `shell` | none |
 | `windows` | `app`, `pid`, `limit` |
 | `enable_web_accessibility` | `app`, `pid` |
-| `tree` | `app`, `pid`, `shell`, `max_depth` |
+| `tree` | `app`, `pid`, `shell`, `max_depth`, `detail` |
 | `find` | `selector`, `app`, `pid`, `shell`, `limit` |
-| `action` | `action`, `selector`, `app`, `pid`, `shell`, `value`, `at`, `size` |
-| `text` | `op`, `selector`, `app`, `pid`, `shell`, `start`, `end`, `find`, `occurrence`, `offset`, `unit`, `limit` |
-| `table` | `op`, `selector`, `app`, `pid`, `shell`, `row`, `column`, `limit` |
+| `action` | `action`, `selector` or `ref`, `app`, `pid`, `shell`, `value`, `at`, `size` |
+| `text` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `start`, `end`, `find`, `occurrence`, `offset`, `unit`, `limit` |
+| `table` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `row`, `column`, `limit` |
+| `relations` | `selector` or `ref`, `app`, `pid`, `shell`, `kinds`, `limit` |
 | `click` | `x`, `y`, `button`, `count`, `held` |
 | `move` | `x`, `y` |
 | `drag` | `from_x`, `from_y`, `to_x`, `to_y`, `button`, `duration_ms`, `held` |
@@ -566,6 +597,15 @@ gives it selectors to resolve.
 `action` accepts the same verbs as [`xa11y action`](#xa11y-action). `key`
 accepts the same key names as [`xa11y key`](#input-simulation). Selectors are
 the same syntax the library takes; see [Selectors](/reference/selectors/).
+
+Every `tree` node, `find` match and `relations` target carries a `ref` such
+as `c3:17`. `action`, `text`, `table` and `relations` take one in place of
+`selector` (and then no `app`, `pid` or `shell`), and act on exactly that
+element. A ref is never re-resolved by selector: an element that was removed
+or replaced fails with `element_stale` and a `stale_reason`. The server keeps
+the refs of its 8 most recent `tree`, `find` and `relations` results, and an
+older ref fails with `ref_expired`. The command
+line has no refs, because each invocation is a new process.
 
 `shell` takes a kind string, is mutually exclusive with `app`, and combines
 with `pid`. A kind matching several surfaces comes back as an

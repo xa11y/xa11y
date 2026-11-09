@@ -63,6 +63,10 @@ These are the rules agents get wrong most often:
 - Table and list positions are numeric attributes that take a quoted integer
   and only `=`: `table_cell[row="2"][column="0"]`, `list_item[index="0"]`.
   They count from 0, like every index except `:nth`.
+- Landmarks are one role, `landmark`, with a `landmark_type`:
+  `landmark[landmark_type="navigation"]`, `landmark[landmark_type="main"]`.
+  The old `navigation` role is gone and fails to parse with that replacement.
+  Headings take a numeric `heading_level`: `heading[heading_level="2"]`.
 
 ## Actions
 
@@ -77,6 +81,15 @@ The selector must match exactly one element. A selector matching several is
 refused with an `ambiguous_selector` failure that lists the candidates, and no
 element is touched. Narrow it with an attribute filter or pick one with
 `:nth(n)`.
+
+To act on an element you have already read, pass its `ref` instead of a
+selector. Every `tree` node, `find` match and `relations` target carries one,
+such as `c3:17`, and `action`, `text`, `table` and `relations` accept it. A ref names exactly that element and
+acts at once, without the wait. Buttons that share the name "Save" keep
+different refs. When the element is gone or replaced, the call fails with
+`element_stale` and a `stale_reason` instead of finding a similar one. The
+server keeps the refs of its 8 most recent `tree`, `find` and `relations`
+results.
 
 `action` auto-waits. It polls until the selector matches one element that is
 visible and enabled, then acts on that element. The window verbs and
@@ -105,7 +118,7 @@ anything whose `states` include `editable`. `toggle` applies to anything with a
 `checked` state, `expand` and `collapse` to anything with `expanded`, and
 `press` to any control.
 
-## Text and tables
+## Text, tables and relations
 
 `text` reads an element's text by range. Its `op` is `info` (length, caret,
 selections), `read`, `find`, `range-at`, `lines`, `bounds` or `runs`. Offsets
@@ -122,19 +135,35 @@ table or of one cell. Elements from `tree`, `find` and `table` carry `cell`,
 `table_row`, `table` and `collection` objects when the platform reports
 positions.
 
+`relations` returns the elements one element points at: the label of a text
+field (`labelled_by`), its hint (`described_by`), what a button `controls`,
+where reading `flows_to`. Each kind asked for comes back once, with an empty
+list when there are none. Omit `kinds` for every kind the platform reports.
+`capabilities` lists them as `relation:*` rows. macOS reports `aria-controls`
+and `aria-flowto` together as `linked`.
+
+Document semantics ride on every element, each only when the platform
+reports it: `heading_level`, `landmark_type`, `web_role` (the ARIA role a web
+page gave it), `url` (a link's target) and `live_region` (`politeness`,
+`atomic`, `relevant`).
+
 ## Results
 
 Every result is bounded and reports what it dropped.
 
-- `tree` stops at `max_depth` (default 12) and at a fixed node cap. Its
-  `truncated` field says which limit cut the result.
+- `tree` stops at `max_depth` (default 12) and at a 2,000-node cap, read
+  breadth-first so the top of the tree survives a cut. Its `truncated` field
+  says which limit cut the result. `detail: ["text"]` adds each element's
+  text (`text.content`, within a shared byte budget, so document text no
+  action needs is still read), and `detail: ["relations"]` adds `relations`
+  with a `ref` per target.
 - `find` returns at most `limit` matches (default 50). `match_count` gives the
   real total and `truncated` says whether any were dropped.
 - `text` pages its reads. `read` returns at most `limit` code units, and
   `lines` and `runs` at most `limit` entries, each with `truncated` and
   `next_start` for the next page.
-- `windows`, `table`, `events_poll` and the `annotate` legend of `screenshot`
-  carry their own `truncated` fields.
+- `windows`, `table`, `relations` (per kind), `events_poll` and the
+  `annotate` legend of `screenshot` carry their own `truncated` fields.
 
 `tree` also marks each place it cut. A node whose children were dropped by
 `max_depth` or the node cap carries `subtree_truncated: true` and
@@ -170,7 +199,8 @@ diagnosis before retrying.
 | `ambiguous_selector` | The selector matched several elements where one is required. | Narrow it with an attribute filter or `:nth(n)`. |
 | `ambiguous_shell_surface` | Several shell surfaces of the requested kind exist. | Pass the `pid` of the one you mean, from the candidates. |
 | `timeout` | An auto-wait ran out before its condition held. | Read `last_observed`. "never matched" means the selector is wrong. A state such as `visible=false` means the element exists and cannot be acted on yet. |
-| `element_stale` | The element vanished between being found and being acted on. | Run the lookup again. |
+| `element_stale` | The element is gone or replaced; `stale_reason` says which (`removed`, `process_exited`, `process_restarted`, `identity_changed`, `evicted`). Nothing was done to it. | Read the tree again and act on what is there now. |
+| `ref_expired` | The `ref` belongs to a `tree`, `find` or `relations` result the server no longer keeps. | Call `tree` or `find` again for a fresh ref. |
 | `action_not_supported` | The element cannot perform this verb. | Pick another verb from the element's properties. |
 | `text_value_not_supported` | The platform cannot set text on this element. | Use `type-text`, or the `type` tool after focusing the element. |
 | `invalid_selector` | The selector failed to parse. | Fix the syntax the message points to. |
@@ -192,6 +222,11 @@ diagnosis before retrying.
 and `events_stop` closes the subscription. Start the subscription before the
 action you want to observe. An event is a snapshot from when it fired, so read
 the tree again to see the current state.
+
+An `announcement` event carries `announcement.origin`. A `request` usually
+has the `text` to speak. A `live_region` or `alert` change has no text, so read
+its `target`. Asking `events_start` for a kind the platform never sends fails
+with `unsupported`, so check `capabilities` first instead of waiting.
 
 ## Platform notes
 

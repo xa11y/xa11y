@@ -65,6 +65,10 @@ DIAGNOSIS_ATTRS = (
 # The two xa11y errors documented to carry a full diagnosis.
 DIAGNOSIS_ERRORS = ("SelectorNotMatchedError", "TimeoutError")
 
+# The stale-element error and the attributes `describe` reads off it.
+STALE_ERROR = "ElementStaleError"
+STALE_ATTRS = ("reason", "element")
+
 # Declared once on the base class and inherited by every error: whether a
 # failed action may already have taken effect (`not_delivered` / `unknown`).
 BASE_ERROR_ATTRS = ("delivery",)
@@ -218,6 +222,9 @@ def main() -> int:
             continue
         for attr in sorted(set(DIAGNOSIS_ATTRS) - declared[error_name]):
             failures.append(f"xa11y.{error_name} no longer carries the {attr!r} diagnosis attribute.")
+
+    for attr in sorted(set(STALE_ATTRS) - declared.get(STALE_ERROR, set())):
+        failures.append(f"xa11y.{STALE_ERROR} no longer carries the {attr!r} attribute.")
 
     for attr in BASE_ERROR_ATTRS:
         if attr not in declared.get("XA11yError", set()):

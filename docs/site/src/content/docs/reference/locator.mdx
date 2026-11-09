@@ -147,6 +147,11 @@ A live handle returned by `app.children()`, `element.children()`,
 | `cell` | Cell position (`row`, `column`, `row_span`, `column_span`, `header`), optional |
 | `table_row` | Row position (`index`), optional |
 | `collection` | Position in a list or tree (`index`, `size`, `depth`), optional |
+| `heading_level` | Integer, optional. `1` is an h1. |
+| `landmark_type` | Landmark kind (`main`, `navigation`, `contentinfo`, and the rest), optional, on a `landmark` |
+| `web_role` | The ARIA role a web page gave the element, optional |
+| `link_url` | A link's target URL, optional. The selector attribute is `url`. |
+| `live_region` | Live-region settings (`politeness`, `atomic`, `relevant`), optional |
 | `pid` | Process ID of the owning application |
 | `raw` | Platform-native key/value map |
 
@@ -154,7 +159,8 @@ A live handle returned by `app.children()`, `element.children()`,
 controls. `raw` holds the unstripped platform string under the platform-native
 key. Each of these properties except `raw`, `states`, and `actions` is also
 usable as a selector attribute, along with the individual state flags.
-`pid` is the exception, having no attribute of its own. `table`, `cell`,
+`pid` is the exception, having no attribute of its own. `link_url` matches as
+`url`, and `live_region` as `live` (its politeness). `table`, `cell`,
 `table_row`, and `collection` are matched through their fields, as
 [numeric attributes](/reference/selectors/#numeric-attributes). See
 [Selectors](/reference/selectors/#attributes).
@@ -179,6 +185,47 @@ string `"unknown"`. Platform support is in
 and so on. Omit it for the full subtree. `tree()` and `dump()` are also
 available on `App` and `Locator`.
 
+### Bounded capture
+
+`capture()` reads a subtree into a flat list of nodes under explicit limits,
+and reports which limit cut it. It is on `Element`, `App`, `Locator` and
+`ShellSurface`. Use it in place of `tree()` for a large or unknown tree.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `max_depth` | none | Deepest level read; the root is depth 0 |
+| `max_nodes` | 2000 | Most nodes, the root included |
+| `detail` | none | `text` reads each element's text, `relations` its relations |
+| `max_text_bytes` | 65536 | Total text budget for `text` detail |
+| `timeout` | none | Seconds in Python, milliseconds in JavaScript |
+
+The tree is read breadth-first and listed in pre-order, so when `max_nodes`
+cuts, the top of the tree is complete. Each node carries its `index`,
+`parent`, `depth`, the `element` itself, its `children` as indices,
+`children_count` (its real number of children) and `children_truncated`.
+`truncated` on the capture has `by_depth`, `by_nodes`, `by_text` and
+`by_time`, each set only when that limit left something out.
+
+Each node is read once, at some moment while the capture runs, so the result
+is not an atomic snapshot of the app. Nodes that disappear mid-read are
+dropped and counted in `vanished`, and any other failed read is kept in that
+node's `errors` while the walk carries on. When the time budget runs out, the
+call still returns, with what it read and `truncated.by_time` set.
+
+A node's `element` names exactly that node, so an action on it reaches it or
+raises `ElementStaleError`. With `relations` detail, a target inside the
+capture is the `int` index of its node and a target outside it is an
+`Element`.
+
+```python
+cap = app.capture(max_nodes=5000, detail={"text"})
+for node in cap.nodes:
+    if node.children_truncated:
+        print("cut at", node.role, node.name, node.children_count)
+article = next(n for n in cap.nodes if n.element.landmark_type == "main")
+print("".join(n.text.content for n in cap.subtree(article.index) if n.text))
+```
+
 ### Tables and text
 
 | Method | On | Returns |
@@ -188,6 +235,20 @@ available on `App` and `Locator`.
 | `column_headers()`, `row_headers()` | A table | Its header cells |
 | `column_header_cells()`, `row_header_cells()` | A cell | The header cells that head it |
 | `selected_items()` | A list, tree, table, or tab list | The selected rows or cells |
+
+### Relations
+
+| Method | Returns |
+| --- | --- |
+| `relations(kinds)` | The elements this one is related to, per kind. Its label is `labelled_by` and its hint `described_by`. The reverse of each kind is a kind too (`label_for`). |
+
+Each requested kind appears once, in request order, with an empty list when
+there are none. Python returns a `dict` keyed by kind and JavaScript an array
+of `{ kind, elements }`. With no kinds it reads every kind the platform reports,
+the `relation:*` rows of [`capabilities()`](/reference/platform-details/#capabilities).
+A kind the platform never reports raises `Unsupported`. macOS reports
+`aria-controls` and `aria-flowto` together as `linked`, and Windows reports
+`aria-details` as `details`, because the platforms do not tell them apart.
 
 `Locator.text()` returns a `Text` that re-resolves the selector on every read,
 waiting until it matches. It does not wait for visible or enabled.
@@ -230,7 +291,8 @@ difference is what they act on:
 | --- | --- | --- |
 | Selector | Re-resolved on every call | Not applicable; the handle is fixed |
 | Auto-wait | Waits for visible and enabled, scrolling a scrolled-out target into view | None |
-| Handle went away | Re-resolves against the current tree | Raises `ElementStale` |
+| Node went away or was replaced | Re-resolves against the current tree | Raises `ElementStale` with a `reason`, before acting |
+| Equality | Not applicable | `==` (Python) / `sameAs` (JS) compares platform identity, not role and name |
 
 ## Default timeout
 

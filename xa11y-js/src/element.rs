@@ -307,6 +307,70 @@ impl Element {
         self.data.collection.map(Into::into)
     }
 
+    /// A heading's level, `1` for a top-level heading (a level, not an
+    /// index); `null` on a non-heading or when not reported.
+    #[napi(getter)]
+    pub fn heading_level(&self) -> Option<u32> {
+        self.data.heading_level
+    }
+
+    /// Which landmark a `landmark` element is, as its ARIA role (`'main'`,
+    /// `'navigation'`, `'contentinfo'`, ...); `null` on every other role.
+    #[napi(getter)]
+    pub fn landmark_type(&self) -> Option<String> {
+        self.data
+            .landmark_type
+            .map(|l| crate::types::landmark_name(l).to_string())
+    }
+
+    /// The ARIA role web content declares, verbatim; `null` outside web
+    /// content and on macOS.
+    #[napi(getter)]
+    pub fn web_role(&self) -> Option<String> {
+        self.data.web_role.clone()
+    }
+
+    /// A link's target URL; `null` on a non-link or when not reported.
+    #[napi(getter)]
+    pub fn link_url(&self) -> Option<String> {
+        self.data.link_url.clone()
+    }
+
+    /// Live-region settings; `null` when the element has none.
+    #[napi(getter)]
+    pub fn live_region(&self) -> Option<crate::types::LiveRegionInfo> {
+        self.data.live_region.clone().map(Into::into)
+    }
+
+    /// The elements this one is related to, by kind, in the order asked for:
+    /// `[{ kind, elements }]`. No `kinds` asks for every kind this platform
+    /// reports. A kind it never reports rejects with
+    /// `ActionNotSupportedError` naming it; a reported kind with no targets
+    /// has an empty `elements`.
+    #[napi(ts_return_type = "Promise<Relation[]>")]
+    pub fn relations(
+        &self,
+        kinds: Option<Vec<String>>,
+    ) -> napi::Result<AsyncTask<Blocking<Vec<Relation>>>> {
+        let kinds: Vec<xa11y::RelationKind> = kinds
+            .unwrap_or_default()
+            .iter()
+            .map(|k| xa11y::RelationKind::parse(k))
+            .collect::<xa11y::Result<_>>()
+            .map_err(map_err)?;
+        let el = self.core();
+        Ok(AsyncTask::new(Blocking::new(move || {
+            Ok(el
+                .relations(&kinds)?
+                .into_iter()
+                .map(|(kind, targets)| Relation {
+                    kind: kind.to_snake_case().to_string(),
+                    elements: targets.into_iter().map(Element::from_core).collect(),
+                })
+                .collect())
+        })))
+    }
+
     // ── Async navigation ────────────────────────────────────────────────
 
     /// Get direct children (lazy — each call re-queries the provider).
@@ -328,12 +392,44 @@ impl Element {
     }
 
     /// Subscribe to accessibility events for this element (typically an app).
-    #[napi(ts_return_type = "Promise<_NativeSubscription>")]
-    pub fn subscribe(&self) -> AsyncTask<SubscribeTask> {
+    /// `kinds` keeps only those event types (`'announcement'`,
+    /// `'focusChanged'`); a type this platform never sends rejects with
+    /// `ActionNotSupportedError` at once. `buffer` bounds the queue (default
+    /// 4096 events, oldest dropped first).
+    #[napi(
+        ts_args_type = "kinds?: Array<EventTypeName> | null, buffer?: number | null",
+        ts_return_type = "Promise<_NativeSubscription>"
+    )]
+    pub fn subscribe(
+        &self,
+        kinds: Option<Vec<String>>,
+        buffer: Option<u32>,
+    ) -> AsyncTask<SubscribeTask> {
         AsyncTask::new(SubscribeTask {
             data: self.data.clone(),
             provider: self.provider.clone(),
+            options: crate::subscription::subscribe_options(kinds, buffer),
         })
+    }
+
+    /// Read the subtree into a bounded capture: every node read, pre-order,
+    /// with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
+    /// the top of the tree is complete. `detail` adds `'text'` and/or
+    /// `'relations'`; `timeout` (ms) resolves with what was read when it runs
+    /// out, with `truncated.byTime`.
+    #[napi(
+        ts_args_type = "options?: CaptureOptions | null",
+        ts_return_type = "Promise<Capture>"
+    )]
+    pub fn capture(
+        &self,
+        options: Option<crate::capture::CaptureOptions>,
+    ) -> napi::Result<AsyncTask<crate::text::Blocking<crate::capture::Capture>>> {
+        let options = crate::capture::parse_options(options)?;
+        let el = self.core();
+        Ok(AsyncTask::new(crate::text::Blocking::new(move || {
+            el.capture(&options).map(Into::into)
+        })))
     }
 
     /// Capture the subtree rooted at this element as a recursive snapshot.
@@ -433,6 +529,29 @@ impl Element {
     #[napi(ts_return_type = "Promise<Element[]>")]
     pub fn selected_items(&self) -> AsyncTask<Blocking<Vec<Element>>> {
         self.elements_task(|el| el.selected_items())
+    }
+
+    // ── Identity and liveness ───────────────────────────────────────────
+
+    /// Whether `other` names the same platform node. Two elements found
+    /// separately compare equal when they are one node; two that merely share
+    /// a role and name do not. Rejects with `ElementStaleError` (reason
+    /// `evicted`) when either handle is no longer held by the provider.
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn same_as(&self, other: &Element) -> AsyncTask<Blocking<bool>> {
+        let a = self.core();
+        let b = other.core();
+        AsyncTask::new(Blocking::new(move || a.same_as(&b)))
+    }
+
+    /// Prove this element still names the node it was found as: the node
+    /// exists, its process is the same instance, and it reports the role it
+    /// had. Rejects with `ElementStaleError` and the `reason` otherwise. Every
+    /// action runs this check first.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn check_alive(&self) -> AsyncTask<Blocking<()>> {
+        let el = self.core();
+        AsyncTask::new(Blocking::new(move || el.check_alive()))
     }
 
     // ── Actions (act on the captured snapshot — do not re-resolve) ──────
@@ -808,6 +927,7 @@ impl Task for ParentTask {
 pub struct SubscribeTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
+    options: xa11y::SubscribeOptions,
 }
 
 impl Task for SubscribeTask {
@@ -815,7 +935,7 @@ impl Task for SubscribeTask {
     type JsValue = NativeSubscription;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        self.provider.subscribe(&self.data).map_err(map_err)
+        xa11y::subscribe_with(&*self.provider, &self.data, &self.options).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -953,6 +1073,16 @@ pub enum ElementActionKind {
     Close,
     MoveTo,
     ResizeTo,
+}
+
+/// One relation kind and its targets (`Element.relations`). Output only:
+/// it holds `Element` instances, which JS cannot construct.
+#[napi(object, object_from_js = false)]
+pub struct Relation {
+    /// The kind: `'labelled_by'`, `'controls'`, `'flows_to'`, ...
+    pub kind: String,
+    /// The related elements, possibly none.
+    pub elements: Vec<Element>,
 }
 
 pub struct ElementActionTask {

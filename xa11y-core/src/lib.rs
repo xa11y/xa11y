@@ -1,16 +1,21 @@
 pub mod app;
 pub mod capabilities;
+pub mod capture;
 pub mod config;
 pub mod element;
 pub mod error;
 pub mod event;
 pub mod event_provider;
+#[doc(hidden)]
+pub mod handle_cache;
+pub mod identity;
 pub mod input;
 pub mod locator;
 pub mod provider;
 pub mod role;
 pub mod screenshot;
 pub mod selector;
+pub mod semantics;
 pub mod shell;
 pub mod table;
 pub mod text;
@@ -26,6 +31,10 @@ pub mod mock;
 // Re-export primary types at the crate root for convenience.
 pub use app::App;
 pub use capabilities::{Capabilities, Capability, Platform, Support};
+pub use capture::{
+    Capture, CaptureError, CaptureOptions, CaptureStep, CapturedNode, CapturedText, RelationTarget,
+    Truncation,
+};
 pub use config::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
 pub use element::{
     Element, ElementData, HiddenReason, RawPlatformData, Rect, StateSet, Toggled, TreeNode,
@@ -34,11 +43,20 @@ pub use element::{
 // the backend crates can reach it. Not public API — see its docs.
 #[doc(hidden)]
 pub use element::{ElementParts, StateParts};
-pub use error::{AutoScrollOutcome, Delivery, Diagnosis, Error, PointerTargetDiagnosis, Result};
-pub use event::{ElementState, Event, EventKind, StateFlag, TextChange, TextChangeKind};
+pub use error::{
+    AutoScrollOutcome, Delivery, Diagnosis, Error, PointerTargetDiagnosis, Result, StaleReason,
+};
+pub use event::{
+    AnnouncementInfo, AnnouncementOrigin, ElementState, Event, EventKind, StateFlag, TextChange,
+    TextChangeKind,
+};
 #[doc(hidden)]
-pub use event::{EventParts, TextChangeParts};
-pub use event_provider::{CancelHandle, EventReceiver, RecvStatus, Subscription, SubscriptionIter};
+pub use event::{AnnouncementParts, EventParts, TextChangeParts};
+pub use event_provider::{
+    event_channel, CancelHandle, EventReceiver, EventSendError, EventSender, RecvStatus,
+    SubscribeOptions, Subscription, SubscriptionIter, DEFAULT_EVENT_BUFFER,
+};
+pub use identity::{NativeObject, NodeIdentity};
 pub use input::{
     anchor_point, point_for, Anchor, ClickOptions, ClickTarget, DragOptions, InputProvider,
     InputSim, IntoPoint, Key, Keyboard, Mouse, MouseButton, Point, ScrollDelta,
@@ -50,6 +68,9 @@ pub use role::{unknown_role, Role};
 pub use screenshot::{CaptureMapping, CaptureMappingSegment};
 pub use screenshot::{Screenshot, ScreenshotProvider};
 pub use selector::{Selector, SelectorGroup};
+#[doc(hidden)]
+pub use semantics::LiveRegionParts;
+pub use semantics::{Landmark, LiveRegionInfo, Politeness, RelationKind};
 pub use shell::{ShellSurface, ShellSurfaceKind};
 pub use table::{CellInfo, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
 #[doc(hidden)]

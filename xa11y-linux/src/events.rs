@@ -32,9 +32,9 @@ use zbus::zvariant::OwnedValue;
 use zbus::MatchRule;
 
 use xa11y_core::{
-    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    Result, Role, StateFlag, StateParts, StateSet, Subscription, TextChange, TextChangeKind,
-    TextChangeParts, TextRange, Toggled,
+    AnnouncementInfo, AnnouncementOrigin, AnnouncementParts, CancelHandle, ElementData,
+    ElementParts, Error, Event, EventKind, EventParts, Result, Role, StateFlag, StateParts,
+    StateSet, Subscription, TextChange, TextChangeKind, TextChangeParts, TextRange, Toggled,
 };
 
 use crate::atspi::{
@@ -163,12 +163,12 @@ pub(crate) fn subscribe_for_pid(
         })
         .collect();
 
-    let (tx, rx) = std::sync::mpsc::channel::<Event>();
+    let (tx, rx) = xa11y_core::event_channel();
     let ctx = Arc::new(EventContext {
         sender_buses: sender_buses.clone(),
         app_name,
         app_pid: pid,
-        tx: Mutex::new(tx),
+        tx,
         conn: conn.clone(),
         windows: Mutex::new(windows),
         window_snapshots: Mutex::new(window_snapshots),
@@ -233,20 +233,18 @@ pub(crate) fn subscribe_for_pid(
         let _ = handle.join();
     });
 
-    Ok(Subscription::new(EventReceiver::new(rx), cancel))
+    Ok(Subscription::new(rx, cancel))
 }
 
 // ── Event context + dispatch ────────────────────────────────────────────────
 
 /// Shared state between the subscription thread and the cancel path.
 ///
-/// `tx` is wrapped in `Mutex` because `std::sync::mpsc::Sender` is `!Sync`;
-/// contention is trivial (one lock per emitted event).
 struct EventContext {
     sender_buses: Vec<String>,
     app_name: String,
     app_pid: u32,
-    tx: Mutex<std::sync::mpsc::Sender<Event>>,
+    tx: xa11y_core::EventSender,
     /// Used for D-Bus property/method calls to build target snapshots.
     /// Cloned from the subscription's owning Connection, so it stays alive
     /// until every `Arc<EventContext>` (including the one held by the
@@ -267,7 +265,7 @@ struct EventContext {
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
-        self.emit_with(kind, target, None);
+        self.emit_with(kind, target, None, None);
     }
 
     fn emit_with(
@@ -275,6 +273,7 @@ impl EventContext {
         kind: EventKind,
         target: Option<ElementData>,
         text_change: Option<TextChange>,
+        announcement: Option<AnnouncementInfo>,
     ) {
         let event: Event = EventParts {
             kind,
@@ -283,11 +282,13 @@ impl EventContext {
             app_pid: self.app_pid,
             timestamp: std::time::Instant::now(),
             text_change,
+            announcement,
+            sequence: 0,
         }
         .into();
-        if let Ok(tx) = self.tx.lock() {
-            let _ = tx.send(event);
-        }
+        // Fails only once the subscription is dropped; the worker stops on
+        // the cancel path, so there is nothing more to do here.
+        let _ = self.tx.send(event);
     }
 
     fn dispatch(&self, msg: &zbus::Message) {
@@ -341,6 +342,8 @@ impl EventContext {
             target_role,
         );
 
+        let announcement =
+            announcement_from_signal(iface.as_str(), member.as_str(), detail1, any_data.clone());
         // The delta rides only on the `TextChanged` that `Object:TextChanged`
         // itself maps to, never on the one derived from a value change.
         let text_change = text_change_from_signal(
@@ -359,9 +362,18 @@ impl EventContext {
                 // the derived lifecycle below.
                 EventKind::WindowOpened => self.window_listed(&target_ref, true, target.clone()),
                 EventKind::WindowClosed => self.window_listed(&target_ref, false, target.clone()),
-                EventKind::TextChanged => {
-                    self.emit_with(EventKind::TextChanged, target.clone(), text_change.clone())
-                }
+                EventKind::TextChanged => self.emit_with(
+                    EventKind::TextChanged,
+                    target.clone(),
+                    text_change.clone(),
+                    None,
+                ),
+                EventKind::Announcement => self.emit_with(
+                    EventKind::Announcement,
+                    target.clone(),
+                    None,
+                    announcement.clone(),
+                ),
                 other => self.emit(other, target.clone()),
             }
         }
@@ -617,6 +629,36 @@ fn application_offset_unit(conn: &Connection, bus: &str) -> Result<Option<Offset
 ///
 /// `any_data` is the inserted or deleted text. An empty string for a
 /// non-empty change means the toolkit did not supply it, so it is `None`.
+/// The payload of `Object:Announcement` (AT-SPI 2.46+): the text in
+/// `any_data`, the politeness in `detail1` (`ATSPI_LIVE_POLITE` = 1,
+/// `ATSPI_LIVE_ASSERTIVE` = 2). Every Linux announcement is a request: AT-SPI
+/// has no live-region signal.
+pub(crate) fn announcement_from_signal(
+    iface: &str,
+    member: &str,
+    detail1: i32,
+    any_data: Option<String>,
+) -> Option<AnnouncementInfo> {
+    if (iface, member) != ("org.a11y.atspi.Event.Object", "Announcement") {
+        return None;
+    }
+    let politeness = match detail1 {
+        1 => Some(xa11y_core::Politeness::Polite),
+        2 => Some(xa11y_core::Politeness::Assertive),
+        _ => None,
+    };
+    Some(
+        AnnouncementParts {
+            origin: AnnouncementOrigin::Request,
+            text: any_data.filter(|t| !t.is_empty()),
+            politeness,
+            platform_priority: (detail1 != 0).then(|| detail1.to_string()),
+            activity_id: None,
+        }
+        .into(),
+    )
+}
+
 pub(crate) fn text_change_from_signal(
     iface: &str,
     member: &str,
@@ -1351,6 +1393,11 @@ fn build_event_snapshot(
 
     Some(
         ElementParts {
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             role,
             name,
             value,
@@ -2251,6 +2298,36 @@ mod tests {
     fn announcement_maps_to_announcement() {
         let kinds = signal_to_kinds("org.a11y.atspi.Event.Object", "Announcement", "", 0, None);
         assert_eq!(kinds, vec![EventKind::Announcement]);
+    }
+
+    #[test]
+    fn an_announcement_carries_its_text_and_politeness() {
+        let info = super::announcement_from_signal(
+            "org.a11y.atspi.Event.Object",
+            "Announcement",
+            2,
+            Some("Saved".into()),
+        )
+        .expect("an announcement");
+        assert_eq!(info.origin, AnnouncementOrigin::Request);
+        assert_eq!(info.text.as_deref(), Some("Saved"));
+        assert_eq!(info.politeness, Some(xa11y_core::Politeness::Assertive));
+        let bare = super::announcement_from_signal(
+            "org.a11y.atspi.Event.Object",
+            "Announcement",
+            0,
+            Some(String::new()),
+        )
+        .expect("an announcement");
+        assert_eq!(bare.text, None, "an empty any_data is no text");
+        assert_eq!(bare.politeness, None);
+        assert!(super::announcement_from_signal(
+            "org.a11y.atspi.Event.Object",
+            "TextChanged",
+            1,
+            None
+        )
+        .is_none());
     }
 
     #[test]

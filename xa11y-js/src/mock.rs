@@ -27,6 +27,22 @@ pub fn make_test_locator() -> Locator {
     ))
 }
 
+/// Create a mock `Locator` over the document fixture
+/// (`xa11y_core::mock::build_document_provider`): landmarks, headings, a link,
+/// a live region and a labelled text field. Used only from the JS unit tests.
+#[napi(js_name = "_makeTestDocumentLocator")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_document_locator(selector: String) -> Locator {
+    let provider = xa11y::mock::build_document_provider();
+    Locator::from_inner(
+        xa11y::Locator::new(provider as Arc<dyn xa11y::Provider>, None, &selector)
+            .with_timeout(std::time::Duration::from_millis(0)),
+    )
+}
+
 /// Create a mock `Locator` over the table fixture
 /// (`xa11y_core::mock::build_table_provider`): the shared tree plus a table,
 /// a virtualized list, a tree and a text area holding
@@ -53,12 +69,16 @@ pub fn make_test_table_locator() -> Locator {
     dead_code,
     reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
 )]
-pub fn make_test_app(split: Option<bool>) -> napi::Result<App> {
-    let provider = if split.unwrap_or(false) {
+pub fn make_test_app(split: Option<bool>, events: Option<bool>) -> napi::Result<App> {
+    let mock = if split.unwrap_or(false) {
         xa11y::mock::build_split_provider()
     } else {
         xa11y::mock::build_provider()
-    } as Arc<dyn xa11y::Provider>;
+    };
+    if events.unwrap_or(false) {
+        mock.enable_events();
+    }
+    let provider = mock as Arc<dyn xa11y::Provider>;
     // Resolve via the predicate finder (not `by_name_with`) so the returned
     // app is foreground-tagged — the mock reports its root as the focused app,
     // letting `App.isForeground` tests observe a `true` value.
@@ -332,4 +352,43 @@ pub fn make_test_text_event_subscription() -> NativeSubscription {
         xa11y::mock::scripted_subscription(xa11y::mock::text_edit_events()),
         provider as Arc<dyn xa11y::Provider>,
     )
+}
+
+/// Two elements of one mock node found by `name`, after `change` made the
+/// node stale: `removed`, `replaced` (same handle, different role) or `none`.
+/// Used only from the JS unit tests — not part of the public API.
+#[napi(js_name = "_makeTestStaleElements")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_stale_elements(
+    name: String,
+    change: String,
+) -> napi::Result<Vec<crate::element::Element>> {
+    let provider = xa11y::mock::build_provider();
+    let dyn_provider: Arc<dyn xa11y::Provider> = provider.clone();
+    let selector = format!("[name=\"{name}\"]");
+    let find = || {
+        xa11y::Locator::new(dyn_provider.clone(), None, &selector)
+            .with_timeout(std::time::Duration::from_millis(0))
+            .element()
+            .map_err(crate::map_err)
+    };
+    let (found, again) = (find()?, find()?);
+    match change.as_str() {
+        "removed" => provider.remove_node(&name),
+        "replaced" => provider.replace_node_role(&name, xa11y::Role::TextField),
+        "none" => {}
+        other => {
+            return Err(napi::Error::new(
+                napi::Status::InvalidArg,
+                format!("change must be removed, replaced or none, got {other:?}"),
+            ))
+        }
+    }
+    Ok(vec![
+        crate::element::Element::from_core(found),
+        crate::element::Element::from_core(again),
+    ])
 }

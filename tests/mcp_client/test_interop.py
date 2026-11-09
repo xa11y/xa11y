@@ -38,6 +38,7 @@ EXPECTED_TOOLS = [
     "action",
     "text",
     "table",
+    "relations",
     "click",
     "move",
     "drag",
@@ -222,6 +223,20 @@ def test_capabilities_answers_without_touching_an_app(run_client):
         c for c in structured["capabilities"] if c["name"] == "window:enter_fullscreen"
     )
     assert fullscreen["support"] == "unsupported" and fullscreen["note"], fullscreen
+
+
+def test_a_ref_and_a_selector_are_exclusive_and_a_stale_ref_is_ref_expired(run_client):
+    """Refs (#481): a malformed or unheld ref is something to fix, not a crash."""
+    both = run_client(
+        lambda c: c.call_tool("action", {"action": "press", "selector": "button", "ref": "c1:0"})
+    )
+    assert both.is_error is True
+    assert both.structured_content["kind"] == "invalid_arguments"
+    unheld = run_client(lambda c: c.call_tool("action", {"action": "press", "ref": "c999:0"}))
+    assert unheld.is_error is True
+    assert unheld.structured_content["kind"] == "ref_expired"
+    assert unheld.structured_content["ref"] == "c999:0"
+    assert unheld.structured_content["delivery"] == "not_delivered"
 
 
 def test_an_argument_mistake_is_reported_as_something_to_fix(run_client):
@@ -434,7 +449,7 @@ def test_the_action_schema_declares_the_geometry_arguments(run_client):
 
 
 def test_the_element_tools_take_a_shell_surface_as_a_target(run_client):
-    for name in ("tree", "find", "action", "text", "table"):
+    for name in ("tree", "find", "action", "text", "table", "relations"):
         shell = _tool(run_client, name).input_schema["properties"]["shell"]
         assert set(shell["enum"]) == SHELL_KINDS, name
         assert "Mutually exclusive with `app`" in shell["description"], name
@@ -458,7 +473,9 @@ def test_the_text_tool_states_its_unit_and_bounds(run_client):
     text = _tool(run_client, "text")
     assert "UTF-16 code unit" in text.description
     props = text.input_schema["properties"]
-    assert set(text.input_schema["required"]) == {"op", "selector"}
+    # `selector` and `ref` are alternatives, so only `op` is required.
+    assert set(text.input_schema["required"]) == {"op"}
+    assert {"selector", "ref"} <= props.keys()
     for key in ("start", "end", "offset", "occurrence", "limit"):
         assert props[key]["type"] == "integer", key
         assert "minimum" in props[key] and "maximum" in props[key], key
@@ -486,6 +503,24 @@ def test_a_table_argument_mistake_is_a_fixable_error(run_client):
     assert result.is_error is True
     assert result.structured_content["kind"] == "invalid_arguments"
     assert "--" not in result.structured_content["message"]
+
+
+def test_a_tree_detail_mistake_is_a_fixable_error(run_client):
+    result = run_client(lambda c: c.call_tool("tree", {"app": "X", "detail": ["formatting"]}))
+    assert result.is_error is True
+    assert result.structured_content["kind"] == "invalid_arguments"
+    assert "relations" in result.structured_content["message"]
+
+
+def test_a_relation_kind_mistake_is_a_fixable_error(run_client):
+    result = run_client(
+        lambda c: c.call_tool(
+            "relations", {"selector": "text_field", "app": "X", "kinds": ["labeled_by"]}
+        )
+    )
+    assert result.is_error is True
+    assert result.structured_content["kind"] == "invalid_arguments"
+    assert "labelled_by" in result.structured_content["message"]
 
 
 # ── Screenshot annotation ────────────────────────────────────────────────────

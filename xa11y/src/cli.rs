@@ -81,6 +81,19 @@ pub enum CliError {
         /// Handles that are open right now, in issue order.
         live: Vec<String>,
     },
+    /// An MCP element `ref` names a capture the server no longer keeps (or
+    /// one it never issued) — exit code 1.
+    ///
+    /// The server keeps the refs of its most recent `tree` / `find` results
+    /// only; `kept` names those captures so the recovery (call `tree` or
+    /// `find` again) is readable off the error (tenet 6). A ref is never
+    /// re-resolved by selector.
+    RefExpired {
+        /// The ref the caller passed.
+        reference: String,
+        /// Captures whose refs are still held, oldest first (`c7`, `c8`, ...).
+        kept: Vec<String>,
+    },
     /// An underlying xa11y operation failed — exit code 1.
     Xa11y(Error),
 }
@@ -94,6 +107,7 @@ impl CliError {
             | CliError::Ambiguous { .. }
             | CliError::AmbiguousShellSurface { .. }
             | CliError::NoSubscription { .. }
+            | CliError::RefExpired { .. }
             | CliError::Xa11y(_) => 1,
         }
     }
@@ -115,7 +129,8 @@ impl CliError {
             CliError::NotFound(_)
             | CliError::Ambiguous { .. }
             | CliError::AmbiguousShellSurface { .. }
-            | CliError::NoSubscription { .. } => Some(crate::Delivery::NotDelivered),
+            | CliError::NoSubscription { .. }
+            | CliError::RefExpired { .. } => Some(crate::Delivery::NotDelivered),
             CliError::Xa11y(e) => Some(e.delivery()),
         }
     }
@@ -163,6 +178,19 @@ impl std::fmt::Display for CliError {
                     f,
                     "subscription \"{id}\" {cause}. Start another with \
                      `events_start`; {open}"
+                )
+            }
+            CliError::RefExpired { reference, kept } => {
+                let held = if kept.is_empty() {
+                    "no captures are held".to_string()
+                } else {
+                    format!("refs are held for captures {}", kept.join(", "))
+                };
+                write!(
+                    f,
+                    "ref \"{reference}\" is not held: the server keeps the refs of its most \
+                     recent `tree` and `find` results only, and never re-resolves one by \
+                     selector. Call `tree` or `find` again for a fresh ref; {held}"
                 )
             }
             CliError::Xa11y(e) => write!(f, "{e}"),
@@ -269,6 +297,7 @@ pub fn run(args: &[String]) -> CliResult<()> {
         Some("action") => cmd_action(&args[1..]),
         Some("text") => cmd_text(&args[1..]),
         Some("table") => cmd_table(&args[1..]),
+        Some("relations") => cmd_relations(&args[1..]),
         Some("events") => cmd_events(&args[1..]),
         Some("click") => cmd_click(&args[1..]),
         Some("move") => cmd_move(&args[1..]),
@@ -304,7 +333,9 @@ Accessibility tree:
   xa11y apps                                List running applications
   xa11y shell                               List OS shell surfaces: KIND PID NAME
   xa11y windows [--app NAME | --pid PID]    List top-level windows
-  xa11y tree   [TARGET]                     Print the accessibility tree
+  xa11y tree   [TARGET] [--max-nodes N] [--max-depth N]
+                                            Print the accessibility tree, at
+                                            most N nodes (default 2000)
   xa11y find   SELECTOR [TARGET] [-o pretty|bounds|center] [--stable]
                                             Find elements matching a selector.
                                             --stable waits (up to the default
@@ -321,7 +352,14 @@ Accessibility tree:
                                             prints JSON; see Text below
   xa11y table  OP SELECTOR [TARGET] [--row N --column N]
                                             Table lookups: {table_ops}
-  xa11y events [--app NAME | --pid PID]     Stream accessibility events
+  xa11y relations SELECTOR [KIND...] [TARGET]
+                                            Elements related to one: who labels
+                                            or describes it, what it controls,
+                                            where reading flows. No KIND means
+                                            every kind this platform reports:
+                                            {relation_kinds}
+  xa11y events [--app NAME | --pid PID] [--kinds K,K]
+                                            Stream accessibility events
   xa11y enable-web-accessibility (--app NAME | --pid PID)
                                             Turn on a Chromium/Electron app's
                                             web content tree (macOS) and wait
@@ -432,6 +470,7 @@ Exit codes:
         kinds = shell_kind_names().join(", "),
         text_ops = TEXT_OPS.join(", "),
         table_ops = TABLE_OPS.join(", "),
+        relation_kinds = relation_kind_names().join(", "),
         read_default = TEXT_READ_DEFAULT_UNITS,
         read_max = TEXT_READ_MAX_UNITS,
         page = TEXT_PAGE_DEFAULT,
@@ -546,6 +585,12 @@ pub(crate) struct Opts {
     pub output_format: Option<String>,
     /// `find --stable`: wait for the single match's bounds to settle.
     pub stable: bool,
+    /// `events --kinds a,b`: the event kinds to show.
+    pub kinds: Option<String>,
+    /// `tree --max-nodes N`: the node limit (default 2000).
+    pub max_nodes: Option<usize>,
+    /// `tree --max-depth N`: the depth limit (default none).
+    pub max_depth: Option<usize>,
     // `text` / `table`
     /// `--range START,END`: a text range in UTF-16 code units.
     pub range: Option<String>,
@@ -725,6 +770,28 @@ pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
             "--limit" => {
                 i += 1;
                 opts.limit = Some(flag_value_parsed(args, i, "--limit", "a positive integer")?);
+            }
+            "--kinds" => {
+                i += 1;
+                opts.kinds = Some(flag_value(args, i, "--kinds")?.to_string());
+            }
+            "--max-nodes" => {
+                i += 1;
+                opts.max_nodes = Some(flag_value_parsed(
+                    args,
+                    i,
+                    "--max-nodes",
+                    "a positive integer",
+                )?);
+            }
+            "--max-depth" => {
+                i += 1;
+                opts.max_depth = Some(flag_value_parsed(
+                    args,
+                    i,
+                    "--max-depth",
+                    "a 0-based depth",
+                )?);
             }
             "--row" => {
                 i += 1;
@@ -1096,11 +1163,11 @@ pub(crate) enum Target {
 }
 
 impl Target {
-    /// Direct children of the public scope, including all app registrations.
-    pub(crate) fn children(&self) -> crate::Result<Vec<Element>> {
+    /// A bounded [`Capture`] of the target's tree, rooted at its root.
+    pub(crate) fn capture(&self, options: &CaptureOptions) -> crate::Result<Capture> {
         match self {
-            Target::App(app) => app.children(),
-            Target::Shell(surface) => surface.children(),
+            Target::App(app) => app.capture(options),
+            Target::Shell(surface) => surface.capture(options),
         }
     }
 
@@ -1109,14 +1176,6 @@ impl Target {
         match self {
             Target::App(app) => app.locator(selector),
             Target::Shell(surface) => surface.locator(selector),
-        }
-    }
-
-    /// The target's root element.
-    pub(crate) fn root(&self) -> Element {
-        match self {
-            Target::App(app) => Element::new(app.data.clone(), app.provider().clone()),
-            Target::Shell(surface) => surface.as_element(),
         }
     }
 
@@ -1198,6 +1257,23 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     let positions = format_positions(el);
     if !positions.is_empty() {
         parts.push(positions);
+    }
+
+    // Document semantics (#476), spelled as their selector attributes.
+    if let Some(level) = el.heading_level {
+        parts.push(format!("heading_level={level}"));
+    }
+    if let Some(landmark) = el.landmark_type {
+        parts.push(format!("landmark_type={landmark}"));
+    }
+    if let Some(web_role) = &el.web_role {
+        parts.push(format!("web_role=\"{web_role}\""));
+    }
+    if let Some(url) = &el.link_url {
+        parts.push(format!("url=\"{url}\""));
+    }
+    if let Some(politeness) = el.live_region.as_ref().and_then(|l| l.politeness) {
+        parts.push(format!("live={}", politeness.to_snake_case()));
     }
 
     // States. A hidden element says why (`hidden=scrolled_out`), which is
@@ -1324,51 +1400,6 @@ pub(crate) fn format_positions(el: &ElementData) -> String {
         push("depth", c.depth.map(|n| n.to_string()));
     }
     out.join(" ")
-}
-
-fn print_tree_recursive(
-    el: &Element,
-    prefix: &str,
-    is_last: bool,
-    is_root: bool,
-    scope: Option<&Target>,
-) {
-    let connector = if is_root {
-        ""
-    } else if is_last {
-        "└── "
-    } else {
-        "├── "
-    };
-    println!("{prefix}{connector}{}", format_element_oneline(el));
-
-    let children = match scope.map_or_else(|| el.children(), Target::children) {
-        Ok(c) => c,
-        Err(e) => {
-            let child_prefix = if is_root {
-                prefix.to_string()
-            } else if is_last {
-                format!("{prefix}    ")
-            } else {
-                format!("{prefix}│   ")
-            };
-            println!("{child_prefix}└── <error: {e}>");
-            return;
-        }
-    };
-
-    let child_prefix = if is_root {
-        prefix.to_string()
-    } else if is_last {
-        format!("{prefix}    ")
-    } else {
-        format!("{prefix}│   ")
-    };
-
-    for (i, child) in children.iter().enumerate() {
-        let child_is_last = i == children.len() - 1;
-        print_tree_recursive(child, &child_prefix, child_is_last, false, None);
-    }
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -1758,9 +1789,113 @@ fn cmd_enable_web_accessibility(args: &[String]) -> CliResult<()> {
 
 fn cmd_tree(args: &[String]) -> CliResult<()> {
     let (opts, _pos) = parse_opts(args)?;
+    let max_nodes = opts
+        .max_nodes
+        .unwrap_or(xa11y_core::capture::DEFAULT_MAX_NODES);
+    if max_nodes == 0 {
+        return Err(CliError::Usage(
+            "--max-nodes must be at least 1: the root is a node".into(),
+        ));
+    }
     let target = resolve_target(&opts)?;
-    print_tree_recursive(&target.root(), "", true, true, Some(&target));
+    let mut options = CaptureOptions::new().max_nodes(max_nodes);
+    if let Some(depth) = opts.max_depth {
+        options = options.max_depth(depth);
+    }
+    let cap = target.capture(&options)?;
+    for line in format_capture(&cap) {
+        println!("{line}");
+    }
     Ok(())
+}
+
+/// Render a capture as the `tree` command prints it: one element per line
+/// with box-drawing connectors. A node whose children were cut ends with a
+/// `… N more` line naming the limit, and a capture cut by a limit ends with a
+/// summary line, so a shortened tree never reads as a complete one.
+pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
+    fn walk(cap: &Capture, index: usize, prefix: &str, is_last: bool, out: &mut Vec<String>) {
+        let node = &cap.nodes[index];
+        let is_root = index == 0;
+        let connector = match (is_root, is_last) {
+            (true, _) => "",
+            (false, true) => "└── ",
+            (false, false) => "├── ",
+        };
+        out.push(format!(
+            "{prefix}{connector}{}",
+            format_element_oneline(node)
+        ));
+        let child_prefix = match (is_root, is_last) {
+            (true, _) => prefix.to_string(),
+            (false, true) => format!("{prefix}    "),
+            (false, false) => format!("{prefix}│   "),
+        };
+        let errors: Vec<&CaptureError> = node
+            .errors
+            .iter()
+            .filter(|e| matches!(e.step, CaptureStep::Children | CaptureStep::Cycle))
+            .collect();
+        let missing = match node.children_count {
+            Some(count) if node.children_truncated => count.saturating_sub(node.children.len()),
+            _ => 0,
+        };
+        let not_read =
+            node.children_truncated && node.children_count.is_none() && errors.is_empty();
+        let tail = errors.len() + usize::from(missing > 0 || not_read);
+        for (i, &child) in node.children.iter().enumerate() {
+            let last = i + 1 == node.children.len() && tail == 0;
+            walk(cap, child, &child_prefix, last, out);
+        }
+        let mut left = tail;
+        let mut tail_line = |text: String, out: &mut Vec<String>| {
+            left -= 1;
+            let connector = if left == 0 {
+                "└── "
+            } else {
+                "├── "
+            };
+            out.push(format!("{child_prefix}{connector}{text}"));
+        };
+        for err in errors {
+            tail_line(format!("<error: {}>", err.error), out);
+        }
+        if missing > 0 {
+            let why = if cap.options.max_depth.is_some_and(|d| node.depth >= d) {
+                "--max-depth"
+            } else {
+                "--max-nodes"
+            };
+            tail_line(format!("… {missing} more (cut by {why})"), out);
+        } else if not_read {
+            tail_line("… children not read (out of time)".into(), out);
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(cap, 0, "", true, &mut out);
+    let t = cap.truncated;
+    if t.any() {
+        let mut why = Vec::new();
+        if t.by_nodes {
+            why.push(format!(
+                "the node limit of {} (--max-nodes)",
+                cap.options.max_nodes
+            ));
+        }
+        if t.by_depth {
+            why.push("the depth limit (--max-depth)".to_string());
+        }
+        if t.by_time {
+            why.push("the time budget".to_string());
+        }
+        out.push(format!(
+            "(truncated: {} nodes shown, cut by {})",
+            cap.nodes.len(),
+            why.join(" and ")
+        ));
+    }
+    out
 }
 
 fn cmd_find(args: &[String]) -> CliResult<()> {
@@ -3140,6 +3275,53 @@ fn cmd_table(args: &[String]) -> CliResult<()> {
     Ok(())
 }
 
+/// Every relation kind's name, for usage text and the MCP schema.
+pub(crate) fn relation_kind_names() -> Vec<&'static str> {
+    RelationKind::ALL
+        .iter()
+        .map(|k| k.to_snake_case())
+        .collect()
+}
+
+/// Parse relation kind names. A bad name is a usage error naming the valid
+/// ones, raised before anything is resolved.
+pub(crate) fn parse_relation_kinds<S: AsRef<str>>(names: &[S]) -> CliResult<Vec<RelationKind>> {
+    names
+        .iter()
+        .map(|n| RelationKind::parse(n.as_ref()).map_err(|e| CliError::Usage(e.to_string())))
+        .collect()
+}
+
+fn cmd_relations(args: &[String]) -> CliResult<()> {
+    let (opts, positional) = parse_opts(args)?;
+    let Some((selector, kind_names)) = positional.split_first() else {
+        return Err(CliError::Usage(format!(
+            "usage: xa11y relations SELECTOR [KIND...] [--app NAME | --pid PID | --shell KIND]  \
+             (KIND is one of: {})",
+            relation_kind_names().join(", ")
+        )));
+    };
+    let kinds = parse_relation_kinds(kind_names)?;
+    let target = resolve_target(&opts)?;
+    // One element, read once like `table`: relations of several matches
+    // would not say whose they are.
+    let element = match resolve_table_element(&target, selector)? {
+        Ok(element) => element,
+        Err(matches) => {
+            return Err(ambiguous_selector(selector, &matches, 8, |el| {
+                format_element_oneline(el)
+            }))
+        }
+    };
+    for (kind, targets) in element.relations(&kinds)? {
+        println!("{kind} ({}):", targets.len());
+        for el in &targets {
+            println!("  {}", format_element_oneline(el));
+        }
+    }
+    Ok(())
+}
+
 fn cmd_events(args: &[String]) -> CliResult<()> {
     let (opts, _pos) = parse_opts(args)?;
     // Events are subscribed per application; there is no surface-level event
@@ -3153,8 +3335,24 @@ fn cmd_events(args: &[String]) -> CliResult<()> {
                 .into(),
         ));
     }
+    let kinds: Vec<String> = opts
+        .kinds
+        .as_deref()
+        .map(|k| k.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+    if let Some(bad) = kinds
+        .iter()
+        .find(|k| !crate::event_kind_names().contains(&k.as_str()))
+    {
+        return Err(CliError::Usage(format!(
+            "unknown event kind {bad:?} for --kinds; expected one of {}",
+            crate::event_kind_names().join(", ")
+        )));
+    }
     let app = resolve_app(&opts)?;
-    let sub = app.subscribe()?;
+    // A kind this platform never sends fails here rather than leaving the
+    // command listening for nothing.
+    let sub = app.subscribe_with(&SubscribeOptions::new().kinds(kinds))?;
     eprintln!(
         "Listening for events on \"{}\" (ctrl-c to stop)...",
         app.name
@@ -3283,6 +3481,20 @@ pub(crate) fn format_event_detail(event: &Event) -> String {
     if let EventKind::StateChanged { flag, value } = event.kind {
         return format!(" {flag:?}={value}");
     }
+    if let Some(a) = &event.announcement {
+        let mut out = format!(" {}", a.origin);
+        if let Some(p) = a.politeness {
+            out.push_str(&format!(" {}", p.to_snake_case()));
+        }
+        if let Some(text) = &a.text {
+            let (shown, truncated) = clip_utf16(text, RANGE_TEXT_MAX_UNITS);
+            out.push_str(&format!(" {shown:?}"));
+            if truncated {
+                out.push_str(&format!(" (truncated, {} units)", utf16_units(text)));
+            }
+        }
+        return out;
+    }
     let Some(change) = &event.text_change else {
         return String::new();
     };
@@ -3334,6 +3546,29 @@ pub(crate) fn clip_utf16(s: &str, max: u32) -> (&str, bool) {
 /// supplied), cut to [`RANGE_TEXT_MAX_UNITS`] UTF-16 units. A cut text says so
 /// with `text_truncated: true` and the full `text_length`, so a shortened
 /// string never reads as the whole edit.
+/// An announcement's payload as MCP reports it: each field only when set.
+pub(crate) fn announcement_json(a: &crate::AnnouncementInfo) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    out.insert("origin".into(), a.origin.to_snake_case().into());
+    if let Some(text) = &a.text {
+        let (shown, truncated) = clip_utf16(text, RANGE_TEXT_MAX_UNITS);
+        out.insert("text".into(), shown.into());
+        if truncated {
+            out.insert("text_truncated".into(), true.into());
+        }
+    }
+    if let Some(p) = a.politeness {
+        out.insert("politeness".into(), p.to_snake_case().into());
+    }
+    if let Some(p) = &a.platform_priority {
+        out.insert("platform_priority".into(), p.clone().into());
+    }
+    if let Some(id) = &a.activity_id {
+        out.insert("activity_id".into(), id.clone().into());
+    }
+    serde_json::Value::Object(out)
+}
+
 pub(crate) fn text_change_json(change: &TextChange) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("kind".into(), format_text_change_kind(change.kind).into());
@@ -3875,7 +4110,7 @@ mod tests {
         // `ACTION_COMMANDS` is hand-kept. Read the dispatcher's own arms, so
         // a new command that nobody classified fails here instead of
         // silently lacking the `delivery:` line.
-        const NOT_ACTIONS: [&str; 11] = [
+        const NOT_ACTIONS: [&str; 12] = [
             "apps",
             "capabilities",
             "shell",
@@ -3884,6 +4119,7 @@ mod tests {
             "find",
             "text",
             "table",
+            "relations",
             "events",
             "screenshot",
             "guide",
@@ -4808,6 +5044,21 @@ mod tests {
         );
         let detail = format_event_detail(&event);
         assert!(detail.contains("Focused=true"));
+    }
+
+    #[test]
+    fn format_event_detail_names_an_announcements_origin_and_text() {
+        let event = xa11y_core::mock::announcement_events().remove(1);
+        assert_eq!(format_event_detail(&event), r#" request polite "Saved""#);
+        let alert = xa11y_core::mock::announcement_events().remove(3);
+        assert_eq!(format_event_detail(&alert), " alert assertive");
+    }
+
+    #[test]
+    fn an_unknown_events_kind_is_a_usage_error_before_any_lookup() {
+        let err = cmd_events(&strs(&["--kinds", "focus", "--pid", "1"])).expect_err("refused");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert!(err.to_string().contains("focus_changed"), "{err}");
     }
 
     #[test]
@@ -6138,6 +6389,55 @@ mod tests {
         );
         let err = parse_text_op("info", &a, &CLI_TEXT_ARG_NAMES).expect_err("info takes none");
         assert!(err.to_string().contains("does not take --range"), "{err}");
+    }
+
+    #[test]
+    fn the_tree_printer_marks_every_cut() {
+        let provider = xa11y_core::mock::build_provider();
+        let target = Target::App(mock_app(&provider));
+        let full = format_capture(&target.capture(&CaptureOptions::new()).expect("capture"));
+        assert!(full
+            .iter()
+            .all(|l| !l.contains("more") && !l.starts_with("(truncated")));
+        assert!(full[0].starts_with("application"), "{full:?}");
+        assert!(full.iter().any(|l| l.contains("└── ")), "{full:?}");
+
+        let cut = format_capture(
+            &target
+                .capture(&CaptureOptions::new().max_nodes(3))
+                .expect("capture"),
+        );
+        let last = cut.last().expect("lines");
+        assert!(
+            last.starts_with("(truncated: 3 nodes shown, cut by the node limit of 3"),
+            "{cut:?}"
+        );
+        assert!(
+            cut.iter().any(|l| l.contains("more (cut by --max-nodes)")),
+            "{cut:?}"
+        );
+
+        let shallow = format_capture(
+            &target
+                .capture(&CaptureOptions::new().max_depth(1))
+                .expect("capture"),
+        );
+        assert!(
+            shallow
+                .iter()
+                .any(|l| l.contains("more (cut by --max-depth)")),
+            "{shallow:?}"
+        );
+    }
+
+    #[test]
+    fn tree_limits_parse_and_zero_nodes_is_a_usage_error() {
+        let (opts, _) =
+            parse_opts(&strs(&["--max-nodes", "10", "--max-depth", "2"])).expect("flags parse");
+        assert_eq!(opts.max_nodes, Some(10));
+        assert_eq!(opts.max_depth, Some(2));
+        let err = cmd_tree(&strs(&["--max-nodes", "0", "--pid", "1"])).expect_err("refused");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
     }
 
     #[test]

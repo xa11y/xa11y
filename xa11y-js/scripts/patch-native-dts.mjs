@@ -20,6 +20,8 @@
 //      `TextChange.kind`, and `Text.rangeAt`'s unit parameter.
 //   5d. Narrow the capability table's platform and support strings to
 //      `PlatformName` / `SupportName`.
+//   5e. Narrow the document-semantics strings: `LandmarkName`,
+//      `PolitenessName` and `RelationKindName`.
 //   6. Append a `;` to the napi-emitted `NativeSubscription` type alias
 //      (napi-rs omits terminators, which confuses the docs generator's
 //      multi-line type-alias parser).
@@ -110,6 +112,48 @@ export type CountValue = number | 'unknown';
 /** Which kind of header a header cell is. Spelled as in Python. */
 export type HeaderKindName = 'column' | 'row';
 
+/** A landmark's kind, as its ARIA role (\`Element.landmarkType\`). */
+export type LandmarkName =
+  | 'banner'
+  | 'complementary'
+  | 'contentinfo'
+  | 'form'
+  | 'main'
+  | 'navigation'
+  | 'region'
+  | 'search'
+  | 'unknown';
+
+/** A live region's politeness (\`LiveRegionInfo.politeness\`). */
+export type PolitenessName = 'off' | 'polite' | 'assertive';
+
+/** Why an announcement event was raised (\`AnnouncementInfo.origin\`). */
+export type AnnouncementOriginName = 'request' | 'live_region' | 'alert';
+
+/** A relation kind (\`Element.relations\`). */
+export type RelationKindName =
+  | 'labelled_by'
+  | 'label_for'
+  | 'described_by'
+  | 'description_for'
+  | 'details'
+  | 'details_for'
+  | 'controls'
+  | 'controlled_by'
+  | 'flows_to'
+  | 'flows_from'
+  | 'error_message'
+  | 'error_for'
+  | 'owns'
+  | 'member_of'
+  | 'linked';
+
+/** Which read of a captured node failed (\`CaptureError.step\`). */
+export type CaptureStepName = 'children' | 'identity' | 'text' | 'relations' | 'cycle';
+
+/** Extra reads a capture can make (\`CaptureOptions.detail\`). */
+export type CaptureDetailName = 'text' | 'relations';
+
 /** A platform xa11y has a backend for. */
 export type PlatformName = 'linux' | 'macos' | 'windows';
 
@@ -135,6 +179,32 @@ export type TextChangeKindName = 'inserted' | 'deleted';
  * new call site that quietly picks up the wide type is caught too.
  */
 const REPLACEMENTS = [
+  // Before `TextChange.kind`: both are `kind: string` until this one is
+  // narrowed, and that entry asserts a single occurrence.
+  {
+    name: 'CapturedRelation.kind -> RelationKindName',
+    from: "  kind: string\n  /**\n   * Each target: a `number` index",
+    to: "  kind: RelationKindName\n  /**\n   * Each target: a `number` index",
+    all: 1,
+  },
+  {
+    name: 'CaptureError.step -> CaptureStepName',
+    from: "  step: string\n  /** The error code the call would have rejected with",
+    to: "  step: CaptureStepName\n  /** The error code the call would have rejected with",
+    all: 1,
+  },
+  {
+    name: 'CaptureOptions.detail -> CaptureDetailName[]',
+    from: "  detail?: Array<string>",
+    to: "  detail?: Array<CaptureDetailName>",
+    all: 1,
+  },
+  {
+    name: 'Relation.kind -> RelationKindName',
+    from: '  kind: string\n  /** The related elements',
+    to: '  kind: RelationKindName\n  /** The related elements',
+    all: 1,
+  },
   {
     name: 'Element.checked -> CheckedState | null',
     from: '  get checked(): string | null',
@@ -260,6 +330,36 @@ const REPLACEMENTS = [
     name: 'Capabilities.support() -> SupportName',
     from: '  support(name: string): string\n',
     to: '  support(name: string): SupportName\n',
+    all: 1,
+  },
+  {
+    name: 'Element.landmarkType -> LandmarkName',
+    from: '  get landmarkType(): string | null\n',
+    to: '  get landmarkType(): LandmarkName | null\n',
+    all: 1,
+  },
+  {
+    name: 'AnnouncementInfo.origin -> AnnouncementOriginName',
+    from: "   * `'alert'` (a region changed: read the target).\n   */\n  origin: string\n",
+    to: "   * `'alert'` (a region changed: read the target).\n   */\n  origin: AnnouncementOriginName\n",
+    all: 1,
+  },
+  {
+    name: 'AnnouncementInfo.politeness -> PolitenessName',
+    from: "  politeness?: string\n",
+    to: "  politeness?: PolitenessName\n",
+    all: 1,
+  },
+  {
+    name: 'LiveRegionInfo.politeness -> PolitenessName',
+    from: '  politeness: string | null\n',
+    to: '  politeness: PolitenessName | null\n',
+    all: 1,
+  },
+  {
+    name: 'Element.relations kinds -> RelationKindName',
+    from: '  relations(kinds?: Array<string> | undefined | null)',
+    to: '  relations(kinds?: Array<RelationKindName> | undefined | null)',
     all: 1,
   },
   {

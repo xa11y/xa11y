@@ -95,6 +95,9 @@ type MockElementSpec<'a> = (
 /// One entry in the mock's action log. `(handle, action_name, optional_argument)`.
 pub type ActionLogEntry = (u64, String, Option<String>);
 
+/// One node's relations: each kind with the indices of its targets.
+type MockRelations = Vec<(crate::semantics::RelationKind, Vec<usize>)>;
+
 /// Mock provider backing the test tree.
 pub struct MockProvider {
     /// Interior-mutable so window verbs can mutate state/bounds in place.
@@ -105,6 +108,14 @@ pub struct MockProvider {
     /// Text selection per node handle, set by `set_text_selection`. A
     /// selection with `start == end` is a caret.
     selections: Mutex<HashMap<u64, TextRange>>,
+    /// Relations per node index, set by [`build_document_provider`].
+    relations: Mutex<HashMap<usize, MockRelations>>,
+    /// Errors `get_children` returns for a node index, set by
+    /// [`MockProvider::fail_children`].
+    children_errors: Mutex<HashMap<usize, Error>>,
+    /// Whether `subscribe` yields [`announcement_events`] (set by
+    /// [`MockProvider::enable_events`]) rather than failing.
+    events: std::sync::atomic::AtomicBool,
 }
 
 /// One scripted observation of a node: its bounds and whether it is visible.
@@ -117,6 +128,61 @@ impl MockProvider {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Remove the node named `name` from the tree, as an app that destroyed
+    /// the widget would. An element captured before the call is then stale
+    /// ([`StaleReason::Removed`](crate::StaleReason::Removed)).
+    pub fn remove_node(&self, name: &str) {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = Self::index_named(&nodes, name);
+        nodes[idx].closed = true;
+    }
+
+    /// Give the node named `name` a different role under the same handle, as
+    /// a platform that reused the id for a new node would. An element captured
+    /// before the call is then stale
+    /// ([`StaleReason::IdentityChanged`](crate::StaleReason::IdentityChanged)).
+    pub fn replace_node_role(&self, name: &str, role: Role) {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = Self::index_named(&nodes, name);
+        nodes[idx].data.role = role;
+    }
+
+    /// List the node named `child` as a child of the node named `parent` as
+    /// well, as a platform that shares a node between two parents does (or,
+    /// when `child` is an ancestor of `parent`, as a cyclic tree does).
+    pub fn link_child(&self, parent: &str, child: &str) {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let p = Self::index_named(&nodes, parent);
+        let c = Self::index_named(&nodes, child);
+        nodes[p].children.push(c);
+    }
+
+    /// Make `subscribe` succeed with a scripted [`announcement_events`]
+    /// stream. Without it, `subscribe` fails with a platform error, which the
+    /// binding error-mapping tests rely on.
+    pub fn enable_events(&self) {
+        self.events
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Make reading the children of the node named `name` fail with
+    /// `error`, as a node that went away mid-read or a broken subtree would.
+    pub fn fail_children(&self, name: &str, error: Error) {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = Self::index_named(&nodes, name);
+        self.children_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(idx, error);
+    }
+
+    fn index_named(nodes: &[MockNode], name: &str) -> usize {
+        nodes
+            .iter()
+            .position(|n| n.data.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("mock fixture has no node named {name:?}"))
     }
 
     /// Script how the node named `name` looks to successive tree reads.
@@ -273,6 +339,14 @@ impl Provider for MockProvider {
             }
             Some(el) => {
                 let idx = el.handle as usize;
+                if let Some(error) = self
+                    .children_errors
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&idx)
+                {
+                    return Err(error.clone());
+                }
                 // A closed element is gone (see `closed`): resolving its subtree
                 // through a stale handle would fake a live window that real
                 // providers have dropped.
@@ -341,6 +415,82 @@ impl Provider for MockProvider {
             .iter()
             .map(|(kind, idx)| (*kind, nodes[*idx].data.clone()))
             .collect())
+    }
+
+    fn relations(
+        &self,
+        el: &ElementData,
+        kinds: &[crate::semantics::RelationKind],
+    ) -> Result<Vec<(crate::semantics::RelationKind, Vec<ElementData>)>> {
+        // The mock reports every kind except `linked` where the running
+        // platform's table says it is never reported (Linux, Windows), so the
+        // unsupported path is testable and "every supported kind" agrees with
+        // the table on each OS.
+        let linked_unsupported = crate::Capabilities::current()
+            .and_then(|c| c.support("relation:linked"))
+            .is_ok_and(|s| s == crate::Support::Unsupported);
+        if let Some(kind) = kinds
+            .iter()
+            .find(|k| linked_unsupported && **k == crate::semantics::RelationKind::Linked)
+        {
+            return Err(Error::Unsupported {
+                feature: format!("relation {kind} on the mock provider"),
+            });
+        }
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let relations = self.relations.lock().unwrap_or_else(|e| e.into_inner());
+        let own = relations.get(&(el.handle as usize));
+        Ok(kinds
+            .iter()
+            .map(|kind| {
+                let targets = own
+                    .into_iter()
+                    .flatten()
+                    .filter(|(k, _)| k == kind)
+                    .flat_map(|(_, t)| t.iter())
+                    .map(|&i| nodes[i].data.clone())
+                    .collect();
+                (*kind, targets)
+            })
+            .collect())
+    }
+
+    fn identity(&self, el: &ElementData) -> Result<crate::identity::NodeIdentity> {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        if el.handle as usize >= nodes.len() {
+            return Err(Error::stale(
+                crate::StaleReason::Evicted,
+                format!("handle:{}", el.handle),
+            ));
+        }
+        Ok(crate::identity::NodeIdentity::from_key(
+            "mock",
+            el.pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
+            el.handle.to_string(),
+        ))
+    }
+
+    fn revalidate(&self, el: &ElementData) -> Result<()> {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let described = crate::error::stale_subject(el);
+        let Some(node) = nodes.get(el.handle as usize) else {
+            return Err(Error::stale(crate::StaleReason::Evicted, described));
+        };
+        // A node under a closed window is gone with it.
+        let mut cursor = Some(el.handle as usize);
+        while let Some(i) = cursor {
+            if nodes[i].closed {
+                return Err(Error::stale(crate::StaleReason::Removed, described));
+            }
+            cursor = nodes[i].parent;
+        }
+        if node.data.role != el.role {
+            return Err(Error::stale(
+                crate::StaleReason::IdentityChanged,
+                format!("{described}; the handle now names a {}", node.data.role),
+            ));
+        }
+        Ok(())
     }
 
     fn press(&self, el: &ElementData) -> Result<()> {
@@ -740,11 +890,27 @@ impl Provider for MockProvider {
         self.record(el, "resize_to", Some(format!("{width}x{height}")))
     }
 
+    /// With [`MockProvider::enable_events`]: a subscription on the bounded
+    /// channel that yields [`announcement_events`] and then disconnects.
+    /// Otherwise a platform error.
     fn subscribe(&self, _el: &ElementData) -> Result<Subscription> {
-        Err(Error::Platform {
-            code: -1,
-            message: "MockProvider does not support subscribe".to_string(),
-        })
+        use crate::event_provider::{event_channel, CancelHandle};
+        if !self.events.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(Error::Platform {
+                code: -1,
+                message: "MockProvider does not support subscribe".to_string(),
+            });
+        }
+        let (tx, rx) = event_channel();
+        for event in announcement_events() {
+            // The receiver is alive in this scope, so the send cannot fail.
+            tx.send(event).map_err(|e| Error::Platform {
+                code: -1,
+                message: e.to_string(),
+            })?;
+        }
+        drop(tx);
+        Ok(Subscription::new(rx, CancelHandle::noop()))
     }
 }
 
@@ -1175,6 +1341,11 @@ pub fn build_provider() -> Arc<MockProvider> {
             1234
         };
         let data = ElementData {
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             role,
             name: name.map(String::from),
             value: value.map(String::from),
@@ -1204,6 +1375,9 @@ pub fn build_provider() -> Arc<MockProvider> {
 
     Arc::new(MockProvider {
         nodes: Mutex::new(nodes),
+        relations: Mutex::new(HashMap::new()),
+        children_errors: Mutex::new(HashMap::new()),
+        events: std::sync::atomic::AtomicBool::new(false),
         actions: Mutex::new(Vec::new()),
         frames: Mutex::new(HashMap::new()),
         selections: Mutex::new(HashMap::new()),
@@ -1337,6 +1511,84 @@ fn mock_unit_at(text: &str, offset: u32, unit: TextUnit) -> Result<TextRange> {
         start: start as u32,
         end: end as u32,
     })
+}
+
+/// The shared tree plus a document (#476): a `main` landmark holding an h1
+/// and an h2, a navigation landmark with a link, a polite live region, and a
+/// labelled, described text field whose relations point at its label and its
+/// hint. Used by the binding tests of document semantics.
+pub fn build_document_provider() -> Arc<MockProvider> {
+    use crate::semantics::{Landmark, LiveRegionParts, Politeness, RelationKind};
+    let provider = build_provider();
+    {
+        let mut nodes = provider.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let window = 1;
+        let pid = nodes[window].data.pid;
+        let mut add = |parent: usize, mut data: ElementData| {
+            let i = nodes.len();
+            data.handle = i as u64;
+            data.pid = pid;
+            nodes.push(MockNode {
+                data,
+                children: Vec::new(),
+                parent: Some(parent),
+                closed: false,
+            });
+            nodes[parent].children.push(i);
+            i
+        };
+        let named = |role: Role, name: &str| {
+            let mut d = ElementData::for_role(role);
+            d.name = Some(name.into());
+            d
+        };
+        let mut main = named(Role::Landmark, "Article");
+        main.landmark_type = Some(Landmark::Main);
+        main.web_role = Some("main".into());
+        let main = add(window, main);
+        let mut h1 = named(Role::Heading, "Title");
+        h1.heading_level = Some(1);
+        add(main, h1);
+        let mut h2 = named(Role::Heading, "Section");
+        h2.heading_level = Some(2);
+        add(main, h2);
+        let mut nav = named(Role::Landmark, "Site");
+        nav.landmark_type = Some(Landmark::Navigation);
+        let nav = add(window, nav);
+        let mut link = named(Role::Link, "Docs");
+        link.link_url = Some("https://example.com/docs".into());
+        add(nav, link);
+        let mut live = named(Role::Status, "Saved");
+        live.live_region = Some(
+            LiveRegionParts {
+                politeness: Some(Politeness::Polite),
+                atomic: Some(true),
+                relevant: Some("additions text".into()),
+            }
+            .into(),
+        );
+        add(window, live);
+        let label = add(window, named(Role::StaticText, "Email address"));
+        let hint = add(window, named(Role::StaticText, "We never share it"));
+        let field = add(window, named(Role::TextField, "Email"));
+        provider
+            .relations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                field,
+                vec![
+                    (RelationKind::LabelledBy, vec![label]),
+                    (RelationKind::DescribedBy, vec![hint]),
+                ],
+            );
+        provider
+            .relations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(label, vec![(RelationKind::LabelFor, vec![field])]);
+    }
+    provider
 }
 
 /// Build the test tree plus a table, a virtualized list and a tree under the
@@ -1561,6 +1813,48 @@ pub fn text_edit_events() -> Vec<crate::event::Event> {
         deleted,
         Event::new(EventKind::TextChanged, "Mock", 1),
         Event::new(EventKind::TextSelectionChanged, "Mock", 1),
+    ]
+}
+
+/// The events [`MockProvider::subscribe`] yields, in order:
+///
+/// 1. `FocusChanged`.
+/// 2. `Announcement`, a request: text `"Saved"`, polite (UIA `MostRecent`).
+/// 3. `Announcement` from a live region: no text, polite.
+/// 4. `Announcement` from an alert: no text, assertive.
+pub fn announcement_events() -> Vec<crate::event::Event> {
+    use crate::event::{AnnouncementOrigin, AnnouncementParts, Event, EventKind};
+    use crate::semantics::Politeness;
+
+    let announce = |origin, text: Option<&str>, politeness, priority: Option<&str>| {
+        let mut event = Event::new(EventKind::Announcement, "Mock", 1);
+        event.announcement = Some(
+            AnnouncementParts {
+                origin,
+                text: text.map(str::to_string),
+                politeness: Some(politeness),
+                platform_priority: priority.map(str::to_string),
+                activity_id: priority.map(|_| "save".to_string()),
+            }
+            .into(),
+        );
+        event
+    };
+    vec![
+        Event::new(EventKind::FocusChanged, "Mock", 1),
+        announce(
+            AnnouncementOrigin::Request,
+            Some("Saved"),
+            Politeness::Polite,
+            Some("MostRecent"),
+        ),
+        announce(
+            AnnouncementOrigin::LiveRegion,
+            None,
+            Politeness::Polite,
+            None,
+        ),
+        announce(AnnouncementOrigin::Alert, None, Politeness::Assertive, None),
     ]
 }
 

@@ -17,6 +17,7 @@
 //! reported in the payload — a silently shortened tree reads as a complete
 //! one, which is worse than no tree.
 
+use super::refs::RefTable;
 use serde_json::{json, Map, Value};
 
 use super::base64;
@@ -328,12 +329,14 @@ pub(crate) trait ToolHost {
 /// stops every drainer and cancels every platform subscription.
 pub(crate) struct Xa11yTools {
     events: Registry,
+    refs: RefTable,
 }
 
 impl Xa11yTools {
     pub(crate) fn new() -> Self {
         Self {
             events: Registry::new(),
+            refs: RefTable::default(),
         }
     }
 }
@@ -350,6 +353,7 @@ const TOOL_NAMES: &[&str] = &[
     "action",
     "text",
     "table",
+    "relations",
     "click",
     "move",
     "drag",
@@ -381,11 +385,12 @@ impl ToolHost for Xa11yTools {
             "shell" => tool_shell(),
             "windows" => tool_windows(args),
             "enable_web_accessibility" => tool_enable_web_accessibility(args),
-            "tree" => tool_tree(args),
-            "find" => tool_find(args),
-            "action" => tool_action(args),
-            "text" => tool_text(args),
-            "table" => tool_table(args),
+            "tree" => tool_tree(args, &self.refs),
+            "find" => tool_find(args, &self.refs),
+            "action" => tool_action(args, &self.refs),
+            "text" => tool_text(args, &self.refs),
+            "table" => tool_table(args, &self.refs),
+            "relations" => tool_relations(args, &self.refs),
             "click" => tool_click(args),
             "move" => tool_move(args),
             "drag" => tool_drag(args),
@@ -440,6 +445,24 @@ fn app_properties() -> Map<String, Value> {
 
 /// Properties naming the target — an application or a shell surface — shared
 /// by every a11y tool.
+/// The `ref` property of `action`, `text` and `table`: an alternative to
+/// `selector` naming an element from an earlier `tree` / `find`.
+fn ref_property() -> Value {
+    json!({
+        "type": "string",
+        "description": format!(
+            "An element `ref` from a recent `tree`, `find` or `relations` result (`c3:17`), in place of \
+             `selector`: give exactly one of the two, and no `app` / `pid` / `shell` with a \
+             ref. A ref names exactly that element. If it was removed, its application \
+             restarted, or its id now names a different element, the call fails with \
+             `element_stale` (and `stale_reason`) rather than finding a similar one. The \
+             server keeps the refs of its {} most recent `tree` / `find` / `relations` results; an older \
+             ref fails with `ref_expired`.",
+            super::refs::MAX_CAPTURES
+        ),
+    })
+}
+
 fn app_target_properties() -> Map<String, Value> {
     let mut props = app_properties();
     props.insert(
@@ -660,6 +683,24 @@ fn tool_definition(name: &str) -> Value {
                      children to one is marked where it happened."
                 )),
             );
+            props.insert(
+                "detail".into(),
+                json!({
+                    "type": "array",
+                    "items": { "type": "string", "enum": TREE_DETAILS },
+                    "description": format!(
+                        "Extra reads per node. `text`: the full text of each element \
+                         with a text interface, as `text` (`content`, `length` in UTF-16 \
+                         units, `truncated`), within {} bytes in total, so document \
+                         text that no action needs is still read. `relations`: \
+                         `relations` maps each reported kind (`labelled_by`, \
+                         `controls`, ...) to its targets, each a `ref`; a target outside \
+                         the result also carries `role`, `name` and `outside: true`. \
+                         Each costs a platform read per node.",
+                        crate::capture::DEFAULT_MAX_TEXT_BYTES
+                    ),
+                }),
+            );
             tool(
                 "tree",
                 "Read accessibility tree",
@@ -677,6 +718,8 @@ fn tool_definition(name: &str) -> Value {
                      see what was cut, call `find` with a selector reaching into that \
                      node (`list[name=\"Files\"] list_item`), or `tree` again with a larger `max_depth`.\n\n\
                      {CENTER_NOTE}\n\n\
+                     Every node carries a `ref` (`c3:17`) that `action`, `text` and `table` \
+                     accept in place of a selector, to act on exactly that element.\n\n\
                      {field_cap}\n\n\
                      {ACTIONS_FIELD_NOTE}",
                     field_cap = field_cap_note(),
@@ -723,7 +766,9 @@ fn tool_definition(name: &str) -> Value {
                      drag, scroll, and screenshot tools take, plus its `states` and \
                      the actions the application advertises. A selector that matches \
                      nothing comes back with the near-miss candidates that were in \
-                     scope, so read those before guessing again.\n\n\
+                     scope, so read those before guessing again. Each match also carries \
+                     a `ref` that `action`, `text` and `table` accept in place of a \
+                     selector.\n\n\
                      {CENTER_NOTE}\n\n\
                      Without `stable` this reads the tree once and does not wait. Set \
                      `stable: true` before clicking or dragging something that may \
@@ -811,6 +856,7 @@ fn tool_definition(name: &str) -> Value {
                                     Required for `resize-to`; ignored otherwise.",
                 }),
             );
+            props.insert("ref".into(), ref_property());
             tool(
                 "action",
                 "Perform accessibility action",
@@ -821,7 +867,9 @@ fn tool_definition(name: &str) -> Value {
                      visible on screen.\n\n\
                      The selector must match exactly one element. One that matches \
                      several is refused with an `ambiguous_selector` failure listing \
-                     what it matched, rather than applied to the first of them.\n\n\
+                     what it matched, rather than applied to the first of them. Pass a \
+                     `ref` from `tree` or `find` instead to act on exactly the element \
+                     you read: it acts at once (no wait) or fails `element_stale`.\n\n\
                      Auto-waits for the selector to match an element that is visible and \
                      enabled, re-resolving as it polls, and only then acts. The window verbs \
                      (`activate`, `minimize`, `maximize`, `enter-fullscreen`, `restore`, \
@@ -864,7 +912,7 @@ fn tool_definition(name: &str) -> Value {
                     timeout = default_timeout_label(),
                     timeout_env = crate::DEFAULT_TIMEOUT_ENV_VAR,
                 ),
-                object_schema(props, &["action", "selector"]),
+                object_schema(props, &["action"]),
             )
         }
         "click" => {
@@ -1133,6 +1181,7 @@ fn tool_definition(name: &str) -> Value {
                     page_max = cli::TEXT_PAGE_MAX,
                 )),
             );
+            props.insert("ref".into(), ref_property());
             tool(
                 "text",
                 "Read text by range",
@@ -1177,7 +1226,54 @@ fn tool_definition(name: &str) -> Value {
                     sel_cap = cli::MAX_SELECTIONS,
                     timeout = default_timeout_label(),
                 ),
-                object_schema(props, &["op", "selector"]),
+                object_schema(props, &["op"]),
+            )
+        }
+        "relations" => {
+            let mut props = app_target_properties();
+            props.insert(
+                "selector".into(),
+                json!({
+                    "type": "string",
+                    "description": format!(
+                        "Selector for the element to ask. Must match exactly one \
+                         element: several are refused with `ambiguous_selector` and \
+                         the candidates.\n\n{SELECTOR_SYNTAX}"
+                    ),
+                }),
+            );
+            props.insert(
+                "kinds".into(),
+                json!({
+                    "type": "array",
+                    "items": { "type": "string", "enum": cli::relation_kind_names() },
+                    "description": "Relation kinds to read. Omit for every kind this \
+                                    platform reports (the `relation:*` rows of \
+                                    `capabilities`). Naming a kind the platform never \
+                                    reports fails with `unsupported`.",
+                }),
+            );
+            props.insert(
+                "limit".into(),
+                FIND_LIMIT.property(format!(
+                    "Most elements to return per kind. Default {FIND_DEFAULT_LIMIT}."
+                )),
+            );
+            props.insert("ref".into(), ref_property());
+            tool(
+                "relations",
+                "Element relations",
+                "The elements one element is related to: who labels it \
+                 (`labelled_by`) or describes it (`described_by`), what it controls \
+                 (`controls`), where reading flows next (`flows_to`), its error \
+                 message, and the reverse of each. Each kind comes back once, in \
+                 request order, as `{kind, count, returned, truncated, elements}`; a \
+                 kind with no targets has an empty list, never an absent entry. \
+                 Elements are in the shape `find` returns, each with a `ref`.\n\n\
+                 The kinds are reported as the platform reports them: macOS reports \
+                 `aria-controls` and `aria-flowto` together as `linked`, and Windows \
+                 reports `aria-details` as `details`. Reads once and does not wait.",
+                object_schema(props, &[]),
             )
         }
         "table" => {
@@ -1221,6 +1317,7 @@ fn tool_definition(name: &str) -> Value {
                     "Most elements to return. Default {FIND_DEFAULT_LIMIT}."
                 )),
             );
+            props.insert("ref".into(), ref_property());
             tool(
                 "table",
                 "Table lookups",
@@ -1251,7 +1348,7 @@ fn tool_definition(name: &str) -> Value {
                      {field_cap}",
                     field_cap = field_cap_note(),
                 ),
-                object_schema(props, &["op", "selector"]),
+                object_schema(props, &["op"]),
             )
         }
         "events_start" => tool(
@@ -1339,7 +1436,9 @@ fn events_start_properties() -> Map<String, Value> {
             "description": "Kinds to buffer, e.g. [\"focus_changed\", \"value_changed\"]. \
                             Omit for every kind. Filtering happens before buffering, so \
                             on a chatty application it is what keeps the events you \
-                            care about from being evicted by ones you do not.",
+                            care about from being evicted by ones you do not. A kind \
+                            this platform never sends fails with `unsupported` (see the \
+                            `event:*` rows of `capabilities`) instead of never arriving.",
         }),
     );
     props
@@ -1813,133 +1912,176 @@ fn tool_shell() -> CliResult<ToolOutput> {
     })))
 }
 
-fn tool_tree(args: &Value) -> CliResult<ToolOutput> {
+fn tool_tree(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     let max_depth = opt_usize(args, "max_depth", TREE_DEFAULT_MAX_DEPTH, TREE_DEPTH)?;
+    let detail = tree_detail(args)?;
     let target = target(args)?;
-    let root = target.root();
-
-    let mut budget = TREE_MAX_NODES;
-    let mut cut = Cut::default();
     let center = cli::pointer_center();
-    let node = build_node(
-        &root,
+    let (node, cap) = tree_json(
+        &target,
         max_depth,
-        0,
-        &mut budget,
-        &mut cut,
-        Some(&target),
+        TREE_MAX_NODES,
+        detail,
         center.is_usable(),
-    );
+        refs,
+    )?;
 
     let mut out = Map::new();
     target_fields(&target, &mut out);
     note_center(&mut out, &center);
     out.insert("max_depth".into(), json!(max_depth));
-    out.insert(
-        "truncated".into(),
-        json!({
-            "by_depth": cut.by_depth,
-            "by_node_limit": cut.by_node_limit,
-            "node_limit": TREE_MAX_NODES,
-        }),
-    );
+    let mut truncated = Map::new();
+    truncated.insert("by_depth".into(), json!(cap.truncated.by_depth));
+    truncated.insert("by_node_limit".into(), json!(cap.truncated.by_nodes));
+    truncated.insert("node_limit".into(), json!(TREE_MAX_NODES));
+    if detail.text {
+        truncated.insert("by_text".into(), json!(cap.truncated.by_text));
+        truncated.insert("text_limit_bytes".into(), json!(cap.options.max_text_bytes));
+    }
+    out.insert("truncated".into(), Value::Object(truncated));
+    out.insert("vanished".into(), json!(cap.vanished));
     out.insert("tree".into(), node);
     Ok(ToolOutput::json(Value::Object(out)))
 }
 
-/// Which of `tree`'s limits actually dropped a node.
-///
-/// Set only where children existed and were left out, so a tree that merely
-/// reached `max_depth` at its leaves, or spent its budget exactly, does not
-/// report a cut that removed nothing.
-#[derive(Debug, Default)]
-struct Cut {
-    by_depth: bool,
-    by_node_limit: bool,
+/// What `tree` reads besides structure.
+#[derive(Debug, Clone, Copy, Default)]
+struct TreeDetail {
+    text: bool,
+    relations: bool,
 }
 
-/// Walk `element` into a JSON node, honouring both the depth limit and a
-/// shared node budget.
+/// The `detail` names `tree` accepts.
+const TREE_DETAILS: &[&str] = &["text", "relations"];
+
+fn tree_detail(args: &Value) -> CliResult<TreeDetail> {
+    let mut detail = TreeDetail::default();
+    let items = match args.get("detail") {
+        None | Some(Value::Null) => return Ok(detail),
+        Some(Value::Array(items)) => items,
+        Some(_) => return Err(usage("\"detail\" must be an array of strings")),
+    };
+    for item in items {
+        match item.as_str() {
+            Some("text") => detail.text = true,
+            Some("relations") => detail.relations = true,
+            Some(other) => {
+                return Err(usage(format!(
+                    "unknown detail {other:?}; expected one of {}",
+                    TREE_DETAILS.join(", ")
+                )))
+            }
+            None => return Err(usage("\"detail\" must be an array of strings")),
+        }
+    }
+    Ok(detail)
+}
+
+/// Capture `target` and encode it as nested JSON, every node with a ref.
 ///
-/// A node whose children were dropped by either limit carries
+/// A node whose children were left out by a limit carries
 /// `subtree_truncated: true` and `children_count` (how many children it
 /// has, of which `children` holds the first few or none). Without that a
 /// pruned node is indistinguishable from a leaf, and the global `truncated`
-/// flags cannot say *where* to look deeper. Counting the children of a node
-/// at the depth frontier costs one enumeration per frontier node — at most
-/// one per node already in the budget — and that is what lets a genuine leaf
-/// at the frontier stay unmarked.
-///
-/// A child-enumeration failure is recorded inside the node rather than
-/// failing the whole tree: one inaccessible subtree should not cost the
-/// caller every other window (this mirrors what `xa11y tree` prints).
-fn build_node(
-    element: &Element,
+/// flags cannot say *where* to look deeper. A child-enumeration failure is
+/// recorded in the node (`children_error`) rather than failing the whole
+/// tree: one inaccessible subtree should not cost the caller every other
+/// window.
+fn tree_json(
+    target: &Target,
     max_depth: usize,
-    depth: usize,
-    budget: &mut usize,
-    cut: &mut Cut,
-    scope: Option<&cli::Target>,
+    max_nodes: usize,
+    detail: TreeDetail,
     center: bool,
-) -> Value {
-    // `Element` derefs to `ElementData`, so the leaf encoding is shared with
-    // `find` and the two cannot describe the same element differently.
-    let mut node = element_data_json(element, center);
-    let obj = node
-        .as_object_mut()
-        .expect("element_data_json always builds an object");
+    refs: &RefTable,
+) -> CliResult<(Value, crate::Capture)> {
+    let options = crate::CaptureOptions::new()
+        .max_depth(max_depth)
+        .max_nodes(max_nodes)
+        .text(detail.text)
+        .relations(detail.relations);
+    let cap = target.capture(&options)?;
 
-    let children = match scope.map_or_else(|| element.children(), cli::Target::children) {
-        Ok(children) => children,
-        Err(e) => {
-            obj.insert("children_error".into(), json!(e.to_string()));
-            // Whichever limit would have stopped here may have hidden a
-            // subtree or not; the global flag must not claim nothing was cut
-            // when that is unknown.
-            if depth >= max_depth {
-                cut.by_depth = true;
-            } else if *budget == 0 {
-                cut.by_node_limit = true;
-            }
-            return node;
+    let mut capture = refs.begin();
+    let node_refs: Vec<String> = cap.nodes.iter().map(|n| capture.add(&n.element)).collect();
+    // Built bottom-up: in pre-order every child comes after its parent.
+    let mut built: Vec<Option<Value>> = vec![None; cap.nodes.len()];
+    for node in cap.nodes.iter().rev() {
+        let mut value = element_data_json(&node.element, center);
+        let obj = value
+            .as_object_mut()
+            .expect("element_data_json always builds an object");
+        obj.insert("ref".into(), json!(node_refs[node.index]));
+        for err in &node.errors {
+            let key = match err.step {
+                crate::CaptureStep::Children | crate::CaptureStep::Cycle => "children_error",
+                crate::CaptureStep::Text => "text_error",
+                crate::CaptureStep::Relations => "relations_error",
+                // Identity only feeds cycle detection and relation
+                // resolution; its failure shows up there.
+                _ => continue,
+            };
+            obj.insert(key.into(), json!(err.error.to_string()));
         }
-    };
-    if children.is_empty() {
-        return node;
-    }
-
-    let mut encoded = Vec::new();
-    if depth >= max_depth {
-        cut.by_depth = true;
-    } else {
-        for child in &children {
-            if *budget == 0 {
-                cut.by_node_limit = true;
-                break;
+        let has_children_error = node
+            .errors
+            .iter()
+            .any(|e| e.step == crate::CaptureStep::Children);
+        if node.children_truncated && !has_children_error {
+            obj.insert("subtree_truncated".into(), json!(true));
+            if let Some(count) = node.children_count {
+                obj.insert("children_count".into(), json!(count));
             }
-            *budget -= 1;
-            encoded.push(build_node(
-                child,
-                max_depth,
-                depth + 1,
-                budget,
-                cut,
-                None,
-                center,
-            ));
         }
+        if let Some(text) = &node.text {
+            obj.insert(
+                "text".into(),
+                json!({
+                    "content": text.content,
+                    "length": text.length,
+                    "truncated": text.truncated,
+                }),
+            );
+        }
+        let relations: Map<String, Value> = node
+            .relations
+            .iter()
+            .filter(|(_, targets)| !targets.is_empty())
+            .map(|(kind, targets)| {
+                let listed: Vec<Value> = targets
+                    .iter()
+                    .map(|t| match t {
+                        crate::RelationTarget::Node(i) => json!({ "ref": node_refs[*i] }),
+                        crate::RelationTarget::Outside(el) => json!({
+                            "ref": capture.add(el),
+                            "role": el.role.to_snake_case(),
+                            "name": el.name,
+                            "outside": true,
+                        }),
+                    })
+                    .collect();
+                (kind.to_snake_case().to_string(), Value::Array(listed))
+            })
+            .collect();
+        if !relations.is_empty() {
+            obj.insert("relations".into(), Value::Object(relations));
+        }
+        let children: Vec<Value> = node
+            .children
+            .iter()
+            .filter_map(|&c| built[c].take())
+            .collect();
+        if !children.is_empty() {
+            obj.insert("children".into(), Value::Array(children));
+        }
+        built[node.index] = Some(value);
     }
-    if encoded.len() < children.len() {
-        obj.insert("subtree_truncated".into(), json!(true));
-        obj.insert("children_count".into(), json!(children.len()));
-    }
-    if !encoded.is_empty() {
-        obj.insert("children".into(), Value::Array(encoded));
-    }
-    node
+    refs.keep(capture);
+    let root = built[0].take().unwrap_or(Value::Null);
+    Ok((root, cap))
 }
 
-fn tool_find(args: &Value) -> CliResult<ToolOutput> {
+fn tool_find(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     let selector = req_str(args, "selector")?;
     let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT)?;
     let stable = opt_bool(args, "stable")?.unwrap_or(false);
@@ -1956,6 +2098,7 @@ fn tool_find(args: &Value) -> CliResult<ToolOutput> {
             &[element],
             limit,
             &cli::pointer_center(),
+            refs,
         ));
     }
 
@@ -1984,6 +2127,7 @@ fn tool_find(args: &Value) -> CliResult<ToolOutput> {
         &elements,
         limit,
         &cli::pointer_center(),
+        refs,
     ))
 }
 
@@ -1998,13 +2142,22 @@ fn find_output(
     elements: &[Element],
     limit: usize,
     center: &cli::PointerCenter,
+    refs: &RefTable,
 ) -> ToolOutput {
     let total = elements.len();
+    let mut capture = refs.begin();
     let matches: Vec<Value> = elements
         .iter()
         .take(limit)
-        .map(|el| element_data_json(el, center.is_usable()))
+        .map(|el| {
+            let mut encoded = element_data_json(el, center.is_usable());
+            if let Some(obj) = encoded.as_object_mut() {
+                obj.insert("ref".into(), json!(capture.add(el)));
+            }
+            encoded
+        })
         .collect();
+    refs.keep(capture);
 
     let mut out = Map::new();
     out.insert("selector".into(), json!(selector));
@@ -2017,9 +2170,48 @@ fn find_output(
     ToolOutput::json(Value::Object(out))
 }
 
-fn tool_action(args: &Value) -> CliResult<ToolOutput> {
+/// Which element a tool acts on: a `selector` resolved now in the given
+/// target, or a `ref` from an earlier `tree` / `find` — exactly one.
+enum Subject<'a> {
+    Selector(&'a str),
+    Ref(&'a str),
+}
+
+/// Read the `selector` / `ref` pair. Exactly one must be given; a `ref`
+/// carries its own application, so it takes no `app` / `pid` / `shell`.
+fn subject(args: &Value) -> CliResult<Subject<'_>> {
+    match (opt_str(args, "selector")?, opt_str(args, "ref")?) {
+        (Some(selector), None) => Ok(Subject::Selector(selector)),
+        (None, Some(r)) => {
+            if let Some(key) = ["app", "pid", "shell"]
+                .into_iter()
+                .find(|k| args.get(*k).is_some_and(|v| !v.is_null()))
+            {
+                return Err(usage(format!(
+                    "\"{key}\" cannot be combined with \"ref\": a ref already names its element"
+                )));
+            }
+            Ok(Subject::Ref(r))
+        }
+        (Some(_), Some(_)) => Err(usage(
+            "give \"selector\" or \"ref\", not both: a ref names one element already",
+        )),
+        (None, None) => Err(usage("missing required argument \"selector\" (or \"ref\")")),
+    }
+}
+
+/// The element a `ref` names, proven to still be the captured node before a
+/// read: a read through a reused platform id would otherwise return another
+/// node's data. Actions run the same check themselves.
+fn resolve_ref_for_read(refs: &RefTable, reference: &str) -> CliResult<Element> {
+    let element = refs.resolve(reference)?;
+    element.check_alive()?;
+    Ok(element)
+}
+
+fn tool_action(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     let action = req_str(args, "action")?;
-    let selector = req_str(args, "selector")?;
+    let subject = subject(args)?;
     let value = opt_str(args, "value")?;
     let at = opt_str(args, "at")?;
     let size = opt_str(args, "size")?;
@@ -2030,8 +2222,37 @@ fn tool_action(args: &Value) -> CliResult<ToolOutput> {
     // typed a bad point must be told the point is bad, not that an app was
     // not found.
     let action_args = cli::parse_action_args(action, value, at, size)?;
-    let target = target(args)?;
-    tool_action_parsed(&target, action, selector, &action_args)
+    match subject {
+        Subject::Selector(selector) => {
+            let target = target(args)?;
+            tool_action_parsed(&target, action, selector, &action_args)
+        }
+        Subject::Ref(reference) => tool_action_on_ref(refs, action, reference, &action_args),
+    }
+}
+
+/// [`tool_action`] for a `ref`: the action reaches exactly the element the
+/// ref names, or fails `element_stale`. No auto-wait: the element is already
+/// resolved, and waiting cannot make a removed node come back.
+fn tool_action_on_ref(
+    refs: &RefTable,
+    action: &str,
+    reference: &str,
+    action_args: &cli::ActionArgs,
+) -> CliResult<ToolOutput> {
+    if !cli::ACTION_NAMES.contains(&action) {
+        return Err(usage(format!(
+            "unknown action: {action} (expected one of: {})",
+            cli::ACTION_NAMES.join(", ")
+        )));
+    }
+    let element = refs.resolve(reference)?;
+    cli::perform_action_on(&element, action, action_args)?;
+    let mut out = Map::new();
+    out.insert("ok".into(), json!(true));
+    out.insert("action".into(), json!(action));
+    out.insert("ref".into(), json!(reference));
+    Ok(ToolOutput::json(Value::Object(out)))
 }
 
 /// The resolving-and-dispatching half of [`tool_action`] against an explicit
@@ -2143,11 +2364,24 @@ fn text_op_from_args(args: &Value) -> CliResult<cli::TextOp> {
     )
 }
 
-fn tool_text(args: &Value) -> CliResult<ToolOutput> {
-    let selector = req_str(args, "selector")?;
+fn tool_text(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
+    let subject = subject(args)?;
     let op = text_op_from_args(args)?;
-    let target = target(args)?;
-    tool_text_parsed(&target, selector, &op)
+    match subject {
+        Subject::Selector(selector) => {
+            let target = target(args)?;
+            tool_text_parsed(&target, selector, &op)
+        }
+        Subject::Ref(reference) => {
+            let element = resolve_ref_for_read(refs, reference)?;
+            let result = cli::run_text_op(&element.text()?, &op)?;
+            let mut out = Map::new();
+            out.insert("ref".into(), json!(reference));
+            out.insert("units".into(), json!("utf16"));
+            out.insert("result".into(), result);
+            Ok(ToolOutput::json(Value::Object(out)))
+        }
+    }
 }
 
 /// The resolving half of [`tool_text`], against an explicit target, so the
@@ -2166,9 +2400,9 @@ fn tool_text_parsed(target: &Target, selector: &str, op: &cli::TextOp) -> CliRes
     Ok(ToolOutput::json(Value::Object(out)))
 }
 
-fn tool_table(args: &Value) -> CliResult<ToolOutput> {
+fn tool_table(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     let op_name = req_str(args, "op")?;
-    let selector = req_str(args, "selector")?;
+    let subject = subject(args)?;
     let op = cli::parse_table_op(
         op_name,
         opt_u32(args, "row", TABLE_INDEX)?,
@@ -2177,15 +2411,131 @@ fn tool_table(args: &Value) -> CliResult<ToolOutput> {
         "\"column\"",
     )?;
     let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT)?;
-    let target = target(args)?;
-    tool_table_parsed(
-        &target,
-        selector,
-        op_name,
-        op,
-        limit,
-        &cli::pointer_center(),
-    )
+    match subject {
+        Subject::Selector(selector) => {
+            let target = target(args)?;
+            tool_table_parsed(
+                &target,
+                selector,
+                op_name,
+                op,
+                limit,
+                &cli::pointer_center(),
+            )
+        }
+        Subject::Ref(reference) => {
+            let element = resolve_ref_for_read(refs, reference)?;
+            let found = cli::run_table_op(&element, op)?;
+            let mut out = Map::new();
+            out.insert("op".into(), json!(op_name));
+            out.insert("ref".into(), json!(reference));
+            Ok(table_output(
+                out,
+                &element,
+                op,
+                &found,
+                limit,
+                &cli::pointer_center(),
+            ))
+        }
+    }
+}
+
+fn tool_relations(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
+    let subject = subject(args)?;
+    let kinds = match args.get("kinds") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => {
+            let names = items
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .ok_or_else(|| usage("\"kinds\" must be an array of strings"))
+                })
+                .collect::<CliResult<Vec<&str>>>()?;
+            if names.is_empty() {
+                return Err(usage(
+                    "\"kinds\" is empty; omit it to read every kind this platform reports",
+                ));
+            }
+            cli::parse_relation_kinds(&names)?
+        }
+        Some(_) => return Err(usage("\"kinds\" must be an array of strings")),
+    };
+    let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT)?;
+    match subject {
+        Subject::Selector(selector) => {
+            let target = target(args)?;
+            tool_relations_parsed(&target, selector, &kinds, limit, refs)
+        }
+        Subject::Ref(reference) => {
+            let element = resolve_ref_for_read(refs, reference)?;
+            let mut out = Map::new();
+            out.insert("ref".into(), json!(reference));
+            relations_output(out, &element, &kinds, limit, refs)
+        }
+    }
+}
+
+/// The resolving half of [`tool_relations`], against an explicit target.
+fn tool_relations_parsed(
+    target: &Target,
+    selector: &str,
+    kinds: &[crate::RelationKind],
+    limit: usize,
+    refs: &RefTable,
+) -> CliResult<ToolOutput> {
+    let element = match cli::resolve_table_element(target, selector)? {
+        Ok(element) => element,
+        Err(matches) => return Err(ambiguous(selector, &matches)),
+    };
+    let mut out = Map::new();
+    out.insert("selector".into(), json!(selector));
+    target_fields(target, &mut out);
+    relations_output(out, &element, kinds, limit, refs)
+}
+
+/// The `relations` result: each kind with at most `limit` targets, each
+/// target carrying a ref.
+fn relations_output(
+    mut out: Map<String, Value>,
+    element: &Element,
+    kinds: &[crate::RelationKind],
+    limit: usize,
+    refs: &RefTable,
+) -> CliResult<ToolOutput> {
+    let center = cli::pointer_center();
+    note_center(&mut out, &center);
+    let center = center.is_usable();
+    let found = element.relations(kinds)?;
+    let mut capture = refs.begin();
+    let relations: Vec<Value> = found
+        .iter()
+        .map(|(kind, targets)| {
+            let listed: Vec<Value> = targets
+                .iter()
+                .take(limit)
+                .map(|el| {
+                    let mut encoded = element_data_json(el, center);
+                    if let Some(obj) = encoded.as_object_mut() {
+                        obj.insert("ref".into(), json!(capture.add(el)));
+                    }
+                    encoded
+                })
+                .collect();
+            json!({
+                "kind": kind.to_snake_case(),
+                "count": targets.len(),
+                "returned": listed.len(),
+                "truncated": targets.len() > listed.len(),
+                "elements": listed,
+            })
+        })
+        .collect();
+    refs.keep(capture);
+    out.insert("element".into(), element_data_json(element, center));
+    out.insert("relations".into(), Value::Array(relations));
+    Ok(ToolOutput::json(Value::Object(out)))
 }
 
 /// The resolving half of [`tool_table`], against an explicit target.
@@ -2206,6 +2556,19 @@ fn tool_table_parsed(
     out.insert("op".into(), json!(op_name));
     out.insert("selector".into(), json!(selector));
     target_fields(target, &mut out);
+    Ok(table_output(out, &element, op, &found, limit, center))
+}
+
+/// The rest of a `table` result after its header fields: the cell for
+/// `cell-at`, otherwise the bounded element list.
+fn table_output(
+    mut out: Map<String, Value>,
+    element: &Element,
+    op: cli::TableOp,
+    found: &[Element],
+    limit: usize,
+    center: &cli::PointerCenter,
+) -> ToolOutput {
     note_center(&mut out, center);
     if let cli::TableOp::CellAt { row, column } = op {
         out.insert("row".into(), json!(row));
@@ -2219,11 +2582,11 @@ fn tool_table_parsed(
                 out.insert("cell".into(), Value::Null);
                 out.insert(
                     "reason".into(),
-                    json!(cli::no_cell_message(&element, row, column)),
+                    json!(cli::no_cell_message(element, row, column)),
                 );
             }
         }
-        return Ok(ToolOutput::json(Value::Object(out)));
+        return ToolOutput::json(Value::Object(out));
     }
     let listed: Vec<Value> = found
         .iter()
@@ -2234,7 +2597,7 @@ fn tool_table_parsed(
     out.insert("returned".into(), json!(listed.len()));
     out.insert("truncated".into(), json!(found.len() > listed.len()));
     out.insert("elements".into(), Value::Array(listed));
-    Ok(ToolOutput::json(Value::Object(out)))
+    ToolOutput::json(Value::Object(out))
 }
 
 /// `windows` tool — enumerate top-level windows (winlenium's list-windows).
@@ -2619,7 +2982,10 @@ fn tool_events_start(registry: &Registry, args: &Value) -> CliResult<ToolOutput>
     // leave a live platform subscription behind that nobody holds a handle to.
     let kinds = event_kinds(args)?;
     let app = events_app(args)?;
-    let sub = app.subscribe()?;
+    // Core refuses a kind this platform never sends (`unsupported`) before
+    // subscribing; the drainer below still filters what it buffers.
+    let sub = app
+        .subscribe_with(&crate::SubscribeOptions::new().kinds(kinds.clone().unwrap_or_default()))?;
     Ok(ToolOutput::json(
         registry.start(&app.name, app.pid, sub, kinds)?,
     ))
@@ -2818,6 +3184,39 @@ pub(super) fn element_data_json(data: &crate::ElementData, center: bool) -> Valu
         data.collection.filter(|c| !c.is_empty()),
     );
 
+    // Document semantics (#476): each only when reported.
+    insert_some(
+        &mut node,
+        "heading_level",
+        data.heading_level.map(Value::from),
+    );
+    insert_some(
+        &mut node,
+        "landmark_type",
+        data.landmark_type.map(|l| Value::from(l.to_snake_case())),
+    );
+    insert_some(
+        &mut node,
+        "web_role",
+        data.web_role.as_deref().map(Value::from),
+    );
+    insert_some(&mut node, "url", data.link_url.as_deref().map(Value::from));
+    if let Some(live) = data.live_region.as_ref().filter(|l| !l.is_empty()) {
+        let mut l = Map::new();
+        insert_some(
+            &mut l,
+            "politeness",
+            live.politeness.map(|p| Value::from(p.to_snake_case())),
+        );
+        insert_some(&mut l, "atomic", live.atomic.map(Value::from));
+        insert_some(
+            &mut l,
+            "relevant",
+            live.relevant.as_deref().map(Value::from),
+        );
+        node.insert("live_region".into(), Value::Object(l));
+    }
+
     if !data.actions.is_empty() {
         node.insert("actions".into(), json!(data.actions));
     }
@@ -2958,6 +3357,10 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
         // The range and the text's current length as fields, so a caller
         // holding a stale range sees how long the text is now without
         // parsing the message (tenet 6).
+        CliError::Xa11y(crate::Error::ElementStale { reason, element }) => {
+            structured.insert("stale_reason".into(), json!(reason.to_snake_case()));
+            structured.insert("element".into(), json!(element));
+        }
         CliError::Xa11y(crate::Error::InvalidTextRange {
             start, end, length, ..
         }) => {
@@ -2999,6 +3402,10 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
             structured.insert("subscription_id".into(), json!(id));
             structured.insert("expired".into(), json!(expired));
             structured.insert("live_subscriptions".into(), json!(live));
+        }
+        CliError::RefExpired { reference, kept } => {
+            structured.insert("ref".into(), json!(reference));
+            structured.insert("kept_captures".into(), json!(kept));
         }
         CliError::Usage(_) | CliError::NotFound(_) => {}
     }
@@ -3080,6 +3487,7 @@ fn failure_kind(err: &CliError) -> &'static str {
         // that cannot tell them apart retries the wrong one.
         CliError::NoSubscription { expired: true, .. } => return "subscription_expired",
         CliError::NoSubscription { expired: false, .. } => return "subscription_not_found",
+        CliError::RefExpired { .. } => return "ref_expired",
         CliError::Xa11y(inner) => inner,
     };
     match inner {
@@ -3111,53 +3519,45 @@ mod tests {
             xa11y_core::mock::build_split_provider();
         let app = crate::App::by_pid_with(provider, 1234, std::time::Duration::ZERO).unwrap();
         let target = cli::Target::App(app);
-        let mut budget = 20;
-        let mut cut = Cut::default();
-        let tree = build_node(
-            &target.root(),
-            1,
-            0,
-            &mut budget,
-            &mut cut,
-            Some(&target),
-            true,
-        );
+        let refs = RefTable::default();
+        let (tree, _) = tree_json(&target, 1, 21, TreeDetail::default(), true, &refs).unwrap();
         let children = tree["children"].as_array().unwrap();
         assert_eq!(children.len(), 2);
         assert_eq!(children[1]["name"], "Second Window");
         assert!(children.iter().all(|child| child.get("children").is_none()));
-        let mut budget = 1;
-        let tree = build_node(
-            &target.root(),
-            5,
-            0,
-            &mut budget,
-            &mut cut,
-            Some(&target),
-            true,
-        );
+        let (tree, cap) = tree_json(&target, 5, 2, TreeDetail::default(), true, &refs).unwrap();
         assert_eq!(tree["children"].as_array().unwrap().len(), 1);
-        assert_eq!(budget, 0);
+        assert!(cap.truncated.by_nodes);
+    }
+
+    /// Which of `tree`'s limits cut something, as the result reports them.
+    #[derive(Debug)]
+    struct Cut {
+        by_depth: bool,
+        by_node_limit: bool,
     }
 
     /// Walk the mock app with explicit limits, returning the tree and which
-    /// limits cut something.
+    /// limits cut something. `budget` counts nodes below the root, as the
+    /// old walker did; the capture's limit includes the root.
     fn mock_tree(max_depth: usize, budget: usize) -> (Value, Cut) {
         let provider: std::sync::Arc<dyn crate::Provider> = xa11y_core::mock::build_provider();
         let app = crate::App::by_pid_with(provider, 1234, std::time::Duration::ZERO)
             .expect("the mock app resolves by pid");
         let target = cli::Target::App(app);
-        let mut budget = budget;
-        let mut cut = Cut::default();
-        let tree = build_node(
-            &target.root(),
+        let (tree, cap) = tree_json(
+            &target,
             max_depth,
-            0,
-            &mut budget,
-            &mut cut,
-            Some(&target),
+            budget + 1,
+            TreeDetail::default(),
             true,
-        );
+            &RefTable::default(),
+        )
+        .expect("the mock tree captures");
+        let cut = Cut {
+            by_depth: cap.truncated.by_depth,
+            by_node_limit: cap.truncated.by_nodes,
+        };
         (tree, cut)
     }
 
@@ -3914,6 +4314,124 @@ mod tests {
             "the open handles are the way out, so they belong in the message: {text}"
         );
         assert_eq!(structured["live_subscriptions"], json!(["sub_2"]));
+    }
+
+    // ── Element refs (#481) ─────────────────────────────────────────────────
+
+    /// A `tree` over the mock app, kept in `refs`, and the ref of the node
+    /// named `name`.
+    fn ref_named(target: &Target, refs: &RefTable, name: &str) -> String {
+        let (tree, _) = tree_json(
+            target,
+            TREE_DEFAULT_MAX_DEPTH,
+            TREE_MAX_NODES,
+            TreeDetail::default(),
+            true,
+            refs,
+        )
+        .expect("the mock tree captures");
+        fn search(node: &Value, name: &str) -> Option<String> {
+            if node["name"] == json!(name) {
+                return node["ref"].as_str().map(str::to_string);
+            }
+            node["children"]
+                .as_array()?
+                .iter()
+                .find_map(|child| search(child, name))
+        }
+        search(&tree, name).unwrap_or_else(|| panic!("no node named {name}: {tree}"))
+    }
+
+    #[test]
+    fn an_action_by_ref_reaches_exactly_the_node_read() {
+        let (target, provider) = mock_target_app();
+        let refs = RefTable::default();
+        let back = ref_named(&target, &refs, "Back");
+        let args = cli::parse_action_args("press", None, None, None).expect("args");
+        let out = tool_action_on_ref(&refs, "press", &back, &args).expect("press by ref");
+        let body = out.structured.expect("structured");
+        assert_eq!(body["ok"], json!(true));
+        assert_eq!(body["ref"], json!(back));
+        let (_, verb, _) = provider.actions().pop().expect("an action was recorded");
+        assert_eq!(verb, "press");
+    }
+
+    #[test]
+    fn an_action_by_ref_on_a_removed_node_fails_stale_with_its_reason() {
+        let (target, provider) = mock_target_app();
+        let refs = RefTable::default();
+        let back = ref_named(&target, &refs, "Back");
+        provider.remove_node("Back");
+        let before = provider.actions().len();
+        let args = cli::parse_action_args("press", None, None, None).expect("args");
+        let err = tool_action_on_ref(&refs, "press", &back, &args).expect_err("stale");
+        assert_eq!(failure_kind(&err), "element_stale");
+        let (_, structured) = describe_failure("action", &err);
+        assert_eq!(structured["stale_reason"], json!("removed"));
+        assert!(structured["element"]
+            .as_str()
+            .is_some_and(|e| e.contains("Back")));
+        assert_eq!(structured["delivery"], json!("not_delivered"));
+        assert_eq!(provider.actions().len(), before, "nothing reached the app");
+    }
+
+    #[test]
+    fn a_ref_from_an_aged_out_capture_is_ref_expired() {
+        let (target, _) = mock_target_app();
+        let refs = RefTable::default();
+        let back = ref_named(&target, &refs, "Back");
+        for _ in 0..super::super::refs::MAX_CAPTURES {
+            ref_named(&target, &refs, "Forward");
+        }
+        let args = cli::parse_action_args("press", None, None, None).expect("args");
+        let err = tool_action_on_ref(&refs, "press", &back, &args).expect_err("expired");
+        assert_eq!(failure_kind(&err), "ref_expired");
+        let (_, structured) = describe_failure("action", &err);
+        assert_eq!(structured["ref"], json!(back));
+    }
+
+    #[test]
+    fn selector_and_ref_are_exclusive_and_a_ref_takes_no_target() {
+        let refs = RefTable::default();
+        for args in [
+            json!({ "action": "press" }),
+            json!({ "action": "press", "selector": "button", "ref": "c1:0" }),
+            json!({ "action": "press", "ref": "c1:0", "app": "TestApp" }),
+            json!({ "action": "press", "ref": "not-a-ref" }),
+        ] {
+            let err = tool_action(&args, &refs).expect_err("must refuse");
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{args}");
+        }
+        for tool in ["text", "table"] {
+            let args = json!({ "op": "info", "ref": "c1:0", "pid": 1 });
+            let err = match tool {
+                "text" => tool_text(&args, &refs),
+                _ => tool_table(&args, &refs),
+            }
+            .expect_err("must refuse");
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{tool}");
+        }
+    }
+
+    #[test]
+    fn find_matches_carry_refs() {
+        let (target, _) = mock_target_app();
+        let refs = RefTable::default();
+        let element = target
+            .locator(r#"button[name="Back"]"#)
+            .element()
+            .expect("Back");
+        let out = find_output(
+            r#"button[name="Back"]"#,
+            &target,
+            &[element],
+            1,
+            &cli::PointerCenter::Usable,
+            &refs,
+        );
+        let body = out.structured.expect("structured");
+        let r = body["matches"][0]["ref"].as_str().expect("ref");
+        assert!(refs.resolve(r).is_ok());
     }
 
     #[test]
@@ -4762,11 +5280,14 @@ mod tests {
         );
         // The same ordering at the tool boundary: a malformed payload is
         // refused before target resolution.
-        let tool_err = tool_action(&json!({
-            "action": "move-to",
-            "selector": "window",
-            "at": "12,not-a-number",
-        }))
+        let tool_err = tool_action(
+            &json!({
+                "action": "move-to",
+                "selector": "window",
+                "at": "12,not-a-number",
+            }),
+            &RefTable::default(),
+        )
         .expect_err("malformed --at must be refused");
         assert!(tool_err.to_string().contains("--at"), "{tool_err}");
     }
@@ -4825,6 +5346,7 @@ mod tests {
             &[element],
             1,
             &cli::PointerCenter::Usable,
+            &RefTable::default(),
         );
         let structured = out.structured.expect("find results are structured");
         assert_eq!(structured["match_count"], 1);
@@ -4851,8 +5373,11 @@ mod tests {
 
     #[test]
     fn find_refuses_a_non_boolean_stable_before_resolving_a_target() {
-        let err = tool_find(&json!({ "selector": "button", "stable": "yes" }))
-            .expect_err("a string is not a boolean");
+        let err = tool_find(
+            &json!({ "selector": "button", "stable": "yes" }),
+            &RefTable::default(),
+        )
+        .expect_err("a string is not a boolean");
         assert!(
             err.to_string().contains("\"stable\" must be a boolean"),
             "{err}"
@@ -5168,6 +5693,7 @@ mod tests {
             &elements,
             FIND_DEFAULT_LIMIT,
             &cli::PointerCenter::Usable,
+            &RefTable::default(),
         );
         let structured = out.structured.expect("find results are structured");
         assert!(
@@ -5188,7 +5714,14 @@ mod tests {
             .expect("the mock resolves");
         assert!(!elements.is_empty());
         let policy = cli::PointerCenter::from_capability(Ok(false));
-        let out = find_output("button", &target, &elements, FIND_DEFAULT_LIMIT, &policy);
+        let out = find_output(
+            "button",
+            &target,
+            &elements,
+            FIND_DEFAULT_LIMIT,
+            &policy,
+            &RefTable::default(),
+        );
         let structured = out.structured.expect("find results are structured");
         let reason = structured[CENTER_UNAVAILABLE_FIELD]
             .as_str()
@@ -5203,17 +5736,15 @@ mod tests {
     fn tree_and_windows_follow_the_same_center_policy() {
         let policy = cli::PointerCenter::from_capability(Ok(false));
         let (target, _provider) = mock_target_app();
-        let mut budget = TREE_MAX_NODES;
-        let mut cut = Cut::default();
-        let tree = build_node(
-            &target.root(),
+        let (tree, _) = tree_json(
+            &target,
             TREE_DEFAULT_MAX_DEPTH,
-            0,
-            &mut budget,
-            &mut cut,
-            Some(&target),
+            TREE_MAX_NODES,
+            TreeDetail::default(),
             policy.is_usable(),
-        );
+            &RefTable::default(),
+        )
+        .expect("the mock tree captures");
         fn no_center(node: &Value) {
             assert!(node.get("center").is_none(), "{node}");
             if let Some(children) = node.get("children").and_then(Value::as_array) {
@@ -5314,6 +5845,195 @@ mod tests {
     }
 
     const NOTES: &str = r#"text_area[name="Notes"]"#;
+
+    // ── Document semantics and relations (#476) ─────────────────────────────
+
+    fn document_target() -> Target {
+        let provider: std::sync::Arc<dyn xa11y_core::Provider> =
+            xa11y_core::mock::build_document_provider();
+        let app = App::list_with(provider)
+            .expect("the mock must list its app")
+            .into_iter()
+            .next()
+            .expect("the mock must vend one app");
+        Target::App(app)
+    }
+
+    #[test]
+    fn tree_detail_reads_text_and_relations_on_request() {
+        let refs = RefTable::default();
+        let find = |tree: &Value, name: &str| -> Value {
+            fn walk(node: &Value, name: &str) -> Option<Value> {
+                if node["name"] == json!(name) {
+                    return Some(node.clone());
+                }
+                node["children"]
+                    .as_array()?
+                    .iter()
+                    .find_map(|c| walk(c, name))
+            }
+            walk(tree, name).unwrap_or_else(|| panic!("no {name} in {tree}"))
+        };
+        let (plain, _) = tree_json(
+            &document_target(),
+            TREE_DEFAULT_MAX_DEPTH,
+            TREE_MAX_NODES,
+            TreeDetail::default(),
+            true,
+            &refs,
+        )
+        .expect("tree");
+        let field = find(&plain, "Email");
+        assert!(field.get("relations").is_none(), "{field}");
+        assert!(field.get("text").is_none(), "{field}");
+
+        let (rich, _) = tree_json(
+            &document_target(),
+            TREE_DEFAULT_MAX_DEPTH,
+            TREE_MAX_NODES,
+            TreeDetail {
+                text: true,
+                relations: true,
+            },
+            true,
+            &refs,
+        )
+        .expect("tree");
+        let field = find(&rich, "Email");
+        let label = find(&rich, "Email address");
+        assert_eq!(
+            field["relations"]["labelled_by"],
+            json!([{ "ref": label["ref"] }])
+        );
+        // Kinds with no targets are left out of the map.
+        assert!(field["relations"].get("controls").is_none(), "{field}");
+
+        let (notes, _) = tree_json(
+            &table_target(),
+            TREE_DEFAULT_MAX_DEPTH,
+            TREE_MAX_NODES,
+            TreeDetail {
+                text: true,
+                relations: false,
+            },
+            true,
+            &refs,
+        )
+        .expect("tree");
+        let notes = find(&notes, "Notes");
+        assert_eq!(notes["text"]["content"], "Hello 😀 world\nsecond line");
+        assert_eq!(notes["text"]["length"], 26);
+        assert_eq!(notes["text"]["truncated"], false);
+    }
+
+    #[test]
+    fn an_unknown_tree_detail_is_refused() {
+        for detail in [json!(["formatting"]), json!("text"), json!([1])] {
+            let err = tree_detail(&args(json!({ "detail": detail }))).expect_err("refused");
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{detail}");
+        }
+        assert!(tree_detail(&json!({})).is_ok());
+    }
+
+    #[test]
+    fn element_nodes_carry_document_semantics_only_when_reported() {
+        let target = document_target();
+        let one = |sel: &str| {
+            let els = target.locator(sel).elements().expect("resolves");
+            assert_eq!(els.len(), 1, "{sel}");
+            element_data_json(&els[0], true)
+        };
+        let h1 = one(r#"heading[heading_level="1"]"#);
+        assert_eq!(h1["heading_level"], 1);
+        let main = one(r#"landmark[landmark_type="main"]"#);
+        assert_eq!(main["landmark_type"], "main");
+        assert_eq!(main["web_role"], "main");
+        assert_eq!(
+            one(r#"link[name="Docs"]"#)["url"],
+            "https://example.com/docs"
+        );
+        assert_eq!(
+            one(r#"status[name="Saved"]"#)["live_region"],
+            json!({ "politeness": "polite", "atomic": true, "relevant": "additions text" })
+        );
+        let field = one(r#"text_field[name="Email"]"#);
+        for key in [
+            "heading_level",
+            "landmark_type",
+            "web_role",
+            "url",
+            "live_region",
+        ] {
+            assert!(field.get(key).is_none(), "{key} must be absent: {field}");
+        }
+    }
+
+    #[test]
+    fn relations_lists_each_kind_once_with_refs() {
+        let refs = RefTable::default();
+        let kinds = [
+            crate::RelationKind::LabelledBy,
+            crate::RelationKind::Controls,
+        ];
+        let out = tool_relations_parsed(
+            &document_target(),
+            r#"text_field[name="Email"]"#,
+            &kinds,
+            FIND_DEFAULT_LIMIT,
+            &refs,
+        )
+        .expect("relations read");
+        let got = out.structured.expect("structured");
+        assert_eq!(got["element"]["name"], "Email");
+        let relations = got["relations"].as_array().expect("a list");
+        assert_eq!(relations.len(), 2, "{got}");
+        assert_eq!(relations[0]["kind"], "labelled_by");
+        assert_eq!(relations[0]["count"], 1);
+        assert_eq!(relations[0]["elements"][0]["name"], "Email address");
+        // A supported kind with no targets is an empty list, not absent.
+        assert_eq!(relations[1]["kind"], "controls");
+        assert_eq!(relations[1]["elements"], json!([]));
+        assert_eq!(relations[1]["truncated"], false);
+        // The target's ref acts on exactly the label.
+        let label_ref = relations[0]["elements"][0]["ref"].as_str().expect("a ref");
+        let label = refs.resolve(label_ref).expect("the ref resolves");
+        assert_eq!(label.name.as_deref(), Some("Email address"));
+    }
+
+    #[test]
+    fn relations_refuses_bad_kinds_before_resolving() {
+        let refs = RefTable::default();
+        for kinds in [
+            json!(["labeled_by"]),
+            json!([]),
+            json!("labelled_by"),
+            json!([1]),
+        ] {
+            let err = tool_relations(
+                &args(json!({ "selector": "button", "app": "nope", "kinds": kinds })),
+                &refs,
+            )
+            .expect_err("refused");
+            assert!(matches!(err, CliError::Usage(_)), "{kinds}: {err}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))] // `linked` is reported on macOS
+    fn relations_of_an_unreported_kind_is_unsupported() {
+        let err = tool_relations_parsed(
+            &document_target(),
+            r#"text_field[name="Email"]"#,
+            &[crate::RelationKind::Linked],
+            FIND_DEFAULT_LIMIT,
+            &RefTable::default(),
+        )
+        .expect_err("the mock does not report linked");
+        assert!(
+            matches!(err, CliError::Xa11y(crate::Error::Unsupported { .. })),
+            "{err}"
+        );
+    }
 
     /// Run a `text` call against the fixture and return its `result`.
     fn text_result(call: Value) -> Value {

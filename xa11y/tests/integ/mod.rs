@@ -14,6 +14,7 @@
 //!   the per-platform requirement stated in the file rather than skipped
 //!   when the listing comes back empty.
 //! * `capabilities` — the capability table held against the running backend.
+//! * `identity` — element identity and staleness (#481) on the dynamic list.
 //! * `stability` — `Locator::wait_stable` against the sliding widget.
 //! * `errors` — error paths on the query/wait surface: selector misses,
 //!   invalid selectors, `wait_*` timeouts, auto-wait timeouts, unknown
@@ -38,10 +39,13 @@
 
 pub mod actions;
 pub mod capabilities;
+pub mod capture;
 pub mod errors;
+pub mod identity;
 pub mod mcp;
 pub mod multi_window;
 pub mod screenshot;
+pub mod semantics;
 pub mod shell;
 pub mod stability;
 pub mod tree;

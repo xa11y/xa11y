@@ -416,6 +416,60 @@ impl std::fmt::Display for AutoScrollOutcome {
     }
 }
 
+/// How a stale error names the element: `role "name"`, or the role alone,
+/// so the message says what was captured without reading the platform.
+///
+/// Not public API: the shared spelling for the backend crates.
+#[doc(hidden)]
+pub fn stale_subject(element: &crate::element::ElementData) -> String {
+    match &element.name {
+        Some(name) => format!("{} {name:?}", element.role),
+        None => element.role.to_string(),
+    }
+}
+
+/// Why an element is stale ([`Error::ElementStale`]).
+///
+/// `#[non_exhaustive]`: providers map platform facts *to* a reason, never the
+/// reverse, so a finer reason needs no work in a backend that cannot tell it
+/// apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StaleReason {
+    /// The node no longer exists in the application.
+    Removed,
+    /// The process that owned the node has exited.
+    ProcessExited,
+    /// The process id or name now belongs to a new process instance.
+    ProcessRestarted,
+    /// The platform id now names a different node: re-reading it gave a
+    /// different role than the one captured.
+    IdentityChanged,
+    /// The provider's bounded handle table dropped the handle, so the node
+    /// can no longer be reached (it may still exist).
+    Evicted,
+}
+
+impl StaleReason {
+    /// The `snake_case` name this reason crosses the bindings, the CLI and
+    /// MCP as (`"removed"`, `"process_exited"`, ...).
+    pub fn to_snake_case(self) -> &'static str {
+        match self {
+            StaleReason::Removed => "removed",
+            StaleReason::ProcessExited => "process_exited",
+            StaleReason::ProcessRestarted => "process_restarted",
+            StaleReason::IdentityChanged => "identity_changed",
+            StaleReason::Evicted => "evicted",
+        }
+    }
+}
+
+impl std::fmt::Display for StaleReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_snake_case())
+    }
+}
+
 /// Structured error type for xa11y operations.
 /// Designed to be informative across FFI boundaries.
 ///
@@ -455,9 +509,19 @@ pub enum Error {
         diagnosis: Option<Box<Diagnosis>>,
     },
 
-    /// The node's platform handle is stale and re-traversal could not relocate it.
-    #[error("Element stale: could not relocate element for selector: {selector}")]
-    ElementStale { selector: String },
+    /// The element no longer names a live platform node, so nothing was done
+    /// to it.
+    ///
+    /// xa11y never re-matches a stale element by name or position: an action
+    /// on a captured element reaches that node or fails here. `element`
+    /// describes what was captured (role and name, or the handle when that is
+    /// all the provider still has); `reason` says why it is stale. Re-resolve
+    /// with a selector to act on whatever is there now.
+    #[error("Element stale ({reason}): {element}")]
+    ElementStale {
+        reason: StaleReason,
+        element: String,
+    },
 
     /// The requested action is not supported by this element.
     #[error("Action {action} not supported on {role}")]
@@ -538,6 +602,15 @@ impl Error {
         Self::Timeout {
             elapsed,
             diagnosis: None,
+        }
+    }
+
+    /// An [`Error::ElementStale`] for `element` (a description such as
+    /// `button "Save"` or `handle:42`).
+    pub fn stale(reason: StaleReason, element: impl Into<String>) -> Self {
+        Self::ElementStale {
+            reason,
+            element: element.into(),
         }
     }
 
@@ -691,9 +764,7 @@ mod tests {
     fn delivery_is_not_delivered_for_errors_decided_before_dispatch() {
         let cases = [
             Error::selector_not_matched("button"),
-            Error::ElementStale {
-                selector: "button".into(),
-            },
+            Error::stale(StaleReason::Removed, "button"),
             Error::ActionNotSupported {
                 action: "press".into(),
                 role: Role::Button,

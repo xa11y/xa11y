@@ -35,6 +35,7 @@
 mod base64;
 mod events;
 mod protocol;
+mod refs;
 mod tools;
 mod transport;
 

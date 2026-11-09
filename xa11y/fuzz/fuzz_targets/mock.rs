@@ -311,6 +311,13 @@ pub fn build_provider(elements: &[FuzzElement]) -> Option<Arc<FuzzProvider>> {
                 cell: None,
                 table_row: None,
                 collection: None,
+                // Document semantics (#476): derived from the fuzzed name so
+                // the selector attributes see values and absences.
+                heading_level: fuzz.name.as_ref().map(|n| n.len() as u32 % 7),
+                landmark_type: None,
+                web_role: fuzz.description.clone(),
+                link_url: fuzz.value.clone(),
+                live_region: None,
                 stable_id: fuzz.stable_id.clone(),
                 pid: fuzz.pid,
                 raw: make_raw(&fuzz.raw),

@@ -6,7 +6,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 mod capabilities;
+mod capture;
 mod rich;
+mod semantics;
 
 // ── Singleton provider ─────────────────────────────────────────────────────
 
@@ -30,6 +32,7 @@ pyo3::create_exception!(_native, XA11yError, PyException);
 pyo3::create_exception!(_native, PermissionDeniedError, XA11yError);
 pyo3::create_exception!(_native, AccessibilityNotEnabledError, XA11yError);
 pyo3::create_exception!(_native, SelectorNotMatchedError, XA11yError);
+pyo3::create_exception!(_native, ElementStaleError, SelectorNotMatchedError);
 pyo3::create_exception!(_native, ActionNotSupportedError, XA11yError);
 pyo3::create_exception!(_native, TimeoutError, XA11yError);
 pyo3::create_exception!(_native, InvalidSelectorError, XA11yError);
@@ -121,6 +124,20 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
     })
 }
 
+/// The Python spelling of a stale reason (`ElementStaleError.reason`).
+fn stale_reason_name(reason: xa11y::StaleReason) -> &'static str {
+    match reason {
+        xa11y::StaleReason::Removed => "removed",
+        xa11y::StaleReason::ProcessExited => "process_exited",
+        xa11y::StaleReason::ProcessRestarted => "process_restarted",
+        xa11y::StaleReason::IdentityChanged => "identity_changed",
+        xa11y::StaleReason::Evicted => "evicted",
+        // `StaleReason` is `#[non_exhaustive]`; the parity check's variant
+        // coverage fails the build before a new one reaches this arm.
+        other => other.to_snake_case(),
+    }
+}
+
 fn map_to_py_err(e: xa11y::Error) -> PyErr {
     match e {
         xa11y::Error::PermissionDenied { instructions } => {
@@ -144,9 +161,25 @@ fn map_to_py_err(e: xa11y::Error) -> PyErr {
             let py_err = SelectorNotMatchedError::new_err(err.to_string());
             attach_diagnosis_attrs(py_err, Some(selector), None, err.diagnosis())
         }
-        xa11y::Error::ElementStale { selector } => {
-            let py_err = SelectorNotMatchedError::new_err(format!("Element stale: {selector}"));
-            attach_diagnosis_attrs(py_err, Some(selector), None, None)
+        xa11y::Error::ElementStale { reason, element } => {
+            let message = xa11y::Error::stale(reason, element.clone()).to_string();
+            let py_err =
+                attach_diagnosis_attrs(ElementStaleError::new_err(message), None, None, None);
+            // A subclass of SelectorNotMatchedError, so existing handlers keep
+            // catching it; `reason` and `element` say why and what.
+            Python::attach(|py| {
+                let value = py_err.value(py);
+                match value
+                    .setattr("reason", stale_reason_name(reason))
+                    .and_then(|()| value.setattr("element", element))
+                {
+                    Ok(()) => py_err,
+                    Err(set_failed) => {
+                        set_failed.set_cause(py, Some(py_err));
+                        set_failed
+                    }
+                }
+            })
         }
         xa11y::Error::ActionNotSupported { action, role } => {
             ActionNotSupportedError::new_err(format!("{action} not supported on {role}"))
@@ -461,6 +494,47 @@ struct Element {
 
 #[pymethods]
 impl Element {
+    /// Whether ``other`` names the same platform node. Two elements found
+    /// separately compare equal when they are one node; two that merely
+    /// share a role and name do not. ``==`` uses this.
+    ///
+    /// Raises :class:`ElementStaleError` (``reason="evicted"``) when either
+    /// handle is no longer held by the provider.
+    fn same_as(&self, py: Python<'_>, other: PyRef<'_, Element>) -> PyResult<bool> {
+        let a = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let b = xa11y::Element::new(other.inner_data.clone(), other.provider.clone());
+        py.detach(move || a.same_as(&b)).map_err(to_py_err)
+    }
+
+    /// Prove this element still names the node it was found as: the node
+    /// exists, its process is the same instance, and it reports the role it
+    /// had. Raises :class:`ElementStaleError` with the ``reason`` otherwise.
+    ///
+    /// Every action runs this check first, so call it only to test liveness
+    /// without acting.
+    fn check_alive(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.check_alive()).map_err(to_py_err)
+    }
+
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let Ok(other) = other.cast::<Element>() else {
+            return Ok(py.NotImplemented());
+        };
+        let same = self.same_as(py, other.borrow())?;
+        Ok(pyo3::types::PyBool::new(py, same)
+            .to_owned()
+            .into_any()
+            .unbind())
+    }
+
+    fn __hash__(&self, py: Python<'_>) -> PyResult<u64> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.identity())
+            .map(|identity| identity.hash_u64())
+            .map_err(to_py_err)
+    }
+
     /// Get direct children (lazy — each call queries the provider).
     fn children(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
         let provider = self.provider.clone();
@@ -488,16 +562,62 @@ impl Element {
     }
 
     /// Subscribe to accessibility events for this element (typically an app).
-    fn subscribe(&self, py: Python<'_>) -> PyResult<Subscription> {
+    ///
+    /// ``kinds`` keeps only those event kinds (``["announcement",
+    /// "focus_changed"]``); a kind this platform never sends raises
+    /// :class:`ActionNotSupportedError` at once rather than never arriving.
+    /// ``buffer`` bounds the queue (default 4096 events, oldest dropped
+    /// first; see ``Subscription.dropped``).
+    #[pyo3(signature = (*, kinds=None, buffer=None))]
+    fn subscribe(
+        &self,
+        py: Python<'_>,
+        kinds: Option<Vec<String>>,
+        buffer: Option<usize>,
+    ) -> PyResult<Subscription> {
+        let options = subscribe_options(kinds, buffer);
         let provider = self.provider.clone();
         let data = self.inner_data.clone();
         let sub = py
-            .detach(move || provider.subscribe(&data))
+            .detach(move || xa11y::subscribe_with(&*provider, &data, &options))
             .map_err(to_py_err)?;
         Ok(Subscription {
             inner: std::sync::Mutex::new(Some(sub)),
             provider: self.provider.clone(),
         })
+    }
+
+    /// Read the subtree into a bounded :class:`Capture`: every node read,
+    /// pre-order, with which limits cut it. Read breadth-first, so when
+    /// ``max_nodes`` cuts, the top of the tree is complete.
+    ///
+    /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+    /// counts the root; ``detail`` adds ``"text"`` (full text within
+    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+    /// (seconds) returns what was read when it runs out, with
+    /// ``truncated.by_time``. Releases the GIL while it reads.
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    fn capture(
+        &self,
+        py: Python<'_>,
+        max_depth: Option<usize>,
+        max_nodes: usize,
+        max_text_bytes: usize,
+        detail: Option<Bound<'_, PyAny>>,
+        timeout: Option<f64>,
+    ) -> PyResult<capture::Capture> {
+        let options = capture::parse_options(
+            max_depth,
+            max_nodes,
+            max_text_bytes,
+            detail.as_ref(),
+            timeout,
+        )?;
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let cap = py
+            .detach(move || element.capture(&options))
+            .map_err(to_py_err)?;
+        capture::to_py(py, cap)
     }
 
     /// Capture the subtree rooted at this element as a recursive dict snapshot.
@@ -670,6 +790,70 @@ impl Element {
     #[getter]
     fn collection(&self) -> Option<rich::CollectionInfo> {
         rich::collection_info(&self.inner_data)
+    }
+    /// A heading's level, ``1`` for a top-level heading (a level, not an
+    /// index); ``None`` on a non-heading or when not reported.
+    #[getter]
+    fn heading_level(&self) -> Option<u32> {
+        self.inner_data.heading_level
+    }
+    /// Which landmark a ``landmark`` element is, as its ARIA role
+    /// (``"main"``, ``"navigation"``, ``"contentinfo"``, ...); ``None`` on
+    /// every other role.
+    #[getter]
+    fn landmark_type(&self) -> Option<&'static str> {
+        self.inner_data.landmark_type.map(semantics::landmark_name)
+    }
+    /// The ARIA role web content declares, verbatim; ``None`` outside web
+    /// content and on macOS.
+    #[getter]
+    fn web_role(&self) -> Option<String> {
+        self.inner_data.web_role.clone()
+    }
+    /// A link's target URL; ``None`` on a non-link or when not reported.
+    #[getter]
+    fn link_url(&self) -> Option<String> {
+        self.inner_data.link_url.clone()
+    }
+    /// Live-region settings; ``None`` when the element has none.
+    #[getter]
+    fn live_region(&self) -> Option<semantics::LiveRegionInfo> {
+        self.inner_data
+            .live_region
+            .clone()
+            .map(semantics::LiveRegionInfo::new)
+    }
+    /// The elements this one is related to, as a ``dict`` from relation
+    /// kind (``"labelled_by"``, ``"controls"``, ...) to a list of elements,
+    /// in the order asked for. ``kinds=None`` asks for every kind this
+    /// platform reports. A kind it never reports raises
+    /// :class:`ActionNotSupportedError` (``Unsupported``) naming it; a
+    /// reported kind with no targets maps to ``[]``.
+    #[pyo3(signature = (kinds=None))]
+    fn relations(
+        &self,
+        py: Python<'_>,
+        kinds: Option<Vec<String>>,
+    ) -> PyResult<Py<pyo3::types::PyDict>> {
+        let kinds: Vec<xa11y::RelationKind> = kinds
+            .unwrap_or_default()
+            .iter()
+            .map(|k| xa11y::RelationKind::parse(k))
+            .collect::<xa11y::Result<_>>()
+            .map_err(to_py_err)?;
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let found = py
+            .detach(move || element.relations(&kinds))
+            .map_err(to_py_err)?;
+        let out = pyo3::types::PyDict::new(py);
+        for (kind, targets) in found {
+            let list = targets
+                .iter()
+                .map(|t| make_py_element(py, t.data(), t.provider().clone()))
+                .collect::<PyResult<Vec<_>>>()?;
+            out.set_item(kind.to_snake_case(), list)?;
+        }
+        Ok(out.unbind())
     }
     /// This element's text, read by range (UTF-16 offsets). Raises
     /// ``ActionNotSupportedError`` when the element has no text interface.
@@ -909,6 +1093,41 @@ impl Locator {
             .detach(move || locator.tree(max_depth))
             .map_err(to_py_err)?;
         tree_node_to_py(py, &node)
+    }
+
+    /// Read the subtree into a bounded :class:`Capture`: every node read,
+    /// pre-order, with which limits cut it. Read breadth-first, so when
+    /// ``max_nodes`` cuts, the top of the tree is complete.
+    ///
+    /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+    /// counts the root; ``detail`` adds ``"text"`` (full text within
+    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+    /// (seconds) returns what was read when it runs out, with
+    /// ``truncated.by_time``. Releases the GIL while it reads.
+    ///
+    /// Resolves the selector once, like :meth:`tree`; does not auto-wait.
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    fn capture(
+        &self,
+        py: Python<'_>,
+        max_depth: Option<usize>,
+        max_nodes: usize,
+        max_text_bytes: usize,
+        detail: Option<Bound<'_, PyAny>>,
+        timeout: Option<f64>,
+    ) -> PyResult<capture::Capture> {
+        let options = capture::parse_options(
+            max_depth,
+            max_nodes,
+            max_text_bytes,
+            detail.as_ref(),
+            timeout,
+        )?;
+        let locator = self.inner.clone();
+        let cap = py
+            .detach(move || locator.capture(&options))
+            .map_err(to_py_err)?;
+        capture::to_py(py, cap)
     }
 
     /// Render the subtree rooted at the matched element as an indented string.
@@ -1349,6 +1568,13 @@ struct Event {
     /// platform reports it.
     #[pyo3(get)]
     text_change: Option<rich::TextChange>,
+    /// Position in this subscription's stream, from 0. A gap means events
+    /// were dropped because the buffer was full (see ``Subscription.dropped``).
+    #[pyo3(get)]
+    sequence: u64,
+    /// For announcement events: the origin and, where sent, the text.
+    #[pyo3(get)]
+    announcement: Option<semantics::AnnouncementInfo>,
 }
 
 impl Event {
@@ -1368,6 +1594,8 @@ impl Event {
             state_flag,
             state_value,
             text_change: event.text_change.map(rich::TextChange::from),
+            sequence: event.sequence,
+            announcement: event.announcement.map(semantics::AnnouncementInfo::new),
         }
     }
 }
@@ -1398,6 +1626,16 @@ struct Subscription {
     provider: Arc<dyn xa11y::Provider>,
 }
 
+/// The core options for ``subscribe(kinds=, buffer=)``. Validation of the
+/// names happens in core, before the platform is asked.
+fn subscribe_options(kinds: Option<Vec<String>>, buffer: Option<usize>) -> xa11y::SubscribeOptions {
+    let mut options = xa11y::SubscribeOptions::new().kinds(kinds.unwrap_or_default());
+    if let Some(buffer) = buffer {
+        options = options.buffer(buffer);
+    }
+    options
+}
+
 impl Subscription {
     fn with_sub<T>(&self, f: impl FnOnce(&xa11y::Subscription) -> T) -> PyResult<T> {
         let guard = self.inner.lock().unwrap();
@@ -1413,6 +1651,13 @@ impl Subscription {
 
 #[pymethods]
 impl Subscription {
+    /// How many events the buffer has dropped, in total, because it was full.
+    /// A dropped event leaves a gap in ``Event.sequence``.
+    #[getter]
+    fn dropped(&self) -> PyResult<u64> {
+        self.with_sub(|sub| sub.dropped())
+    }
+
     fn try_recv(&self) -> PyResult<Option<Event>> {
         let provider = self.provider.clone();
         self.with_sub(|sub| sub.try_recv().map(|e| Event::from_core(e, provider)))
@@ -1779,11 +2024,23 @@ impl App {
     }
 
     /// Subscribe to accessibility events from this application.
-    fn subscribe(&self, py: Python<'_>) -> PyResult<Subscription> {
-        let provider = self.provider.clone();
-        let data = self.inner_data.clone();
+    ///
+    /// ``kinds`` keeps only those event kinds (``["announcement",
+    /// "focus_changed"]``); a kind this platform never sends raises
+    /// :class:`ActionNotSupportedError` at once rather than never arriving.
+    /// ``buffer`` bounds the queue (default 4096 events, oldest dropped
+    /// first; see ``Subscription.dropped``).
+    #[pyo3(signature = (*, kinds=None, buffer=None))]
+    fn subscribe(
+        &self,
+        py: Python<'_>,
+        kinds: Option<Vec<String>>,
+        buffer: Option<usize>,
+    ) -> PyResult<Subscription> {
+        let options = subscribe_options(kinds, buffer);
+        let app = xa11y::App::from_data(self.provider.clone(), self.inner_data.clone());
         let sub = py
-            .detach(move || provider.subscribe(&data))
+            .detach(move || app.subscribe_with(&options))
             .map_err(to_py_err)?;
         Ok(Subscription {
             inner: std::sync::Mutex::new(Some(sub)),
@@ -1882,6 +2139,42 @@ impl App {
         let app = xa11y::App::from_data(self.provider.clone(), self.inner_data.clone());
         let node = py.detach(move || app.tree(max_depth)).map_err(to_py_err)?;
         tree_node_to_py(py, &node)
+    }
+
+    /// Read the subtree into a bounded :class:`Capture`: every node read,
+    /// pre-order, with which limits cut it. Read breadth-first, so when
+    /// ``max_nodes`` cuts, the top of the tree is complete.
+    ///
+    /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+    /// counts the root; ``detail`` adds ``"text"`` (full text within
+    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+    /// (seconds) returns what was read when it runs out, with
+    /// ``truncated.by_time``. Releases the GIL while it reads.
+    ///
+    /// The root is the application; its children are those of every native
+    /// registration of the process, as in :meth:`children`.
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    fn capture(
+        &self,
+        py: Python<'_>,
+        max_depth: Option<usize>,
+        max_nodes: usize,
+        max_text_bytes: usize,
+        detail: Option<Bound<'_, PyAny>>,
+        timeout: Option<f64>,
+    ) -> PyResult<capture::Capture> {
+        let options = capture::parse_options(
+            max_depth,
+            max_nodes,
+            max_text_bytes,
+            detail.as_ref(),
+            timeout,
+        )?;
+        let app = xa11y::App::from_data(self.provider.clone(), self.inner_data.clone());
+        let cap = py
+            .detach(move || app.capture(&options))
+            .map_err(to_py_err)?;
+        capture::to_py(py, cap)
     }
 
     /// Render this application's accessibility tree as an indented string.
@@ -2075,6 +2368,39 @@ impl ShellSurface {
             .detach(move || element.tree(max_depth))
             .map_err(to_py_err)?;
         tree_node_to_py(py, &node)
+    }
+
+    /// Read the subtree into a bounded :class:`Capture`: every node read,
+    /// pre-order, with which limits cut it. Read breadth-first, so when
+    /// ``max_nodes`` cuts, the top of the tree is complete.
+    ///
+    /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
+    /// counts the root; ``detail`` adds ``"text"`` (full text within
+    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
+    /// (seconds) returns what was read when it runs out, with
+    /// ``truncated.by_time``. Releases the GIL while it reads.
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    fn capture(
+        &self,
+        py: Python<'_>,
+        max_depth: Option<usize>,
+        max_nodes: usize,
+        max_text_bytes: usize,
+        detail: Option<Bound<'_, PyAny>>,
+        timeout: Option<f64>,
+    ) -> PyResult<capture::Capture> {
+        let options = capture::parse_options(
+            max_depth,
+            max_nodes,
+            max_text_bytes,
+            detail.as_ref(),
+            timeout,
+        )?;
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let cap = py
+            .detach(move || element.capture(&options))
+            .map_err(to_py_err)?;
+        capture::to_py(py, cap)
     }
 
     /// Render this surface's accessibility tree as an indented string.
@@ -2991,6 +3317,13 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Subscription>()?;
     m.add_class::<capabilities::Capabilities>()?;
     m.add_class::<capabilities::Capability>()?;
+    m.add_class::<semantics::LiveRegionInfo>()?;
+    m.add_class::<semantics::AnnouncementInfo>()?;
+    m.add_class::<capture::Capture>()?;
+    m.add_class::<capture::CapturedNode>()?;
+    m.add_class::<capture::CapturedText>()?;
+    m.add_class::<capture::CaptureError>()?;
+    m.add_class::<capture::Truncation>()?;
     m.add_class::<rich::TableInfo>()?;
     m.add_class::<rich::CellInfo>()?;
     m.add_class::<rich::RowInfo>()?;
@@ -3007,6 +3340,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_exception::<PermissionDeniedError>(m, "PermissionDeniedError")?;
     register_exception::<AccessibilityNotEnabledError>(m, "AccessibilityNotEnabledError")?;
     register_exception::<SelectorNotMatchedError>(m, "SelectorNotMatchedError")?;
+    register_exception::<ElementStaleError>(m, "ElementStaleError")?;
     register_exception::<ActionNotSupportedError>(m, "ActionNotSupportedError")?;
     register_exception::<TimeoutError>(m, "TimeoutError")?;
     register_exception::<InvalidSelectorError>(m, "InvalidSelectorError")?;
@@ -3033,6 +3367,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_document_locator, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_stale_elements, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_table_locator, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_input, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_app, m)?)?;
@@ -3101,6 +3437,17 @@ fn _make_test_table_locator(selector: &str) -> PyResult<Locator> {
     })
 }
 
+/// A test Locator over the mock document (`build_document_provider`):
+/// landmarks, headings, a link, a live region and a labelled text field.
+#[pyfunction]
+fn _make_test_document_locator(selector: &str) -> PyResult<Locator> {
+    let provider = xa11y::mock::build_document_provider();
+    Ok(Locator {
+        inner: xa11y::Locator::new(provider as Arc<dyn xa11y::Provider>, None, selector)
+            .with_timeout(Duration::from_millis(0)),
+    })
+}
+
 /// Create a test Locator backed by the shared mock provider.
 #[pyfunction]
 fn _make_test_locator() -> PyResult<Locator> {
@@ -3108,6 +3455,43 @@ fn _make_test_locator() -> PyResult<Locator> {
     Ok(Locator {
         inner: xa11y::Locator::new(provider as Arc<dyn xa11y::Provider>, None, "application"),
     })
+}
+
+/// An element from the mock tree, found by name, then made stale: the node
+/// is removed (``change="removed"``) or its handle reused for a node with a
+/// different role (``change="replaced"``). A second element of the same node
+/// found before the change is returned too, for identity tests.
+#[pyfunction]
+fn _make_test_stale_elements(
+    py: Python<'_>,
+    name: &str,
+    change: &str,
+) -> PyResult<(Py<Element>, Py<Element>)> {
+    let provider = xa11y::mock::build_provider();
+    let dyn_provider: Arc<dyn xa11y::Provider> = provider.clone();
+    let selector = format!("[name=\"{name}\"]");
+    let found = xa11y::Locator::new(dyn_provider.clone(), None, &selector)
+        .with_timeout(Duration::from_millis(0))
+        .element()
+        .map_err(to_py_err)?;
+    let again = xa11y::Locator::new(dyn_provider.clone(), None, &selector)
+        .with_timeout(Duration::from_millis(0))
+        .element()
+        .map_err(to_py_err)?;
+    match change {
+        "removed" => provider.remove_node(name),
+        "replaced" => provider.replace_node_role(name, xa11y::Role::TextField),
+        "none" => {}
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "change must be removed, replaced or none, got {other:?}"
+            )))
+        }
+    }
+    Ok((
+        make_py_element(py, found.data(), dyn_provider.clone())?,
+        make_py_element(py, again.data(), dyn_provider)?,
+    ))
 }
 
 #[pyfunction]
@@ -3122,13 +3506,17 @@ fn _make_test_input(delay_ms: u32) -> InputSim {
 
 /// Create a test App backed by the shared mock provider (resolves "TestApp").
 #[pyfunction]
-#[pyo3(signature = (split=false))]
-fn _make_test_app(split: bool) -> PyResult<App> {
-    let provider = if split {
+#[pyo3(signature = (split=false, events=false))]
+fn _make_test_app(split: bool, events: bool) -> PyResult<App> {
+    let mock = if split {
         xa11y::mock::build_split_provider()
     } else {
         xa11y::mock::build_provider()
-    } as Arc<dyn xa11y::Provider>;
+    };
+    if events {
+        mock.enable_events();
+    }
+    let provider = mock as Arc<dyn xa11y::Provider>;
     // Resolve via the predicate finder (not `by_name_with`) so the returned
     // app is foreground-tagged — the mock reports its root as the focused app,
     // letting `App.is_foreground` tests observe a `True` value.

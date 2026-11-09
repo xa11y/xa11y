@@ -19,6 +19,7 @@ interop
 showmenu
 static_text
 subrole
+subroles
 [Ss]ubtrees?
 
 # ── Platforms, toolkits, and desktop stacks ─────────────────────────

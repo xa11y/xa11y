@@ -24,15 +24,24 @@ use std::sync::{Arc, Mutex};
 pub use xa11y_core::{
     App, AutoScrollOutcome, Delivery, Diagnosis, Element, ElementData, ElementState, Error, Event,
     EventKind, HiddenReason, Locator, PointerTargetDiagnosis, RawPlatformData, Rect, Result, Role,
-    ShellSurface, ShellSurfaceKind, StateFlag, StateSet, Subscription, SubscriptionIter,
-    TextChange, TextChangeKind, Toggled, TreeNode,
+    ShellSurface, ShellSurfaceKind, StaleReason, StateFlag, StateSet, Subscription,
+    SubscriptionIter, TextChange, TextChangeKind, Toggled, TreeNode,
 };
+
+// Event announcements and subscribe options (#480).
+pub use xa11y_core::{
+    AnnouncementInfo, AnnouncementOrigin, SubscribeOptions, DEFAULT_EVENT_BUFFER,
+};
+// The element-level form of `App::subscribe_with`, for the bindings. Not
+// public API.
+#[doc(hidden)]
+pub use xa11y_core::event_provider::{event_kind_names, subscribe_with};
 
 // `#[doc(hidden)]`: the provider-side construction contracts. Re-exported so
 // an out-of-tree `Provider` implementation can reach them — without this the
 // completeness guard stops at this repo's own backends. Not public API.
 #[doc(hidden)]
-pub use xa11y_core::{ElementParts, EventParts, StateParts, TextChangeParts};
+pub use xa11y_core::{AnnouncementParts, ElementParts, EventParts, StateParts, TextChangeParts};
 
 // Re-export the process-wide default-timeout configuration (see
 // `xa11y_core::config`): the default for every auto-wait / `wait_*` call
@@ -43,6 +52,23 @@ pub use xa11y_core::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_V
 
 // Re-export the capability table (see `xa11y_core::capabilities`).
 pub use xa11y_core::{Capabilities, Capability, Platform, Support};
+
+// Element identity (see `xa11y_core::identity`).
+pub use xa11y_core::identity;
+pub use xa11y_core::{NativeObject, NodeIdentity};
+
+// Bounded capture (see `xa11y_core::capture`).
+pub use xa11y_core::capture;
+pub use xa11y_core::{
+    Capture, CaptureError, CaptureOptions, CaptureStep, CapturedNode, CapturedText, RelationTarget,
+    Truncation,
+};
+
+// Document semantics (see `xa11y_core::semantics`).
+pub use xa11y_core::semantics;
+#[doc(hidden)]
+pub use xa11y_core::LiveRegionParts;
+pub use xa11y_core::{Landmark, LiveRegionInfo, Politeness, RelationKind};
 
 // Re-export input simulation surface.
 pub use xa11y_core::input;

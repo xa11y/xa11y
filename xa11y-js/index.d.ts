@@ -41,8 +41,18 @@ export {
 // Forward the narrowed types from native.d.ts.
 export type {
   AnchorName,
+  AnnouncementInfo,
+  AnnouncementOriginName,
   Capability,
   CapabilitiesOptions,
+  Capture,
+  CaptureDetailName,
+  CaptureError,
+  CaptureOptions,
+  CaptureStepName,
+  CapturedNode,
+  CapturedRelation,
+  CapturedText,
   CellInfo,
   CheckedState,
   ClickOptions,
@@ -54,11 +64,16 @@ export type {
   HeaderKindName,
   HiddenReasonName,
   AutoScrollOutcomeName,
+  LandmarkName,
   LegendEntry,
+  LiveRegionInfo,
   MouseButtonName,
   Omission,
   OmissionReasonName,
   PlatformName,
+  PolitenessName,
+  Relation,
+  RelationKindName,
   Rect,
   RowInfo,
   ShellSurfaceKindName,
@@ -68,6 +83,7 @@ export type {
   TextChange,
   TextChangeKindName,
   TextFindOptions,
+  Truncation,
   TextLines,
   TextRange,
   TextRun,
@@ -78,6 +94,8 @@ export type {
 import type {
   AnchorName,
   AutoScrollOutcomeName,
+  Capture,
+  CaptureOptions,
   Element,
   Event,
   DeliveryName,
@@ -95,6 +113,14 @@ import type {
 export interface SubscribeOptions {
   /** Abort signal; closes the subscription when aborted. */
   signal?: AbortSignal;
+  /**
+   * Keep only these event types (`'announcement'`, `'focusChanged'`). A
+   * type this platform never sends rejects with `ActionNotSupportedError`
+   * at once rather than never arriving.
+   */
+  kinds?: EventTypeName[];
+  /** Most events to buffer; the oldest are dropped first. Default 4096. */
+  buffer?: number;
 }
 
 export interface AppLookupOptions {
@@ -195,6 +221,11 @@ declare module './native.js' {
 export class Subscription extends EventEmitter {
   /** Whether the subscription has been closed. */
   readonly closed: boolean;
+  /**
+   * How many events the buffer has dropped, in total, because it was full.
+   * A dropped event leaves a gap in `Event.sequence`.
+   */
+  readonly dropped: number;
 
   /** Stop event delivery and release the underlying platform subscription. */
   close(): void;
@@ -365,6 +396,15 @@ export declare class App {
   asElement(): Element;
 
   /**
+   * Read the subtree into a bounded capture: every node read, pre-order,
+   * with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
+   * the top of the tree is complete. `detail` adds `'text'` and/or
+   * `'relations'`; `timeout` (ms) resolves with what was read when it runs
+   * out, with `truncated.byTime`.
+   */
+  capture(options?: CaptureOptions | null): Promise<Capture>;
+
+  /**
    * Capture this application's accessibility tree as a recursive snapshot,
    * rooted at the application element.
    *
@@ -495,6 +535,15 @@ export declare class ShellSurface {
    * holds the root's accessibility data.
    */
   asElement(): Element;
+
+  /**
+   * Read the subtree into a bounded capture: every node read, pre-order,
+   * with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
+   * the top of the tree is complete. `detail` adds `'text'` and/or
+   * `'relations'`; `timeout` (ms) resolves with what was read when it runs
+   * out, with `truncated.byTime`.
+   */
+  capture(options?: CaptureOptions | null): Promise<Capture>;
 
   /**
    * Capture this surface's accessibility tree as a recursive snapshot, rooted
@@ -656,6 +705,28 @@ export class SelectorNotMatchedError extends XA11yError {
   scope: string | null;
   /** Always `null` for this class (parity with {@link TimeoutError}). */
   elapsedMs: number | null;
+}
+
+/** Why an element is stale (`ElementStaleError.reason`). */
+export type StaleReasonName =
+  | 'removed'
+  | 'process_exited'
+  | 'process_restarted'
+  | 'identity_changed'
+  | 'evicted';
+
+/**
+ * The element no longer names a live node, so nothing was done to it.
+ *
+ * A subclass of {@link SelectorNotMatchedError}, so existing handlers keep
+ * catching it. xa11y never re-matches a stale element by name: re-resolve with
+ * a locator to act on whatever is there now.
+ */
+export class ElementStaleError extends SelectorNotMatchedError {
+  /** Why the element is stale. */
+  reason: StaleReasonName | null;
+  /** What was captured: `role "name"`, or the handle when that is all the provider still has. */
+  element: string | null;
 }
 
 /** The requested action is not supported on the target element. */

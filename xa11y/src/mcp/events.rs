@@ -52,7 +52,8 @@ use serde_json::{json, Map, Value};
 
 use super::tools::{element_data_json, note_center};
 use crate::cli::{
-    format_event_kind, format_state_flag, text_change_json, CliError, CliResult, PointerCenter,
+    announcement_json, format_event_kind, format_state_flag, text_change_json, CliError, CliResult,
+    PointerCenter,
 };
 use crate::{Event, EventKind, RecvStatus, Subscription};
 
@@ -562,6 +563,9 @@ fn event_json(buffered: &Buffered, center: bool) -> Value {
     if let Some(change) = &event.text_change {
         out.insert("text_change".into(), text_change_json(change));
     }
+    if let Some(a) = &event.announcement {
+        out.insert("announcement".into(), announcement_json(a));
+    }
     out.insert("application".into(), json!(event.app_name));
     out.insert("pid".into(), json!(event.app_pid));
     if let Some(target) = &event.target {
@@ -806,6 +810,30 @@ mod tests {
         assert_eq!(events[0]["kind"], json!("state_changed"));
         assert_eq!(events[0]["state_flag"], json!("checked"));
         assert_eq!(events[0]["state_value"], json!(true));
+    }
+
+    #[test]
+    fn an_announcement_carries_its_payload() {
+        let (registry, tx, id) = registry_with(None);
+        for event in xa11y_core::mock::announcement_events() {
+            tx.send(event).expect("the drainer is listening");
+        }
+        let events = collect(&registry, &id, 4);
+        assert!(events[0].get("announcement").is_none(), "{}", events[0]);
+        assert_eq!(
+            events[1]["announcement"],
+            json!({
+                "origin": "request",
+                "text": "Saved",
+                "politeness": "polite",
+                "platform_priority": "MostRecent",
+                "activity_id": "save",
+            })
+        );
+        assert_eq!(
+            events[2]["announcement"],
+            json!({ "origin": "live_region", "politeness": "polite" })
+        );
     }
 
     #[test]

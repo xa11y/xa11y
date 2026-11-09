@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
 
 use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
@@ -14,9 +15,9 @@ use rayon::prelude::*;
 #[cfg(test)]
 use xa11y_core::Selector;
 use xa11y_core::{
-    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    HiddenReason, Provider, Rect, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet,
-    Subscription, Toggled,
+    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, HiddenReason,
+    Provider, Rect, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet, Subscription,
+    Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -96,9 +97,15 @@ extern "C" {
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
     fn safe_cg_preflight_screen_capture_access() -> bool;
-    fn safe_ax_observer_create(
+    fn safe_ax_observer_create_with_info(
         pid: i32,
-        callback: unsafe extern "C" fn(CFTypeRef, AXUIElementRef, CFTypeRef, *mut c_void),
+        callback: unsafe extern "C" fn(
+            CFTypeRef,
+            AXUIElementRef,
+            CFTypeRef,
+            CFTypeRef,
+            *mut c_void,
+        ),
         observer: *mut CFTypeRef,
     ) -> i32;
     fn safe_ax_observer_add_notification(
@@ -137,6 +144,8 @@ extern "C" {
     fn safe_cf_number_get_type_id() -> u64;
     fn safe_cf_boolean_get_type_id() -> u64;
     fn safe_cf_array_get_type_id() -> u64;
+    fn safe_cf_url_get_type_id() -> u64;
+    fn safe_cf_url_get_string(url: CFTypeRef) -> CFTypeRef;
 
     fn safe_ax_is_process_trusted() -> bool;
 
@@ -183,6 +192,53 @@ impl Drop for AXElement {
         if !self.0.is_null() {
             unsafe { safe_cf_release(self.0) };
         }
+    }
+}
+
+/// An `AXUIElementRef` as an identity: `CFEqual` compares the underlying
+/// object (two `AXChildren` reads vend different pointers for one element),
+/// and `CFHash` is consistent with it.
+#[derive(Debug)]
+struct AxIdentity(AXElement);
+
+impl std::fmt::Debug for AXElement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AXElement({:p})", self.0)
+    }
+}
+
+impl xa11y_core::NativeObject for AxIdentity {
+    fn object_hash(&self) -> u64 {
+        unsafe { safe_cf_hash(self.0.as_ptr() as CFTypeRef) }
+    }
+    fn same_object(&self, other: &dyn xa11y_core::NativeObject) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<AxIdentity>()
+            .is_some_and(|o| unsafe {
+                safe_cf_equal(self.0.as_ptr() as CFTypeRef, o.0.as_ptr() as CFTypeRef)
+            })
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Whether process `pid` still answers AX at all: its application element
+/// reads `AXRole`. A dead process answers `kAXErrorInvalidUIElement` (or
+/// cannot be messaged).
+fn process_answers_ax(pid: i32) -> bool {
+    let app = AXElement::from_owned(unsafe { safe_ax_create_application(pid) });
+    if app.is_null() {
+        return false;
+    }
+    match read_raw_attr(app.as_ptr(), "AXRole") {
+        RawAttr::Value(v) => {
+            unsafe { safe_cf_release(v) };
+            true
+        }
+        RawAttr::Absent => true,
+        RawAttr::Unanswered(code) => code != AX_ERROR_INVALID_UI_ELEMENT,
     }
 }
 
@@ -301,6 +357,24 @@ fn ax_attr(element: AXUIElementRef, attribute: &str) -> Option<CFTypeRef> {
         Some(value)
     } else {
         None
+    }
+}
+
+/// The string of a borrowed `CFURL` value, or `None` for anything else.
+fn cf_url_string(v: CFTypeRef) -> Option<String> {
+    if v.is_null() {
+        return None;
+    }
+    unsafe {
+        if safe_cf_get_type_id(v) != safe_cf_url_get_type_id() {
+            return None;
+        }
+        let s = safe_cf_url_get_string(v);
+        if s.is_null() || safe_cf_get_type_id(s) != safe_cf_string_get_type_id() {
+            return None;
+        }
+        // Borrowed from the URL (Get rule).
+        Some(CFString::wrap_under_get_rule(s as *const _).to_string())
     }
 }
 
@@ -1222,7 +1296,12 @@ mod attr_idx {
     pub const DISCLOSURE_LEVEL: usize = 22;
     pub const ARIA_POS_IN_SET: usize = 23;
     pub const ARIA_SET_SIZE: usize = 24;
-    pub const COUNT: usize = 25;
+    // Document semantics (#476), in the same batch.
+    pub const ARIA_LIVE: usize = 25;
+    pub const ARIA_ATOMIC: usize = 26;
+    pub const ARIA_RELEVANT: usize = 27;
+    pub const URL: usize = 28;
+    pub const COUNT: usize = 29;
 }
 
 /// Raw values returned by a single batch AX fetch. Values are borrowed
@@ -1265,6 +1344,10 @@ impl BatchAttrs {
             CFString::new("AXDisclosureLevel"),
             CFString::new("AXARIAPosInSet"),
             CFString::new("AXARIASetSize"),
+            CFString::new("AXARIALive"),
+            CFString::new("AXARIAAtomic"),
+            CFString::new("AXARIARelevant"),
+            CFString::new("AXURL"),
         ];
         let ptrs: Vec<CFTypeRef> = attr_names
             .iter()
@@ -1319,6 +1402,11 @@ impl BatchAttrs {
                 None
             }
         }
+    }
+
+    /// Read a value as a URL string (CFURL).
+    fn url(&self, idx: usize) -> Option<String> {
+        cf_url_string(self.vals[idx])
     }
 
     /// Read a value as a bool (CFBoolean).
@@ -1480,6 +1568,11 @@ struct ResolvedAttrs {
     identifier: Option<String>,
     /// Table / collection position attributes (#479).
     rich: rich::PositionAttrs,
+    /// Live-region settings and link target (#476).
+    aria_live: Option<String>,
+    aria_atomic: Option<bool>,
+    aria_relevant: Option<String>,
+    url: Option<String>,
 }
 
 impl ResolvedAttrs {
@@ -1541,6 +1634,10 @@ impl ResolvedAttrs {
                 pos_in_set: batch.integer(attr_idx::ARIA_POS_IN_SET),
                 set_size: batch.integer(attr_idx::ARIA_SET_SIZE),
             },
+            aria_live: batch.string(attr_idx::ARIA_LIVE),
+            aria_atomic: batch.boolean(attr_idx::ARIA_ATOMIC),
+            aria_relevant: batch.string(attr_idx::ARIA_RELEVANT),
+            url: batch.url(attr_idx::URL),
         })
     }
 
@@ -1629,6 +1726,14 @@ impl ResolvedAttrs {
             size: ax_size(element),
             identifier: ax_string(element, "AXIdentifier"),
             rich,
+            aria_live: ax_string(element, "AXARIALive"),
+            aria_atomic: ax_bool(element, "AXARIAAtomic"),
+            aria_relevant: ax_string(element, "AXARIARelevant"),
+            url: ax_attr(element, "AXURL").and_then(|v| {
+                let s = cf_url_string(v);
+                unsafe { safe_cf_release(v) };
+                s
+            }),
         })
     }
 }
@@ -3143,6 +3248,109 @@ fn settle_window_size(
     }
 }
 
+// ── Document semantics (#476) ─────────────────────────────────────────────────
+
+struct AxSemantics {
+    heading_level: Option<u32>,
+    landmark_type: Option<xa11y_core::Landmark>,
+    link_url: Option<String>,
+    live_region: Option<xa11y_core::LiveRegionInfo>,
+}
+
+/// The document semantics in one element's batch read: an `AXHeading`'s
+/// level is its `AXValue`, a landmark's kind its `AXLandmark*` subrole, a
+/// link's target its `AXURL`, and the `AXARIA*` live attributes.
+fn document_semantics(attrs: &ResolvedAttrs, role: Role) -> AxSemantics {
+    let live: xa11y_core::LiveRegionInfo = xa11y_core::LiveRegionParts {
+        politeness: attrs
+            .aria_live
+            .as_deref()
+            .and_then(xa11y_core::Politeness::parse),
+        atomic: attrs.aria_atomic,
+        relevant: attrs.aria_relevant.clone().filter(|r| !r.is_empty()),
+    }
+    .into();
+    AxSemantics {
+        heading_level: (role == Role::Heading)
+            .then_some(attrs.value_int)
+            .flatten()
+            .and_then(|level| u32::try_from(level).ok())
+            .filter(|level| *level > 0),
+        landmark_type: (role == Role::Landmark).then(|| {
+            attrs
+                .subrole_str
+                .as_deref()
+                .and_then(landmark_from_subrole)
+                .unwrap_or(xa11y_core::Landmark::Unknown)
+        }),
+        link_url: (role == Role::Link).then(|| attrs.url.clone()).flatten(),
+        live_region: (!live.is_empty()).then_some(live),
+    }
+}
+
+fn landmark_from_subrole(subrole: &str) -> Option<xa11y_core::Landmark> {
+    use xa11y_core::Landmark;
+    Some(match subrole {
+        "AXLandmarkBanner" => Landmark::Banner,
+        "AXLandmarkComplementary" => Landmark::Complementary,
+        "AXLandmarkContentInfo" => Landmark::ContentInfo,
+        "AXLandmarkForm" => Landmark::Form,
+        "AXLandmarkMain" => Landmark::Main,
+        "AXLandmarkNavigation" => Landmark::Navigation,
+        "AXLandmarkRegion" => Landmark::Region,
+        "AXLandmarkSearch" => Landmark::Search,
+        _ => return None,
+    })
+}
+
+/// The AX attribute holding a relation, and whether it holds one element
+/// (`AXTitleUIElement`) rather than an array. `None` for a kind AX does not
+/// report (see the capability table).
+fn ax_relation_attribute(kind: xa11y_core::RelationKind) -> Option<(&'static str, bool)> {
+    use xa11y_core::RelationKind as K;
+    Some(match kind {
+        K::LabelledBy => ("AXTitleUIElement", true),
+        K::LabelFor => ("AXServesAsTitleForUIElements", false),
+        K::Details => ("AXDetailsElements", false),
+        K::ErrorMessage => ("AXErrorMessageElements", false),
+        K::Owns => ("AXOwns", false),
+        K::Linked => ("AXLinkedUIElements", false),
+        K::DescribedBy
+        | K::DescriptionFor
+        | K::DetailsFor
+        | K::Controls
+        | K::ControlledBy
+        | K::FlowsTo
+        | K::FlowsFrom
+        | K::ErrorFor
+        | K::MemberOf => return None,
+    })
+}
+
+/// One element-valued attribute: `Ok(None)` when absent, an error when the
+/// app did not answer (never read as "no element", tenet 1).
+fn ax_single_element(element: AXUIElementRef, attribute: &str) -> Result<Option<AXElement>> {
+    match read_raw_attr(element, attribute) {
+        RawAttr::Value(v) => {
+            let is_element =
+                unsafe { safe_cf_get_type_id(v) == safe_cf_get_type_id(element as CFTypeRef) };
+            if is_element {
+                Ok(Some(AXElement::from_owned(v as AXUIElementRef)))
+            } else {
+                unsafe { safe_cf_release(v) };
+                Ok(None)
+            }
+        }
+        RawAttr::Absent => Ok(None),
+        RawAttr::Unanswered(code) => Err(Error::Platform {
+            code: code as i64,
+            message: format!(
+                "{attribute} read failed (AXError {code}); the relation is unknown, not empty"
+            ),
+        }),
+    }
+}
+
 // ── Role Mapping ──────────────────────────────────────────────────────────────
 
 /// Whether an AX role/subrole pair is a secure (password) text field.
@@ -3165,7 +3373,7 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         Some("AXSwitch") => return Role::Switch,
         // WebKit exposes <nav>/role="navigation" as AXGroup with this
         // subrole; matches AT-SPI's "navigation" landmark mapping.
-        Some("AXLandmarkNavigation") => return Role::Navigation,
+        Some(sub) if sub.starts_with("AXLandmark") => return Role::Landmark,
         _ => {}
     }
 
@@ -3559,27 +3767,10 @@ fn screen_recording_gates_ax(major: u32) -> bool {
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 pub struct MacOSProvider {
-    /// Cached AXElement refs keyed by handle ID.
-    ///
-    /// The map is append-only: a handle is inserted with every snapshot this
-    /// provider builds and removed only when the provider itself drops. Core
-    /// abandons snapshots on several paths (a locator poll that matched but
-    /// was not actionable, `exists` / `count`, a `tree()` walk, and anything
-    /// a binding hands to its garbage collector), so a long-lived process
-    /// accumulates one retained `AXUIElement` per abandoned snapshot,
-    /// unbounded.
-    ///
-    /// There is no per-drop hook to evict from: `ElementData` is a plain
-    /// `Clone` value carrying only the `u64`, so the provider cannot see
-    /// when core is done with a handle. A future fix can either bound this
-    /// map (an LRU / capped cache catches every abandoned entry, at the cost
-    /// of evicting a still-held element under enough churn and making it
-    /// fail with `ElementStale`), or make ownership travel with the value (a
-    /// refcounted lease on `ElementData`, which releases on the last clone
-    /// and lets the map go entirely). Both are larger designs than this
-    /// fix; the leak is tracked as a known limitation here rather than
-    /// worked around with per-call-site release calls.
-    handle_cache: Mutex<HashMap<u64, AXElement>>,
+    /// Handle table: each handle's retained `AXUIElementRef`. Bounded (see
+    /// `xa11y_core::handle_cache`), so a long session cannot grow it without
+    /// limit; an evicted handle fails as `ElementStale` (`evicted`).
+    handle_cache: Mutex<BoundedHandleCache<AXElement>>,
 }
 
 /// Holds a shell-probe messaging-timeout bound, releasing it on drop.
@@ -3632,7 +3823,7 @@ impl MacOSProvider {
         set_global_messaging_timeout()?;
 
         Ok(Self {
-            handle_cache: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
         })
     }
 
@@ -3726,9 +3917,10 @@ impl MacOSProvider {
             .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
-            .ok_or(Error::ElementStale {
-                selector: format!("handle:{}", handle),
-            })
+            .ok_or(Error::stale(
+                xa11y_core::StaleReason::Evicted,
+                format!("handle:{}", handle),
+            ))
     }
 
     /// Build an ElementData from an AXElement, caching the AX handle.
@@ -3756,6 +3948,11 @@ fn build_snapshot_data(
         // through ElementParts rather than `for_role`. A new property needs a
         // decision here too, even if the decision is almost always "absent".
         return Ok(ElementParts {
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             role: Role::Unknown,
             name: None,
             value: None,
@@ -3796,6 +3993,7 @@ fn build_snapshot_data(
         };
 
         let role = map_ax_role(&attrs.role_str, attrs.subrole_str.as_deref());
+        let semantics = document_semantics(&attrs, role);
         let password = is_secure_text_field(&attrs.role_str, attrs.subrole_str.as_deref());
 
         // Build raw platform data map before consuming attrs fields.
@@ -4159,6 +4357,11 @@ fn build_snapshot_data(
         let description = xa11y_core::text::strip_bidi_opt(description);
 
         Ok(ElementParts {
+            heading_level: semantics.heading_level,
+            landmark_type: semantics.landmark_type,
+            web_role: None,
+            link_url: semantics.link_url,
+            live_region: semantics.live_region,
             role,
             name,
             value,
@@ -4754,6 +4957,108 @@ impl MacOSProvider {
 }
 
 impl Provider for MacOSProvider {
+    fn relations(
+        &self,
+        element: &ElementData,
+        kinds: &[xa11y_core::RelationKind],
+    ) -> Result<Vec<(xa11y_core::RelationKind, Vec<ElementData>)>> {
+        let attributes = kinds
+            .iter()
+            .map(|k| {
+                ax_relation_attribute(*k)
+                    .map(|a| (*k, a))
+                    .ok_or_else(|| Error::Unsupported {
+                        feature: format!(
+                            "relation {k} on macOS: AX does not report it (controls and flows-to \
+                         arrive together as `linked`)"
+                        ),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let ax = self.get_cached(element.handle)?;
+        let mut out = Vec::with_capacity(attributes.len());
+        for (kind, (attribute, single)) in attributes {
+            let targets = if single {
+                ax_single_element(ax.as_ptr(), attribute)?
+                    .into_iter()
+                    .collect()
+            } else {
+                ax_element_list_strict(ax.as_ptr(), attribute)?
+            };
+            let built = targets
+                .iter()
+                .map(|t| self.build_element_data(t, element.pid))
+                .collect::<Result<Vec<_>>>()?;
+            out.push((kind, built));
+        }
+        Ok(out)
+    }
+
+    fn identity(&self, element: &ElementData) -> Result<xa11y_core::NodeIdentity> {
+        let ax = self.get_cached(element.handle)?;
+        let process = element
+            .pid
+            .map_or_else(|| "-".to_string(), |pid| pid.to_string());
+        Ok(xa11y_core::NodeIdentity::from_object(
+            "ax",
+            process,
+            std::sync::Arc::new(AxIdentity(ax)),
+        ))
+    }
+
+    fn revalidate(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        let subject = xa11y_core::error::stale_subject(element);
+        let live_role = match read_raw_attr(ax.as_ptr(), "AXRole") {
+            RawAttr::Value(v) => {
+                let is_string = unsafe { safe_cf_get_type_id(v) == safe_cf_string_get_type_id() };
+                if is_string {
+                    // Adopts the +1 retain; released when the CFString drops.
+                    Some(unsafe { CFString::wrap_under_create_rule(v as *const _) }.to_string())
+                } else {
+                    unsafe { safe_cf_release(v) };
+                    None
+                }
+            }
+            RawAttr::Absent => None,
+            RawAttr::Unanswered(code) => {
+                return Err(match classify_element_churn_code(i64::from(code)) {
+                    ElementChurn::Gone => {
+                        let exited = element
+                            .pid
+                            .and_then(|pid| i32::try_from(pid).ok())
+                            .is_some_and(|pid| !process_answers_ax(pid));
+                        let reason = if exited {
+                            xa11y_core::StaleReason::ProcessExited
+                        } else {
+                            xa11y_core::StaleReason::Removed
+                        };
+                        Error::stale(reason, subject)
+                    }
+                    // A busy or wedged app is not a stale element: report it
+                    // as the platform failure it is.
+                    ElementChurn::Unreachable | ElementChurn::Fatal => Error::Platform {
+                        code: i64::from(code),
+                        message: format!("AXRole read for {subject} failed (AXError {code})"),
+                    },
+                });
+            }
+        };
+        // The guard compares the raw `AXRole` the snapshot stored
+        // (`ax_role`), not the mapped role, so a subrole refinement cannot
+        // make a live element look replaced.
+        match (
+            live_role,
+            element.raw.get("ax_role").and_then(|v| v.as_str()),
+        ) {
+            (Some(live), Some(captured)) if live != captured => Err(Error::stale(
+                xa11y_core::StaleReason::IdentityChanged,
+                format!("{subject}; the element now reports {live}, not {captured}"),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         match element {
             None => {
@@ -5857,15 +6162,96 @@ impl Provider for MacOSProvider {
 // ── Event subscription ──────────────────────────────────────────────────────
 
 struct ObserverContext {
-    sender: std::sync::mpsc::Sender<Event>,
+    sender: xa11y_core::EventSender,
     app_name: String,
     app_pid: u32,
+}
+
+/// `NSAccessibilityPriorityHigh`; `Low` is 10 and `Medium` 50.
+const AX_PRIORITY_HIGH: i64 = 90;
+
+/// A string value of a borrowed `userInfo` dictionary, or `None`.
+fn info_string(info: CFTypeRef, key: &str) -> Option<String> {
+    if info.is_null() {
+        return None;
+    }
+    let key = CFString::new(key);
+    unsafe {
+        let v = safe_cf_dict_get_value(info, key.as_concrete_TypeRef() as CFTypeRef);
+        if v.is_null() || safe_cf_get_type_id(v) != safe_cf_string_get_type_id() {
+            return None;
+        }
+        // Borrowed from the dictionary (Get rule).
+        Some(CFString::wrap_under_get_rule(v as *const _).to_string())
+    }
+}
+
+/// An integer value of a borrowed `userInfo` dictionary, or `None`.
+fn info_i64(info: CFTypeRef, key: &str) -> Option<i64> {
+    if info.is_null() {
+        return None;
+    }
+    let key = CFString::new(key);
+    unsafe {
+        let v = safe_cf_dict_get_value(info, key.as_concrete_TypeRef() as CFTypeRef);
+        if v.is_null() || safe_cf_get_type_id(v) != safe_cf_number_get_type_id() {
+            return None;
+        }
+        let mut out: i64 = 0;
+        safe_cf_number_get_value(v, CF_NUMBER_SINT64, &mut out as *mut _ as *mut c_void)
+            .then_some(out)
+    }
+}
+
+/// The payload of an AX announcement-like notification.
+fn ax_announcement(
+    notification: &str,
+    info: CFTypeRef,
+    target: Option<&ElementData>,
+) -> Option<xa11y_core::AnnouncementInfo> {
+    use xa11y_core::{AnnouncementOrigin, AnnouncementParts, Politeness};
+    match notification {
+        "AXAnnouncementRequested" => {
+            let priority = info_i64(info, "AXPriorityKey");
+            Some(
+                AnnouncementParts {
+                    origin: AnnouncementOrigin::Request,
+                    text: info_string(info, "AXAnnouncementKey").filter(|t| !t.is_empty()),
+                    politeness: priority.map(|p| {
+                        if p >= AX_PRIORITY_HIGH {
+                            Politeness::Assertive
+                        } else {
+                            Politeness::Polite
+                        }
+                    }),
+                    platform_priority: priority.map(|p| p.to_string()),
+                    activity_id: None,
+                }
+                .into(),
+            )
+        }
+        // The region changed; its own `AXARIALive` says how urgently.
+        "AXLiveRegionChanged" => Some(
+            AnnouncementParts {
+                origin: AnnouncementOrigin::LiveRegion,
+                text: None,
+                politeness: target
+                    .and_then(|t| t.live_region.as_ref())
+                    .and_then(|l| l.politeness),
+                platform_priority: None,
+                activity_id: None,
+            }
+            .into(),
+        ),
+        _ => None,
+    }
 }
 
 unsafe extern "C" fn ax_observer_callback(
     _observer: CFTypeRef,
     element: AXUIElementRef,
     notification: CFTypeRef,
+    info: CFTypeRef,
     refcon: *mut c_void,
 ) {
     let ctx = &*(refcon as *const ObserverContext);
@@ -6003,13 +6389,17 @@ unsafe extern "C" fn ax_observer_callback(
         "AXMenuOpened" => vec![EventKind::MenuOpened],
         "AXMenuClosed" => vec![EventKind::MenuClosed],
 
-        "AXAnnouncementRequested" => vec![EventKind::Announcement],
+        "AXAnnouncementRequested" | "AXLiveRegionChanged" => vec![EventKind::Announcement],
 
         _ => return,
     };
 
+    let announcement = ax_announcement(notif_str.as_str(), info, target.as_ref());
     for kind in kinds {
         let event: Event = EventParts {
+            announcement: (kind == EventKind::Announcement)
+                .then(|| announcement.clone())
+                .flatten(),
             kind,
             target: target.clone(),
             app_name: ctx.app_name.clone(),
@@ -6017,8 +6407,11 @@ unsafe extern "C" fn ax_observer_callback(
             timestamp: std::time::Instant::now(),
             // AXValueChanged carries no delta (#480).
             text_change: None,
+            sequence: 0,
         }
         .into();
+        // Fails only once the subscription is dropped; the cancel path
+        // stops this run loop.
         let _ = ctx.sender.send(event);
     }
 }
@@ -6072,7 +6465,7 @@ fn register_notifications(
 
 impl MacOSProvider {
     fn subscribe_impl(&self, pid: i32, app_name: String) -> Result<Subscription> {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = xa11y_core::event_channel();
 
         let ctx = Box::new(ObserverContext {
             sender: tx,
@@ -6082,12 +6475,13 @@ impl MacOSProvider {
         let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
 
         let mut observer: CFTypeRef = std::ptr::null();
-        let err = unsafe { safe_ax_observer_create(pid, ax_observer_callback, &mut observer) };
+        let err =
+            unsafe { safe_ax_observer_create_with_info(pid, ax_observer_callback, &mut observer) };
         if err != AX_ERROR_SUCCESS || observer.is_null() {
             unsafe { drop(Box::from_raw(ctx_ptr as *mut ObserverContext)) };
             return Err(Error::Platform {
                 code: err as i64,
-                message: "AXObserverCreate failed".to_string(),
+                message: "AXObserverCreateWithInfoCallback failed".to_string(),
             });
         }
 
@@ -6123,6 +6517,7 @@ impl MacOSProvider {
             "AXMenuOpened",
             "AXMenuClosed",
             "AXAnnouncementRequested",
+            "AXLiveRegionChanged",
         ];
 
         // Register every notification, failing the whole subscribe on the
@@ -6233,7 +6628,7 @@ impl MacOSProvider {
             }
         });
 
-        Ok(Subscription::new(EventReceiver::new(rx), cancel))
+        Ok(Subscription::new(rx, cancel))
     }
 }
 
@@ -6662,9 +7057,10 @@ mod tests {
         );
         // Non-platform errors are never churn.
         assert_eq!(
-            classify_element_churn(&Error::ElementStale {
-                selector: "handle:1".to_string(),
-            }),
+            classify_element_churn(&Error::stale(
+                xa11y_core::StaleReason::Removed,
+                "handle:1".to_string()
+            )),
             ElementChurn::Fatal
         );
         // `kAXErrorNoValue` is not retryable on its own: the process
@@ -7114,7 +7510,7 @@ mod tests {
         assert_eq!(map_ax_role("AXPopover", None), Role::Group);
         assert_eq!(
             map_ax_role("AXGroup", Some("AXLandmarkNavigation")),
-            Role::Navigation
+            Role::Landmark
         );
         assert_eq!(map_ax_role("AXWindow", Some("AXDialog")), Role::Dialog);
         assert_eq!(

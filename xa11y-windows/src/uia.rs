@@ -2,9 +2,10 @@
 
 mod rich;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
 
 use windows::core::{implement, Interface, BOOL};
 use windows::Win32::Foundation::*;
@@ -20,9 +21,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
-    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    HiddenReason, Provider, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet,
-    Subscription, Toggled,
+    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, HiddenReason,
+    Provider, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet, Subscription,
+    Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -46,53 +47,7 @@ const SYNTHETIC_APP_TAG: u64 = 1 << 63;
 /// flows while preventing repeated enumeration from retaining every UIA COM
 /// object for the lifetime of the process. Synthetic apps are much smaller,
 /// but process churn is unbounded too, so they have their own cap.
-const MAX_CACHED_ELEMENTS: usize = 65_536;
 const MAX_SYNTHETIC_APPS: usize = 4_096;
-
-/// Insertion-order-bounded handle table with refresh-on-update.
-///
-/// Handle values are never reused, so insertion order is enough: an evicted
-/// capability becomes stale and can never accidentally resolve to a newer
-/// object. Updating an existing key refreshes its age, which lets repeated
-/// app enumeration keep a still-live synthetic identity resident while old
-/// process generations age out.
-struct BoundedHandleCache<T> {
-    entries: HashMap<u64, T>,
-    order: VecDeque<u64>,
-    capacity: usize,
-}
-
-impl<T> BoundedHandleCache<T> {
-    fn new(capacity: usize) -> Self {
-        debug_assert!(capacity > 0);
-        Self {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-            capacity,
-        }
-    }
-
-    fn insert(&mut self, handle: u64, value: T) {
-        if self.entries.insert(handle, value).is_some() {
-            self.order.retain(|candidate| *candidate != handle);
-        }
-        self.order.push_back(handle);
-        while self.entries.len() > self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            }
-        }
-    }
-
-    fn get(&self, handle: &u64) -> Option<&T> {
-        self.entries.get(handle)
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
 
 /// True for every handle in the synthetic Application-node tag space.
 fn is_synthetic_handle(handle: u64) -> bool {
@@ -135,7 +90,6 @@ fn cache_synthetic_app_identity(
     // doing so could make a new process inherit an old process's handle.
     let existing = identity.creation_time.and_then(|_| {
         synthetic_apps
-            .entries
             .iter()
             .find_map(|(handle, candidate)| (*candidate == identity).then_some(*handle))
     });
@@ -419,9 +373,10 @@ impl WindowsProvider {
             .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
-            .ok_or(Error::ElementStale {
-                selector: format!("handle:{}", handle),
-            })
+            .ok_or(Error::stale(
+                xa11y_core::StaleReason::Evicted,
+                format!("handle:{}", handle),
+            ))
     }
 
     /// Identity of the synthesized Application node for `handle`, if any.
@@ -453,11 +408,14 @@ impl WindowsProvider {
         }
         self.synthetic_app_identity(handle)
             .map(Some)
-            .ok_or_else(|| Error::ElementStale {
-                selector: format!(
-                    "handle:{handle}; the synthetic Application identity expired, so its pid \
+            .ok_or_else(|| {
+                Error::stale(
+                    xa11y_core::StaleReason::Evicted,
+                    format!(
+                        "handle:{handle}; the synthetic Application identity expired, so its pid \
                      can no longer be resolved safely"
-                ),
+                    ),
+                )
             })
     }
 
@@ -1095,6 +1053,11 @@ impl WindowsProvider {
             );
         }
         Ok(ElementParts {
+            heading_level: None,
+            landmark_type: None,
+            web_role: None,
+            link_url: None,
+            live_region: None,
             role: Role::Application,
             name: if name.is_empty() { None } else { Some(name) },
             value: None,
@@ -1585,6 +1548,23 @@ fn uia_call<T>(f: impl Fn() -> windows::core::Result<T>) -> Result<T> {
         code: e.code().0 as i64,
         message: e.to_string(),
     })
+}
+
+/// HRESULTs that mean the element, or the process serving it, is gone:
+/// `UIA_E_ELEMENTNOTAVAILABLE`, `RPC_E_DISCONNECTED`, `CO_E_OBJNOTCONNECTED`
+/// and `RPC_S_SERVER_UNAVAILABLE` as an HRESULT.
+fn is_gone_code(code: i64) -> bool {
+    const RPC_E_DISCONNECTED_HR: i32 = 0x8001_0108_u32 as i32;
+    const CO_E_OBJNOTCONNECTED_HR: i32 = 0x8004_01FD_u32 as i32;
+    const RPC_S_SERVER_UNAVAILABLE_HR: i32 = 0x8007_06BA_u32 as i32;
+    [
+        UIA_E_ELEMENTNOTAVAILABLE as i32,
+        RPC_E_DISCONNECTED_HR,
+        CO_E_OBJNOTCONNECTED_HR,
+        RPC_S_SERVER_UNAVAILABLE_HR,
+    ]
+    .iter()
+    .any(|hr| i64::from(*hr) == code)
 }
 
 /// A candidate invalidated during a live tree/query snapshot is no longer
@@ -2827,27 +2807,30 @@ fn validate_synthetic_app_identity(
 ) -> Result<()> {
     match (identity.creation_time, current) {
         (Some(stored), Some(current)) if stored == current => Ok(()),
-        (Some(_), Some(_)) => Err(Error::ElementStale {
-            selector: format!(
+        (Some(_), Some(_)) => Err(Error::stale(
+            xa11y_core::StaleReason::ProcessRestarted,
+            format!(
                 "handle:{handle} (pid {}); the process exited and Windows reused its pid, \
                  so this Application node is stale",
                 identity.pid
             ),
-        }),
-        (None, _) => Err(Error::ElementStale {
-            selector: format!(
+        )),
+        (None, _) => Err(Error::stale(
+            xa11y_core::StaleReason::ProcessRestarted,
+            format!(
                 "handle:{handle} (pid {}); the process identity could not be captured when \
                  this Application node was created, so resolving the pid would be unsafe",
                 identity.pid
             ),
-        }),
-        (Some(_), None) => Err(Error::ElementStale {
-            selector: format!(
+        )),
+        (Some(_), None) => Err(Error::stale(
+            xa11y_core::StaleReason::ProcessRestarted,
+            format!(
                 "handle:{handle} (pid {}); the current process identity could not be verified, \
                  so resolving the pid would be unsafe",
                 identity.pid
             ),
-        }),
+        )),
     }
 }
 
@@ -2872,6 +2855,106 @@ fn uia_cached_i32(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Opti
     unsafe { element.GetCachedPropertyValue(prop) }
         .ok()
         .and_then(|v| variant_i32(&v))
+}
+
+/// Document semantics from an element's cached properties (#476).
+struct UiaSemantics {
+    heading_level: Option<u32>,
+    landmark_type: Option<xa11y_core::Landmark>,
+    web_role: Option<String>,
+    link_url: Option<String>,
+    live_region: Option<xa11y_core::LiveRegionInfo>,
+}
+
+/// The landmark a UIA `LandmarkType` id names. A custom landmark's kind is
+/// in its localized name ("banner", "content information") or ARIA role.
+fn landmark_from_type_id(
+    element: &IUIAutomationElement,
+    id: i32,
+    web_role: Option<&str>,
+) -> xa11y_core::Landmark {
+    use xa11y_core::Landmark;
+    match id {
+        id if id == UIA_FormLandmarkTypeId.0 => Landmark::Form,
+        id if id == UIA_MainLandmarkTypeId.0 => Landmark::Main,
+        id if id == UIA_NavigationLandmarkTypeId.0 => Landmark::Navigation,
+        id if id == UIA_SearchLandmarkTypeId.0 => Landmark::Search,
+        _ => uia_cached_bstr(element, UIA_LocalizedLandmarkTypePropertyId)
+            .as_deref()
+            .and_then(|name| {
+                if name.eq_ignore_ascii_case("content information") {
+                    Some(Landmark::ContentInfo)
+                } else {
+                    Landmark::from_aria_role(name)
+                }
+            })
+            .or_else(|| web_role.and_then(Landmark::from_aria_role))
+            .unwrap_or(Landmark::Unknown),
+    }
+}
+
+fn uia_semantics(
+    element: &IUIAutomationElement,
+    role: Role,
+    landmark_type_id: Option<i32>,
+    value: Option<&str>,
+) -> UiaSemantics {
+    let web_role = uia_cached_bstr(element, UIA_AriaRolePropertyId);
+    // `HeadingLevel1` .. `HeadingLevel9`; `HeadingLevel_None` and anything
+    // else is no level.
+    let heading_level = uia_cached_i32(element, UIA_HeadingLevelPropertyId)
+        .map(|id| id - (HeadingLevel1.0 - 1))
+        .filter(|level| (1..=9).contains(level))
+        .map(|level| level as u32);
+    let landmark_type = match landmark_type_id {
+        Some(id) => Some(landmark_from_type_id(element, id, web_role.as_deref())),
+        // No UIA LandmarkType: a landmark the ARIA role alone marked.
+        None if role == Role::Landmark => Some(
+            web_role
+                .as_deref()
+                .and_then(xa11y_core::Landmark::from_aria_role)
+                .unwrap_or(xa11y_core::Landmark::Unknown),
+        ),
+        None => None,
+    };
+    let aria = uia_cached_bstr(element, UIA_AriaPropertiesPropertyId);
+    let aria_prop = |key: &str| {
+        aria.as_deref().and_then(|props| {
+            props.split(';').find_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                (k.trim() == key).then(|| v.trim().to_string())
+            })
+        })
+    };
+    // UIA reports `Off` (0) for every element that is not a live region, so
+    // only polite / assertive mark one.
+    let politeness = match uia_cached_i32(element, UIA_LiveSettingPropertyId) {
+        Some(1) => Some(xa11y_core::Politeness::Polite),
+        Some(2) => Some(xa11y_core::Politeness::Assertive),
+        _ => None,
+    };
+    let live = politeness.map(|politeness| {
+        xa11y_core::LiveRegionParts {
+            politeness: Some(politeness),
+            atomic: aria_prop("atomic").and_then(|v| match v.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            }),
+            relevant: aria_prop("relevant").filter(|v| !v.is_empty()),
+        }
+        .into()
+    });
+    UiaSemantics {
+        heading_level,
+        landmark_type,
+        web_role,
+        // UIA has no URL property; browsers put a link's URL in its value.
+        link_url: (role == Role::Link)
+            .then(|| value.map(str::to_string))
+            .flatten(),
+        live_region: live,
+    }
 }
 
 /// Build an ElementData snapshot from a pre-fetched UIA element without
@@ -2931,6 +3014,15 @@ fn build_snapshot_data(
                 "separator" => role = Role::Separator,
                 "progressbar" => role = Role::ProgressBar,
                 "link" => role = Role::Link,
+                // A landmark that sets only its ARIA role (AccessKit, and
+                // frameworks without a UIA LandmarkType) is still a landmark
+                // (#476); `uia_semantics` reads its kind from the same role.
+                other
+                    if matches!(role, Role::Group | Role::Unknown)
+                        && xa11y_core::Landmark::from_aria_role(other).is_some() =>
+                {
+                    role = Role::Landmark;
+                }
                 _ => {}
             }
         }
@@ -2942,6 +3034,13 @@ fn build_snapshot_data(
         {
             role = Role::Dialog;
         }
+    }
+    // A landmark is a group with a UIA LandmarkType (#476); its kind is
+    // read below.
+    let landmark_type_id = uia_cached_i32(element, UIA_LandmarkTypePropertyId)
+        .filter(|id| (UIA_CustomLandmarkTypeId.0..=UIA_SearchLandmarkTypeId.0).contains(id));
+    if landmark_type_id.is_some() && matches!(role, Role::Group | Role::Unknown) {
+        role = Role::Landmark;
     }
 
     let name = unsafe { element.CachedName() }
@@ -2962,6 +3061,7 @@ fn build_snapshot_data(
         name: name.as_deref(),
     };
     let (value, observed_range_value) = get_value(site, &patterns, password)?;
+    let semantics = uia_semantics(element, role, landmark_type_id, value.as_deref());
 
     // Try FullDescription first (AccessKit's description), then HelpText
     let description = uia_cached_bstr(element, UIA_FullDescriptionPropertyId)
@@ -3097,6 +3197,11 @@ fn build_snapshot_data(
     };
 
     Ok(ElementParts {
+        heading_level: semantics.heading_level,
+        landmark_type: semantics.landmark_type,
+        web_role: semantics.web_role,
+        link_url: semantics.link_url,
+        live_region: semantics.live_region,
         role,
         name,
         value,
@@ -3212,6 +3317,13 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_LevelPropertyId,
     UIA_ControlTypePropertyId,
     UIA_AriaRolePropertyId,
+    // Document semantics (#476): heading level, landmark, live region and
+    // the ARIA properties carrying atomic / relevant.
+    UIA_HeadingLevelPropertyId,
+    UIA_LandmarkTypePropertyId,
+    UIA_LocalizedLandmarkTypePropertyId,
+    UIA_LiveSettingPropertyId,
+    UIA_AriaPropertiesPropertyId,
     UIA_OrientationPropertyId,
     UIA_IsDialogPropertyId,
     UIA_IsTableItemPatternAvailablePropertyId,
@@ -3971,12 +4083,13 @@ impl WindowsProvider {
                 && crate::uwp::PidFilter::for_pid(identity.pid).owns(hwnd)?
         };
         if !belongs_to_app {
-            return Err(Error::ElementStale {
-                selector: format!(
+            return Err(Error::stale(
+                xa11y_core::StaleReason::IdentityChanged,
+                format!(
                     "handle:{} (pid {}); top-level window HWND was reused by pid {reacquired_pid}",
                     app.handle, identity.pid
                 ),
-            });
+            ));
         }
         // Re-check the process generation after resolving the
         // numeric HWND. HWNDs are reusable too; together these
@@ -4028,6 +4141,93 @@ impl WindowsProvider {
 // scope is a defensive habit, not a requirement: it keeps a coordinate call
 // added to one of them later from needing a scope threaded in first.
 impl Provider for WindowsProvider {
+    fn identity(&self, element: &ElementData) -> Result<xa11y_core::NodeIdentity> {
+        if let Some(app) = self.synthetic_app_identity_checked(element.handle)? {
+            return Ok(xa11y_core::NodeIdentity::from_key(
+                "uia",
+                format!("{}:{:?}", app.pid, app.creation_time),
+                "application",
+            ));
+        }
+        let uia = self.get_cached(element.handle)?;
+        let rid = Self::runtime_id(&uia, element.handle).map_err(|e| match e {
+            Error::Platform { code, .. } if is_gone_code(code) => Error::stale(
+                xa11y_core::StaleReason::Removed,
+                xa11y_core::error::stale_subject(element),
+            ),
+            other => other,
+        })?;
+        if rid.is_empty() {
+            return Err(Error::Unsupported {
+                feature: format!(
+                    "identity of {}: its UIA provider reports no RuntimeId",
+                    xa11y_core::error::stale_subject(element)
+                ),
+            });
+        }
+        // The pid alone can be reused; its creation time names the process
+        // instance. A process that cannot be opened keeps `None`, which still
+        // compares consistently within this session.
+        let process = element.pid.map_or_else(
+            || "-".to_string(),
+            |pid| format!("{pid}:{:?}", process_creation_time(pid)),
+        );
+        let key = rid
+            .iter()
+            .map(|part| part.to_string())
+            .collect::<Vec<_>>()
+            .join(".");
+        Ok(xa11y_core::NodeIdentity::from_key("uia", process, key))
+    }
+
+    fn revalidate(&self, element: &ElementData) -> Result<()> {
+        if let Some(app) = self.synthetic_app_identity_checked(element.handle)? {
+            return validate_synthetic_app_identity(
+                element.handle,
+                app,
+                process_creation_time(app.pid),
+            );
+        }
+        let uia = self.get_cached(element.handle)?;
+        let subject = xa11y_core::error::stale_subject(element);
+        let gone = |code: i64| -> Error {
+            let exited = element
+                .pid
+                .is_some_and(|pid| process_creation_time(pid).is_none());
+            let reason = if exited {
+                xa11y_core::StaleReason::ProcessExited
+            } else {
+                xa11y_core::StaleReason::Removed
+            };
+            Error::stale(reason, format!("{subject} (HRESULT {code:#x})"))
+        };
+        let live = |result: Result<i32>| -> Result<i32> {
+            result.map_err(|e| match e {
+                Error::Platform { code, .. } if is_gone_code(code) => gone(code),
+                other => other,
+            })
+        };
+        // `ElementData::pid` is the owning application's, which for a
+        // hosted window (a UWP frame) is not the element's own process, so
+        // it is not compared: the COM element is bound to its node, and the
+        // control type below catches a reused id.
+        // The role guard compares UIA's own control type, which the snapshot
+        // stored as `control_type_id`, so a mapping refinement (ARIA role,
+        // DataItem cells) cannot make a live node look replaced. Partial
+        // data with no control type carries nothing to compare.
+        let control_type = live(uia_call(|| unsafe { uia.CurrentControlType() }).map(|c| c.0))?;
+        match element.raw.get("control_type_id").and_then(|v| v.as_i64()) {
+            Some(captured) if captured != i64::from(control_type) => Err(Error::stale(
+                xa11y_core::StaleReason::IdentityChanged,
+                format!(
+                    "{subject}; the element now reports UIA control type {control_type}, \
+                     not {captured}"
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
         let dpi = &crate::dpi::DpiScope::enter()?;
         if let Some(identity) = self.synthetic_app_identity_checked(app.handle)? {
@@ -5655,6 +5855,70 @@ impl Provider for WindowsProvider {
                 message: format!("Grid.GetItem({row}, {column}) failed: {e}"),
             }),
         }
+    }
+
+    fn relations(
+        &self,
+        e: &ElementData,
+        kinds: &[xa11y_core::RelationKind],
+    ) -> Result<Vec<(xa11y_core::RelationKind, Vec<ElementData>)>> {
+        use xa11y_core::RelationKind as K;
+        // Refuse an unsupported kind before any COM call, naming it.
+        for kind in kinds {
+            if !matches!(
+                kind,
+                K::LabelledBy | K::Details | K::Controls | K::FlowsTo | K::FlowsFrom
+            ) {
+                return Err(Error::Unsupported {
+                    feature: format!(
+                        "relation {kind} on UIA: UIA reports labelled_by (LabeledBy), details \
+                         (DescribedBy), controls (ControllerFor), flows_to and flows_from only"
+                    ),
+                });
+            }
+        }
+        let dpi = crate::dpi::DpiScope::enter()?;
+        let uia = self.get_cached(e.handle)?;
+        let mut out = Vec::with_capacity(kinds.len());
+        for kind in kinds {
+            let targets = match kind {
+                K::LabelledBy => match uia_call(|| unsafe { uia.CurrentLabeledBy() }) {
+                    Ok(label) => vec![self.rich_element(&dpi, &label)?],
+                    // No label: UIA answers a null element, which the
+                    // binding surfaces as an error with a success-class
+                    // code. Anything else is a real failure.
+                    Err(Error::Platform { code: 0, .. }) => Vec::new(),
+                    Err(err) => return Err(err),
+                },
+                K::Details => {
+                    let array = uia_call(|| unsafe { uia.CurrentDescribedBy() })?;
+                    self.rich_elements(&dpi, &array)?
+                }
+                K::Controls => {
+                    let array = uia_call(|| unsafe { uia.CurrentControllerFor() })?;
+                    self.rich_elements(&dpi, &array)?
+                }
+                K::FlowsTo => {
+                    let array = uia_call(|| unsafe { uia.CurrentFlowsTo() })?;
+                    self.rich_elements(&dpi, &array)?
+                }
+                K::FlowsFrom => {
+                    let element2: IUIAutomationElement2 = windows::core::Interface::cast(&uia)
+                        .map_err(|err| Error::Unsupported {
+                            feature: format!(
+                                "relation flows_from: this UIA element has no \
+                                 IUIAutomationElement2 ({err})"
+                            ),
+                        })?;
+                    let array = uia_call(|| unsafe { element2.CurrentFlowsFrom() })?;
+                    self.rich_elements(&dpi, &array)?
+                }
+                // Refused above.
+                _ => Vec::new(),
+            };
+            out.push((*kind, targets));
+        }
+        Ok(out)
     }
 
     fn table_headers(
@@ -7384,7 +7648,7 @@ fn cleanup_registrations(
 /// disconnect the stream and become visible to a waiting consumer. The mutex
 /// keeps that transition atomic with concurrent callback sends.
 struct EventContext {
-    sender: Mutex<Option<std::sync::mpsc::Sender<Event>>>,
+    sender: Mutex<Option<xa11y_core::EventSender>>,
     app_name: String,
     app_pid: u32,
     frame_runtime_ids: Arc<Mutex<HashMap<usize, HashSet<Vec<i32>>>>>,
@@ -7411,6 +7675,15 @@ fn known_frame_sender(runtime_id: &[i32], frames: &HashMap<usize, HashSet<Vec<i3
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
+        self.emit_with(kind, target, None);
+    }
+
+    fn emit_with(
+        &self,
+        kind: EventKind,
+        target: Option<ElementData>,
+        announcement: Option<xa11y_core::AnnouncementInfo>,
+    ) {
         let event: Event = EventParts {
             kind,
             target,
@@ -7420,6 +7693,8 @@ impl EventContext {
             // UIA TextChanged has no insertion/deletion payload. Do not infer
             // a delta by racing a fresh text read against subsequent edits.
             text_change: None,
+            announcement,
+            sequence: 0,
         }
         .into();
         if let Some(tx) = self
@@ -7669,9 +7944,43 @@ impl IUIAutomationEventHandler_Impl for AutomationHandler_Impl {
             _ => return Ok(()),
         };
         let target = self.ctx.snapshot_or_log(el, &self.cache);
-        self.ctx.emit(kind, target);
+        let announcement = uia_announcement(eventid, target.as_ref());
+        self.ctx.emit_with(kind, target, announcement);
         Ok(())
     }
+}
+
+/// The payload of a UIA announcement-like event. A Notification's text and
+/// kind arrive only through `AddNotificationEventHandler`, which this
+/// backend does not register yet, so a request carries no text here.
+#[allow(non_upper_case_globals)] // UIA constants use CamelCase in the windows crate
+fn uia_announcement(
+    eventid: UIA_EVENT_ID,
+    target: Option<&ElementData>,
+) -> Option<xa11y_core::AnnouncementInfo> {
+    use xa11y_core::{AnnouncementOrigin, AnnouncementParts, Politeness};
+    let (origin, politeness) = match eventid {
+        UIA_NotificationEventId => (AnnouncementOrigin::Request, None),
+        // The region's own `LiveSetting` says how urgently.
+        UIA_LiveRegionChangedEventId => (
+            AnnouncementOrigin::LiveRegion,
+            target
+                .and_then(|t| t.live_region.as_ref())
+                .and_then(|l| l.politeness),
+        ),
+        UIA_SystemAlertEventId => (AnnouncementOrigin::Alert, Some(Politeness::Assertive)),
+        _ => return None,
+    };
+    Some(
+        AnnouncementParts {
+            origin,
+            text: None,
+            politeness,
+            platform_priority: None,
+            activity_id: None,
+        }
+        .into(),
+    )
 }
 
 /// Same native IID and ABI as IUIAutomationPropertyChangedEventHandler.
@@ -8062,7 +8371,7 @@ impl WindowsProvider {
         app_name: String,
         saved_app: Option<SavedSyntheticAppIdentity>,
     ) -> Result<Subscription> {
-        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+        let (tx, rx) = xa11y_core::event_channel();
 
         // Enumerate every current top-level window of the pid up front and
         // register the scoped handlers on *each* of them — the pre-C1 shape
@@ -8254,7 +8563,7 @@ impl WindowsProvider {
             }
         });
 
-        Ok(Subscription::new(EventReceiver::new(rx), cancel))
+        Ok(Subscription::new(rx, cancel))
     }
 }
 
@@ -10409,9 +10718,10 @@ mod tests {
                 if code == i64::from(hr.0))
             );
         }
-        let result: Result<()> = Err(Error::ElementStale {
-            selector: "saved App pid was reused".into(),
-        });
+        let result: Result<()> = Err(Error::stale(
+            xa11y_core::StaleReason::ProcessRestarted,
+            "saved App pid was reused",
+        ));
         assert!(matches!(
             live_snapshot(result),
             Err(Error::ElementStale { .. })

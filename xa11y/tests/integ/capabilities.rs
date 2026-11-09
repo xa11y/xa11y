@@ -28,6 +28,7 @@ mod tests {
         ("event:", "an event that never arrives cannot be shown absent by waiting; the supported kinds are driven by events_<platform>.rs"),
         ("table:", "the AccessKit app has no table; rich.rs and the Python rich suites cover tables per platform"),
         ("text:attribute:script", "the AccessKit text entry carries no superscript; rich.rs covers runs"),
+        ("property:", "presence depends on what the page or app published, so an absent value proves nothing; semantics.rs reads each property from the AccessKit document fixture"),
         ("window:activate", "not harmful to call, but windows.rs and multi_window.rs already drive it on every platform"),
     ];
 
@@ -141,6 +142,11 @@ mod tests {
                         .expect("the row names a text unit");
                     let text = entry.text().expect("the text field has a text interface");
                     check_call(name, cap, text.range_at(0, unit).map(|_| ()));
+                }
+                _ if name.starts_with("relation:") => {
+                    let kind = RelationKind::parse(name.trim_start_matches("relation:"))
+                        .expect("the row names a relation kind");
+                    check_call(name, cap, entry.relations(&[kind]).map(|_| ()));
                 }
                 _ if name.starts_with("window:") => {
                     let verb = name.trim_start_matches("window:");
