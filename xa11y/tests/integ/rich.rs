@@ -4,10 +4,10 @@
 //! `scripts/run_integ_tests.sh` launches next to the AccessKit test app.
 //! AccessKit's AT-SPI adapter implements no `Table` / `TableCell` interface
 //! and reports no text attribute runs, so the table and rich-text paths of
-//! the Linux backend have nothing to read there. The collection test is the
-//! exception: GTK 3 sets no `posinset` / `setsize` object attributes on any
-//! widget, while AccessKit does, so it reads the AccessKit test app's
-//! "Fruit List".
+//! the Linux backend have nothing to read there. Collection positions come
+//! from AccessKit instead, because GTK 3 sets no `posinset` / `setsize`
+//! object attributes on any widget: see `integ::collections`, which also
+//! runs in the Wayland job that skips this module.
 //!
 //! What neither fixture can show, and so nothing here claims:
 //!
@@ -16,6 +16,10 @@
 //! * a `level` (`CollectionInfo::depth`). GTK 3 tree cells carry no
 //!   `level` attribute and `accesskit_atspi_common` does not export one.
 //! * row headers. A `GtkTreeView` has column headers only.
+//!
+//! Merged cells, depth, declared totals and right-to-left text are covered
+//! against Chromium instead, by `tests/suites/python/test_web_rich.py` on the
+//! Electron test app.
 //!
 //! Every expected offset is in UTF-16 code units. GTK counts code points, so
 //! the fixture text puts a non-BMP character on each of its first two lines:
@@ -234,30 +238,6 @@ fn table_calls_on_a_non_table_are_refused() {
             "{what} on a button: {result:?}"
         );
     }
-}
-
-// ── Collections ─────────────────────────────────────────────────────
-
-#[test]
-#[ignore]
-fn list_items_report_position_and_set_size() {
-    let app = crate::integ::app_root();
-    let items = app
-        .locator(r#"list[name="Fruit List"] > list_item"#)
-        .elements()
-        .expect("fruit list items");
-    assert_eq!(names(&items), ["Apple", "Banana", "Cherry"]);
-    for (i, item) in items.iter().enumerate() {
-        let c = item
-            .collection
-            .unwrap_or_else(|| panic!("{:?} has no collection info", item.name));
-        assert_eq!(c.index, Some(i as u32), "{:?}", item.name);
-        assert_eq!(c.size, Some(Count::Known(3)), "{:?}", item.name);
-        // accesskit_atspi_common exports no `level`.
-        assert_eq!(c.depth, None, "{:?}", item.name);
-    }
-    let banana = crate::integ::one(&app, r#"list_item[index="1"][size="3"]"#);
-    assert_eq!(banana.name.as_deref(), Some("Banana"));
 }
 
 // ── Text ────────────────────────────────────────────────────────────

@@ -74,6 +74,11 @@ apps:
       (app launched without --force-renderer-accessibility). The macOS cell
       is where App.enable_web_accessibility runs against a real Chromium
       (#511); Windows has no Electron cell.
+      The page's "Rich" section is the web fixture for tables, collections
+      and text by range (#655): merged cells, declared ARIA totals in
+      virtualized grids and lists, ARIA tree depth, combining marks,
+      right-to-left and wrapped text, and contenteditable editors. It is read
+      by tests/suites/python/test_web_rich.py.
 
   egui:
     platforms: [linux, macos, windows]

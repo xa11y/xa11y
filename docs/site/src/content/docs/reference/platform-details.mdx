@@ -497,7 +497,7 @@ JavaScript.
 
 | Capability | Linux (AT-SPI) | macOS | Windows (UIA) |
 | --- | --- | --- | --- |
-| `table` (`row_count`, `column_count`) | `Table.NRows` / `NColumns`; a negative value reads `unknown` | `AXRowCount` / `AXColumnCount`, or the length of `AXRows` / `AXColumns` where those are absent (AppKit) | Grid row and column counts |
+| `table` (`row_count`, `column_count`) | The `rowcount` / `colcount` object attributes when the table declares them (Chromium sets them from `aria-rowcount` / `aria-colcount`), otherwise `Table.NRows` / `NColumns`; a negative value reads `unknown` | `AXRowCount` / `AXColumnCount`, or the length of `AXRows` / `AXColumns` where those are absent (AppKit) | Grid row and column counts |
 | `cell` (`row`, `column`, spans) | `TableCell.GetRowColumnSpan` | `AXRowIndexRange` / `AXColumnIndexRange` | GridItem properties |
 | `cell.header` | The `column header` / `row header` roles | Always `None`: AX marks no cell as a header | Cached ARIA header role, WPF header class, or parent Header orientation; explicit header requests label their returned cells |
 | `table_row` | Always `None`: AT-SPI has no row-index call for a row object, so read the row from a cell | `AXIndex` of an `AXRow`, including outline rows | GridItem row when the row object reports it |

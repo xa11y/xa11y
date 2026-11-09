@@ -3,6 +3,14 @@
 <head>
   <meta charset="utf-8">
   <title>xa11y-electron-test-app</title>
+  <style>
+    /* Rich content sits in a right-hand column so the page fits its window. */
+    #rich { position: absolute; top: 8px; left: 430px; width: 340px; font: 13px sans-serif; }
+    #rich table, #rich [role="grid"], #rich ul, #rich [contenteditable], #rich textarea { margin: 0 0 6px; }
+    #rich [role="row"] { display: flex; gap: 8px; }
+    #rich ul { padding-left: 18px; }
+    #rich [contenteditable] { border: 1px solid #888; padding: 2px; }
+  </style>
 </head>
 <body>
   <h1>xa11y Electron Test App</h1>
@@ -68,6 +76,78 @@ Line 3</textarea>
     <label for="password-field">Password</label>
     <input id="password-field" type="password" aria-label="Password">
   </div>
+
+
+  <!-- Rich content (#655): the real-fixture cover for tables, collections
+       and text by range that no native toolkit in the matrix provides.
+       Chromium reports HTML spans, ARIA totals and ARIA tree levels, which
+       GTK 3, Qt and AppKit do not. Positioned beside the controls above, so
+       the page does not scroll: every element here stays on screen for the
+       bounds tests. tests/suites/python/test_web_rich.py reads it. -->
+  <section id="rich" aria-label="Rich">
+    <table id="span-table" aria-label="Span Table">
+      <thead>
+        <tr><th>Fruit</th><th>Colour</th><th>Qty</th></tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="2">Apple</td><td>10</td></tr>
+        <tr><td>Banana</td><td>Yellow</td><td rowspan="2">20</td></tr>
+        <tr><td>Cherry</td><td>Red</td></tr>
+      </tbody>
+    </table>
+
+    <!-- A window onto 1000 rows: 3 realized, the total from aria-rowcount. -->
+    <div role="grid" aria-label="Paged Grid" aria-rowcount="1000" aria-colcount="2">
+      <div role="row" aria-rowindex="1">
+        <span role="columnheader">ID</span><span role="columnheader">Label</span>
+      </div>
+      <div role="row" aria-rowindex="500">
+        <span role="gridcell">500</span><span role="gridcell">Row 500</span>
+      </div>
+      <div role="row" aria-rowindex="501">
+        <span role="gridcell">501</span><span role="gridcell">Row 501</span>
+      </div>
+    </div>
+
+    <!-- A total the page does not know: aria-rowcount="-1". -->
+    <div role="grid" aria-label="Endless Grid" aria-rowcount="-1">
+      <div role="row" aria-rowindex="1">
+        <span role="gridcell">First</span><span role="gridcell">Loaded</span>
+      </div>
+      <div role="row" aria-rowindex="2">
+        <span role="gridcell">Second</span><span role="gridcell">Loaded</span>
+      </div>
+    </div>
+
+    <!-- Feed of a list whose size is unknown, and one of 200 items. -->
+    <ul aria-label="Paged List">
+      <li aria-posinset="41" aria-setsize="200">Item 41</li>
+      <li aria-posinset="42" aria-setsize="200">Item 42</li>
+    </ul>
+    <ul aria-label="Endless List">
+      <li aria-posinset="1" aria-setsize="-1">Post 1</li>
+      <li aria-posinset="2" aria-setsize="-1">Post 2</li>
+    </ul>
+
+    <ul role="tree" aria-label="Outline">
+      <li role="treeitem" aria-expanded="true">Docs
+        <ul role="group">
+          <li role="treeitem">report.pdf</li>
+          <li role="treeitem" aria-expanded="true">Archive
+            <ul role="group"><li role="treeitem">old.txt</li></ul>
+          </li>
+        </ul>
+      </li>
+      <li role="treeitem">Music</li>
+    </ul>
+
+    <div id="rich-editor" contenteditable="true" role="textbox" aria-multiline="true"
+         aria-label="Rich Editor">cafe&#x301; na&#xEF;ve <b>bold</b></div>
+    <div id="rtl-editor" contenteditable="true" role="textbox" aria-label="RTL Editor"
+         dir="rtl">&#x5E9;&#x5DC;&#x5D5;&#x5DD; abc</div>
+    <textarea id="rtl-notes" aria-label="RTL Notes" dir="rtl" rows="1">&#x5E9;&#x5DC;&#x5D5;&#x5DD; abc</textarea>
+    <textarea id="wrapped-notes" aria-label="Wrapped Notes" cols="16" rows="4">alpha beta gamma delta epsilon zeta</textarea>
+  </section>
 
   <script>
     // Keep aria-valuenow in sync so AT-SPI value reads track user changes.
