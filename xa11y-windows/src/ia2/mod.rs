@@ -425,6 +425,10 @@ struct State {
     next: u64,
     dispatched: bool,
     deadline: Option<Instant>,
+    /// Set when [`check_deadline`](Self::check_deadline) refused to start a
+    /// native operation, so the worker can tell a cooperative stop from a
+    /// native call that overran its budget.
+    deadline_hit: std::cell::Cell<bool>,
 }
 impl State {
     fn new() -> Self {
@@ -434,6 +438,7 @@ impl State {
             next: 1,
             dispatched: false,
             deadline: None,
+            deadline_hit: std::cell::Cell::new(false),
         }
     }
     fn check_deadline(&self) -> Result<()> {
@@ -441,6 +446,7 @@ impl State {
             .deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
+            self.deadline_hit.set(true);
             return Err(platform(
                 "IA2 request deadline expired before the next native operation",
             ));
@@ -890,10 +896,102 @@ fn data(snapshot: Snapshot, bits: i32, owner: &Owner, handle: u64) -> ElementDat
 }
 
 type Job = Box<dyn FnOnce(&mut State) + Send>;
+
+/// How long past a request's budget its caller keeps waiting before it
+/// treats the native call as hung. A request whose budget ends between
+/// native operations stops at its next `check_deadline`; this covers the gap
+/// between that stop and the caller seeing it.
+const STALL_GRACE: Duration = Duration::from_millis(200);
+/// How long a caller sleeps between attempts to enqueue on a full queue.
+const QUEUE_RETRY: Duration = Duration::from_millis(2);
+
+/// The request the worker is running, so a caller can tell whether the
+/// worker is hung and cancel only its own call.
+#[derive(Clone, Copy)]
+struct Running {
+    id: u64,
+    started: Instant,
+    budget: Duration,
+}
+impl Running {
+    fn overran(&self, now: Instant) -> bool {
+        now >= self.started + self.budget + STALL_GRACE
+    }
+}
+
+const QUEUED: u8 = 0;
+const STARTED: u8 = 1;
+const CANCELLED: u8 = 2;
+
+/// One request's hand-off between its caller and the worker. Exactly one of
+/// them moves it out of `QUEUED`: the worker to `STARTED`, or the caller to
+/// `CANCELLED` once it stops waiting, after which the worker skips it.
+#[derive(Default)]
+struct Ticket {
+    status: std::sync::atomic::AtomicU8,
+    /// When the worker began running the request. Set before `status`
+    /// becomes `STARTED`, so a caller that sees `STARTED` can read it.
+    started: std::sync::OnceLock<Instant>,
+}
+impl Ticket {
+    /// Claim the request for the worker; `None` when its caller cancelled it.
+    fn start(&self) -> Option<Instant> {
+        let now = Instant::now();
+        // Set before the claim; a cancelled ticket's start time is never read,
+        // and only the worker sets it, once.
+        let _ = self.started.set(now);
+        self.status
+            .compare_exchange(QUEUED, STARTED, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| now)
+    }
+    /// Withdraw a request that has not started. False once the worker has it.
+    fn cancel(&self) -> bool {
+        self.status
+            .compare_exchange(QUEUED, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+    fn started_at(&self) -> Option<Instant> {
+        if self.status.load(Ordering::Acquire) == STARTED {
+            self.started.get().copied()
+        } else {
+            None
+        }
+    }
+}
+
 struct Worker {
     sender: mpsc::SyncSender<Job>,
     stalled: Arc<AtomicBool>,
     thread: u32,
+    running: Arc<Mutex<Option<Running>>>,
+    next_id: std::sync::atomic::AtomicU64,
+}
+impl Worker {
+    fn new(sender: mpsc::SyncSender<Job>, thread: u32) -> Self {
+        Self {
+            sender,
+            stalled: Arc::new(AtomicBool::new(false)),
+            thread,
+            running: Arc::default(),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+    fn running(&self) -> Option<Running> {
+        *self.running.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Disable the worker when the request it is running has overrun its
+    /// budget: a native call is hung in it, and every later request would
+    /// only queue behind it. Returns whether the worker is disabled.
+    fn check_hung(&self) -> bool {
+        if self
+            .running()
+            .is_some_and(|running| running.overran(Instant::now()))
+        {
+            self.stalled.store(true, Ordering::Release);
+        }
+        self.stalled.load(Ordering::Acquire)
+    }
 }
 enum WorkerInit {
     Vacant,
@@ -903,10 +1001,14 @@ enum WorkerInit {
 static WORKER: Mutex<WorkerInit> = Mutex::new(WorkerInit::Vacant);
 /// Explicit MSAA/IA2 provider. Select before the umbrella provider's first use.
 /// Native interfaces remain confined to one MTA worker. Requests and retained
-/// handles are bounded. A timed-out COM call poisons this process-wide worker;
-/// no replacement threads are spawned and subsequent calls fail explicitly.
-/// Restart the host after a timeout. COM cancellation is best effort, because
-/// an in-process/misbehaving server may not honor it.
+/// handles are bounded. Each request's budget runs from when the worker
+/// starts it. A request that times out in the queue, or stops at its next
+/// native operation when its budget or the caller's deadline runs out, is an
+/// ordinary timeout. A native COM call still running past its budget poisons
+/// this process-wide worker: no replacement threads are spawned and
+/// subsequent calls fail explicitly, so restart the host after one. COM
+/// cancellation of the hung call is best effort, because an
+/// in-process/misbehaving server may not honor it.
 pub struct Ia2Provider {
     worker: Arc<Worker>,
 }
@@ -965,11 +1067,7 @@ impl Ia2Provider {
         let thread = ready_rx
             .recv_timeout(CALL_TIMEOUT)
             .map_err(|e| platform(format!("initialize IA2 worker: {e}")))??;
-        let worker = Arc::new(Worker {
-            sender: tx,
-            stalled: Arc::new(AtomicBool::new(false)),
-            thread,
-        });
+        let worker = Arc::new(Worker::new(tx, thread));
         *slot = WorkerInit::Ready(Arc::clone(&worker));
         Ok(Self { worker })
     }
@@ -1018,80 +1116,233 @@ impl Ia2Provider {
     /// Run `f` on the IA2 worker, bounded by `timeout` and by the caller's
     /// open [`Deadline`](xa11y_core::Deadline) (#531).
     ///
-    /// The two bounds mean different things. `timeout` is the stall
-    /// detector: a request still running when it expires disables the
-    /// worker, because a hung native call cannot be taken back. The caller's
-    /// deadline is the caller choosing to stop waiting: the worker stops at
-    /// its next native operation (`State::check_deadline`), a request still
-    /// queued never starts, and the worker stays usable.
+    /// `timeout` is the request's budget, measured from when the worker
+    /// starts it, not from when it was queued. Three outcomes end a request
+    /// early, and only the last disables the worker:
+    ///
+    /// - **It never started.** The caller stops waiting for a request still
+    ///   queued at its deadline (or after `timeout` in the queue) and
+    ///   cancels it; the worker skips it. The error is `NotDelivered`.
+    /// - **It stopped cooperatively.** A budget or deadline that expires
+    ///   between native operations stops the request at the next one
+    ///   (`State::check_deadline`). That is an ordinary timeout.
+    /// - **A native call hung.** A request still running `STALL_GRACE`
+    ///   after its budget is inside a native call that cannot be taken
+    ///   back. The worker is disabled for the life of the process and the
+    ///   caller's own call is cancelled (best effort) with `CoCancelCall`.
+    ///
+    /// The caller's deadline, when it is shorter than the budget, is the
+    /// caller choosing to stop waiting: the worker stops at its next native
+    /// operation and stays usable.
     fn call_with_timeout<T: Send + 'static>(
         &self,
         timeout: Duration,
         f: impl FnOnce(&mut State) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        if self.worker.stalled.load(Ordering::Acquire) {
-            return Err(platform(
-                "IA2 worker timed out previously; restart the host before using IA2 again",
-            ));
+        if self.worker.check_hung() {
+            return Err(disabled());
         }
         let bound = xa11y_core::call_timeout(timeout, || PENDING.to_string())?;
-        let caller = bound.deadline.clone();
+        let caller = xa11y_core::Deadline::current();
+        let caller_at = caller.as_ref().map(|d| d.at());
+        // How long the request may wait to start: its own budget, or less
+        // when the caller's deadline is nearer.
+        let queue_limit = Instant::now() + bound.duration;
+        let id = self.worker.next_id.fetch_add(1, Ordering::Relaxed);
+        let ticket = Arc::new(Ticket::default());
         let (tx, rx) = mpsc::sync_channel(1);
-        let expires = Instant::now() + timeout;
-        let stop_at = caller.as_ref().map_or(expires, |d| d.at().min(expires));
-        let stalled = Arc::clone(&self.worker.stalled);
-        self.worker
-            .sender
-            .try_send(Box::new(move |state| {
-                let result = if stalled.load(Ordering::Acquire) || Instant::now() >= stop_at {
+        let job: Job = {
+            let ticket = Arc::clone(&ticket);
+            let stalled = Arc::clone(&self.worker.stalled);
+            let running = Arc::clone(&self.worker.running);
+            Box::new(move |state| {
+                let Some(started) = ticket.start() else {
+                    // The caller stopped waiting before it started; never run it.
+                    return;
+                };
+                let budget_end = started + timeout;
+                let result = if stalled.load(Ordering::Acquire) {
+                    Err(disabled())
+                } else if caller_at.is_some_and(|at| started >= at) {
                     Err(platform("IA2 request expired before dispatch"))
                 } else {
+                    let stop_at = caller_at.map_or(budget_end, |at| at.min(budget_end));
+                    *running.lock().unwrap_or_else(|e| e.into_inner()) = Some(Running {
+                        id,
+                        started,
+                        budget: timeout,
+                    });
                     state.dispatched = false;
-                    state.deadline=Some(stop_at);
-                    let result=f(state);
-                    state.deadline=None;
-                    if Instant::now()>=expires{
-                        stalled.store(true,Ordering::Release);
-                        Err(platform("IA2 request finished after its deadline; native action delivery may be unknown; worker disabled"))
-                    }else{result}
+                    state.deadline_hit.set(false);
+                    state.deadline = Some(stop_at);
+                    let result = f(state);
+                    state.deadline = None;
+                    *running.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    let budget_stop =
+                        state.deadline_hit.get() && caller_at.is_none_or(|at| at >= budget_end);
+                    match result {
+                        Err(_) if budget_stop => Err(budget_timeout(timeout, state.dispatched)),
+                        result => result,
+                    }
                 };
                 // The caller may have abandoned a timed-out read/action. Never retry it.
                 let _ = tx.send(result);
-            }))
-            .map_err(|e| platform(format!("IA2 request queue is full or disconnected: {e}")))?;
-        match rx.recv_timeout(bound.duration) {
-            Ok(result) => {
-                if result.is_err() && caller.as_ref().is_some_and(|d| d.is_expired()) {
-                    // The worker stopped at the caller's deadline. Recording
-                    // the cut is the point; core builds the error the caller
-                    // sees from it.
-                    let _ = bound.expired(PENDING);
+            })
+        };
+        if let Err(error) = self.enqueue(job, queue_limit) {
+            return Err(error.unwrap_or_else(|| self.not_started(timeout, caller.as_ref())));
+        }
+        loop {
+            let started = ticket.started_at();
+            let limit = match started {
+                None => queue_limit,
+                Some(started) => {
+                    let budget_end = started + timeout;
+                    caller_at.map_or(budget_end, |at| at.min(budget_end))
                 }
-                result
-            }
-            Err(_) if bound.is_deadline() => {
-                // The caller stopped waiting, not the worker: it stops at its
-                // next native operation, and stays usable.
-                Err(bound
-                    .expired(PENDING)
-                    .unwrap_or_else(|| platform("IA2 request outlived the caller's deadline")))
-            }
-            Err(error) => {
-                self.worker.stalled.store(true, Ordering::Release);
-                let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
-                // RPC_E_CHANGED_MODE means the caller already has an STA.
-                if let Err(e) = unsafe { CoCancelCall(self.worker.thread, 0) } {
-                    eprintln!("IA2 cancellation request: {e}");
+            };
+            match rx.recv_timeout(limit.saturating_duration_since(Instant::now())) {
+                Ok(result) => return self.finish(result, caller.as_ref()),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(platform(
+                        "IA2 worker dropped a request without answering; worker exited",
+                    ))
                 }
-                if initialized {
-                    unsafe {
-                        CoUninitialize();
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            let Some(started) = started else {
+                if ticket.cancel() {
+                    return Err(self.not_started(timeout, caller.as_ref()));
+                }
+                // The worker took it as the wait ended; wait on its budget.
+                continue;
+            };
+            if let Some(caller) = caller.as_ref().filter(|d| d.is_expired()) {
+                if caller.at() < started + timeout {
+                    // The caller stopped waiting, not the worker: it stops at
+                    // its next native operation, and stays usable.
+                    return Err(caller.expired(Some(PENDING.into())));
+                }
+            }
+            // The budget is spent. A request between native operations stops
+            // at the next one; give that stop time to arrive.
+            match rx.recv_timeout(STALL_GRACE) {
+                Ok(result) => return self.finish(result, caller.as_ref()),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(platform(
+                        "IA2 worker dropped a request without answering; worker exited",
+                    ))
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            self.worker.stalled.store(true, Ordering::Release);
+            if self.worker.running().is_some_and(|r| r.id == id) {
+                self.cancel_native_call();
+            }
+            return Err(platform(format!(
+                "IA2 native request still running {:?} after it started (budget {timeout:?}); an in-flight action may have been delivered; worker disabled",
+                started.elapsed()
+            )));
+        }
+    }
+    /// Hand `job` to the worker, waiting for queue capacity until `limit`.
+    /// `Err(None)` when the queue stayed full until then: the request was
+    /// never queued.
+    fn enqueue(&self, mut job: Job, limit: Instant) -> std::result::Result<(), Option<Error>> {
+        loop {
+            match self.worker.sender.try_send(job) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(Some(platform(
+                        "IA2 request queue is disconnected; worker exited",
+                    )))
+                }
+                Err(mpsc::TrySendError::Full(back)) => {
+                    let left = limit.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(None);
                     }
+                    job = back;
+                    std::thread::sleep(QUEUE_RETRY.min(left));
                 }
-                Err(platform(format!("IA2 native request did not finish within {timeout:?} ({error}); an in-flight action may have been delivered; worker disabled")))
             }
         }
     }
+    /// The error for a request that never started: it was not run.
+    fn not_started(&self, timeout: Duration, caller: Option<&xa11y_core::Deadline>) -> Error {
+        // A request ahead of this one that has overrun its budget is a hung
+        // native call; record it so later callers fail at once.
+        let hung = self.worker.check_hung();
+        let error = match caller.filter(|d| d.is_expired()) {
+            Some(caller) => caller.expired(Some(PENDING.into())),
+            None => Error::timeout(timeout).diagnose(
+                xa11y_core::Diagnosis::new()
+                    .condition(format!(
+                        "IA2 worker to start the request within {timeout:?}{}",
+                        if hung {
+                            "; the request ahead of it is hung in a native call and the worker is disabled"
+                        } else {
+                            "; it was queued behind other requests"
+                        }
+                    ))
+                    .pending(PENDING),
+            ),
+        };
+        let diagnosis = error
+            .diagnosis()
+            .cloned()
+            .unwrap_or_default()
+            .delivery(xa11y_core::Delivery::NotDelivered);
+        error.diagnose(diagnosis)
+    }
+    fn finish<T>(&self, result: Result<T>, caller: Option<&xa11y_core::Deadline>) -> Result<T> {
+        if let Some(caller) = caller.filter(|d| d.is_expired()) {
+            if result.is_err() {
+                // The worker stopped at the caller's deadline. Recording the
+                // cut is the point; core builds the error the caller sees
+                // from it.
+                let _ = caller.expired(Some(PENDING.into()));
+            }
+        }
+        result
+    }
+    /// Ask COM to cancel the outbound call on the worker thread. Called only
+    /// for the caller's own request, while it is the one running.
+    fn cancel_native_call(&self) {
+        let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+        // RPC_E_CHANGED_MODE means the caller already has an STA.
+        if let Err(e) = unsafe { CoCancelCall(self.worker.thread, 0) } {
+            eprintln!("IA2 cancellation request: {e}");
+        }
+        if initialized {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
+/// The error for a request refused because an earlier native call hung.
+fn disabled() -> Error {
+    platform("IA2 worker is disabled: an earlier native call hung past its budget; restart the host before using IA2 again")
+}
+
+/// The error for a request that stopped at its next native operation
+/// because its budget ran out.
+fn budget_timeout(timeout: Duration, dispatched: bool) -> Error {
+    let delivery = if dispatched {
+        xa11y_core::Delivery::Unknown
+    } else {
+        xa11y_core::Delivery::NotDelivered
+    };
+    Error::timeout(timeout).diagnose(
+        xa11y_core::Diagnosis::new()
+            .condition(format!(
+                "IA2 request to finish within its {timeout:?} budget; it stopped before its next native operation"
+            ))
+            .pending(PENDING)
+            .delivery(delivery),
+    )
 }
 
 /// What a deadline diagnosis names as pending for an IA2 request. The
@@ -1487,30 +1738,37 @@ mod tests {
             assert_eq!(error.delivery(), xa11y_core::error::Delivery::Unknown);
         }
     }
-    #[test]
-    fn an_expired_queued_action_never_runs_and_the_worker_stays_disabled() {
-        let (sender, receiver) = mpsc::sync_channel::<Job>(32);
+    /// A worker thread serving `capacity` queued requests, held before its
+    /// first request until the returned sender is used or dropped.
+    fn test_worker(
+        capacity: usize,
+    ) -> (
+        Ia2Provider,
+        mpsc::SyncSender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = mpsc::sync_channel::<Job>(capacity);
         let (release, paused) = mpsc::sync_channel(1);
         let (id_tx, id_rx) = mpsc::sync_channel(1);
-        let (done_tx, done_rx) = mpsc::sync_channel(1);
         let thread = std::thread::spawn(move || {
             id_tx
                 .send(unsafe { GetCurrentThreadId() })
                 .expect("thread id");
-            paused.recv().expect("release worker");
+            // Released, or the test dropped the sender: either way, serve.
+            let _ = paused.recv();
             let mut state = State::new();
             while let Ok(job) = receiver.recv() {
                 job(&mut state);
             }
-            done_tx.send(()).expect("worker stopped");
         });
         let p = Ia2Provider {
-            worker: Arc::new(Worker {
-                sender,
-                thread: id_rx.recv().expect("thread id"),
-                stalled: Arc::new(AtomicBool::new(false)),
-            }),
+            worker: Arc::new(Worker::new(sender, id_rx.recv().expect("thread id"))),
         };
+        (p, release, thread)
+    }
+    #[test]
+    fn an_expired_queued_request_never_runs_and_the_worker_stays_healthy() {
+        let (p, release, thread) = test_worker(32);
         let delivered = Arc::new(AtomicBool::new(false));
         let action = Arc::clone(&delivered);
         let error = p
@@ -1519,40 +1777,123 @@ mod tests {
                 Ok(())
             })
             .expect_err("queued request deadline");
-        assert!(matches!(error, Error::Platform { .. }));
-        assert_eq!(error.delivery(), xa11y_core::error::Delivery::Unknown);
+        assert!(matches!(error, Error::Timeout { .. }), "got {error:?}");
+        assert_eq!(error.delivery(), xa11y_core::error::Delivery::NotDelivered);
         assert!(
-            p.call(|_| Ok(())).is_err(),
-            "no replacement worker after timeout"
+            !p.worker.stalled.load(Ordering::Acquire),
+            "a request that never started is not a stalled worker"
         );
         release.send(()).expect("release worker");
+        p.call(|_| Ok(()))
+            .expect("the worker still serves requests");
+        assert!(
+            !delivered.load(Ordering::Acquire),
+            "the worker skipped the cancelled request"
+        );
         drop(p);
-        done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("worker drains expired request and exits");
         thread.join().expect("worker exit");
-        assert!(!delivered.load(Ordering::Acquire));
+    }
+    #[test]
+    fn a_request_stopped_by_its_budget_is_a_timeout_not_a_stall() {
+        let (p, release, thread) = test_worker(32);
+        drop(release);
+        let error = p
+            .call_with_timeout::<()>(Duration::from_millis(50), |state| loop {
+                // Each iteration stands for one native operation.
+                state.check_deadline()?;
+                std::thread::sleep(Duration::from_millis(5));
+            })
+            .expect_err("the budget stops the request");
+        assert!(matches!(error, Error::Timeout { .. }), "got {error:?}");
+        assert_eq!(error.delivery(), xa11y_core::error::Delivery::NotDelivered);
+        assert!(
+            !p.worker.stalled.load(Ordering::Acquire),
+            "a cooperative stop is not a stalled worker"
+        );
+        p.call(|_| Ok(()))
+            .expect("the worker still serves requests");
+        drop(p);
+        thread.join().expect("worker exit");
+    }
+    #[test]
+    fn a_native_call_hung_past_its_budget_disables_the_worker() {
+        let (p, release, thread) = test_worker(32);
+        drop(release);
+        let error = p
+            .call_with_timeout(Duration::from_millis(50), |_| {
+                // A native call that ignores the deadline.
+                std::thread::sleep(Duration::from_millis(800));
+                Ok(())
+            })
+            .expect_err("the hung call outlives its budget");
+        assert!(matches!(error, Error::Platform { .. }), "got {error:?}");
+        assert_eq!(error.delivery(), xa11y_core::error::Delivery::Unknown);
+        assert!(p.worker.stalled.load(Ordering::Acquire));
+        let started = Instant::now();
+        assert!(
+            p.call(|_| Ok(())).is_err(),
+            "no replacement worker after a hung native call"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "a disabled worker fails at once"
+        );
+        drop(p);
+        thread.join().expect("worker exit");
+    }
+    #[test]
+    fn a_budget_runs_from_dispatch_not_from_enqueue() {
+        let (p, release, thread) = test_worker(32);
+        let p = Arc::new(p);
+        let first = {
+            let p = Arc::clone(&p);
+            std::thread::spawn(move || {
+                p.call_with_timeout(Duration::from_millis(400), |_| {
+                    std::thread::sleep(Duration::from_millis(250));
+                    Ok(())
+                })
+            })
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        release.send(()).expect("release worker");
+        // Queued behind 250 ms of work, then 250 ms of its own: past 400 ms
+        // from enqueue, within 400 ms of starting.
+        p.call_with_timeout(Duration::from_millis(400), |_| {
+            std::thread::sleep(Duration::from_millis(250));
+            Ok(())
+        })
+        .expect("the second request's budget starts when it runs");
+        first
+            .join()
+            .expect("first caller")
+            .expect("first request finished within budget");
+        assert!(!p.worker.stalled.load(Ordering::Acquire));
+        drop(p);
+        thread.join().expect("worker exit");
+    }
+    #[test]
+    fn a_full_queue_waits_for_capacity_within_the_callers_time() {
+        let (p, release, thread) = test_worker(1);
+        let p = Arc::new(p);
+        let first = {
+            let p = Arc::clone(&p);
+            std::thread::spawn(move || p.call(|_| Ok(1)))
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            release.send(()).expect("release worker");
+        });
+        assert_eq!(p.call(|_| Ok(2)).expect("queued once capacity freed"), 2);
+        assert_eq!(first.join().expect("first caller").expect("first"), 1);
+        releaser.join().expect("releaser");
+        drop(p);
+        thread.join().expect("worker exit");
     }
     #[test]
     fn a_callers_deadline_cuts_the_wait_without_disabling_the_worker() {
-        let (sender, receiver) = mpsc::sync_channel::<Job>(32);
-        let (id_tx, id_rx) = mpsc::sync_channel(1);
-        let thread = std::thread::spawn(move || {
-            id_tx
-                .send(unsafe { GetCurrentThreadId() })
-                .expect("thread id");
-            let mut state = State::new();
-            while let Ok(job) = receiver.recv() {
-                job(&mut state);
-            }
-        });
-        let p = Ia2Provider {
-            worker: Arc::new(Worker {
-                sender,
-                thread: id_rx.recv().expect("thread id"),
-                stalled: Arc::new(AtomicBool::new(false)),
-            }),
-        };
+        let (p, release, thread) = test_worker(32);
+        drop(release);
         let deadline = xa11y_core::Deadline::after(Duration::from_millis(50));
         let probe = deadline.clone();
         let started = Instant::now();
