@@ -133,12 +133,19 @@ Every pointer method accepts either a screen-space point or an `Element`:
 ### Check a refused pointer target
 
 If a pointer action returns `InvalidActionData` (`InvalidActionDataError` in
-Python and JS, `invalid_action_data` in MCP), inspect its geometry diagnosis. The built-in Windows, macOS,
-and X11 backends check that the requested point lies inside an active display.
-This applies to raw points and element anchors; gaps between monitors are
-outside every display. For Wayland and headless uinput, raw points are checked
-against the configured virtual screen extent. Element targets remain
+Python and JS, `invalid_action_data` in MCP), inspect its geometry diagnosis.
+The built-in Windows, macOS, and X11 backends check that the requested point
+lies inside an active display. This applies to raw points and element anchors;
+gaps between monitors are outside every display. For Wayland and headless
+uinput, raw points are checked against the compositor's outputs, or the
+`XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` override. Element targets remain
 unsupported there.
+
+On Linux the diagnosis also says where the display rectangles came from, in
+`display_source` (`displaySource` in JS). An X server without RandR 1.5 has no
+monitor list, so xa11y checks the root window's geometry there and records
+that rule. An X server that reports no active monitors at all fails with a
+`Platform` error, since no point could pass.
 
 The initial check happens before input is posted, including held modifiers,
 so its failure reports `delivery: not_delivered`. Both drag endpoints are
