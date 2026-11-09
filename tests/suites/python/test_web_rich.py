@@ -28,6 +28,23 @@ Chromium quirks the suite records instead of hiding are listed below.
 - In right-to-left text, the AT-SPI word boundary falls one character early,
   and per-character bounds are not in visual order. Logical reads (``read``,
   ``find``, selection, caret) are exact, and they are what this suite asserts.
+
+On macOS, Chromium's AX tree differs from its AT-SPI one in ways that are
+platform facts rather than xa11y choices:
+
+- A table cell has no ``AXTitle``. Its text is in ``AXStaticText`` children,
+  so the suite reads a cell's text with ``text_of``. Header cells carry no
+  header marker either (see ``xa11y-macos/src/ax/rich.rs``).
+- A list item is an ``AXGroup`` with no position (``collection`` is None).
+- ``AXStyleRangeForIndex`` answers one run for the whole editor, so the bold
+  run is not split out.
+- A ``textarea`` answers ``AXRangeForLine`` with the whole text, so wrapped
+  text is one line with one bounding rectangle.
+- AX has no word unit, so ``range_at(.., "word")`` is unsupported.
+
+Two macOS results look like xa11y bugs rather than Chromium facts, and are
+``xfail(strict=True)`` until #665 is fixed: selection reads fail with
+``kAXErrorFailure``, and a ``contenteditable`` reports no character bounds.
 """
 
 from __future__ import annotations
@@ -59,12 +76,29 @@ def electron_only(app_name):
         pytest.skip("reads the Electron test app's Rich section")
 
 
+# Chromium answers AXSelectedTextRanges with kAXErrorFailure (#665).
+SELECTION_READ_FAILS_ON_MACOS = pytest.mark.xfail(
+    MACOS, raises=xa11y.PlatformError, strict=True, reason="#665"
+)
+
+
 def r(start: int, end: int) -> xa11y.TextRange:
     return xa11y.TextRange(start, end)
 
 
 def by_name(app, name: str):
     return app.locator(f'[name="{name}"]').element()
+
+
+def text_of(element) -> str:
+    """An element's text: its name, or else the text of its descendants.
+
+    AT-SPI names a web cell from its content. AX gives the cell no title and
+    keeps the text in ``AXStaticText`` children, whose value holds it.
+    """
+    if element.name:
+        return element.name
+    return "".join(c.name or c.value or text_of(c) for c in element.children())
 
 
 def contains(outer, inner) -> bool:
@@ -105,7 +139,7 @@ def test_colspan_cell_answers_for_every_slot_it_covers(span_table):
     for column in (0, 1):
         cell = span_table.cell_at(1, column)
         assert cell is not None, f"no cell at (1, {column})"
-        assert cell.name == "Apple"
+        assert text_of(cell) == "Apple"
         assert cell.cell.row == 1
         assert cell.cell.column == 0, "a merged cell reports its top-left slot"
         assert cell.cell.column_span == 2
@@ -116,7 +150,7 @@ def test_rowspan_cell_answers_for_every_slot_it_covers(span_table):
     for row in (2, 3):
         cell = span_table.cell_at(row, 2)
         assert cell is not None, f"no cell at ({row}, 2)"
-        assert cell.name == "20"
+        assert text_of(cell) == "20"
         assert cell.cell.row == 2, "a merged cell reports its top-left slot"
         assert cell.cell.column == 2
         assert cell.cell.row_span == 2
@@ -126,20 +160,22 @@ def test_rowspan_cell_answers_for_every_slot_it_covers(span_table):
 def test_cells_after_a_span_keep_their_grid_column(span_table):
     # "10" follows a two-column cell, so it is column 2, not its DOM index 1.
     ten = span_table.cell_at(1, 2)
-    assert ten is not None and ten.name == "10"
+    assert ten is not None and text_of(ten) == "10"
     assert (ten.cell.row, ten.cell.column) == (1, 2)
     # "Red" sits beside the rowspan from the row above.
     red = span_table.cell_at(3, 1)
-    assert red is not None and red.name == "Red"
+    assert red is not None and text_of(red) == "Red"
 
 
 def test_span_table_column_headers(span_table):
     headers = span_table.column_headers()
-    assert [h.name for h in headers] == ["Fruit", "Colour", "Qty"]
+    assert [text_of(h) for h in headers] == ["Fruit", "Colour", "Qty"]
     for column, header in enumerate(headers):
         assert header.cell.row == 0
         assert header.cell.column == column
-        assert header.cell.header == "column"
+        # AX marks no cell as a header; the table's header attribute is
+        # what found these.
+        assert header.cell.header == ("column" if LINUX else None)
     assert span_table.row_headers() == []
 
 
@@ -150,7 +186,7 @@ def test_span_table_column_headers(span_table):
 def test_data_cells_name_their_column_header(span_table, row, column, header):
     cell = span_table.cell_at(row, column)
     assert cell is not None
-    assert [h.name for h in cell.column_header_cells()] == [header]
+    assert [text_of(h) for h in cell.column_header_cells()] == [header]
     assert cell.row_header_cells() == []
 
 
@@ -223,8 +259,8 @@ def test_list_with_unknown_size_reports_unknown(app):
 def test_web_list_items_report_no_collection_on_macos(app):
     # Chromium exposes an <li> to AX as an AXGroup with no position, so the
     # declared posinset / setsize do not reach AX clients at all.
-    items = _items(app, "Paged List")
-    assert len(items) == 2
+    items = by_name(app, "Paged List").children()
+    assert [text_of(i) for i in items] == ["Item 41", "Item 42"]
     assert all(i.collection is None for i in items)
 
 
@@ -266,6 +302,10 @@ def test_combining_mark_is_its_own_character(rich_editor):
 
 def test_rich_editor_runs_split_at_bold(rich_editor):
     runs = rich_editor.text().runs((0, 16)).runs
+    if MACOS:
+        # Chromium's AXStyleRangeForIndex answers the whole editor.
+        assert [run.range for run in runs] == [r(0, 16)]
+        return
     assert [run.range for run in runs] == [r(0, 12), r(12, 16)]
     assert runs[1].attributes.font_weight == 700
     assert runs[0].attributes.font_weight != 700
@@ -273,10 +313,15 @@ def test_rich_editor_runs_split_at_bold(rich_editor):
 
 def test_rich_editor_word_includes_trailing_space(rich_editor):
     # TextUnit.WORD follows the platform's boundaries; Chromium's include the
-    # space after the word.
+    # space after the word. AX has no word unit at all.
+    if MACOS:
+        with pytest.raises(xa11y.ActionNotSupportedError):
+            rich_editor.text().range_at(0, "word")
+        return
     assert rich_editor.text().range_at(0, "word") == r(0, 6)
 
 
+@SELECTION_READ_FAILS_ON_MACOS
 def test_rich_editor_selection_and_caret(rich_editor):
     text = rich_editor.text()
     rich_editor.select_text(1, 3)
@@ -305,12 +350,28 @@ def test_rtl_text_reads_in_logical_order(app, name):
     assert text.read_all() == RTL_TEXT
     assert text.read((0, 4)) == RTL_TEXT[:4]
     assert text.find("abc") == r(5, 8)
+
+
+@SELECTION_READ_FAILS_ON_MACOS
+@pytest.mark.parametrize("name", ["RTL Editor", "RTL Notes"])
+def test_rtl_selection_uses_logical_offsets(app, name):
+    element = by_name(app, name)
+    text = element.text()
     element.select_text(5, 8)
     assert settle(text.selections, [r(5, 8)]) == [r(5, 8)]
     assert text.caret() == 8
 
 
-@pytest.mark.parametrize("name", ["RTL Editor", "RTL Notes"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(
+            "RTL Editor",
+            marks=pytest.mark.xfail(MACOS, raises=AssertionError, strict=True, reason="#665"),
+        ),
+        "RTL Notes",
+    ],
+)
 def test_rtl_character_bounds_lie_inside_the_element(app, name):
     # Visual order is not asserted: Chromium's per-character boxes in RTL
     # text do not follow it (see the module docs).
@@ -335,12 +396,23 @@ def test_wrapped_textarea_reports_visual_lines(wrapped):
     text = wrapped.text()
     assert text.read_all() == WRAPPED_TEXT
     lines = text.lines((0, len(WRAPPED_TEXT))).lines
-    assert lines == [r(0, 17), r(17, 31), r(31, 35)]
+    # Chromium answers a macOS textarea's AXRangeForLine with all its text.
+    want = [r(0, 35)] if MACOS else [r(0, 17), r(17, 31), r(31, 35)]
+    assert lines == want
     assert text.find("gamma") == r(11, 16)
 
 
 def test_wrapped_line_bounds_stack_inside_the_element(wrapped):
-    rects = wrapped.text().bounds((0, len(WRAPPED_TEXT)))
+    text = wrapped.text()
+    rects = text.bounds((0, len(WRAPPED_TEXT)))
+    if MACOS:
+        # One line (see above), so one rectangle, tall enough for the three
+        # lines it wraps onto.
+        assert len(rects) == 1, rects
+        assert contains(wrapped.bounds, rects[0]), (rects, wrapped.bounds)
+        char = text.bounds((0, 1))[0]
+        assert rects[0].height >= 2.5 * char.height, (rects, char)
+        return
     assert len(rects) == 3, f"one rectangle per visual line, got {rects}"
     for rect in rects:
         assert contains(wrapped.bounds, rect), (rect, wrapped.bounds)
@@ -400,16 +472,12 @@ def _line_geometry(app):
     return element.bounds, rects, char
 
 
-@pytest.mark.skipif(
-    not LINUX, reason="--force-device-scale-factor is pinned on X11 only"
-)
+@pytest.mark.skipif(not LINUX, reason="--force-device-scale-factor is pinned on X11 only")
 def test_text_bounds_scale_with_the_device_scale_factor(app, electron_at_scale_2):
     # Screen coordinates are device pixels on X11, so at scale 2 every
     # measurement of the same text roughly doubles, and still lies inside
     # its element.
-    scaled = electron_at_scale_2.locator('[name="Wrapped Notes"]').wait_attached(
-        timeout=30
-    )
+    scaled = electron_at_scale_2.locator('[name="Wrapped Notes"]').wait_attached(timeout=30)
     assert scaled is not None
     el1, lines1, char1 = _line_geometry(app)
     el2, lines2, char2 = _line_geometry(electron_at_scale_2)
