@@ -244,8 +244,10 @@ set +e
 # test-apps/rich/rich.py, a GTK 3 fixture that scripts/run_integ_tests.sh
 # launches and this image does not carry (no PyGObject). What they cover is
 # AT-SPI's Table / Text interfaces, which do not depend on the display
-# protocol, and the X11 `Linux` job runs them. The stale-handle tests read
-# test-apps/stale/stale.py, another GTK 3 fixture, and are skipped likewise.
+# protocol, and the X11 `Linux` job runs them. Collection positions, which
+# come from the AccessKit app, live in integ::collections and do run here.
+# The stale-handle tests read test-apps/stale/stale.py, another GTK 3
+# fixture, and are skipped likewise.
 timeout 240 cargo test -p xa11y --test integ_test --features strict-roles \
     -- --ignored --test-threads=1 --nocapture --skip integ::shell --skip integ::rich \
     --skip integ::stale

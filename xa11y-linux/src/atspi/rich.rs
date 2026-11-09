@@ -5,7 +5,11 @@
 //! Read while building each element, gated on what `GetInterfaces` already
 //! reported, so a node without `Table` / `TableCell` costs nothing extra:
 //!
-//! - `Table.NRows` / `NColumns` → [`TableInfo`] (negative means unknown).
+//! - `Table.NRows` / `NColumns` → [`TableInfo`] (negative means unknown),
+//!   unless the table declares its total in the `rowcount` / `colcount`
+//!   object attributes (`aria-rowcount` / `aria-colcount`). `NRows` counts
+//!   the rows that exist; the attribute is the size of the data set, which
+//!   is what [`TableInfo`] reports when a virtualized grid has both.
 //! - `TableCell.GetRowColumnSpan` → [`CellInfo`] row, column and spans.
 //! - The `column header` / `row header` roles → [`CellInfo::header`]. GTK 3
 //!   tree-view column headers have the role but no `TableCell` interface, so
@@ -142,6 +146,20 @@ pub(super) fn collection_from_attributes(
     }
     .into();
     (!info.is_empty()).then_some(info)
+}
+
+/// A table total the content declares: the `rowcount` / `colcount` object
+/// attribute, which is how `aria-rowcount` / `aria-colcount` reach AT-SPI
+/// (Core-AAM). It is the size of the whole data set, where `Table.NRows`
+/// counts only the rows that exist now, so a virtualized grid reports its
+/// total rather than its window. `-1` is an explicit unknown. An attribute
+/// that is not a number is not a declaration, and leaves the count to the
+/// `Table` interface.
+pub(super) fn declared_count(attrs: &HashMap<String, String>, key: &str) -> Option<Count> {
+    attrs
+        .get(key)
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map(Count::from_signed)
 }
 
 /// Roles whose elements can sit in a set.
@@ -923,14 +941,6 @@ impl LinuxProvider {
         let unread = |what: &str, e: Error| {
             log::debug!("{what} of {}{} unread: {e}", aref.bus_name, aref.path);
         };
-        let table = if ifaces.table {
-            self.read_table_info(aref)
-                .map_err(|e| unread("Table", e))
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
         let header = header_kind_for(role_num, role_name);
         // The header kind comes from the role, so it stands whether or not
         // the position can be read.
@@ -957,10 +967,11 @@ impl LinuxProvider {
         } else {
             header_only()
         };
-        // One GetAttributes read serves both the collection position and the
-        // document semantics (#476), and only for roles that can carry them,
-        // so other nodes pay nothing.
-        let attrs = if is_collection_role(role) || carries_document_semantics(role) {
+        // One GetAttributes read serves the collection position, the document
+        // semantics (#476) and a table's declared totals, and only for nodes
+        // that can carry them, so other nodes pay nothing.
+        let attrs = if is_collection_role(role) || carries_document_semantics(role) || ifaces.table
+        {
             match self.scan_attributes(aref) {
                 Ok(Some(Some(attrs))) => Some(attrs),
                 // The object has gone, or has no attributes: nothing to read.
@@ -970,6 +981,14 @@ impl LinuxProvider {
                     None
                 }
             }
+        } else {
+            None
+        };
+        let table = if ifaces.table {
+            self.read_table_info(aref, attrs.as_ref())
+                .map_err(|e| unread("Table", e))
+                .ok()
+                .flatten()
         } else {
             None
         };
@@ -1026,20 +1045,32 @@ impl LinuxProvider {
         }
     }
 
-    fn read_table_info(&self, aref: &AccessibleRef) -> Result<Option<TableInfo>> {
+    /// A table's size. A total the table declares in its object attributes
+    /// (`rowcount` / `colcount`, see [`declared_count`]) is the one reported;
+    /// `Table.NRows` / `NColumns` answer otherwise.
+    fn read_table_info(
+        &self,
+        aref: &AccessibleRef,
+        attrs: Option<&HashMap<String, String>>,
+    ) -> Result<Option<TableInfo>> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Table")?;
         // Each count is its own field: one that fails is logged and left
         // absent without hiding the other.
-        let count = |p: &str| match proxy.get_property::<i32>(p) {
-            Ok(n) => Some(Count::from_signed(n.into())),
-            Err(e) => {
-                log::debug!("Table.{p} of {}{} unread: {e}", aref.bus_name, aref.path);
-                None
+        let count = |attr: &str, p: &str| {
+            if let Some(declared) = attrs.and_then(|a| declared_count(a, attr)) {
+                return Some(declared);
+            }
+            match proxy.get_property::<i32>(p) {
+                Ok(n) => Some(Count::from_signed(n.into())),
+                Err(e) => {
+                    log::debug!("Table.{p} of {}{} unread: {e}", aref.bus_name, aref.path);
+                    None
+                }
             }
         };
         let info: TableInfo = TableParts {
-            row_count: count("NRows"),
-            column_count: count("NColumns"),
+            row_count: count("rowcount", "NRows"),
+            column_count: count("colcount", "NColumns"),
         }
         .into();
         Ok((!info.is_empty()).then_some(info))
@@ -1543,6 +1574,20 @@ mod tests {
             (Some(2), Some(Count::Unknown), Some(1))
         );
         assert!(collection_from_attributes(&HashMap::new()).is_none());
+    }
+
+    #[test]
+    fn declared_table_totals_are_counts_and_minus_one_is_unknown() {
+        let attrs: HashMap<String, String> =
+            [("rowcount", "1000"), ("colcount", "-1"), ("setsize", "x")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        assert_eq!(declared_count(&attrs, "rowcount"), Some(Count::Known(1000)));
+        assert_eq!(declared_count(&attrs, "colcount"), Some(Count::Unknown));
+        // Absent or not a number: no declaration, so the Table interface answers.
+        assert_eq!(declared_count(&attrs, "rowindex"), None);
+        assert_eq!(declared_count(&attrs, "setsize"), None);
     }
 
     #[test]

@@ -70,6 +70,9 @@ pub mod events_linux;
 pub mod unresponsive_linux;
 
 #[cfg(target_os = "linux")]
+pub mod collections;
+
+#[cfg(target_os = "linux")]
 pub mod rich;
 
 #[cfg(target_os = "linux")]
