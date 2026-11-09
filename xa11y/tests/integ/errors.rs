@@ -206,14 +206,14 @@ mod tests {
     /// macOS the request is made, and exactly two outcomes are accepted, each
     /// for a stated reason:
     ///
-    /// - `AccessibilityNotEnabled`: the app answered neither switch with a
-    ///   value that reads back as set. The error must name both attributes.
-    /// - `Timeout`: the app kept one of the values, so the request counts as
-    ///   taken, but a native app has no `web_area`, so the wait ends with the
+    /// - `AccessibilityNotEnabled`: `AXManualAccessibility` did not read back
+    ///   as set. The error must name the attribute and the relaunch flag.
+    /// - `Timeout`: the app kept the value, so the request counts as taken,
+    ///   but a native app has no `web_area`, so the wait ends with the
     ///   diagnosis "no web_area in the app's tree".
     ///
     /// Which one a given AppKit-style app produces depends on whether it
-    /// retains `AXEnhancedUserInterface`; the test does not assume either, but
+    /// retains `AXManualAccessibility`; the test does not assume either, but
     /// it does not accept a success or any other error.
     #[test]
     #[ignore]
@@ -237,7 +237,7 @@ mod tests {
             Error::Unsupported { feature } => {
                 assert!(feature.contains("UI Automation"), "{feature}");
             }
-            // Outcome 1: neither switch read back as set.
+            // Outcome 1: the switch did not read back as set.
             #[cfg(target_os = "macos")]
             Error::AccessibilityNotEnabled { instructions, .. } => {
                 assert!(
@@ -245,11 +245,11 @@ mod tests {
                     "{instructions}"
                 );
                 assert!(
-                    instructions.contains("AXEnhancedUserInterface"),
+                    instructions.contains("--force-renderer-accessibility"),
                     "{instructions}"
                 );
             }
-            // Outcome 2: a switch was retained, and the app has no web area.
+            // Outcome 2: the switch was retained, and the app has no web area.
             #[cfg(target_os = "macos")]
             e @ Error::Timeout { .. } => {
                 let observed = e.diagnosis().and_then(|d| d.last_observed.clone());

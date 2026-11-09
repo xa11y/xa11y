@@ -659,14 +659,14 @@ fn tool_definition(name: &str) -> Value {
                  macOS only. The request is never made implicitly. Linux and Windows \
                  return an `unsupported` failure saying what to do instead (on Linux, \
                  relaunch the app with `--force-renderer-accessibility`). On macOS it \
-                 sets `AXManualAccessibility`, then `AXEnhancedUserInterface`, on the \
-                 application and reads each back; an app where neither reads back as set \
-                 returns `accessibility_not_enabled` naming what each returned. An app \
-                 that keeps a value but has no web content, such as a native one, ends in \
-                 a `timeout` instead. The attribute stays set to true afterwards and is \
-                 not restored: `AXEnhancedUserInterface` can disable window animations \
-                 or confuse a window manager in an app that reacts to it, so call this \
-                 only for apps whose web content you need.\n\n\
+                 sets `AXManualAccessibility` on the application and reads it back; an \
+                 app where it does not read back as set returns `accessibility_not_enabled` \
+                 naming what the set and the read returned (relaunch such an app with \
+                 `--force-renderer-accessibility`). `AXEnhancedUserInterface` is never \
+                 set. An app that keeps the value but has no web content, such as a native \
+                 one, ends in a `timeout` instead. The attribute stays set to true \
+                 afterwards and is not restored, so call this only for apps whose web \
+                 content you need.\n\n\
                  The wait runs up to the default timeout, currently {timeout}. Set \
                  {timeout_env} (in seconds) in the environment the server is launched \
                  with to change it. A `timeout` failure says how many web areas the app \

@@ -814,7 +814,7 @@ const ROWS: &[Row] = &[
         name: "app:enable_web_accessibility",
         description: "Ask a Chromium or Electron app to build its web accessibility tree (`App.enable_web_accessibility`).",
         linux: no("a launch-time switch on Linux; relaunch the app with `--force-renderer-accessibility`"),
-        macos: yes_by("sets AXManualAccessibility, then AXEnhancedUserInterface"),
+        macos: yes_by("sets AXManualAccessibility"),
         windows: no("not needed; Chromium builds the tree when a UI Automation client connects"),
     },
     // ── Window verbs ──

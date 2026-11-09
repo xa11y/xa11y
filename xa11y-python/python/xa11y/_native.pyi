@@ -988,15 +988,14 @@ class App:
         never makes it implicitly.
 
         On macOS it sets ``AXManualAccessibility`` (Electron) on the
-        application element and reads it back, then does the same with
-        ``AXEnhancedUserInterface`` (Chrome) if that did not read back as
-        set, raising ``AccessibilityNotEnabledError`` when neither does. It
-        does not check that the app is Chromium-based: an app that keeps
-        either value counts as having taken the request, and the call then
-        raises ``TimeoutError`` because no web content appears. The attribute
-        stays set to true afterwards and is not restored; on an app that
-        reacts to ``AXEnhancedUserInterface`` that can disable window
-        animations or confuse a window manager. It then waits up to
+        application element and reads it back, raising
+        ``AccessibilityNotEnabledError`` when it does not read back as set;
+        relaunch such an app with ``--force-renderer-accessibility``. It
+        never sets ``AXEnhancedUserInterface``. It does not check that the
+        app is Chromium-based: an app that keeps the value counts as having
+        taken the request, and the call then raises ``TimeoutError`` because
+        no web content appears. The attribute stays set to true afterwards
+        and is not restored. It then waits up to
         ``timeout`` seconds (default: the
         process-wide default timeout) until some ``web_area`` has a child,
         raising ``TimeoutError`` with a diagnosis otherwise. On Linux and

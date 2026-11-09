@@ -233,15 +233,14 @@ pub trait Provider: Send + Sync {
     ///
     /// Chromium and Electron build the renderer tree only for a client that
     /// asks for it. On macOS the request is an attribute on the
-    /// *application* element: `AXManualAccessibility` for Electron, then
-    /// `AXEnhancedUserInterface` for Chrome, stopping at the first that reads
-    /// back set. Reading the attribute back proves success, not the set
-    /// call's return code. The attribute is left set afterwards. The core's
+    /// *application* element, `AXManualAccessibility`, with no
+    /// `AXEnhancedUserInterface` fallback. Reading the attribute back proves
+    /// success, not the set call's return code. The attribute is left set afterwards. The core's
     /// `App::enable_web_accessibility` then waits for the web content to
     /// appear.
     ///
-    /// Returns [`Error::AccessibilityNotEnabled`] when neither attribute
-    /// reads back as set. Returns [`Error::Unsupported`], naming
+    /// Returns [`Error::AccessibilityNotEnabled`] when the attribute does not
+    /// read back as set. Returns [`Error::Unsupported`], naming
     /// what to do instead, on a platform where the switch is not a client
     /// request; on Linux it is a launch-time flag.
     ///

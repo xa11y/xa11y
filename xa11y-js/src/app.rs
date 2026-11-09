@@ -213,15 +213,14 @@ impl App {
     /// never makes it implicitly.
     ///
     /// On macOS it sets `AXManualAccessibility` (Electron) on the
-    /// application element and reads it back, then does the same with
-    /// `AXEnhancedUserInterface` (Chrome) if that did not read back as set,
-    /// rejecting with `AccessibilityNotEnabledError` when neither does. It
-    /// does not check that the app is Chromium-based: an app that keeps
-    /// either value counts as having taken the request, and the call then
-    /// rejects with `TimeoutError` because no web content appears. The
-    /// attribute stays set to true afterwards and is not restored; on an app
-    /// that reacts to `AXEnhancedUserInterface` that can disable window
-    /// animations or confuse a window manager. It then waits up to
+    /// application element and reads it back, rejecting with
+    /// `AccessibilityNotEnabledError` when it does not read back as set;
+    /// relaunch such an app with `--force-renderer-accessibility`. It never
+    /// sets `AXEnhancedUserInterface`. It does not check that the app is
+    /// Chromium-based: an app that keeps the value counts as having taken
+    /// the request, and the call then rejects with `TimeoutError` because no
+    /// web content appears. The attribute stays set to true afterwards and
+    /// is not restored. It then waits up to
     /// `options.timeout` ms until some
     /// `web_area` has a child, rejecting with `TimeoutError` and a diagnosis
     /// otherwise. On Linux and Windows it rejects with
