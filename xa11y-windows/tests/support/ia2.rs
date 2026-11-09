@@ -7,7 +7,7 @@
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 use windows::core::{IUnknown, Interface, BSTR};
-use windows::Win32::Foundation::{CloseHandle, E_NOINTERFACE, FILETIME, HWND};
+use windows::Win32::Foundation::{CloseHandle, E_FAIL, E_NOINTERFACE, FILETIME, HWND};
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, IDispatch, IServiceProvider, COINIT_APARTMENTTHREADED,
 };
@@ -52,12 +52,28 @@ fn query_ia2(acc: &IAccessible) -> ProbeResult<Option<Accessible2>> {
     let service: IServiceProvider = match acc.cast() {
         Ok(service) => service,
         Err(error) if error.code() == E_NOINTERFACE => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            return Err(windows::core::Error::new(
+                error.code(),
+                format!(
+                    "IAccessible({:p}).QueryInterface(IServiceProvider): {error}",
+                    acc.as_raw()
+                ),
+            )
+            .into())
+        }
     };
     match unsafe { service.QueryService::<Accessible2>(&IAccessible::IID) } {
         Ok(ia2) => Ok(Some(ia2)),
         Err(error) if error.code() == E_NOINTERFACE => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(windows::core::Error::new(
+            error.code(),
+            format!(
+                "IAccessible({:p}).QueryService(IAccessible2): {error}",
+                acc.as_raw()
+            ),
+        )
+        .into()),
     }
 }
 
@@ -76,13 +92,29 @@ struct Node {
 impl Node {
     fn role(&self) -> ProbeResult<i32> {
         integer(
-            &unsafe { self.object.get_accRole(&self.child.into()) }
-                .map_err(|e| format!("get_accRole(child={}): {e}", self.child))?,
+            &unsafe { self.object.get_accRole(&self.child.into()) }.map_err(|e| {
+                windows::core::Error::new(
+                    e.code(),
+                    format!(
+                        "get_accRole(object={:p}, child={}): {e}",
+                        self.object.as_raw(),
+                        self.child
+                    ),
+                )
+            })?,
         )
     }
     fn name(&self) -> ProbeResult<String> {
-        let value = unsafe { self.object.get_accName(&self.child.into()) }
-            .map_err(|e| format!("get_accName(child={}): {e}", self.child))?;
+        let value = unsafe { self.object.get_accName(&self.child.into()) }.map_err(|e| {
+            windows::core::Error::new(
+                e.code(),
+                format!(
+                    "get_accName(object={:p}, child={}): {e}",
+                    self.object.as_raw(),
+                    self.child
+                ),
+            )
+        })?;
         if value.len() > 8192 {
             return Err("fixture node name exceeded 8192 UTF-16 units".into());
         }
@@ -90,8 +122,16 @@ impl Node {
     }
     fn state(&self) -> ProbeResult<i32> {
         integer(
-            &unsafe { self.object.get_accState(&self.child.into()) }
-                .map_err(|e| format!("get_accState(child={}): {e}", self.child))?,
+            &unsafe { self.object.get_accState(&self.child.into()) }.map_err(|e| {
+                windows::core::Error::new(
+                    e.code(),
+                    format!(
+                        "get_accState(object={:p}, child={}): {e}",
+                        self.object.as_raw(),
+                        self.child
+                    ),
+                )
+            })?,
         )
     }
 }
@@ -162,7 +202,9 @@ fn capture(root: &IAccessible) -> ProbeResult<Vec<Node>> {
                 // Returned variants own their contents. decode_children borrows them
                 // and clones interface references before these variants are cleared.
                 unsafe {
-                    AccessibleChildren(&node.object, 0, &mut values, &mut obtained)?;
+                    AccessibleChildren(&node.object, 0, &mut values, &mut obtained).map_err(
+                        |e| format!("AccessibleChildren at depth {depth}, count={count}: {e}"),
+                    )?;
                 }
                 for child in decode_children(&node.object, &values, obtained)?
                     .into_iter()
@@ -212,23 +254,60 @@ fn identity(ia2: &Accessible2) -> ProbeResult<(i32, HWND)> {
     let mut id = 0;
     let mut hwnd = HWND::default();
     unsafe {
-        (ia2.vtable().unique_id)(ia2.as_raw(), &mut id).ok()?;
-        (ia2.vtable().window_handle)(ia2.as_raw(), &mut hwnd).ok()?;
+        (ia2.vtable().unique_id)(ia2.as_raw(), &mut id)
+            .ok()
+            .map_err(|e| format!("IAccessible2({:p}).uniqueID: {e}", ia2.as_raw()))?;
+        (ia2.vtable().window_handle)(ia2.as_raw(), &mut hwnd)
+            .ok()
+            .map_err(|e| {
+                format!(
+                    "IAccessible2({:p}, uniqueID={id}).windowHandle: {e}",
+                    ia2.as_raw()
+                )
+            })?;
     }
     Ok((id, hwnd))
 }
 
+fn read_during_publication<T>(
+    deadline: Instant,
+    mut read: impl FnMut() -> ProbeResult<T>,
+) -> ProbeResult<T> {
+    let mut attempts = 0;
+    loop {
+        match read() {
+            Err(error)
+                if error
+                    .downcast_ref::<windows::core::Error>()
+                    .is_some_and(|native| native.code() == E_FAIL)
+                    && Instant::now() < deadline =>
+            {
+                attempts += 1;
+                eprintln!("IA2 tab publication: discarded invalidated read {attempts}: {error}; recapturing from the retained browser root");
+                std::thread::sleep(
+                    Duration::from_millis(50)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => return result,
+        }
+    }
+}
+
 pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<serde_json::Value> {
+    eprintln!("IA2 identity phase: acquire root pid={pid}, HWND={hwnd:?}, active={active:?}");
     check_window(hwnd, pid)?;
     let generation = process_generation(pid)?;
     let mut raw = std::ptr::null_mut();
     unsafe {
-        AccessibleObjectFromWindow(hwnd, 0xffff_fffc, &IAccessible::IID, &mut raw)?;
+        AccessibleObjectFromWindow(hwnd, 0xffff_fffc, &IAccessible::IID, &mut raw)
+            .map_err(|e| format!("AccessibleObjectFromWindow(HWND={hwnd:?}, pid={pid}): {e}"))?;
     }
     if raw.is_null() {
         return Err("AccessibleObjectFromWindow succeeded with a null interface".into());
     }
     let root = unsafe { IAccessible::from_raw(raw) };
+    eprintln!("IA2 identity phase: capture browser chrome");
     let nodes = capture(&root)?;
     let mut tabs = Vec::new();
     for node in &nodes {
@@ -240,26 +319,43 @@ pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<
         return Err(format!("expected one fixture tab {active:?}, found {}", tabs.len()).into());
     }
     unsafe {
-        tabs[0].object.accDoDefaultAction(&tabs[0].child.into())?;
+        tabs[0]
+            .object
+            .accDoDefaultAction(&tabs[0].child.into())
+            .map_err(|e| {
+                format!(
+                    "accDoDefaultAction(tab={active:?}, child={}): {e}",
+                    tabs[0].child
+                )
+            })?;
     }
+    eprintln!("IA2 identity phase: wait for active document {active:?}");
     let start = Instant::now();
     let (document, examined) = loop {
         check_window(hwnd, pid)?;
-        let fresh = capture(&root)?;
-        let mut documents = Vec::new();
-        let mut inactive_names = Vec::new();
-        for node in &fresh {
-            // MSAA visible/offscreen are provider facts, not physical hit testing.
-            if node.role()? == 0x0f && node.state()? & (0x8000 | 0x10000) == 0 {
-                let name = node.name()?;
-                if name.contains(inactive) {
-                    inactive_names.push(name.chars().take(256).collect::<String>());
+        // #669: Chrome invalidates old MSAA objects while publishing a tab
+        // switch. Retry only E_FAIL from this read-only publication snapshot,
+        // within the existing five-second deadline, with every retry logged.
+        // The tab's native action above is dispatched exactly once.
+        let (fresh, mut documents, inactive_names) =
+            read_during_publication(start + Duration::from_secs(5), || {
+                let fresh = capture(&root)?;
+                let mut documents = Vec::new();
+                let mut inactive_names = Vec::new();
+                for node in &fresh {
+                    // MSAA visible/offscreen are provider facts, not physical hit testing.
+                    if node.role()? == 0x0f && node.state()? & (0x8000 | 0x10000) == 0 {
+                        let name = node.name()?;
+                        if name.contains(inactive) {
+                            inactive_names.push(name.chars().take(256).collect::<String>());
+                        }
+                        if name.contains(active) {
+                            documents.push(node.clone());
+                        }
+                    }
                 }
-                if name.contains(active) {
-                    documents.push(node.clone());
-                }
-            }
-        }
+                Ok((fresh, documents, inactive_names))
+            })?;
         if documents.len() == 1 && inactive_names.is_empty() {
             break (documents.remove(0), fresh.len());
         }
@@ -312,12 +408,13 @@ pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<
             }
             return Err(format!("expected one active document {active:?} and zero visible inactive documents; active count {}, inactive count {}, inactive names {:?}, elapsed {:?}; observed {:?}", documents.len(), inactive_names.len(), &inactive_names[..inactive_names.len().min(8)], start.elapsed(), observed).into());
         }
-        // Only the declared publication condition is polled. Native failures propagate.
+        // Only the declared publication condition is polled. Other native failures propagate.
         std::thread::sleep(Duration::from_millis(50));
     };
     if document.child != 0 {
         return Err("browser document unexpectedly represented as simple MSAA child".into());
     }
+    eprintln!("IA2 identity phase: validate document IDs for {active:?}");
     let ia2 = query_ia2(&document.object)?
         .ok_or("selected document does not expose IA2 via QueryService")?;
     let (id, event_window) = identity(&ia2)?;
@@ -388,7 +485,7 @@ pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     };
     use windows::core::{implement, GUID, PCWSTR};
@@ -403,6 +500,7 @@ mod tests {
         drops: Arc<AtomicUsize>,
         queries: Arc<AtomicUsize>,
         denied: bool,
+        fail_role_once: AtomicBool,
     }
     impl Drop for NativeObject {
         fn drop(&mut self) {
@@ -428,6 +526,9 @@ mod tests {
     }
     impl IAccessible_Impl for NativeObject_Impl {
         fn get_accRole(&self, _child: &VARIANT) -> windows::core::Result<VARIANT> {
+            if self.fail_role_once.swap(false, Ordering::SeqCst) {
+                return Err(E_FAIL.into());
+            }
             Ok(VARIANT::from(0x0f))
         }
         fn get_accName(&self, child: &VARIANT) -> windows::core::Result<BSTR> {
@@ -484,8 +585,59 @@ mod tests {
             drops: drops.clone(),
             queries: queries.clone(),
             denied,
+            fail_role_once: AtomicBool::new(false),
         }
         .into()
+    }
+
+    #[test]
+    fn tab_publication_recaptures_after_a_native_role_read_is_invalidated() {
+        let _apartment = Apartment::new().expect("native COM fixture apartment");
+        let drops = Arc::new(AtomicUsize::new(0));
+        let queries = Arc::new(AtomicUsize::new(0));
+        let document: IAccessible = NativeObject {
+            drops: drops.clone(),
+            queries: queries.clone(),
+            denied: false,
+            fail_role_once: AtomicBool::new(true),
+        }
+        .into();
+        let mut attempts = 0;
+        let nodes = read_during_publication(Instant::now() + Duration::from_secs(1), || {
+            attempts += 1;
+            capture(&document)
+        })
+        .expect("fresh snapshot after the old role read was invalidated");
+        assert_eq!(attempts, 2);
+        assert_eq!(nodes.len(), 1);
+        drop(nodes);
+        drop(document);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn tab_publication_preserves_other_errors_and_an_expired_budget() {
+        for code in [E_ACCESSDENIED, E_FAIL] {
+            let mut attempts = 0;
+            let deadline = if code == E_FAIL {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(1)
+            };
+            let result: ProbeResult<()> = read_during_publication(deadline, || {
+                attempts += 1;
+                Err(windows::core::Error::new(code, "native publication read").into())
+            });
+            assert_eq!(attempts, 1);
+            assert_eq!(
+                result
+                    .expect_err("terminal native error")
+                    .downcast_ref::<windows::core::Error>()
+                    .expect("preserved HRESULT")
+                    .code(),
+                code
+            );
+        }
     }
 
     #[test]
@@ -535,6 +687,8 @@ mod tests {
             error.downcast_ref::<windows::core::Error>().unwrap().code(),
             E_ACCESSDENIED
         );
+        assert!(error.to_string().contains("QueryService(IAccessible2)"));
+        assert!(error.to_string().contains("IAccessible(0x"));
         assert_eq!(queries.load(Ordering::SeqCst), 2);
         drop(absent);
         drop(denied);

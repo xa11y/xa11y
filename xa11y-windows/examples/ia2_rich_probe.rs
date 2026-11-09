@@ -52,11 +52,13 @@ fn main() {
         }
         let hwnd = windows::Win32::Foundation::HWND(args[1].parse::<usize>()? as _);
         let pid = args[3].parse()?;
+        eprintln!("IA2 phase: identity; pid={pid}, active={:?}", args[5]);
         let mut report = {
             let _apartment = support::Apartment::new()?;
             support::probe(hwnd, pid, &args[5], &args[7])?
         };
         let provider: Arc<dyn Provider> = Arc::new(xa11y_windows::Ia2Provider::new()?);
+        eprintln!("IA2 phase: semantics and relations");
         let app = provider.app_by_pid(pid)?;
         assert!(
             app.name
@@ -144,6 +146,7 @@ fn main() {
             one(provider.as_ref(), &doc, r#"group[name="IA2 mixed text"]"#)?,
             Arc::clone(&provider),
         );
+        eprintln!("IA2 phase: embedded objects");
         let mixed_text = mixed.text()?;
         let mixed_value = mixed_text.read_all()?;
         let mut found_link = false;
@@ -179,6 +182,7 @@ fn main() {
             "IA2 required state maps to the shared state set"
         );
         let text = edit.text()?;
+        eprintln!("IA2 phase: text ranges and selections");
         let all = text.read_all()?;
         assert_eq!(
             all,
@@ -380,23 +384,9 @@ fn main() {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        if std::env::var_os("XA11Y_IA2_CONSUMERS").is_some() {
-            let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("workspace");
-            let output = std::process::Command::new("python")
-                .arg(workspace.join("tests/harness/windows_ia2_consumers.py"))
-                .arg(pid.to_string())
-                .output()?;
-            if !output.status.success() {
-                return Err(format!(
-                    "IA2 consumer source checks: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                )
-                .into());
-            }
-            report["consumer_sources"] = serde_json::from_slice(&output.stdout)?;
-        }
+        // Consumer processes run as a separately bounded harness phase. They
+        // must not consume the native probe's budget or inherit its pipe.
+        eprintln!("IA2 phase: deep tree budget and cleanup");
         let clear_deep = Element::new(
             one(
                 provider.as_ref(),

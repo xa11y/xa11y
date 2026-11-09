@@ -464,6 +464,18 @@ def _launch_app(
         xa11y.TimeoutError,
     ) as exc:
         elapsed = time.monotonic() - started
+        native_wait = "not a Linux fixture"
+        if sys.platform == "linux" and proc.poll() is None:
+            # #638: collect wait resources before App.list or teardown changes
+            # the evidence. A failed diagnostic must preserve the native error.
+            try:
+                if __package__:
+                    from .linux_process_diagnostics import collect
+                else:  # Direct `python tests/harness/launch.py` entry point.
+                    from linux_process_diagnostics import collect
+                native_wait = collect(proc.pid)
+            except Exception as diagnostic_error:  # noqa: BLE001
+                native_wait = f"<diagnosis failed: {diagnostic_error!r}>"
         # Distinguish "app crashed on launch" from "app never registered".
         if proc.poll() is not None:
             out = proc.stdout.read().decode() if proc.stdout else ""
@@ -483,6 +495,7 @@ def _launch_app(
             f"Test app (pid={proc.pid}) not found: discovery ended after "
             f"{elapsed:.1f}s of its {STARTUP_TIMEOUT}s budget.\n"
             f"Last error: {exc}\n"
+            f"Native wait evidence: {native_wait}\n"
             f"Available apps: {app_list}\n"
             f"stdout: {out}\nstderr: {err}"
         ) from exc
