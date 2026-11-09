@@ -288,7 +288,7 @@ fn delivery_line(command: &str, error: &CliError) -> Option<String> {
 /// produces the exit code.
 pub fn run(args: &[String]) -> CliResult<()> {
     match args.first().map(|s| s.as_str()) {
-        Some("apps") => cmd_apps(),
+        Some("apps") => cmd_apps(&args[1..]),
         Some("shell") => cmd_shell(&args[1..]),
         Some("windows") => cmd_windows(&args[1..]),
         Some("enable-web-accessibility") => cmd_enable_web_accessibility(&args[1..]),
@@ -636,22 +636,289 @@ fn flag_value_parsed<T: std::str::FromStr>(
     })
 }
 
+/// Every accessibility source `--backend` (and the MCP tools' `backend`)
+/// accepts. The library's own parser is what finally interprets the name;
+/// `backend_names_are_the_ones_the_library_accepts` holds the two together.
+pub(crate) const BACKENDS: [&str; 3] = ["native", "uia", "ia2"];
+
+/// Validate a backend name, so a typo is a usage error that names the
+/// argument the caller typed (`--backend`, or MCP's `"backend"`) rather than
+/// an operation failure naming `XA11Y_ACCESSIBILITY_SOURCE`, an environment
+/// variable the caller never set.
+pub(crate) fn parse_backend(raw: &str, name: &str) -> CliResult<String> {
+    if BACKENDS.contains(&raw) {
+        Ok(raw.to_string())
+    } else {
+        Err(CliError::Usage(format!(
+            "unknown {name} value {raw:?} (expected {})",
+            BACKENDS.join(", ")
+        )))
+    }
+}
+
+/// Every flag [`parse_opts`] recognises. A command accepts a subset of them,
+/// declared in its [`CommandFlags`]; `known_flags_all_parse` keeps this list
+/// and the parser's arms in step.
+const KNOWN_FLAGS: &[&str] = &[
+    "--backend",
+    "--app",
+    "--pid",
+    "--shell",
+    "--value",
+    "--at",
+    "--size",
+    "--from",
+    "--to",
+    "--button",
+    "--count",
+    "--held",
+    "--dx",
+    "--dy",
+    "--duration-ms",
+    "--region",
+    "--out",
+    "--annotate",
+    "--legend",
+    "-o",
+    "--range",
+    "--find",
+    "--occurrence",
+    "--offset",
+    "--unit",
+    "--limit",
+    "--kinds",
+    "--max-nodes",
+    "--max-depth",
+    "--row",
+    "--column",
+    "--stable",
+];
+
+/// What one command's argument list may contain.
+///
+/// Every command shares one flag parser, so without this a flag meant for one
+/// command parsed cleanly on all of them and was then ignored by the ones that
+/// do not read it: `tree --limit 5` printed the whole tree, `apps --backend
+/// uia` listed through the default source. Each command declares the flags
+/// its handler reads, and anything else is a usage error (tenet 1).
+pub(crate) struct CommandFlags {
+    /// The command's name, as the error message spells it.
+    pub command: &'static str,
+    /// The flags the handler reads. Anything else in [`KNOWN_FLAGS`] is
+    /// refused.
+    pub flags: &'static [&'static str],
+    /// The most positional arguments the handler reads; `None` for no limit.
+    pub max_positional: Option<usize>,
+    /// Positionals are literal text (`type TEXT`), so one that starts with
+    /// `--` is text to type rather than a misspelt flag.
+    pub literal_positionals: bool,
+}
+
+/// The target flags every element-reading command takes, plus `extra`.
+macro_rules! target_flags {
+    ($($extra:literal),* $(,)?) => {
+        &["--app", "--pid", "--shell", "--backend" $(, $extra)*]
+    };
+}
+
+const APPS_FLAGS: CommandFlags = CommandFlags {
+    command: "apps",
+    flags: &["--backend"],
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+// `windows`, `enable-web-accessibility` and `events` take `--shell` only so
+// that each can refuse it with a message saying why.
+const WINDOWS_FLAGS: CommandFlags = CommandFlags {
+    command: "windows",
+    flags: target_flags!(),
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const ENABLE_WEB_FLAGS: CommandFlags = CommandFlags {
+    command: "enable-web-accessibility",
+    flags: target_flags!(),
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const TREE_FLAGS: CommandFlags = CommandFlags {
+    command: "tree",
+    flags: target_flags!("--max-nodes", "--max-depth"),
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const FIND_FLAGS: CommandFlags = CommandFlags {
+    command: "find",
+    flags: target_flags!("-o", "--stable"),
+    max_positional: Some(1),
+    literal_positionals: false,
+};
+const ACTION_FLAGS: CommandFlags = CommandFlags {
+    command: "action",
+    flags: target_flags!("--value", "--at", "--size"),
+    max_positional: Some(2),
+    literal_positionals: false,
+};
+const TEXT_FLAGS: CommandFlags = CommandFlags {
+    command: "text",
+    flags: target_flags!(
+        "--range",
+        "--find",
+        "--occurrence",
+        "--offset",
+        "--unit",
+        "--limit"
+    ),
+    max_positional: Some(2),
+    literal_positionals: false,
+};
+const TABLE_FLAGS: CommandFlags = CommandFlags {
+    command: "table",
+    flags: target_flags!("--row", "--column"),
+    max_positional: Some(2),
+    literal_positionals: false,
+};
+const RELATIONS_FLAGS: CommandFlags = CommandFlags {
+    command: "relations",
+    flags: target_flags!(),
+    max_positional: None,
+    literal_positionals: false,
+};
+const EVENTS_FLAGS: CommandFlags = CommandFlags {
+    command: "events",
+    flags: target_flags!("--kinds"),
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const CLICK_FLAGS: CommandFlags = CommandFlags {
+    command: "click",
+    flags: &["--at", "--button", "--count", "--held"],
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const MOVE_FLAGS: CommandFlags = CommandFlags {
+    command: "move",
+    flags: &["--at"],
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const DRAG_FLAGS: CommandFlags = CommandFlags {
+    command: "drag",
+    flags: &["--from", "--to", "--button", "--duration-ms", "--held"],
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const SCROLL_FLAGS: CommandFlags = CommandFlags {
+    command: "scroll",
+    flags: &["--at", "--dx", "--dy"],
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const KEY_FLAGS: CommandFlags = CommandFlags {
+    command: "key",
+    flags: &["--held"],
+    max_positional: Some(1),
+    literal_positionals: false,
+};
+const TYPE_FLAGS: CommandFlags = CommandFlags {
+    command: "type",
+    flags: &[],
+    max_positional: Some(1),
+    literal_positionals: true,
+};
+const SCREENSHOT_FLAGS: CommandFlags = CommandFlags {
+    command: "screenshot",
+    flags: target_flags!("--region", "--out", "--annotate", "--legend"),
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+
+/// Parse `args` for the command `spec` describes: [`parse_opts`], then refuse
+/// every flag the command does not read, any unrecognised `--flag`, and any
+/// positional argument beyond what the command takes.
+///
+/// A refused flag is reported before its value is parsed, so `click --pid x`
+/// says `--pid` does not apply rather than that `x` is not a pid.
+pub(crate) fn parse_command_opts(
+    spec: &CommandFlags,
+    args: &[String],
+) -> CliResult<(Opts, Vec<String>)> {
+    let accepted = || {
+        if spec.flags.is_empty() {
+            format!("`xa11y {}` takes no flags", spec.command)
+        } else {
+            format!("`xa11y {}` takes {}", spec.command, spec.flags.join(", "))
+        }
+    };
+    let (opts, positional) = parse_opts_checked(args, &|flag| {
+        if spec.flags.contains(&flag) {
+            Ok(())
+        } else {
+            Err(CliError::Usage(format!(
+                "{flag} does not apply to `xa11y {}`; {}",
+                spec.command,
+                accepted()
+            )))
+        }
+    })?;
+    if !spec.literal_positionals {
+        if let Some(flag) = positional
+            .iter()
+            .find(|p| p.starts_with("--") && p.len() > 2)
+        {
+            return Err(CliError::Usage(format!(
+                "unknown flag {flag}; {}",
+                accepted()
+            )));
+        }
+    }
+    if let Some(max) = spec.max_positional {
+        if let Some(extra) = positional.get(max) {
+            return Err(CliError::Usage(format!(
+                "xa11y {}: unexpected argument: {extra}",
+                spec.command
+            )));
+        }
+    }
+    Ok((opts, positional))
+}
+
 /// Parse known flags from a slice, returning the parsed Opts and the
 /// remaining positional arguments.
 ///
-/// Unknown flags are left in the positional output (so downstream callers
-/// see them and can surface a sensible error) rather than swallowed. Known
-/// flags require a value: a trailing flag or an unparsable numeric value is
-/// a usage error, not a silently-absent option.
+/// Accepts every flag in [`KNOWN_FLAGS`]; commands go through
+/// [`parse_command_opts`], which narrows that to the flags each one reads.
+/// Unknown flags are left in the positional output rather than swallowed.
+/// Known flags require a value: a trailing flag or an unparsable numeric
+/// value is a usage error, not a silently-absent option.
+///
+/// Test-only: every command parses through [`parse_command_opts`], and this
+/// unrestricted form is what the per-flag parsing tests exercise.
+#[cfg(test)]
 pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
+    parse_opts_checked(args, &|_| Ok(()))
+}
+
+/// [`parse_opts`], asking `allow` about each recognised flag before its value
+/// is read.
+fn parse_opts_checked(
+    args: &[String],
+    allow: &dyn Fn(&str) -> CliResult<()>,
+) -> CliResult<(Opts, Vec<String>)> {
     let mut opts = Opts::default();
     let mut positional = Vec::new();
     let mut i = 0;
     while i < args.len() {
+        if let Some(flag) = KNOWN_FLAGS.iter().find(|f| **f == args[i]) {
+            allow(flag)?;
+        }
         match args[i].as_str() {
             "--backend" => {
                 i += 1;
-                opts.backend = Some(flag_value(args, i, "--backend")?.to_string());
+                opts.backend = Some(parse_backend(
+                    flag_value(args, i, "--backend")?,
+                    "--backend",
+                )?);
             }
             "--app" => {
                 i += 1;
@@ -1464,16 +1731,21 @@ fn cmd_guide(args: &[String]) -> CliResult<()> {
 ///
 /// A bad platform name or version is a usage error: it is the caller's
 /// argument, not an operation that failed.
+///
+/// `backend` is the accessibility source to describe (already validated by
+/// [`parse_backend`] under the caller's own spelling of the argument); `None`
+/// keeps the library default.
 pub(crate) fn resolve_capabilities(
     platform: Option<&str>,
     os_version: Option<&str>,
+    backend: Option<&str>,
 ) -> CliResult<Capabilities> {
     let usage = |e: Error| match e {
         Error::InvalidActionData { message } => CliError::Usage(message),
         other => CliError::Xa11y(other),
     };
     let platform = platform.map(Platform::parse).transpose().map_err(usage)?;
-    crate::capabilities_with(platform, os_version).map_err(usage)
+    crate::capabilities_for_backend(platform, os_version, backend).map_err(usage)
 }
 
 /// The entries of `caps` that `filters` select: each filter is a feature
@@ -1551,7 +1823,10 @@ fn cmd_capabilities(args: &[String]) -> CliResult<()> {
         match args[i].as_str() {
             "--backend" => {
                 i += 1;
-                backend = Some(flag_value(args, i, "--backend")?);
+                backend = Some(parse_backend(
+                    flag_value(args, i, "--backend")?,
+                    "--backend",
+                )?);
             }
             "--platform" => {
                 i += 1;
@@ -1572,14 +1847,7 @@ fn cmd_capabilities(args: &[String]) -> CliResult<()> {
         }
         i += 1;
     }
-    let caps = match backend {
-        Some(b) => crate::capabilities_for_backend(
-            platform.map(Platform::parse).transpose()?,
-            os_version,
-            Some(b),
-        )?,
-        None => resolve_capabilities(platform, os_version)?,
-    };
+    let caps = resolve_capabilities(platform, os_version, backend.as_deref())?;
     let selected = select_capabilities(&caps, &filters)?;
     if json {
         let out = serde_json::json!({
@@ -1611,8 +1879,9 @@ fn cmd_capabilities(args: &[String]) -> CliResult<()> {
     Ok(())
 }
 
-fn cmd_apps() -> CliResult<()> {
-    let apps = App::list()?;
+fn cmd_apps(args: &[String]) -> CliResult<()> {
+    let (opts, _) = parse_command_opts(&APPS_FLAGS, args)?;
+    let apps = App::list_with(selected_provider(&opts)?)?;
     if apps.is_empty() {
         println!("No applications found.");
         return Ok(());
@@ -1722,12 +1991,7 @@ pub(crate) fn window_key(data: &ElementData) -> String {
 /// partial result the MCP `windows` tool returns in its `errors` array
 /// (tenet 1: the failure is surfaced, never swallowed).
 fn cmd_windows(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
-    if let Some(arg) = positional.first() {
-        return Err(CliError::Usage(format!(
-            "usage: xa11y windows [--app NAME | --pid PID]; unexpected argument: {arg}"
-        )));
-    }
+    let (opts, _) = parse_command_opts(&WINDOWS_FLAGS, args)?;
     // `--shell` names an OS shell surface (`xa11y shell`), which this command
     // does not enumerate. Silently ignoring the flag would list every
     // application's windows instead of the requested surface — a filter that
@@ -1814,12 +2078,7 @@ pub(crate) fn enable_web_accessibility(opts: &Opts) -> CliResult<App> {
 
 fn cmd_enable_web_accessibility(args: &[String]) -> CliResult<()> {
     const USAGE: &str = "usage: xa11y enable-web-accessibility (--app NAME | --pid PID)";
-    let (opts, positional) = parse_opts(args)?;
-    if let Some(arg) = positional.first() {
-        return Err(CliError::Usage(format!(
-            "{USAGE}; unexpected argument: {arg}"
-        )));
-    }
+    let (opts, _) = parse_command_opts(&ENABLE_WEB_FLAGS, args)?;
     // A shell surface has no web content switch; refuse the flag rather than
     // ignore it (tenet 1).
     if opts.shell.is_some() {
@@ -1834,7 +2093,7 @@ fn cmd_enable_web_accessibility(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_tree(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&TREE_FLAGS, args)?;
     let max_nodes = opts
         .max_nodes
         .unwrap_or(xa11y_core::capture::DEFAULT_MAX_NODES);
@@ -1945,7 +2204,7 @@ pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
 }
 
 fn cmd_find(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&FIND_FLAGS, args)?;
     let selector = positional.first().ok_or_else(|| {
         CliError::Usage(
             "usage: xa11y find SELECTOR [--app NAME | --pid PID | --shell KIND] \
@@ -2244,7 +2503,7 @@ fn check_center_output(capability: Result<bool>) -> CliResult<()> {
 }
 
 fn cmd_action(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&ACTION_FLAGS, args)?;
     if positional.len() < 2 {
         return Err(CliError::Usage(
             "usage: xa11y action ACTION SELECTOR [--app NAME | --pid PID | --shell KIND] \
@@ -3127,7 +3386,7 @@ pub(crate) fn run_text_op(text: &Text, op: &TextOp) -> CliResult<serde_json::Val
 }
 
 fn cmd_text(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&TEXT_FLAGS, args)?;
     if positional.len() < 2 {
         return Err(CliError::Usage(format!(
             "usage: xa11y text OP SELECTOR [--app NAME | --pid PID | --shell KIND] \
@@ -3308,7 +3567,7 @@ pub(crate) fn no_cell_message(table: &ElementData, row: u32, column: u32) -> Str
 }
 
 fn cmd_table(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&TABLE_FLAGS, args)?;
     if positional.len() < 2 {
         return Err(CliError::Usage(format!(
             "usage: xa11y table OP SELECTOR [--app NAME | --pid PID | --shell KIND] \
@@ -3364,7 +3623,7 @@ pub(crate) fn parse_relation_kinds<S: AsRef<str>>(names: &[S]) -> CliResult<Vec<
 }
 
 fn cmd_relations(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&RELATIONS_FLAGS, args)?;
     let Some((selector, kind_names)) = positional.split_first() else {
         return Err(CliError::Usage(format!(
             "usage: xa11y relations SELECTOR [KIND...] [--app NAME | --pid PID | --shell KIND]  \
@@ -3394,7 +3653,7 @@ fn cmd_relations(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_events(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&EVENTS_FLAGS, args)?;
     // Events are subscribed per application; there is no surface-level event
     // story yet (see design/shell-surfaces/PROPOSAL.md §10). Saying so beats
     // letting `--shell` fall through to "specify --app NAME or --pid PID",
@@ -3669,7 +3928,7 @@ pub(crate) fn text_change_json(change: &TextChange) -> serde_json::Value {
 // ── Input simulation ────────────────────────────────────────────────────────
 
 fn cmd_click(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&CLICK_FLAGS, args)?;
     let at = parse_point_arg(
         opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
         "--at",
@@ -3701,7 +3960,7 @@ pub(crate) fn build_click_options(opts: &Opts) -> CliResult<ClickOptions> {
 }
 
 fn cmd_move(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&MOVE_FLAGS, args)?;
     let at = parse_point_arg(
         opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
         "--at",
@@ -3713,7 +3972,7 @@ fn cmd_move(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_drag(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&DRAG_FLAGS, args)?;
     let from = parse_point_arg(
         opts.from.as_deref().ok_or_else(|| missing("--from X,Y"))?,
         "--from",
@@ -3748,7 +4007,7 @@ pub(crate) fn build_drag_options(opts: &Opts) -> CliResult<DragOptions> {
 }
 
 fn cmd_scroll(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&SCROLL_FLAGS, args)?;
     let at = parse_point_arg(
         opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
         "--at",
@@ -3762,7 +4021,7 @@ fn cmd_scroll(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_key(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&KEY_FLAGS, args)?;
     let name = positional
         .first()
         .ok_or_else(|| CliError::Usage("usage: xa11y key KEY [--held K,K]".into()))?;
@@ -3779,7 +4038,7 @@ fn cmd_key(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_type(args: &[String]) -> CliResult<()> {
-    let (_opts, positional) = parse_opts(args)?;
+    let (_opts, positional) = parse_command_opts(&TYPE_FLAGS, args)?;
     let text = positional
         .first()
         .ok_or_else(|| CliError::Usage("usage: xa11y type TEXT".into()))?;
@@ -3826,7 +4085,7 @@ pub(crate) fn parse_legend_format(raw: &str) -> CliResult<LegendFormat> {
 const MAX_LEGEND_OMISSION_DETAILS: usize = 5;
 
 fn cmd_screenshot(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&SCREENSHOT_FLAGS, args)?;
     let out = opts
         .out
         .as_deref()
@@ -3840,6 +4099,26 @@ fn cmd_screenshot(args: &[String]) -> CliResult<()> {
             return Err(CliError::Usage(format!(
                 "--legend {raw} has nothing to describe: add --annotate SELECTOR, or drop \
                  --legend"
+            )));
+        }
+        // A target is read only to resolve --annotate selectors; it never
+        // crops the capture. Capturing the whole screen and printing nothing
+        // about the ignored flag would read as a capture of that target.
+        let named: Vec<&str> = [
+            ("--app", opts.app.is_some()),
+            ("--pid", opts.pid.is_some()),
+            ("--shell", opts.shell.is_some()),
+            ("--backend", opts.backend.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(flag, given)| given.then_some(flag))
+        .collect();
+        if !named.is_empty() {
+            return Err(CliError::Usage(format!(
+                "{} without --annotate does nothing: a target is only read to resolve \
+                 annotation selectors, and it never crops the capture. Add --annotate \
+                 SELECTOR, or use --region X,Y,W,H to capture part of the screen",
+                named.join(", ")
             )));
         }
         let shot = match region {
@@ -6600,5 +6879,191 @@ mod tests {
             assert!(help.contains(op), "--help omits {op}");
         }
         assert!(help.contains("select-text (requires --value START,END, in UTF-16 code units)"));
+    }
+
+    const ALL_COMMAND_FLAGS: [&CommandFlags; 17] = [
+        &APPS_FLAGS,
+        &WINDOWS_FLAGS,
+        &ENABLE_WEB_FLAGS,
+        &TREE_FLAGS,
+        &FIND_FLAGS,
+        &ACTION_FLAGS,
+        &TEXT_FLAGS,
+        &TABLE_FLAGS,
+        &RELATIONS_FLAGS,
+        &EVENTS_FLAGS,
+        &CLICK_FLAGS,
+        &MOVE_FLAGS,
+        &DRAG_FLAGS,
+        &SCROLL_FLAGS,
+        &KEY_FLAGS,
+        &TYPE_FLAGS,
+        &SCREENSHOT_FLAGS,
+    ];
+
+    /// A sample value each flag's parser accepts.
+    fn sample_value(flag: &str) -> Option<&'static str> {
+        match flag {
+            "--stable" => None,
+            "--backend" => Some("native"),
+            "--pid" | "--count" | "--dx" | "--dy" | "--duration-ms" | "--occurrence"
+            | "--offset" | "--limit" | "--max-nodes" | "--max-depth" | "--row" | "--column" => {
+                Some("1")
+            }
+            _ => Some("v"),
+        }
+    }
+
+    #[test]
+    fn known_flags_all_parse() {
+        // KNOWN_FLAGS is what `parse_command_opts` checks against; a flag the
+        // parser has an arm for but the list lacks would slip past every
+        // command's allow-list as a positional.
+        for flag in KNOWN_FLAGS {
+            let mut args = vec![flag.to_string()];
+            args.extend(sample_value(flag).map(str::to_string));
+            let (_, pos) = parse_opts(&args).unwrap_or_else(|e| panic!("{flag}: {e}"));
+            assert!(pos.is_empty(), "{flag} was not consumed: {pos:?}");
+        }
+    }
+
+    #[test]
+    fn every_command_flag_is_a_known_flag() {
+        for spec in ALL_COMMAND_FLAGS {
+            for flag in spec.flags {
+                assert!(
+                    KNOWN_FLAGS.contains(flag),
+                    "{} lists {flag}, which the parser does not know",
+                    spec.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_command_accepts_its_own_flags() {
+        for spec in ALL_COMMAND_FLAGS {
+            for flag in spec.flags {
+                let mut args = vec![flag.to_string()];
+                args.extend(sample_value(flag).map(str::to_string));
+                parse_command_opts(spec, &args)
+                    .unwrap_or_else(|e| panic!("{} {flag}: {e}", spec.command));
+            }
+        }
+    }
+
+    #[test]
+    fn a_flag_the_command_does_not_read_is_a_usage_error() {
+        for (argv, flag) in [
+            (&["tree", "--app", "X", "--limit", "5"][..], "--limit"),
+            (
+                &["find", "button", "--app", "X", "--kinds", "focus_changed"],
+                "--kinds",
+            ),
+            (&["text", "info", "x", "--app", "X", "--stable"], "--stable"),
+            (
+                &["table", "cell-at", "x", "--app", "X", "--range", "0,1"],
+                "--range",
+            ),
+            (
+                &["action", "press", "x", "--app", "X", "--max-nodes", "3"],
+                "--max-nodes",
+            ),
+            (&["events", "--app", "X", "--max-depth", "2"], "--max-depth"),
+            (&["apps", "--app", "X"], "--app"),
+            (&["click", "--at", "1,2", "--find", "x"], "--find"),
+            (&["key", "a", "--unit", "word"], "--unit"),
+            (&["type", "hi", "--held", "Shift"], "--held"),
+            (&["screenshot", "--out", "x.png", "--row", "1"], "--row"),
+        ] {
+            let err = run(&strs(argv)).expect_err(&format!("{argv:?} must be refused"));
+            assert_eq!(err.exit_code(), 2, "{argv:?}: {err}");
+            assert!(
+                err.to_string().contains(&format!("{flag} does not apply")),
+                "{argv:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_flag_is_named_before_its_value_is_parsed() {
+        let err = run(&strs(&["click", "--at", "1,2", "--pid", "abc"])).expect_err("refused");
+        assert!(err.to_string().contains("--pid does not apply"), "{err}");
+    }
+
+    #[test]
+    fn unknown_flags_and_extra_positionals_are_usage_errors() {
+        for argv in [
+            &["tree", "--app", "X", "--bogus"][..],
+            &["apps", "extra"],
+            &["tree", "--app", "X", "button"],
+            &["events", "--app", "X", "focus_changed"],
+            &["find", "button", "label", "--app", "X"],
+            &["action", "press", "button", "extra", "--app", "X"],
+            &["key", "a", "b"],
+            &["type", "hello", "world"],
+            &["click", "--at", "1,2", "extra"],
+        ] {
+            let err = run(&strs(argv)).expect_err(&format!("{argv:?} must be refused"));
+            assert_eq!(err.exit_code(), 2, "{argv:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn type_text_may_look_like_a_flag() {
+        let (_, pos) =
+            parse_command_opts(&TYPE_FLAGS, &strs(&["--not-a-flag"])).expect("literal text");
+        assert_eq!(pos, vec!["--not-a-flag"]);
+    }
+
+    #[test]
+    fn a_bad_backend_is_a_usage_error_naming_the_flag() {
+        for argv in [
+            &["tree", "--app", "X", "--backend", "foo"][..],
+            &["apps", "--backend", "foo"],
+            &["capabilities", "--backend", "foo"],
+        ] {
+            let err = run(&strs(argv)).expect_err("unknown backend");
+            assert_eq!(err.exit_code(), 2, "{argv:?}: {err}");
+            let msg = err.to_string();
+            assert!(msg.contains("--backend"), "{msg}");
+            assert!(!msg.contains("XA11Y_ACCESSIBILITY_SOURCE"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn a_bad_platform_is_a_usage_error_with_or_without_backend() {
+        for argv in [
+            &["capabilities", "--platform", "bogus"][..],
+            &["capabilities", "--platform", "bogus", "--backend", "native"],
+        ] {
+            let err = run(&strs(argv)).expect_err("unknown platform");
+            assert_eq!(err.exit_code(), 2, "{argv:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn backend_names_are_the_ones_the_library_accepts() {
+        for backend in BACKENDS {
+            crate::capabilities_for_backend(Some(Platform::Windows), None, Some(backend))
+                .unwrap_or_else(|e| panic!("{backend}: {e}"));
+        }
+        assert!(crate::capabilities_for_backend(Some(Platform::Windows), None, Some("x")).is_err());
+    }
+
+    #[test]
+    fn screenshot_refuses_a_target_without_annotate() {
+        for flag in [
+            &["--app", "X"][..],
+            &["--pid", "1"],
+            &["--shell", "dock"],
+            &["--backend", "native"],
+        ] {
+            let mut argv = vec!["screenshot", "--out", "x.png"];
+            argv.extend_from_slice(flag);
+            let err = run(&strs(&argv)).expect_err("inert target");
+            assert_eq!(err.exit_code(), 2, "{argv:?}: {err}");
+            assert!(err.to_string().contains(flag[0]), "{err}");
+        }
     }
 }

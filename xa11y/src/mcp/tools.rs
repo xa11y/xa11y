@@ -429,7 +429,7 @@ fn app_properties() -> Map<String, Value> {
                             `pid`, or `shell`.",
         }),
     );
-    props.insert("backend".into(), json!({"type":"string", "enum":["native","uia","ia2"], "description":"Accessibility source for this attachment; default: server environment. IA2 requires Windows."}));
+    props.insert("backend".into(), json!({"type":"string", "enum": cli::BACKENDS, "description":"Accessibility source for this attachment; default: server environment. IA2 requires Windows."}));
     props.insert(
         "pid".into(),
         PID.property(
@@ -533,7 +533,7 @@ fn tool_definition(name: &str) -> Value {
         ),
         "capabilities" => {
             let mut props = Map::new();
-            props.insert("backend".into(), json!({"type":"string", "enum":["native","uia","ia2"]}));
+            props.insert("backend".into(), json!({"type":"string", "enum": cli::BACKENDS, "description":"Accessibility source to describe. Default: the server environment's source for the running platform, and native for another `platform`. IA2 has its own table, including unsupported events."}));
             props.insert(
                 "platform".into(),
                 json!({
@@ -1423,7 +1423,7 @@ fn tool_definition(name: &str) -> Value {
 /// a schema advertises but a handler refuses is worse than one that is absent.
 fn events_start_properties() -> Map<String, Value> {
     let mut props = Map::new();
-    props.insert("backend".into(), json!({"type":"string", "enum":["native","uia","ia2"], "description":"Explicit accessibility source; IA2 event subscriptions are unsupported."}));
+    props.insert("backend".into(), json!({"type":"string", "enum": cli::BACKENDS, "description":"Explicit accessibility source; IA2 event subscriptions are unsupported."}));
     props.insert(
         "app".into(),
         json!({
@@ -1737,17 +1737,22 @@ fn annotate_selectors(args: &Value) -> CliResult<Vec<String>> {
 /// [`target`] refuses a call with none of them, but its message answers "which
 /// application?" and not "why does a screenshot need one at all". `screenshot`
 /// asks this first so it can say that `annotate` is what needs the target.
+///
+/// `backend` is not one: it says how to attach to a target, not which.
 fn has_target(args: &Value) -> bool {
-    !target_keys(args).is_empty()
+    target_keys(args).iter().any(|key| *key != "backend")
 }
 
-/// The target-naming arguments this call actually passed, in schema order.
+/// The target arguments this call actually passed, in schema order: the three
+/// that name a target, and `backend`, which picks how to attach to it.
 ///
 /// `screenshot` names them back to the caller when they were passed without
 /// `annotate`, because "a target does nothing here" is only actionable if the
-/// answer says which of the three it means.
+/// answer says which of them it means. `backend` is listed because it is just
+/// as inert there; leaving it out let a `backend` without `annotate` be
+/// dropped while the call reported success.
 fn target_keys(args: &Value) -> Vec<&'static str> {
-    ["app", "pid", "shell"]
+    ["app", "pid", "shell", "backend"]
         .into_iter()
         .filter(|key| !matches!(args.get(*key), None | Some(Value::Null)))
         .collect()
@@ -1761,6 +1766,15 @@ fn quoted_list(names: &[&str]) -> String {
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
     }
+}
+
+/// Read the `backend` argument. An unknown name is `invalid_arguments`
+/// naming `"backend"`, not an `invalid_action_data` failure naming the
+/// server's `XA11Y_ACCESSIBILITY_SOURCE` variable, which the caller never set.
+fn backend_arg(args: &Value) -> CliResult<Option<String>> {
+    opt_str(args, "backend")?
+        .map(|raw| cli::parse_backend(raw, "\"backend\""))
+        .transpose()
 }
 
 /// Read the `pid` argument, range-checked and narrowed.
@@ -1789,7 +1803,7 @@ fn pid_arg(args: &Value) -> CliResult<Option<u32>> {
 /// surfaces cannot drift on what `app` or `shell` means.
 fn target(args: &Value) -> CliResult<Target> {
     let opts = Opts {
-        backend: opt_str(args, "backend")?.map(str::to_string),
+        backend: backend_arg(args)?,
         app: opt_str(args, "app")?.map(str::to_string),
         pid: pid_arg(args)?,
         shell: opt_str(args, "shell")?.map(str::to_string),
@@ -1819,7 +1833,7 @@ fn target(args: &Value) -> CliResult<Target> {
 /// / `resolve_apps`, so the two surfaces cannot drift on what `app` means.
 fn target_opts(args: &Value) -> CliResult<Opts> {
     let opts = Opts {
-        backend: opt_str(args, "backend")?.map(str::to_string),
+        backend: backend_arg(args)?,
         app: opt_str(args, "app")?.map(str::to_string),
         pid: pid_arg(args)?,
         ..Default::default()
@@ -1892,14 +1906,8 @@ fn tool_capabilities(args: &Value) -> CliResult<ToolOutput> {
             .collect::<CliResult<_>>()?,
         Some(_) => return Err(usage("\"names\" must be an array of strings".to_string())),
     };
-    let caps = match opt_str(args, "backend")? {
-        Some(b) => crate::capabilities_for_backend(
-            platform.map(crate::Platform::parse).transpose()?,
-            os_version,
-            Some(b),
-        )?,
-        None => crate::cli::resolve_capabilities(platform, os_version)?,
-    };
+    let backend = backend_arg(args)?;
+    let caps = crate::cli::resolve_capabilities(platform, os_version, backend.as_deref())?;
     let selected = crate::cli::select_capabilities(&caps, &names)?;
     let listed: Vec<Value> = selected
         .iter()
@@ -2672,8 +2680,8 @@ fn tool_windows(args: &Value) -> CliResult<ToolOutput> {
         // against listing the same process twice.
         cli::resolve_apps(&target_opts(args)?)?
     } else {
-        App::list_with(match opt_str(args, "backend")? {
-            Some(b) => crate::provider_for_backend(b)?,
+        App::list_with(match backend_arg(args)? {
+            Some(b) => crate::provider_for_backend(&b)?,
             None => crate::provider()?,
         })?
     };
@@ -3077,7 +3085,7 @@ fn events_app(args: &Value) -> CliResult<crate::App> {
         ));
     }
     let opts = Opts {
-        backend: opt_str(args, "backend")?.map(str::to_string),
+        backend: backend_arg(args)?,
         app: opt_str(args, "app")?.map(str::to_string),
         pid: pid_arg(args)?,
         ..Default::default()
@@ -4109,6 +4117,9 @@ mod tests {
             // An empty `annotate` is the plain-capture path too, so it is
             // refused for the same reason an absent one is.
             (json!({ "annotate": [], "pid": 42 }), vec!["\"pid\""]),
+            // `backend` picks how to attach to a target and is just as inert
+            // without `annotate`; it used to be dropped silently.
+            (json!({ "backend": "native" }), vec!["\"backend\""]),
         ] {
             let err = tool_screenshot(&args(arguments.clone()))
                 .expect_err(&format!("{arguments} must be refused"));
@@ -4121,6 +4132,37 @@ mod tests {
             assert!(msg.contains("annotate"), "{arguments}: {msg}");
             assert!(msg.contains("plain capture"), "{arguments}: {msg}");
         }
+    }
+
+    #[test]
+    fn a_backend_alone_does_not_count_as_an_annotation_target() {
+        let err = tool_screenshot(&args(
+            json!({ "annotate": ["button"], "backend": "native" }),
+        ))
+        .expect_err("annotate needs a target");
+        assert!(err.to_string().contains("names none"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_backend_is_invalid_arguments_naming_the_argument() {
+        for (tool, arguments) in [
+            ("tree", json!({ "app": "X", "backend": "foo" })),
+            ("windows", json!({ "backend": "foo" })),
+            ("capabilities", json!({ "backend": "foo" })),
+            ("events_start", json!({ "app": "X", "backend": "foo" })),
+        ] {
+            let err = Xa11yTools::new()
+                .call(tool, &args(arguments.clone()))
+                .expect_err("unknown backend");
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{tool}: {err}");
+            let msg = err.to_string();
+            assert!(msg.contains("\"backend\""), "{tool}: {msg}");
+            assert!(!msg.contains("XA11Y_ACCESSIBILITY_SOURCE"), "{tool}: {msg}");
+        }
+        // A bad platform beside a valid backend is the caller's argument too.
+        let err = tool_capabilities(&args(json!({ "platform": "bogus", "backend": "native" })))
+            .expect_err("unknown platform");
+        assert_eq!(failure_kind(&err), "invalid_arguments", "{err}");
     }
 
     #[test]
