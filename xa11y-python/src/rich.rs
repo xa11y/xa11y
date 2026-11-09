@@ -554,11 +554,7 @@ impl Text {
         let t = self.inner.clone();
         let page = py.detach(move || t.runs(r, limit)).map_err(to_py_err)?;
         Ok(TextRuns {
-            runs: page
-                .runs
-                .into_iter()
-                .map(TextRun::from_core)
-                .collect(),
+            runs: page.runs.into_iter().map(TextRun::from_core).collect(),
             truncated: page.truncated,
             next_start: page.next_start,
         })

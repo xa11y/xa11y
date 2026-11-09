@@ -101,4 +101,38 @@ mod tests {
             other => panic!("expected the controlled node inside the capture: {other:?}"),
         }
     }
+
+    #[test]
+    #[ignore]
+    fn a_structure_only_capture_reads_structure_alone_at_any_size() {
+        let app = h::app_root();
+        let mut timings = Vec::new();
+        for max_nodes in [10, 2000] {
+            let cap = app
+                .capture(&CaptureOptions::new().max_nodes(max_nodes))
+                .expect("capture");
+            assert!(cap.nodes.len() <= max_nodes);
+            assert!(cap.backend.is_some(), "the root reports its backend");
+            let s = cap.stats;
+            assert!(s.identity_reads >= cap.nodes.len(), "{s:?}");
+            assert!(
+                s.children_reads >= 1 && s.children_reads <= cap.nodes.len(),
+                "{s:?}"
+            );
+            assert_eq!(
+                (
+                    s.text_reads,
+                    s.formatting_reads,
+                    s.relation_reads,
+                    s.text_bytes
+                ),
+                (0, 0, 0, 0),
+                "no detail asked for, so none read: {s:?}"
+            );
+            let took = cap.finished.duration_since(cap.started).unwrap_or_default();
+            timings.push((cap.nodes.len(), took));
+        }
+        // Reported rather than asserted: CI machines vary too much for a bound.
+        eprintln!("structure-only capture latency (nodes, time): {timings:?}");
+    }
 }

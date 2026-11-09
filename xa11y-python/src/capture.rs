@@ -121,7 +121,11 @@ impl CancelToken {
     fn __repr__(&self) -> String {
         format!(
             "CancelToken(cancelled={})",
-            if self.inner.is_cancelled() { "True" } else { "False" }
+            if self.inner.is_cancelled() {
+                "True"
+            } else {
+                "False"
+            }
         )
     }
 }
@@ -354,10 +358,12 @@ impl CapturedText {
     /// ``content``, in order; ``None`` when they were not read.
     #[getter]
     fn runs(&self) -> Option<Vec<crate::rich::TextRun>> {
-        self.inner
-            .runs
-            .as_ref()
-            .map(|runs| runs.iter().cloned().map(crate::rich::TextRun::from_core).collect())
+        self.inner.runs.as_ref().map(|runs| {
+            runs.iter()
+                .cloned()
+                .map(crate::rich::TextRun::from_core)
+                .collect()
+        })
     }
     /// Whether ``runs`` stops short of the end of ``content``.
     #[getter]

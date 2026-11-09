@@ -202,7 +202,9 @@ impl Event {
         self.announcement.clone()
     }
 
-    /// Snapshot of the element that triggered the event, if available.
+    /// The element that triggered the event, if available. On Linux it acts
+    /// on the live node (or rejects with `ElementStaleError` once it is
+    /// gone); on macOS and Windows it is a snapshot.
     #[napi(getter)]
     pub fn target(&self) -> Option<Element> {
         self.target_data
