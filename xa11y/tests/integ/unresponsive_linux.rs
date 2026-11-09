@@ -2,9 +2,11 @@
 //!
 //! Enumeration reads every registered application's name, so before the
 //! connection carried a method timeout one `SIGSTOP`ped app hung `App::list`
-//! for every caller, forever. These tests stop the test app itself — the only
-//! fixture the harness guarantees — and always resume it, even on panic, so
-//! the tests after them see a live app again.
+//! for every caller, forever. A locator wait against a stopped app is
+//! bounded more tightly still: by its own timeout, not the connection's 5 s
+//! one (#531). These tests stop the test app itself — the only fixture the
+//! harness guarantees — and always resume it, even on panic, so the tests
+//! after them see a live app again.
 //!
 //! Linux-only; the module is gated with `#[cfg(target_os = "linux")]` in
 //! `mod.rs`.
@@ -96,6 +98,70 @@ mod tests {
                         "App::list did not recover after SIGCONT: {:?}",
                         other.map(|apps| apps.len())
                     )
+                }
+                _ => std::thread::sleep(Duration::from_millis(200)),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn stopped_app_fails_a_locator_wait_within_its_timeout_and_names_the_call() {
+        let app = h::app_root();
+        let pid = app.pid.expect("test app reports a pid");
+        // A read-only wait, so nothing is left queued for the app to act on
+        // once it resumes. Submit is visible: with the app running this wait
+        // returns at once, so a Timeout below can only come from the stop.
+        let target = app.locator(r#"button[name="Submit"]"#);
+        target
+            .wait_visible(Duration::from_secs(5))
+            .expect("Submit is visible while the app runs");
+
+        let start;
+        let result;
+        {
+            let _stopped = Stopped::new(pid);
+            start = Instant::now();
+            result = target.wait_visible(Duration::from_secs(1));
+        }
+        let elapsed = start.elapsed();
+
+        // Bounded by the locator's 1 s timeout plus the short pid/state
+        // lookup the diagnosis makes, well under the connection's 5 s method
+        // timeout that a call ignoring the deadline would wait out.
+        assert!(
+            elapsed < Duration::from_millis(3500),
+            "a 1 s locator wait took {elapsed:?} with the app stopped"
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("wait_visible succeeded with the test app stopped"),
+        };
+        let Error::Timeout { diagnosis, .. } = &err else {
+            panic!("expected Error::Timeout naming the pending call, got: {err}");
+        };
+        let d = diagnosis.as_deref().expect("timeout carries a diagnosis");
+        let pending = d.pending.as_deref().unwrap_or_else(|| {
+            panic!("the timeout must name the D-Bus call it was waiting on: {err}")
+        });
+        // `Interface.Member on /object/path (:bus.name)`, as the deadline
+        // recorded it when it cut the call short.
+        assert!(
+            pending.contains(" on /") && pending.contains("(:"),
+            "pending should name the call, object and bus: {pending}"
+        );
+        assert!(
+            err.to_string().contains("still pending"),
+            "the message should carry the pending call too: {err}"
+        );
+
+        // And once resumed, the app answers again.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match h::app_root().locator("button").count() {
+                Ok(n) if n > 0 => break,
+                other if Instant::now() >= deadline => {
+                    panic!("app did not recover after SIGCONT: {other:?}")
                 }
                 _ => std::thread::sleep(Duration::from_millis(200)),
             }
