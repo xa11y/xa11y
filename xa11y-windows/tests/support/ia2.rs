@@ -485,7 +485,7 @@ pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     };
     use windows::core::{implement, GUID, PCWSTR};
@@ -500,7 +500,7 @@ mod tests {
         drops: Arc<AtomicUsize>,
         queries: Arc<AtomicUsize>,
         denied: bool,
-        role_failures: AtomicUsize,
+        fail_role_once: AtomicBool,
     }
     impl Drop for NativeObject {
         fn drop(&mut self) {
@@ -526,11 +526,7 @@ mod tests {
     }
     impl IAccessible_Impl for NativeObject_Impl {
         fn get_accRole(&self, _child: &VARIANT) -> windows::core::Result<VARIANT> {
-            if self
-                .role_failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok()
-            {
+            if self.fail_role_once.swap(false, Ordering::SeqCst) {
                 return Err(E_FAIL.into());
             }
             Ok(VARIANT::from(0x0f))
@@ -589,7 +585,7 @@ mod tests {
             drops: drops.clone(),
             queries: queries.clone(),
             denied,
-            role_failures: AtomicUsize::new(0),
+            fail_role_once: AtomicBool::new(false),
         }
         .into()
     }
@@ -603,7 +599,7 @@ mod tests {
             drops: drops.clone(),
             queries: queries.clone(),
             denied: false,
-            role_failures: AtomicUsize::new(1),
+            fail_role_once: AtomicBool::new(true),
         }
         .into();
         let mut attempts = 0;
