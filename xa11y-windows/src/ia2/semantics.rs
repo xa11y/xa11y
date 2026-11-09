@@ -1,5 +1,6 @@
 //! IA2 object attributes and relations, using the shared document contracts.
 use super::*;
+use xa11y_core::table::index_from_one_based;
 use xa11y_core::{CollectionParts, Landmark, LiveRegionParts, Politeness, RelationKind};
 
 pub(super) fn object_attributes(node: &Node) -> Result<HashMap<String, String>> {
@@ -60,34 +61,45 @@ pub(super) fn apply(
     } else {
         Some(live)
     };
-    if matches!(
-        data.role,
-        Role::ListItem | Role::TreeItem | Role::Tab | Role::RadioButton
-    ) {
-        let position = number(get("posinset"), "position in set")?;
-        let size = match get("setsize") {
-            Some(v) => Some(Count::from_signed(
-                v.parse().map_err(|_| platform("invalid IA2 set size"))?,
-            )),
-            None => None,
-        };
-        let level = number(get("level"), "collection level")?;
-        if position.is_some() || size.is_some() || level.is_some() {
-            data.collection = Some(
-                CollectionParts {
-                    index: position.map(|n| n - 1),
-                    size,
-                    depth: level.map(|n| n - 1),
-                }
-                .into(),
-            );
+    // Read collection position for any element that exposes it, as UIA and
+    // AT-SPI do: the attributes are already in hand, so this costs no calls.
+    let position = one_based(get("posinset"), "position in set")?;
+    let size = match get("setsize") {
+        Some(v) => {
+            Some(Count::from_signed(v.parse().map_err(|_| {
+                platform(format!("invalid IA2 set size: {v:?}"))
+            })?))
         }
+        None => None,
+    };
+    let level = one_based(get("level"), "collection level")?;
+    if position.is_some() || size.is_some() || level.is_some() {
+        data.collection = Some(
+            CollectionParts {
+                index: position,
+                size,
+                depth: level,
+            }
+            .into(),
+        );
     }
     data.raw.insert(
         "ia2_attributes".into(),
         serde_json::to_value(attrs).map_err(|e| platform(e.to_string()))?,
     );
     Ok(())
+}
+/// A 1-based IA2 attribute as a 0-based index. `0` is "not reported"
+/// (`index_from_one_based`); only a value that is not a number is an error.
+fn one_based(value: Option<&str>, field: &str) -> Result<Option<u32>> {
+    match value {
+        None => Ok(None),
+        Some(v) => v
+            .trim()
+            .parse::<i64>()
+            .map(index_from_one_based)
+            .map_err(|_| platform(format!("invalid IA2 {field}: {v:?}"))),
+    }
 }
 fn number(value: Option<&str>, field: &str) -> Result<Option<u32>> {
     value
@@ -233,6 +245,37 @@ mod tests {
             &mut data,
             &rich::parse_attributes("level:0;").unwrap(),
             0x414
+        )
+        .is_err());
+    }
+    #[test]
+    fn collection_position_is_zero_based_and_zero_means_unreported() {
+        let mut data = ElementData::for_role(Role::Group);
+        apply(
+            &mut data,
+            &rich::parse_attributes("posinset:3;setsize:5;level:2;").unwrap(),
+            0,
+        )
+        .unwrap();
+        let c = data.collection.as_ref().unwrap();
+        assert_eq!(c.index, Some(2));
+        assert_eq!(c.size, Some(Count::Known(5)));
+        assert_eq!(c.depth, Some(1));
+
+        let mut data = ElementData::for_role(Role::ListItem);
+        apply(
+            &mut data,
+            &rich::parse_attributes("posinset:0;level:0;").unwrap(),
+            0,
+        )
+        .unwrap();
+        assert!(data.collection.is_none());
+
+        let mut data = ElementData::for_role(Role::ListItem);
+        assert!(apply(
+            &mut data,
+            &rich::parse_attributes("posinset:abc;").unwrap(),
+            0
         )
         .is_err());
     }
