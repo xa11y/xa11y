@@ -460,3 +460,17 @@ def test_consumer_failure_is_not_hidden_by_a_successful_native_probe(monkeypatch
             Path("probe"), Path("browser"), backend=lambda: job, run=run
         )
     assert job.closed
+
+
+def test_successful_publication_retry_remains_visible_in_bounded_logs(capsys):
+    fixture._run_phase(
+        lambda *a, **kw: SimpleNamespace(
+            returncode=0, stdout="{}", stderr="x" * 9000 + "retry get_accRole E_FAIL"
+        ),
+        ["probe"],
+        "native publication",
+    )
+    log = capsys.readouterr().err
+    assert "retry get_accRole E_FAIL" in log
+    assert "truncated=True" in log
+    assert len(log) < 8500

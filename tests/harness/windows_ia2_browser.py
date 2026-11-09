@@ -305,6 +305,13 @@ def _run_phase(run, command, label, *, timeout=30):
             f"Native IA2 probe failed during {label} ({result.returncode}): "
             f"stdout={result.stdout[-8000:]!r}; stderr={result.stderr[-8000:]!r}"
         )
+    if result.stderr:
+        print(
+            f"IA2 {label} diagnostics (truncated={len(result.stderr) > 8000}):\n"
+            f"{result.stderr[-8000:]}",
+            file=sys.stderr,
+            flush=True,
+        )
     print(
         f"IA2 phase passed: {label} ({time.monotonic() - started:.2f}s)",
         file=sys.stderr,
