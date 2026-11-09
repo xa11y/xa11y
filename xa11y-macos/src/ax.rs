@@ -6879,8 +6879,15 @@ impl MacOSProvider {
                     return;
                 }
                 safe_cf_run_loop_add_source(source);
-                let rl = safe_cf_run_loop_get_current();
-                let _ = rl_tx.send(rl as usize);
+                // Retained for the cancel handle, which may still call
+                // CFRunLoopStop on it after this thread (and its run loop's
+                // last owner) has exited. Released after the join.
+                let rl = safe_cf_retain(safe_cf_run_loop_get_current());
+                if rl_tx.send(rl as usize).is_err() {
+                    // subscribe gave up waiting and will never cancel us.
+                    safe_cf_release(rl);
+                    return;
+                }
                 safe_cf_run_loop_run();
             }
         });
@@ -6920,11 +6927,21 @@ impl MacOSProvider {
         let ctx_usize = ctx_ptr as usize;
 
         let cancel = CancelHandle::new(move || {
-            unsafe {
-                safe_cf_run_loop_stop(run_loop_usize as CFTypeRef);
+            // CFRunLoopStop only stops a loop that is already running. The
+            // worker reports its run loop before it calls CFRunLoopRun, so a
+            // cancel right after subscribe can land in between; a single
+            // stop is then lost and the join below waits forever. Repeat the
+            // stop until the worker has exited. The run loop is retained, so
+            // a stop that races the worker's exit is harmless.
+            while !handle.is_finished() {
+                unsafe { safe_cf_run_loop_stop(run_loop_usize as CFTypeRef) };
+                std::thread::sleep(Duration::from_millis(5));
             }
+            // The thread has finished; join only collects its result. A
+            // panic in it was already reported on stderr by the runtime.
             let _ = handle.join();
             unsafe {
+                safe_cf_release(run_loop_usize as CFTypeRef);
                 drop(Box::from_raw(ctx_usize as *mut ObserverContext));
                 safe_cf_release(observer_usize as CFTypeRef);
             }
