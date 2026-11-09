@@ -516,7 +516,7 @@ def test_the_tree_tool_offers_its_detail(mcp):
     assert props["detail"]["items"]["enum"] == ["text", "relations"]
 
 
-@pytest.mark.parametrize("detail", [["formatting"], "text", [1]])
+@pytest.mark.parametrize("detail", [["styles"], "text", [1]])
 def test_a_tree_detail_mistake_is_refused_before_any_lookup(mcp, detail):
     result = mcp.call_tool("tree", {"app": "no-such-app", "detail": detail})["result"]
     assert result["isError"] is True
