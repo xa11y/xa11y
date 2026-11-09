@@ -105,6 +105,21 @@ fn attach_diagnosis_attrs(
     err
 }
 
+/// Set `pointer_target` on an `InvalidActionDataError`: the geometry of an
+/// off-display pointer target as a plain dict, otherwise `None`. Always set,
+/// so a caller never needs `hasattr`.
+fn attach_pointer_target(err: PyErr, diagnosis: Option<&xa11y::Diagnosis>) -> PyErr {
+    Python::attach(|py| {
+        let geometry = serde_json::json!(diagnosis.and_then(|d| d.pointer_target.as_ref()));
+        // Best-effort like `attach_diagnosis_attrs`: the message already
+        // renders the geometry, and a failed setattr must not replace the
+        // real error.
+        let _ = json_to_py(py, &geometry)
+            .and_then(|geometry| err.value(py).setattr("pointer_target", geometry));
+    });
+    err
+}
+
 /// Convert a core error into the matching Python exception, with the
 /// structured `delivery` attribute set on every one of them: whether the
 /// failed action may already have taken effect (`"not_delivered"` is safe to
@@ -215,7 +230,10 @@ fn map_to_py_err(e: xa11y::Error) -> PyErr {
                 length,
                 message,
             };
-            let py_err = InvalidTextRangeError::new_err(err.to_string());
+            // A subclass of InvalidActionDataError, so it carries that
+            // class's `pointer_target` too (always `None` here).
+            let py_err =
+                attach_pointer_target(InvalidTextRangeError::new_err(err.to_string()), None);
             Python::attach(|py| {
                 let value = py_err.value(py);
                 // Best-effort like `attach_diagnosis_attrs`: the message already
@@ -227,8 +245,14 @@ fn map_to_py_err(e: xa11y::Error) -> PyErr {
             });
             py_err
         }
-        xa11y::Error::InvalidActionData { message } => {
-            InvalidActionDataError::new_err(format!("Invalid action data: {message}"))
+        xa11y::Error::InvalidActionData { message, diagnosis } => {
+            // Reassemble so Display renders the diagnosis suffix (an
+            // off-display pointer target's geometry) into the message.
+            let err = xa11y::Error::InvalidActionData { message, diagnosis };
+            attach_pointer_target(
+                InvalidActionDataError::new_err(err.to_string()),
+                err.diagnosis(),
+            )
         }
         // Config errors are value errors (e.g. an unparsable
         // XA11Y_DEFAULT_TIMEOUT), matching the ValueError raised for an
@@ -1020,9 +1044,7 @@ impl Locator {
         // Reject n == 0 at the binding boundary instead of forwarding to
         // `Locator::nth`, which asserts and panics (crashes Python).
         if n == 0 {
-            return Err(to_py_err(xa11y::Error::InvalidActionData {
-                message: "Locator.nth is 1-based; got 0".to_string(),
-            }));
+            return Err(to_py_err(xa11y::Error::invalid_action_data("Locator.nth is 1-based; got 0")));
         }
         Ok(Self {
             inner: self.inner.clone().nth(n),
@@ -2558,9 +2580,11 @@ impl ShellSurface {
 /// Mouse buttons are `"left"`, `"right"`, `"middle"`.
 ///
 /// Built-in backends reject points outside all active displays before sending
-/// input (Wayland uses the configured virtual input extent). This checks screen
-/// membership, not visibility or hit testing. `SelectorNotMatchedError.pointer_target`
-/// contains the point, checked coordinate space, displays, and element bounds/anchor.
+/// input (Wayland checks the compositor's logical output layout, or the
+/// `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` override). This checks screen
+/// membership, not visibility or hit testing. The refusal is an
+/// `InvalidActionDataError` whose `pointer_target` contains the point, checked
+/// coordinate space, displays, and element bounds/anchor.
 /// Both drag endpoints are checked before the gesture. Captured moves while this
 /// simulator holds a button, and releases, remain possible; explicit clicks and
 /// scrolls still require an on-display target.

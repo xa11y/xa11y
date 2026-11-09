@@ -91,9 +91,11 @@ pub struct DragOptions {
 /// equivalent (drag-and-drop, scroll wheels, global shortcuts).
 ///
 /// Built-in backends reject points outside all active displays before sending
-/// input (Wayland uses the configured virtual input extent). This checks screen
-/// membership, not visibility or hit testing. `SelectorNotMatchedError.pointerTarget`
-/// contains the point, checked coordinate space, displays, and element bounds/anchor.
+/// input (Wayland checks the compositor's logical output layout, or the
+/// `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` override). This checks screen
+/// membership, not visibility or hit testing. The refusal is an
+/// `InvalidActionDataError` whose `pointerTarget` contains the point, checked
+/// coordinate space, displays, and element bounds/anchor.
 /// Both drag endpoints are checked before the gesture. Captured moves while this
 /// simulator holds a button, and releases, remain possible; explicit clicks and
 /// scrolls still require an on-display target.

@@ -498,9 +498,9 @@ fn vk_for(key: &Key) -> Result<u16> {
             19 => 0x50,
             20 => 0x5A,
             _ => {
-                return Err(Error::InvalidActionData {
-                    message: format!("F{n} has no HIToolbox keycode on macOS"),
-                });
+                return Err(Error::invalid_action_data(format!(
+                    "F{n} has no HIToolbox keycode on macOS"
+                )));
             }
         },
         Key::Char(c) => vk_for_char(*c)?,

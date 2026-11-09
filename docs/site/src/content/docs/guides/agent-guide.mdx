@@ -227,7 +227,7 @@ the same value on standard error, as a `delivery: not_delivered (...)` or
 | `action_not_supported` | The element cannot perform this verb. | Pick another verb from the element's properties. |
 | `text_value_not_supported` | The platform cannot set text on this element. | Use `type-text`, or the `type` tool after focusing the element. |
 | `invalid_selector` | The selector failed to parse. | Fix the syntax the message points to. |
-| `invalid_action_data` | An action payload failed validation. | Fix the value, point, size or range. |
+| `invalid_action_data` | An action payload failed validation, or a pointer target is on no display. | Fix the value, size or range. For a point, pick one inside a rectangle in `diagnosis.pointer_target.displays`. |
 | `invalid_text_range` | A text range is past the end of the text or splits a surrogate pair. | Read `text_range.length`, the text's current length, and take offsets from a fresh `text` result. |
 | `invalid_config` | Process configuration is invalid, such as a malformed `XA11Y_DEFAULT_TIMEOUT`. | Fix the server's environment and restart it. |
 | `no_element_bounds` | The element has no screen bounds. | Use `action`, which needs none, or scroll the element into view first. |

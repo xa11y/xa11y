@@ -52,7 +52,13 @@ _GUIDANCE = {
         "The text range is past the end of the text, reversed, or splits an emoji in half. "
         "Offsets are UTF-16 code units; get them from find() or range_at() instead of counting characters."
     ),
-    "InvalidActionDataError": "The action received an out-of-range value. Check offsets and numeric bounds.",
+    "InvalidActionDataError": (
+        "The action received an out-of-range value; nothing was sent. If 'pointer target' is "
+        "shown, the point is not on any display: compare its 'point' with the 'displays' listed "
+        "there and pick a point inside one (for an element target, its bounds put it off screen, "
+        "so scroll it into view or bring its window onto a display first). Otherwise check "
+        "offsets and numeric bounds."
+    ),
     "ElementStaleError": (
         "The element you read earlier is gone or was replaced ('reason' says which: removed, "
         "process_exited, process_restarted, identity_changed, evicted), so nothing was done to it. "

@@ -697,6 +697,13 @@ export interface PointerTargetDiagnosis {
   /** At most 32 regions; validation checks every region before truncating. */
   displays: Rect[];
   omittedDisplays: number;
+  /**
+   * Where the displays came from, when the backend records it (Linux: RandR
+   * monitors, the X11 root window on a server without RandR 1.5, the Wayland
+   * compositor's outputs, or the `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT`
+   * override); `null` on macOS and Windows.
+   */
+  displaySource: string | null;
 }
 
 /**
@@ -720,7 +727,10 @@ export class SelectorNotMatchedError extends XA11yError {
   autoScroll: AutoScrollOutcomeName | null;
   /** Always `null` for this class (parity with {@link TimeoutError}). */
   pending: string | null;
-  /** Geometry of an off-display pointer target, otherwise `null`. */
+  /**
+   * Always `null` for this class: an off-display pointer target rejects with
+   * {@link InvalidActionDataError}, whose `pointerTarget` carries the geometry.
+   */
   pointerTarget: PointerTargetDiagnosis | null;
   /** Bounded near-miss candidates (e.g. same-role elements). */
   candidates: string[];
@@ -810,8 +820,18 @@ export class TimeoutError extends XA11yError {
 /** The selector string has invalid syntax. */
 export class InvalidSelectorError extends XA11yError {}
 
-/** The data passed to an action method was rejected (e.g. out-of-range slider value). */
-export class InvalidActionDataError extends XA11yError {}
+/**
+ * The data passed to an action method was rejected (e.g. out-of-range slider
+ * value, or a pointer target that is not on any display).
+ */
+export class InvalidActionDataError extends XA11yError {
+  /**
+   * Geometry of an off-display pointer target: the requested point, the
+   * checked point and coordinate space, the displays checked, and any element
+   * bounds and anchor. `null` for every other invalid argument.
+   */
+  pointerTarget: PointerTargetDiagnosis | null;
+}
 
 /**
  * A text range is out of bounds, reversed, or splits a surrogate pair.

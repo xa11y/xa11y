@@ -206,9 +206,9 @@ impl Actionability {
             | "show_menu" | "increment" | "decrement" | "set_value" | "set_numeric_value"
             | "type_text" | "select_text" | "perform_action" => Self::VISIBLE_AND_ENABLED,
             other => {
-                return Err(Error::InvalidActionData {
-                    message: format!("no auto-wait gate for unknown action {other:?}"),
-                })
+                return Err(Error::invalid_action_data(format!(
+                    "no auto-wait gate for unknown action {other:?}"
+                )))
             }
         })
     }
@@ -1345,9 +1345,10 @@ impl Locator {
         // Validate up-front so callers fail fast on NaN/inf without burning
         // the auto-wait timeout.
         if !value.is_finite() {
-            return Err(Error::InvalidActionData {
-                message: format!("set_numeric_value requires a finite value, got {}", value),
-            });
+            return Err(Error::invalid_action_data(format!(
+                "set_numeric_value requires a finite value, got {}",
+                value
+            )));
         }
         self.act("set_numeric_value", |e| e.set_numeric_value(value))
     }
@@ -1454,11 +1455,9 @@ impl Locator {
     /// before any auto-wait polling begins.
     pub fn resize_to(&self, width: u32, height: u32) -> Result<()> {
         if width == 0 || height == 0 {
-            return Err(Error::InvalidActionData {
-                message: format!(
-                    "resize_to requires positive width and height, got {width}x{height}"
-                ),
-            });
+            return Err(Error::invalid_action_data(format!(
+                "resize_to requires positive width and height, got {width}x{height}"
+            )));
         }
         self.act("resize_to", |e| e.resize_to(width, height))
     }

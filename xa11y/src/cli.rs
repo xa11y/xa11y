@@ -1779,7 +1779,7 @@ pub(crate) fn resolve_capabilities(
     backend: Option<&str>,
 ) -> CliResult<Capabilities> {
     let usage = |e: Error| match e {
-        Error::InvalidActionData { message } => CliError::Usage(message),
+        Error::InvalidActionData { message, .. } => CliError::Usage(message),
         other => CliError::Xa11y(other),
     };
     let platform = platform.map(Platform::parse).transpose().map_err(usage)?;
@@ -1825,7 +1825,9 @@ pub(crate) fn select_capabilities<'a>(
         } else {
             match caps.get(filter) {
                 Ok(c) => out.push(c),
-                Err(Error::InvalidActionData { message }) => return Err(CliError::Usage(message)),
+                Err(Error::InvalidActionData { message, .. }) => {
+                    return Err(CliError::Usage(message))
+                }
                 Err(other) => return Err(CliError::Xa11y(other)),
             }
         }
@@ -6441,11 +6443,9 @@ mod tests {
             panic!("bounds that are not screen coordinates must withhold the center");
         };
         assert!(reason.contains("not screen coordinates"), "{reason}");
-        let PointerCenter::Unavailable(reason) =
-            PointerCenter::from_capability(Err(Error::InvalidActionData {
-                message: "invalid XA11Y_LINUX_INPUT_BACKEND value \"xyz\"".into(),
-            }))
-        else {
+        let PointerCenter::Unavailable(reason) = PointerCenter::from_capability(Err(
+            Error::invalid_action_data("invalid XA11Y_LINUX_INPUT_BACKEND value \"xyz\""),
+        )) else {
             panic!("an unknown coordinate space must withhold the center");
         };
         assert!(reason.contains("XA11Y_LINUX_INPUT_BACKEND"), "{reason}");

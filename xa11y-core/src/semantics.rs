@@ -277,15 +277,15 @@ impl RelationKind {
         Self::ALL
             .into_iter()
             .find(|k| k.to_snake_case() == name)
-            .ok_or_else(|| Error::InvalidActionData {
-                message: format!(
+            .ok_or_else(|| {
+                Error::invalid_action_data(format!(
                     "unknown relation kind {name:?}; expected one of {}",
                     Self::ALL
                         .iter()
                         .map(|k| k.to_snake_case())
                         .collect::<Vec<_>>()
                         .join(", ")
-                ),
+                ))
             })
     }
 

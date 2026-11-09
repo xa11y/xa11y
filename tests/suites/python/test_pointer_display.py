@@ -35,7 +35,7 @@ def test_native_off_display_point_is_not_delivered(method):
     # point type. No input permission is required: rejection precedes dispatch.
     target = (1_000_000, 1_000_000)
     before = _windows_cursor()
-    with pytest.raises(xa11y.SelectorNotMatchedError) as caught:
+    with pytest.raises(xa11y.InvalidActionDataError) as caught:
         simulator = xa11y.input_sim()
         if method == "click":
             simulator.click(target, held=["Shift"])
@@ -63,7 +63,7 @@ def test_native_off_display_element_anchor_retains_context(app):
     bounds = element.bounds
     assert bounds is not None
     before = _windows_cursor()
-    with pytest.raises(xa11y.SelectorNotMatchedError) as caught:
+    with pytest.raises(xa11y.InvalidActionDataError) as caught:
         xa11y.input_sim().click(element, anchor=(1_000_000, 1_000_000), held=["Shift"])
     geometry = caught.value.pointer_target
     assert caught.value.delivery == "not_delivered"

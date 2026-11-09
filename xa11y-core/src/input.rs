@@ -365,13 +365,11 @@ impl Key {
     pub(crate) fn validate(&self) -> Result<()> {
         if let Key::Char(c) = self {
             if c.is_ascii_uppercase() {
-                return Err(Error::InvalidActionData {
-                    message: format!(
-                        "Key::Char('{c}') is uppercase; use Key::Char('{}') \
+                return Err(Error::invalid_action_data(format!(
+                    "Key::Char('{c}') is uppercase; use Key::Char('{}') \
                          with Key::Shift held to produce an uppercase letter",
-                        c.to_ascii_lowercase()
-                    ),
-                });
+                    c.to_ascii_lowercase()
+                )));
             }
         }
         Ok(())
@@ -667,20 +665,34 @@ pub fn validate_pointer_regions(
     }) {
         return Ok(());
     }
-    Err(Error::selector_not_matched(format!(
-        "pointer[x={}][y={}] on a display",
+    Err(Error::invalid_action_data(format!(
+        "pointer target ({}, {}) is not on any display",
         point.x, point.y
     ))
     .diagnose(
-        crate::Diagnosis::new()
-            .condition("pointer target lies on a display")
-            .pointer_target(crate::PointerTargetDiagnosis::new(
-                point,
-                checked_point,
-                coordinate_space,
-                displays,
-            )),
+        crate::Diagnosis::new().pointer_target(crate::PointerTargetDiagnosis::new(
+            point,
+            checked_point,
+            coordinate_space,
+            displays,
+        )),
     ))
+}
+
+/// Record where a backend's display regions came from on an off-display
+/// refusal, when that is not obvious from the backend (a documented
+/// fallback geometry source, or an explicit configuration override).
+/// Errors without a pointer-target diagnosis pass through unchanged.
+#[doc(hidden)]
+pub fn note_display_source(error: Error, source: &str) -> Error {
+    let Some(mut diagnosis) = error.diagnosis().cloned() else {
+        return error;
+    };
+    let Some(target) = diagnosis.pointer_target.as_mut() else {
+        return error;
+    };
+    target.display_source = Some(source.to_owned());
+    error.diagnose(diagnosis)
 }
 
 /// Preserve an element's original geometry after a binding lowers it to a
@@ -869,6 +881,39 @@ mod pointer_validation_tests {
                 point
             );
         }
+    }
+
+    #[test]
+    fn off_display_target_is_invalid_action_data_not_a_selector_miss() {
+        let point = Point::new(500, 7);
+        let error = validate_pointer_regions(point, point, "pixels", &[rect(0, 0, 10, 10)])
+            .expect_err("off display");
+        assert!(
+            matches!(error, Error::InvalidActionData { .. }),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("pointer target (500, 7) is not on any display"),
+            "{message}"
+        );
+        assert!(message.contains("pointer target: Point"), "{message}");
+        assert_eq!(error.delivery(), crate::Delivery::NotDelivered);
+    }
+
+    #[test]
+    fn display_source_is_recorded_on_pointer_refusals_only() {
+        let point = Point::new(500, 7);
+        let error = note_display_source(
+            validate_pointer_regions(point, point, "pixels", &[rect(0, 0, 10, 10)]).unwrap_err(),
+            "root window",
+        );
+        let geometry = error.diagnosis().unwrap().pointer_target.as_ref().unwrap();
+        assert_eq!(geometry.display_source.as_deref(), Some("root window"));
+        assert!(error.to_string().contains("display source: root window"));
+
+        let other = note_display_source(Error::invalid_action_data("bad"), "root window");
+        assert!(other.diagnosis().is_none());
     }
 
     #[test]

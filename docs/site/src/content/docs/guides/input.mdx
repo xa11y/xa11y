@@ -132,8 +132,8 @@ Every pointer method accepts either a screen-space point or an `Element`:
 
 ### Check a refused pointer target
 
-If a pointer action returns `SelectorNotMatched` (`SelectorNotMatchedError` in
-Python and JS), inspect its geometry diagnosis. The built-in Windows, macOS,
+If a pointer action returns `InvalidActionData` (`InvalidActionDataError` in
+Python and JS, `invalid_action_data` in MCP), inspect its geometry diagnosis. The built-in Windows, macOS,
 and X11 backends check that the requested point lies inside an active display.
 This applies to raw points and element anchors; gaps between monitors are
 outside every display. For Wayland and headless uinput, raw points are checked

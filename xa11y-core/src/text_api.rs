@@ -136,11 +136,9 @@ impl TextUnit {
             "line" => Self::Line,
             "paragraph" => Self::Paragraph,
             other => {
-                return Err(Error::InvalidActionData {
-                    message: format!(
+                return Err(Error::invalid_action_data(format!(
                     "unknown text unit {other:?}; expected one of character, word, line, paragraph"
-                ),
-                })
+                )))
             }
         })
     }
@@ -468,9 +466,7 @@ impl Text {
     /// An empty `needle` fails with [`Error::InvalidActionData`].
     pub fn find_with(&self, needle: &str, options: FindOptions) -> Result<Option<TextRange>> {
         if needle.is_empty() {
-            return Err(Error::InvalidActionData {
-                message: "find needle must not be empty".to_string(),
-            });
+            return Err(Error::invalid_action_data("find needle must not be empty"));
         }
         let el = self.target()?;
         el.provider().text_find(el.data(), needle, options)
@@ -623,9 +619,7 @@ pub fn find_with_reader(
 ) -> Result<Option<TextRange>> {
     let needle: Vec<u16> = needle.encode_utf16().collect();
     if needle.is_empty() {
-        return Err(Error::InvalidActionData {
-            message: "find needle must not be empty".to_string(),
-        });
+        return Err(Error::invalid_action_data("find needle must not be empty"));
     }
     let scope = options.within.unwrap_or(TextRange {
         start: 0,
@@ -637,9 +631,7 @@ pub fn find_with_reader(
 
 fn check_limit(limit: usize) -> Result<()> {
     if limit == 0 {
-        return Err(Error::InvalidActionData {
-            message: "page limit must be at least 1".to_string(),
-        });
+        return Err(Error::invalid_action_data("page limit must be at least 1"));
     }
     Ok(())
 }

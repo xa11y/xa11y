@@ -70,6 +70,7 @@ fn diagnosis_json(
                 "coordinateSpace": target.coordinate_space,
                 "displays": target.displays,
                 "omittedDisplays": target.omitted_displays,
+                "displaySource": target.display_source,
             })
         }),
         "candidates": diagnosis.map(|d| d.candidates.clone()).unwrap_or_default(),
@@ -122,10 +123,9 @@ pub fn map_err(e: xa11y::Error) -> Error {
             codes::INVALID_SELECTOR,
             format!("Invalid selector '{selector}': {message}"),
         ),
-        xa11y::Error::InvalidActionData { message } => (
-            codes::INVALID_ACTION_DATA,
-            format!("Invalid action data: {message}"),
-        ),
+        // Core Display renders an off-display pointer target's geometry
+        // into the message; the payload carries it as `pointerTarget`.
+        xa11y::Error::InvalidActionData { .. } => (codes::INVALID_ACTION_DATA, e.to_string()),
         // Core Display renders the range and length into the message; the
         // payload below carries them as structured fields.
         xa11y::Error::InvalidTextRange { .. } => (codes::INVALID_TEXT_RANGE, e.to_string()),
@@ -184,6 +184,9 @@ pub fn map_err(e: xa11y::Error) -> Error {
                 obj.insert("length".into(), (*length).into());
             }
             Some(p)
+        }
+        xa11y::Error::InvalidActionData { .. } => {
+            Some(diagnosis_json(delivery, None, None, e.diagnosis()))
         }
         _ => Some(diagnosis_json(delivery, None, None, None)),
     };

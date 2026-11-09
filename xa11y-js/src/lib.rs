@@ -54,9 +54,7 @@ pub(crate) fn checked_window_coord(value: f64, what: &str) -> napi::Result<i32> 
     {
         Ok(value as i32)
     } else {
-        Err(crate::errors::map_err(xa11y::Error::InvalidActionData {
-            message: format!("{what} must be a finite whole number in the i32 range, got {value}"),
-        }))
+        Err(crate::errors::map_err(xa11y::Error::invalid_action_data(format!("{what} must be a finite whole number in the i32 range, got {value}"))))
     }
 }
 
@@ -70,11 +68,9 @@ pub(crate) fn checked_window_dimension(value: f64, what: &str) -> napi::Result<u
     if value.is_finite() && value.fract() == 0.0 && value >= 1.0 && value <= f64::from(u32::MAX) {
         Ok(value as u32)
     } else {
-        Err(crate::errors::map_err(xa11y::Error::InvalidActionData {
-            message: format!(
+        Err(crate::errors::map_err(xa11y::Error::invalid_action_data(format!(
                 "{what} must be a positive whole number in the u32 range (1-4294967295), got {value}"
-            ),
-        }))
+            ))))
     }
 }
 

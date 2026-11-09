@@ -459,7 +459,7 @@ mod tests {
         for point in [Point::new(-1, 4), Point::new(10, 4), Point::new(9, 5)] {
             let error =
                 validate_configured_extent(point, point, 10, 5).expect_err("outside extent");
-            assert!(matches!(error, Error::SelectorNotMatched { .. }));
+            assert!(matches!(error, Error::InvalidActionData { .. }));
             assert_eq!(error.delivery(), xa11y_core::Delivery::NotDelivered);
             let target = error
                 .diagnosis()

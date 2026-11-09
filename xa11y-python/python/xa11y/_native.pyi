@@ -20,6 +20,11 @@ class _PointerTargetDiagnosis(TypedDict):
     coordinate_space: str
     displays: list[dict[str, int]]
     omitted_displays: int
+    display_source: str | None
+    """Where the displays came from, when the backend records it (Linux:
+    RandR monitors, the X11 root window on a server without RandR 1.5, the
+    Wayland compositor's outputs, or the ``XA11Y_SCREEN_WIDTH`` /
+    ``XA11Y_SCREEN_HEIGHT`` override); ``None`` on macOS and Windows."""
 
 # Input-layer string values. These spellings are identical in the JS binding —
 # like key names, they are shared across bindings rather than spelled
@@ -132,7 +137,9 @@ class SelectorNotMatchedError(XA11yError):
     """Bounded rendering of the search scope: a depth-limited tree dump for
     scoped locators, or the application list for rootless ones."""
     pointer_target: _PointerTargetDiagnosis | None
-    """Geometry of an off-display pointer target, otherwise ``None``."""
+    """Always ``None`` for this class: an off-display pointer target raises
+    :class:`InvalidActionDataError`, whose ``pointer_target`` carries the
+    geometry (present here for attribute parity with older releases)."""
     elapsed: float | None
     """Always ``None`` for this class (present for attribute parity with
     :class:`TimeoutError`)."""
@@ -217,8 +224,14 @@ class InvalidSelectorError(XA11yError):
     """The selector string has invalid syntax."""
 
 class InvalidActionDataError(XA11yError):
-    """An action received invalid data (e.g. ``Locator.nth(0)``, or a
-    text-selection range with ``start > end``)."""
+    """An action received invalid data (e.g. ``Locator.nth(0)``, a
+    text-selection range with ``start > end``, or a pointer target that is
+    not on any display)."""
+
+    pointer_target: _PointerTargetDiagnosis | None
+    """Geometry of an off-display pointer target: the requested point, the
+    checked point and coordinate space, the displays checked, and any element
+    bounds and anchor. ``None`` for every other invalid argument."""
 
 class InvalidTextRangeError(InvalidActionDataError):
     """A text range is out of bounds, reversed, or splits a surrogate pair.
@@ -1671,10 +1684,12 @@ class InputSim:
     (drag-and-drop, scroll wheels, global shortcuts).
 
     Built-in backends reject pointer targets outside every active display
-    before sending input. On Wayland, raw points use the configured virtual
-    input extent. This checks screen membership, not visibility or hit testing.
-    ``SelectorNotMatchedError.pointer_target`` carries the requested point,
-    checked coordinate space, displays, and any element bounds and anchor.
+    before sending input, with :class:`InvalidActionDataError`. On Wayland,
+    raw points are checked against the compositor's logical output layout, or
+    the ``XA11Y_SCREEN_WIDTH`` / ``XA11Y_SCREEN_HEIGHT`` override. This checks
+    screen membership, not visibility or hit testing. The error's
+    ``pointer_target`` carries the requested point, checked coordinate space,
+    displays, and any element bounds and anchor.
     Both drag endpoints are checked before the gesture. Captured moves while
     this simulator holds a mouse button, and button releases, remain possible;
     explicit clicks and scrolls still require an on-display target.

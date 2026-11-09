@@ -85,10 +85,10 @@ impl Platform {
         Platform::ALL
             .into_iter()
             .find(|p| p.to_snake_case() == name)
-            .ok_or_else(|| Error::InvalidActionData {
-                message: format!(
+            .ok_or_else(|| {
+                Error::invalid_action_data(format!(
                     "unknown platform {name:?}; expected one of \"linux\", \"macos\", \"windows\""
-                ),
+                ))
             })
     }
 
@@ -194,13 +194,11 @@ impl Capabilities {
     pub fn for_platform(platform: Platform, os_version: Option<&str>) -> Result<Capabilities> {
         if let Some(v) = os_version {
             if platform == Platform::Linux {
-                return Err(Error::InvalidActionData {
-                    message: format!(
-                        "os_version {v:?} given for linux: Linux has no single platform version; \
+                return Err(Error::invalid_action_data(format!(
+                    "os_version {v:?} given for linux: Linux has no single platform version; \
                          what it reports depends on the toolkit and display server, which the \
                          notes name"
-                    ),
-                });
+                )));
             }
             parse_version(v)?;
         }
@@ -225,9 +223,9 @@ impl Capabilities {
                 })
             }
             _ => {
-                return Err(Error::InvalidActionData {
-                    message: format!("unknown backend {backend:?}; expected native, uia, or ia2"),
-                })
+                return Err(Error::invalid_action_data(format!(
+                    "unknown backend {backend:?}; expected native, uia, or ia2"
+                )))
             }
         }
         caps.backend = "ia2";
@@ -359,20 +357,16 @@ fn unknown_feature(name: &str) -> Error {
     } else {
         format!("names in {area:?}: {}", near.join(", "))
     };
-    Error::InvalidActionData {
-        message: format!("unknown capability {name:?}; {hint}"),
-    }
+    Error::invalid_action_data(format!("unknown capability {name:?}; {hint}"))
 }
 
 fn parse_version(v: &str) -> Result<Vec<u32>> {
     let parts: std::result::Result<Vec<u32>, _> = v.trim().split('.').map(str::parse).collect();
     match parts {
         Ok(p) if !p.is_empty() => Ok(p),
-        _ => Err(Error::InvalidActionData {
-            message: format!(
-                "os_version {v:?} is not a dotted version such as \"14.5\" or \"10.0.19045\""
-            ),
-        }),
+        _ => Err(Error::invalid_action_data(format!(
+            "os_version {v:?} is not a dotted version such as \"14.5\" or \"10.0.19045\""
+        ))),
     }
 }
 
@@ -579,9 +573,9 @@ fn ia2_entry(name: &str) -> Result<Entry> {
         "text:object_at" => yes_by("IAccessibleHypertext::hyperlinkIndex and hyperlink"),
         "text:attribute:script" => yes_by("IA2 text-position attribute"),
         _ => {
-            return Err(Error::InvalidActionData {
-                message: format!("capability {name:?} needs an explicit IA2 mapping"),
-            })
+            return Err(Error::invalid_action_data(format!(
+                "capability {name:?} needs an explicit IA2 mapping"
+            )))
         }
     })
 }

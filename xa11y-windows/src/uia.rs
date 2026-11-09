@@ -6287,15 +6287,13 @@ impl Provider for WindowsProvider {
             // Payload verbs have no arguments on the generic escape hatch;
             // fail surfaceably with how to call them instead of guessing
             // (tenet 1: no silent fallback).
-            "move_to" => Err(Error::InvalidActionData {
-                message: "perform_action(\"move_to\") requires coordinates; call move_to(x, y)"
-                    .to_string(),
-            }),
-            "resize_to" => Err(Error::InvalidActionData {
-                message: "perform_action(\"resize_to\") requires dimensions; call \
-                           resize_to(width, height)"
-                    .to_string(),
-            }),
+            "move_to" => Err(Error::invalid_action_data(
+                "perform_action(\"move_to\") requires coordinates; call move_to(x, y)",
+            )),
+            "resize_to" => Err(Error::invalid_action_data(
+                "perform_action(\"resize_to\") requires dimensions; call \
+                           resize_to(width, height)",
+            )),
             _ => Err(Error::ActionNotSupported {
                 action: action.to_string(),
                 role: element.role,

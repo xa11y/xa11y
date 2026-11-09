@@ -98,9 +98,9 @@ pub(crate) fn key_to_keysym(key: &Key) -> Result<u32> {
         Key::PageDown => XK_PAGE_DOWN,
         Key::F(n) => {
             if *n < 1 || *n > 24 {
-                return Err(Error::InvalidActionData {
-                    message: format!("F{n} is out of range (1..=24)"),
-                });
+                return Err(Error::invalid_action_data(format!(
+                    "F{n} is out of range (1..=24)"
+                )));
             }
             XK_F1 + (*n as u32 - 1)
         }

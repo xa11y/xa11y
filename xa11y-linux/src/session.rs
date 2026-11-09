@@ -102,11 +102,9 @@ fn select_backend_from(
             DesktopBackend::Wayland
         }
         other => {
-            return Err(Error::InvalidActionData {
-                message: format!(
-                    "invalid {override_var} value {other:?}; expected auto, x11, or wayland"
-                ),
-            });
+            return Err(Error::invalid_action_data(format!(
+                "invalid {override_var} value {other:?}; expected auto, x11, or wayland"
+            )));
         }
     };
     Ok(selected)

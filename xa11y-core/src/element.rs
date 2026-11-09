@@ -595,9 +595,10 @@ impl Element {
     /// Returns [`Error::InvalidActionData`] if `value` is NaN or infinite.
     pub fn set_numeric_value(&self, value: f64) -> crate::error::Result<()> {
         if !value.is_finite() {
-            return Err(Error::InvalidActionData {
-                message: format!("set_numeric_value requires a finite value, got {}", value),
-            });
+            return Err(Error::invalid_action_data(format!(
+                "set_numeric_value requires a finite value, got {}",
+                value
+            )));
         }
         self.revalidate_for_action()?;
         self.provider.set_numeric_value(&self.data, value)
@@ -844,11 +845,9 @@ impl Element {
     /// Returns [`Error::InvalidActionData`] if either dimension is 0.
     pub fn resize_to(&self, width: u32, height: u32) -> crate::error::Result<()> {
         if width == 0 || height == 0 {
-            return Err(Error::InvalidActionData {
-                message: format!(
-                    "resize_to requires positive width and height, got {width}x{height}"
-                ),
-            });
+            return Err(Error::invalid_action_data(format!(
+                "resize_to requires positive width and height, got {width}x{height}"
+            )));
         }
         self.require_window_like("resize_to")?;
         self.revalidate_for_action()?;

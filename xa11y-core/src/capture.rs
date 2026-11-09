@@ -219,9 +219,9 @@ impl CaptureOptions {
 
     fn validate(&self) -> Result<()> {
         if self.max_nodes == 0 {
-            return Err(Error::InvalidActionData {
-                message: "max_nodes must be at least 1: the root is a node".into(),
-            });
+            return Err(Error::invalid_action_data(
+                "max_nodes must be at least 1: the root is a node",
+            ));
         }
         Ok(())
     }

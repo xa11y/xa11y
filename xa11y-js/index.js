@@ -139,6 +139,9 @@ class InvalidActionDataError extends XA11yError {
     this.name = 'InvalidActionDataError';
     // Core reports this variant as not delivered, so a hand-built one agrees.
     this.delivery = 'not_delivered';
+    // Geometry of an off-display pointer target, populated from the native
+    // payload in `toTypedError`; `null` for every other invalid argument.
+    /** @type {import('./index').PointerTargetDiagnosis | null} */ this.pointerTarget = null;
   }
 }
 

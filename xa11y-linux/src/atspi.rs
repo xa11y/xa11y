@@ -3969,11 +3969,11 @@ impl Provider for LinuxProvider {
             height: h,
         }
         .to_physical(crate::scale::coordinate_scale());
-        let width = i32::try_from(physical.width).map_err(|_| Error::InvalidActionData {
-            message: format!("resize width {w} is too large for AT-SPI"),
+        let width = i32::try_from(physical.width).map_err(|_| {
+            Error::invalid_action_data(format!("resize width {w} is too large for AT-SPI"))
         })?;
-        let height = i32::try_from(physical.height).map_err(|_| Error::InvalidActionData {
-            message: format!("resize height {h} is too large for AT-SPI"),
+        let height = i32::try_from(physical.height).map_err(|_| {
+            Error::invalid_action_data(format!("resize height {h} is too large for AT-SPI"))
         })?;
         let reply = proxy
             .call_method("SetSize", &(width, height))
@@ -4220,15 +4220,13 @@ impl Provider for LinuxProvider {
             // Payload verbs have no arguments on the generic escape hatch;
             // fail surfaceably with how to call them instead of guessing
             // (tenet 1: no silent fallback).
-            "move_to" => Err(Error::InvalidActionData {
-                message: "perform_action(\"move_to\") requires coordinates; call move_to(x, y)"
-                    .to_string(),
-            }),
-            "resize_to" => Err(Error::InvalidActionData {
-                message: "perform_action(\"resize_to\") requires dimensions; call \
-                           resize_to(width, height)"
-                    .to_string(),
-            }),
+            "move_to" => Err(Error::invalid_action_data(
+                "perform_action(\"move_to\") requires coordinates; call move_to(x, y)",
+            )),
+            "resize_to" => Err(Error::invalid_action_data(
+                "perform_action(\"resize_to\") requires dimensions; call \
+                           resize_to(width, height)",
+            )),
             _ => Err(Error::ActionNotSupported {
                 action: action.to_string(),
                 role: element.role,

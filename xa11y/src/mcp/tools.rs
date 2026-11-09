@@ -3550,7 +3550,7 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
             );
         }
         CliError::Xa11y(inner) => {
-            if let Some(diagnosis) = diagnosis_of(inner) {
+            if let Some(diagnosis) = inner.diagnosis() {
                 let mut encoded = diagnosis_json(diagnosis);
                 // A `SelectorNotMatched` carries its selector on the error
                 // rather than in the diagnosis, because the message already
@@ -3593,14 +3593,6 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
 }
 
 /// Borrow the [`Diagnosis`] an error carries, if any.
-fn diagnosis_of(err: &crate::Error) -> Option<&crate::Diagnosis> {
-    match err {
-        crate::Error::SelectorNotMatched { diagnosis, .. }
-        | crate::Error::Timeout { diagnosis, .. } => diagnosis.as_deref(),
-        _ => None,
-    }
-}
-
 fn diagnosis_json(d: &crate::Diagnosis) -> Value {
     let mut out = Map::new();
     insert_some(
@@ -4954,7 +4946,7 @@ mod tests {
         ));
         let err = CliError::Xa11y(input.mouse().click(point).unwrap_err());
         let (text, structured) = describe_failure("click", &err);
-        assert_eq!(structured["kind"], "no_match");
+        assert_eq!(structured["kind"], "invalid_action_data");
         assert_eq!(structured["delivery"], "not_delivered");
         let geometry = &structured["diagnosis"]["pointer_target"];
         assert_eq!(geometry["point"], json!({"x": 500, "y": 500}));

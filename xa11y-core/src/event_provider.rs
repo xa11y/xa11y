@@ -504,9 +504,9 @@ pub fn subscribe_with(
 ) -> Result<Subscription> {
     let buffer = options.buffer.unwrap_or(DEFAULT_EVENT_BUFFER);
     if buffer == 0 {
-        return Err(Error::InvalidActionData {
-            message: "buffer must hold at least 1 event".into(),
-        });
+        return Err(Error::invalid_action_data(
+            "buffer must hold at least 1 event",
+        ));
     }
     let kinds = if options.kinds.is_empty() {
         None
@@ -515,12 +515,10 @@ pub fn subscribe_with(
         let mut names = Vec::with_capacity(options.kinds.len());
         for kind in &options.kinds {
             let Some(name) = KIND_NAMES.iter().find(|n| **n == kind.as_str()) else {
-                return Err(Error::InvalidActionData {
-                    message: format!(
-                        "unknown event kind {kind:?}; expected one of {}",
-                        KIND_NAMES.join(", ")
-                    ),
-                });
+                return Err(Error::invalid_action_data(format!(
+                    "unknown event kind {kind:?}; expected one of {}",
+                    KIND_NAMES.join(", ")
+                )));
             };
             let feature = format!("event:{name}");
             if caps.support(&feature)? == crate::Support::Unsupported {

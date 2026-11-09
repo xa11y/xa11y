@@ -491,9 +491,8 @@ impl SwayWindowBackend {
                     .to_string(),
             });
         }
-        let length = u32::try_from(payload.len()).map_err(|_| Error::InvalidActionData {
-            message: "Sway IPC request is too large".to_string(),
-        })?;
+        let length = u32::try_from(payload.len())
+            .map_err(|_| Error::invalid_action_data("Sway IPC request is too large"))?;
         let mut header = Vec::with_capacity(14);
         header.extend_from_slice(SWAY_IPC_MAGIC);
         header.extend_from_slice(&length.to_le_bytes());

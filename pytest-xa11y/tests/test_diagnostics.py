@@ -141,7 +141,7 @@ def test_render_diagnosis_reports_the_delivery_disposition():
 
 
 def test_render_diagnosis_preserves_plain_pointer_geometry():
-    error = xa11y.SelectorNotMatchedError("point matches no display")
+    error = xa11y.InvalidActionDataError("pointer target (1000, 1000) is not on any display")
     geometry = {
         "point": {"x": 1000, "y": 1000},
         "element_bounds": {"x": 900, "y": 900, "width": 50, "height": 50},
@@ -157,7 +157,7 @@ def test_render_diagnosis_preserves_plain_pointer_geometry():
     assert f"pointer_target: {geometry}" in rendered
     assert "delivery: not_delivered" in rendered
     assert error.pointer_target is geometry
-    assert str(error) == "point matches no display"
+    assert str(error) == "pointer target (1000, 1000) is not on any display"
     assert "pointer_target" not in render_diagnosis(FakeTimeout("Timeout after 5.0s"))
 
 

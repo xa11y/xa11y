@@ -57,6 +57,13 @@ pub struct PointerTargetDiagnosis {
     pub displays: Vec<Rect>,
     /// Number of checked regions omitted from the diagnostic snapshot.
     pub omitted_displays: usize,
+    /// Where the checked regions came from, when the backend records it:
+    /// e.g. RandR monitors, the X11 root window on a server without RandR
+    /// 1.5, the compositor's outputs, or the `XA11Y_SCREEN_WIDTH` /
+    /// `XA11Y_SCREEN_HEIGHT` override. `None` when the backend has a single
+    /// source (the OS display list on macOS and Windows).
+    #[serde(default)]
+    pub display_source: Option<String>,
 }
 
 impl PointerTargetDiagnosis {
@@ -77,6 +84,7 @@ impl PointerTargetDiagnosis {
             coordinate_space: coordinate_space.into(),
             displays: displays.iter().take(LIMIT).copied().collect(),
             omitted_displays: displays.len().saturating_sub(LIMIT),
+            display_source: None,
         }
     }
 }
@@ -207,7 +215,8 @@ pub struct Diagnosis {
     /// wait timeouts happen before any dispatch (`NotDelivered`), while a
     /// bare [`Error::Timeout`] from a backend is `Unknown`.
     pub delivery: Option<Delivery>,
-    /// Requested and checked geometry when no display contains a pointer target.
+    /// Requested and checked geometry when no display contains a pointer
+    /// target. Attached to [`Error::InvalidActionData`].
     pub pointer_target: Option<PointerTargetDiagnosis>,
     /// The platform call that was still in flight when the operation's
     /// deadline expired, and what it was addressed to, e.g.
@@ -368,6 +377,9 @@ impl std::fmt::Display for Diagnosis {
             if target.omitted_displays > 0 {
                 write!(f, " ({} more displays omitted)", target.omitted_displays)?;
             }
+            if let Some(source) = &target.display_source {
+                write!(f, ", display source: {source}")?;
+            }
         }
         if let Some(scope) = &self.scope {
             write!(f, "\nsearch scope (bounded):\n{scope}")?;
@@ -490,9 +502,11 @@ impl std::fmt::Display for StaleReason {
 /// Structured error type for xa11y operations.
 /// Designed to be informative across FFI boundaries.
 ///
-/// Construct [`SelectorNotMatched`](Error::SelectorNotMatched) and
-/// [`Timeout`](Error::Timeout) through [`Error::selector_not_matched`] /
-/// [`Error::timeout`] and attach context with [`Error::diagnose`] — see the
+/// Construct [`SelectorNotMatched`](Error::SelectorNotMatched),
+/// [`Timeout`](Error::Timeout) and
+/// [`InvalidActionData`](Error::InvalidActionData) through
+/// [`Error::selector_not_matched`] / [`Error::timeout`] /
+/// [`Error::invalid_action_data`] and attach context with [`Error::diagnose`] — see the
 /// [module docs](self) for the diagnosis pattern.
 ///
 /// `#[non_exhaustive]`: new failure modes arrive with every backend and
@@ -563,8 +577,16 @@ pub enum Error {
     InvalidSelector { selector: String, message: String },
 
     /// Invalid argument to an action method.
-    #[error("Invalid action data: {message}")]
-    InvalidActionData { message: String },
+    ///
+    /// Construct through [`Error::invalid_action_data`]. The diagnosis is set
+    /// where the argument is checked against something the caller cannot see
+    /// in the argument alone: an off-display pointer target carries
+    /// [`Diagnosis::pointer_target`], the geometry it was checked against.
+    #[error("Invalid action data: {message}{}", diagnosis_suffix(.diagnosis))]
+    InvalidActionData {
+        message: String,
+        diagnosis: Option<Box<Diagnosis>>,
+    },
 
     /// A text range is out of bounds, reversed, or splits a surrogate pair.
     ///
@@ -622,6 +644,14 @@ impl Error {
         }
     }
 
+    /// Construct a bare [`Error::InvalidActionData`] (no diagnosis).
+    pub fn invalid_action_data(message: impl Into<String>) -> Self {
+        Self::InvalidActionData {
+            message: message.into(),
+            diagnosis: None,
+        }
+    }
+
     /// An [`Error::ElementStale`] for `element` (a description such as
     /// `button "Save"` or `handle:42`).
     pub fn stale(reason: StaleReason, element: impl Into<String>) -> Self {
@@ -633,8 +663,9 @@ impl Error {
 
     /// Attach (or replace) a [`Diagnosis`] on errors that carry one.
     ///
-    /// Supported variants: [`SelectorNotMatched`](Self::SelectorNotMatched)
-    /// and [`Timeout`](Self::Timeout). Other variants are returned unchanged —
+    /// Supported variants: [`SelectorNotMatched`](Self::SelectorNotMatched),
+    /// [`Timeout`](Self::Timeout) and
+    /// [`InvalidActionData`](Self::InvalidActionData). Other variants are returned unchanged —
     /// their primary fields already identify the failure, and silently
     /// growing a diagnosis field on them would not be rendered. An empty
     /// diagnosis is normalized to `None`.
@@ -646,7 +677,9 @@ impl Error {
             Some(Box::new(diagnosis))
         };
         match &mut self {
-            Self::SelectorNotMatched { diagnosis: d, .. } | Self::Timeout { diagnosis: d, .. } => {
+            Self::SelectorNotMatched { diagnosis: d, .. }
+            | Self::Timeout { diagnosis: d, .. }
+            | Self::InvalidActionData { diagnosis: d, .. } => {
                 *d = normalized;
             }
             _ => {}
@@ -695,9 +728,9 @@ impl Error {
     /// this to expose structured fields on their exception types.
     pub fn diagnosis(&self) -> Option<&Diagnosis> {
         match self {
-            Self::SelectorNotMatched { diagnosis, .. } | Self::Timeout { diagnosis, .. } => {
-                diagnosis.as_deref()
-            }
+            Self::SelectorNotMatched { diagnosis, .. }
+            | Self::Timeout { diagnosis, .. }
+            | Self::InvalidActionData { diagnosis, .. } => diagnosis.as_deref(),
             _ => None,
         }
     }
@@ -791,9 +824,7 @@ mod tests {
                 selector: "[".into(),
                 message: "bad".into(),
             },
-            Error::InvalidActionData {
-                message: "bad".into(),
-            },
+            Error::invalid_action_data("bad"),
             Error::NoElementBounds,
             Error::Unsupported {
                 feature: "x".into(),
