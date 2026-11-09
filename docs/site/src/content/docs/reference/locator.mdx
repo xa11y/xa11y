@@ -305,7 +305,7 @@ difference is what they act on:
 | Selector | Re-resolved on every call | Not applicable; the handle is fixed |
 | Auto-wait | Waits for visible and enabled, scrolling a scrolled-out target into view | None |
 | Node went away or was replaced | Re-resolves against the current tree | Raises `ElementStale` with a `reason`, before acting |
-| Equality | Not applicable | `==` (Python) / `sameAs` (JS) compares platform identity, not role and name |
+| Same node | Not applicable | `same_as` (Python) / `sameAs` (JS) asks the provider whether two handles are one node. Python `==` is object identity |
 
 ## Default timeout
 

@@ -68,7 +68,7 @@ opaque = [
     { type = "Platform", reason = "Crosses as the identically-spelled strings 'linux' | 'macos' | 'windows' via Platform::to_snake_case / Platform::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
     { type = "Support", reason = "Crosses as the identically-spelled strings 'supported' | 'partial' | 'unsupported' via Support::to_snake_case. See [[types.variant_coverage]]." },
     { type = "StaleReason", reason = "Crosses as the identically-spelled snake_case strings 'removed' | 'process_exited' | 'process_restarted' | 'identity_changed' | 'evicted', as the `reason` attribute of ElementStaleError in both bindings and the `stale_reason` of an MCP `element_stale` failure. See [[types.variant_coverage]]." },
-    { type = "NodeIdentity", reason = "Not a binding class: Python exposes identity as Element.__eq__ / __hash__ / same_as, JS as Element.sameAs. The identity value itself is session-local and opaque." },
+    { type = "NodeIdentity", reason = "Not a binding class: Both bindings expose identity as an explicit live check: Python Element.same_as, JS Element.sameAs. Python == / hash stay object identity. The identity value itself is session-local and opaque." },
     { type = "Landmark", reason = "Crosses as the ARIA landmark role string ('main', 'navigation', 'contentinfo', ...) as Element.landmark_type / landmarkType, identically spelled in both bindings. See [[types.variant_coverage]]." },
     { type = "Politeness", reason = "Crosses as the strings 'off' | 'polite' | 'assertive' (LiveRegionInfo.politeness). See [[types.variant_coverage]]." },
     { type = "RelationKind", reason = "Crosses as identically-spelled snake_case strings ('labelled_by', 'flows_to', ...): the keys of Element.relations() in Python, the `kind` of each entry in JS, and the accepted names of its `kinds` argument, parsed by RelationKind::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
@@ -466,7 +466,7 @@ reason = "Both bindings surface the annotation legend on their Screenshot class 
 [python]
 # Core members deliberately not exposed to Python. key = "Type::member".
 rust_only = [
-    { method = "Element::identity", reason = "Identity crosses as Element.__eq__ / __hash__ (and same_as); the NodeIdentity value is opaque and not a binding class." },
+    { method = "Element::identity", reason = "Identity crosses as Element.same_as (== / hash stay object identity, since identity is read from the provider, not captured at read time); the NodeIdentity value is opaque and not a binding class." },
     { method = "Capabilities::current", reason = "Folded into the module function capabilities(platform=None, os_version=None): with no arguments it is current(). One name per operation (AGENTS.md: options fold into the primary verb)." },
     { method = "Capabilities::for_backend", reason = "Folded into capabilities backend option on both bindings." },
     { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities(platform, os_version): passing a platform or version is for_platform(). One name per operation." },

@@ -497,8 +497,13 @@ struct Element {
 #[pymethods]
 impl Element {
     /// Whether ``other`` names the same platform node. Two elements found
-    /// separately compare equal when they are one node; two that merely
-    /// share a role and name do not. ``==`` uses this.
+    /// separately are the same node when this returns ``True``; two that
+    /// merely share a role and name are not.
+    ///
+    /// This is a live check: it asks the provider for both nodes' identity
+    /// (a platform call on Windows). ``==`` and ``hash`` are deliberately
+    /// *not* overloaded and keep Python's object identity, so ``in``,
+    /// ``set`` and ``dict`` never make a platform call or raise.
     ///
     /// Raises :class:`ElementStaleError` (``reason="evicted"``) when either
     /// handle is no longer held by the provider.
@@ -517,24 +522,6 @@ impl Element {
     fn check_alive(&self, py: Python<'_>) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         py.detach(move || element.check_alive()).map_err(to_py_err)
-    }
-
-    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let Ok(other) = other.cast::<Element>() else {
-            return Ok(py.NotImplemented());
-        };
-        let same = self.same_as(py, other.borrow())?;
-        Ok(pyo3::types::PyBool::new(py, same)
-            .to_owned()
-            .into_any()
-            .unbind())
-    }
-
-    fn __hash__(&self, py: Python<'_>) -> PyResult<u64> {
-        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        py.detach(move || element.identity())
-            .map(|identity| identity.hash_u64())
-            .map_err(to_py_err)
     }
 
     /// Get direct children (lazy — each call queries the provider).

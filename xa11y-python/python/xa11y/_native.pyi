@@ -1270,7 +1270,10 @@ class Element:
     def fullscreen(self) -> bool | None:
         """Whether the window is fullscreen. ``None`` = unknown / not a window."""
     def same_as(self, other: Element) -> bool:
-        """Whether ``other`` names the same platform node. ``==`` uses this.
+        """Whether ``other`` names the same platform node, checked live with
+        the provider. ``==`` and ``hash`` are not overloaded: they keep
+        Python's object identity, so ``in``, ``set`` and ``dict`` never make
+        a platform call or raise. Use this to compare two finds of one node.
 
         Raises :class:`ElementStaleError` (``reason="evicted"``) when either
         handle is no longer held by the provider."""
@@ -1278,8 +1281,6 @@ class Element:
         """Prove this element still names the node it was found as. Raises
         :class:`ElementStaleError` with the ``reason`` otherwise. Every action
         runs this check first."""
-    def __eq__(self, other: object) -> bool: ...
-    def __hash__(self) -> int: ...
     def children(self) -> list[Element]:
         """Get direct children (lazy — each call queries the provider)."""
     def parent(self) -> Element | None:
