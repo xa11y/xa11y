@@ -80,7 +80,8 @@ _GUIDANCE = {
 # "window_minimized", ...), which is what tells the model whether to scroll or to
 # restore a window. `auto_scroll` says whether the action already tried scrolling
 # it into view ("refused", "no_effect", "revealed"), so the model does not try a
-# scroll that was just refused.
+# scroll that was just refused. `pending` names the platform call a timeout cut
+# short, which is how the model learns the application stopped answering.
 # `delivery` says whether the failed action may already have taken effect, so
 # the model knows whether retrying is safe or could double-submit.
 _DIAGNOSIS_FIELDS = (
@@ -93,6 +94,7 @@ _DIAGNOSIS_FIELDS = (
     "last_observed",
     "hidden_reason",
     "auto_scroll",
+    "pending",
     "elapsed",
     "delivery",
     "pointer_target",

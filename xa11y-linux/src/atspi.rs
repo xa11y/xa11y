@@ -6,16 +6,19 @@ use std::sync::{Arc, Mutex};
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
 use xa11y_core::RelationKind;
 
+use bounded::Proxy;
+pub(crate) use bounded::Proxy as BoundedProxy;
 use rayon::prelude::*;
 use xa11y_core::{
     ElementData, ElementParts, Error, HiddenReason, Provider, Rect, Result, Role, ShellSurfaceKind,
     StateParts, StateSet, Subscription, Toggled,
 };
-use zbus::blocking::{Connection, Proxy};
+use zbus::blocking::Connection;
 use zbus::DBusError;
 
 use crate::window::WindowManager;
 
+mod bounded;
 mod rich;
 pub(crate) use rich::{read_offset_unit_unless_gone, OffsetUnit};
 
@@ -397,7 +400,7 @@ impl LinuxProvider {
         // Use uncached proxy to avoid GetAll calls — Qt's AT-SPI adaptor
         // doesn't support GetAll on all objects, causing spurious errors.
         let conn = self.connection()?;
-        zbus::blocking::proxy::Builder::<Proxy>::new(&conn)
+        zbus::blocking::proxy::Builder::<zbus::blocking::Proxy>::new(&conn)
             .destination(bus_name.to_owned())
             .map_err(|e| Error::Platform {
                 code: -1,
@@ -415,6 +418,7 @@ impl LinuxProvider {
             })?
             .cache_properties(zbus::proxy::CacheProperties::No)
             .build()
+            .map(Proxy::from)
             .map_err(|e| Error::Platform {
                 code: -1,
                 message: format!("Failed to create proxy: {}", e),
@@ -632,9 +636,25 @@ impl LinuxProvider {
     /// Built on the failure path only: it costs one bus-daemon round trip
     /// for the pid (the daemon answers even when the application cannot)
     /// and one `/proc` read for the process state.
+    ///
+    /// When the caller's deadline is what cut the call short (see
+    /// `bounded::Proxy`), the error is the deadline's, with the same facts about
+    /// the application as its pending call.
     fn unresponsive_peer(&self, aref: &AccessibleRef, call: &str) -> Error {
-        let pid = self.get_dbus_pid(&aref.bus_name);
-        unresponsive_peer_error(aref, call, pid, pid.and_then(read_process_state))
+        let deadline = xa11y_core::Deadline::current().filter(xa11y_core::Deadline::is_expired);
+        let pid = match deadline {
+            // The pid lookup is a bus round trip; under an expired deadline
+            // it would be refused before it was made, so give it the
+            // diagnosis' own short bound.
+            Some(_) => xa11y_core::Deadline::after(PEER_DIAGNOSIS_TIMEOUT)
+                .scope_instead(|| self.get_dbus_pid(&aref.bus_name)),
+            None => self.get_dbus_pid(&aref.bus_name),
+        };
+        let state = pid.and_then(read_process_state);
+        match deadline {
+            Some(d) => d.expired(Some(pending_peer_call(aref, call, pid, state))),
+            None => unresponsive_peer_error(aref, call, pid, state),
+        }
     }
 
     /// Get the description of an accessible element.
@@ -1388,7 +1408,7 @@ impl LinuxProvider {
         // reads in this snapshot, an unreadable object degrades to absent
         // fields, and probing the interfaces anyway is exactly the unguarded
         // read issue #465 removed.
-        let ((role_name, role_num), ifaces) = rayon::join(
+        let ((role_name, role_num), ifaces) = join_carrying_deadline(
             || {
                 (
                     self.get_role_name(aref).unwrap_or_default(),
@@ -1426,9 +1446,9 @@ impl LinuxProvider {
                 ((states, state_bits, state_read_ok), bounds_read),
                 ((actions, action_index_map), (numeric_value, min_value, max_value)),
             ),
-        ) = rayon::join(
+        ) = join_carrying_deadline(
             || {
-                rayon::join(
+                join_carrying_deadline(
                     || {
                         let name = self.get_name(aref).ok().filter(|s| !s.is_empty());
                         let value = if role_has_value(role) {
@@ -1452,9 +1472,9 @@ impl LinuxProvider {
                 )
             },
             || {
-                rayon::join(
+                join_carrying_deadline(
                     || {
-                        rayon::join(
+                        join_carrying_deadline(
                             || {
                                 self.parse_states_with_bits(
                                     aref,
@@ -1472,7 +1492,7 @@ impl LinuxProvider {
                         )
                     },
                     || {
-                        rayon::join(
+                        join_carrying_deadline(
                             || {
                                 if let Some(actions) = prefetched_menu_actions.as_ref() {
                                     actions.clone()
@@ -2734,7 +2754,7 @@ impl LinuxProvider {
         type ChildBatch = (Vec<(usize, AccessibleRef)>, Option<Error>);
         let per_child: Vec<ChildBatch> = to_search
             .par_iter()
-            .map(|child| {
+            .map(carry_deadline(|child: &AccessibleRef| {
                 let mut child_results: Vec<(usize, AccessibleRef)> = Vec::new();
                 for (idx, simple) in clauses.iter().enumerate() {
                     if self.matches_ref(child, simple, pid) {
@@ -2756,7 +2776,7 @@ impl LinuxProvider {
                     Err(e @ Error::AccessibilityNotEnabled { .. }) => (Vec::new(), Some(e)),
                     Err(_) => (child_results, None),
                 }
-            })
+            }))
             .collect();
 
         // Merge results, respecting limit. The first AccessibilityNotEnabled
@@ -2870,7 +2890,9 @@ impl Provider for LinuxProvider {
                 let memo = AncestorMemo::default();
                 let results: Vec<ElementData> = to_build
                     .par_iter()
-                    .map(|r| self.build_element_data_in(r, pid, &memo))
+                    .map(carry_deadline(|r: &AccessibleRef| {
+                        self.build_element_data_in(r, pid, &memo)
+                    }))
                     .collect();
 
                 Ok(results)
@@ -2970,12 +2992,12 @@ impl Provider for LinuxProvider {
             let memo = AncestorMemo::default();
             let phase1_data: Vec<(usize, ElementData)> = hits
                 .par_iter()
-                .map(|(pos, aref)| {
+                .map(carry_deadline(|(pos, aref): &(usize, AccessibleRef)| {
                     // `root` is always present now, so the PID comes from
                     // the root element. No need to re-resolve via
                     // `get_app_pid` / `get_dbus_pid`.
                     (*pos, self.build_element_data_in(aref, pid_from_root, &memo))
-                })
+                }))
                 .collect();
 
             if clause.segments.len() == 1 {
@@ -3233,7 +3255,7 @@ impl Provider for LinuxProvider {
             .collect();
         let names: Vec<Option<String>> = entries
             .par_iter()
-            .map(|c| self.read_app_name(c))
+            .map(carry_deadline(|c: &&AccessibleRef| self.read_app_name(c)))
             .collect::<Result<_>>()?;
         let valid: Vec<(&AccessibleRef, String)> = entries
             .into_iter()
@@ -3243,12 +3265,14 @@ impl Provider for LinuxProvider {
 
         let results: Vec<ElementData> = valid
             .par_iter()
-            .map(|(child, app_name)| {
-                let pid = self.get_app_pid(child);
-                let mut data = self.build_element_data(child, pid);
-                data.name = Some(app_name.clone());
-                data
-            })
+            .map(carry_deadline(
+                |(child, app_name): &(&AccessibleRef, String)| {
+                    let pid = self.get_app_pid(child);
+                    let mut data = self.build_element_data(child, pid);
+                    data.name = Some(app_name.clone());
+                    data
+                },
+            ))
             .collect();
 
         Ok(results)
@@ -4800,6 +4824,32 @@ fn is_unimplemented(err: &zbus::Error) -> bool {
     }
 }
 
+/// `rayon::join`, with the caller's open [`Deadline`](xa11y_core::Deadline)
+/// carried into both halves. Either half may run on a pool thread, where no
+/// deadline is open, and its D-Bus reads would then wait their full
+/// [`ATSPI_METHOD_TIMEOUT`] past the caller's timeout.
+fn join_carrying_deadline<A, B, RA, RB>(a: A, b: B) -> (RA, RB)
+where
+    A: FnOnce() -> RA + Send,
+    B: FnOnce() -> RB + Send,
+    RA: Send,
+    RB: Send,
+{
+    let left = xa11y_core::Deadline::current();
+    let right = left.clone();
+    rayon::join(
+        move || xa11y_core::Deadline::scope_opt(left, a),
+        move || xa11y_core::Deadline::scope_opt(right, b),
+    )
+}
+
+/// Wrap a `par_iter` closure so each item runs under the caller's open
+/// deadline, for the reason [`join_carrying_deadline`] gives.
+fn carry_deadline<T, R>(f: impl Fn(T) -> R + Sync + Send) -> impl Fn(T) -> R + Sync + Send {
+    let deadline = xa11y_core::Deadline::current();
+    move |item| xa11y_core::Deadline::scope_opt(deadline.clone(), || f(item))
+}
+
 /// Whether a failed D-Bus call is the connection's method timeout expiring
 /// (see [`ATSPI_METHOD_TIMEOUT`]): zbus reports it as an I/O error of kind
 /// `TimedOut`, distinct from a peer's own `org.freedesktop.DBus.Error.*` reply.
@@ -4835,6 +4885,28 @@ fn describe_process_state(state: char) -> &'static str {
              stopped"
         }
         _ => "in an unrecognised scheduler state",
+    }
+}
+
+/// How long the pid lookup for a deadline expiry's diagnosis may take. The
+/// bus daemon answers it even when the application cannot.
+const PEER_DIAGNOSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The pending call of a deadline expiry: what was called, on which object
+/// of which application, and what `/proc` says about the process.
+fn pending_peer_call(
+    aref: &AccessibleRef,
+    call: &str,
+    pid: Option<u32>,
+    state: Option<char>,
+) -> String {
+    let call = format!("{call} on {} ({})", aref.path, aref.bus_name);
+    match (pid, state) {
+        (Some(pid), Some(state)) => {
+            format!("{call}; process {pid} is {}", describe_process_state(state))
+        }
+        (Some(pid), None) => format!("{call}; process {pid} has no readable /proc entry"),
+        (None, _) => call,
     }
 }
 
@@ -7268,6 +7340,61 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("org.test.Hung"));
+    }
+
+    /// The caller's deadline, not the connection's 5 s method timeout, ends a
+    /// call to a hung peer, and the error names the call as pending (#531).
+    #[test]
+    fn hung_peer_read_ends_at_the_callers_deadline() {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at("/org/a11y/atspi/accessible/root", HungPeer)
+                .expect("hung interface")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .method_timeout(ATSPI_METHOD_TIMEOUT)
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        let aref = AccessibleRef {
+            bus_name: "org.test.Hung".into(),
+            path: "/org/a11y/atspi/accessible/root".into(),
+        };
+        let budget = std::time::Duration::from_millis(300);
+        let start = std::time::Instant::now();
+        let err = xa11y_core::Deadline::after(budget)
+            .scope(|| provider.read_app_name(&aref))
+            .expect_err("a hung peer must not read as a name or as absent");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(1200),
+            "the read ran past the deadline: {:?}",
+            start.elapsed()
+        );
+        let Error::Timeout { elapsed, .. } = &err else {
+            panic!("expected a timeout, got {err:?}");
+        };
+        assert_eq!(*elapsed, budget);
+        let pending = err
+            .diagnosis()
+            .and_then(|d| d.pending.as_deref())
+            .expect("names the call in flight");
+        assert!(pending.starts_with("Accessible.Name on /org/a11y/atspi/accessible/root"));
+        assert!(pending.contains("org.test.Hung"), "{pending}");
     }
 
     /// A registry listing one application whose own `GetChildren` hangs.

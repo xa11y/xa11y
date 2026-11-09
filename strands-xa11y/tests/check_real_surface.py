@@ -57,6 +57,7 @@ DIAGNOSIS_ATTRS = (
     "last_observed",
     "hidden_reason",
     "auto_scroll",
+    "pending",
     "elapsed",
     "candidates",
     "scope",

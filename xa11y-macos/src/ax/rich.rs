@@ -239,14 +239,18 @@ fn read(element: AXUIElementRef, attribute: &str) -> Result<Read> {
 fn read_param(element: AXUIElementRef, attribute: &str, parameter: CFTypeRef) -> Result<Read> {
     let name = CFString::new(attribute);
     let mut value: CFTypeRef = std::ptr::null();
-    let err = unsafe {
-        safe_ax_copy_parameterized_attribute_value(
-            element,
-            name.as_concrete_TypeRef() as CFStringRef,
-            parameter,
-            &mut value,
-        )
-    };
+    let err = ax_bounded(
+        element,
+        || format!("reading {attribute}"),
+        || unsafe {
+            safe_ax_copy_parameterized_attribute_value(
+                element,
+                name.as_concrete_TypeRef() as CFStringRef,
+                parameter,
+                &mut value,
+            )
+        },
+    );
     match err {
         AX_ERROR_SUCCESS if value.is_null() => Ok(Read::NoValue),
         AX_ERROR_SUCCESS => Ok(Read::Value(Owned(value))),
@@ -278,13 +282,17 @@ fn number_param(n: u32) -> CFNumber {
 fn attribute_count(element: AXUIElementRef, attribute: &str) -> Result<Option<u32>> {
     let name = CFString::new(attribute);
     let mut count: CFIndex = 0;
-    let err = unsafe {
-        safe_ax_get_attribute_value_count(
-            element,
-            name.as_concrete_TypeRef() as CFStringRef,
-            &mut count,
-        )
-    };
+    let err = ax_bounded(
+        element,
+        || format!("counting {attribute}"),
+        || unsafe {
+            safe_ax_get_attribute_value_count(
+                element,
+                name.as_concrete_TypeRef() as CFStringRef,
+                &mut count,
+            )
+        },
+    );
     match err {
         AX_ERROR_SUCCESS => Ok(u32::try_from(count).ok()),
         AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(None),
@@ -302,15 +310,19 @@ fn attribute_element_at(
 ) -> Result<Option<AXElement>> {
     let name = CFString::new(attribute);
     let mut values: CFArrayRef = std::ptr::null();
-    let err = unsafe {
-        safe_ax_copy_attribute_values(
-            element,
-            name.as_concrete_TypeRef() as CFStringRef,
-            index as CFIndex,
-            1,
-            &mut values,
-        )
-    };
+    let err = ax_bounded(
+        element,
+        || format!("reading {attribute} at index {index}"),
+        || unsafe {
+            safe_ax_copy_attribute_values(
+                element,
+                name.as_concrete_TypeRef() as CFStringRef,
+                index as CFIndex,
+                1,
+                &mut values,
+            )
+        },
+    );
     match err {
         AX_ERROR_SUCCESS if values.is_null() => Ok(None),
         AX_ERROR_SUCCESS => {
@@ -707,14 +719,18 @@ impl MacOSProvider {
         }
         let name = CFString::new("AXCellForColumnAndRow");
         let mut value: CFTypeRef = std::ptr::null();
-        let err = unsafe {
-            safe_ax_copy_parameterized_attribute_value(
-                ax.as_ptr(),
-                name.as_concrete_TypeRef() as CFStringRef,
-                slot.ptr(),
-                &mut value,
-            )
-        };
+        let err = ax_bounded(
+            ax.as_ptr(),
+            || "reading AXCellForColumnAndRow".to_string(),
+            || unsafe {
+                safe_ax_copy_parameterized_attribute_value(
+                    ax.as_ptr(),
+                    name.as_concrete_TypeRef() as CFStringRef,
+                    slot.ptr(),
+                    &mut value,
+                )
+            },
+        );
         match err {
             AX_ERROR_SUCCESS if value.is_null() => return Ok(None),
             AX_ERROR_SUCCESS => {

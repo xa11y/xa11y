@@ -30,19 +30,33 @@ where
     F: FnMut() -> Result<App>,
     D: FnOnce() -> Diagnosis,
 {
-    let start = Instant::now();
-    loop {
-        match attempt() {
-            Ok(app) => return Ok(app),
-            Err(e @ Error::SelectorNotMatched { .. }) => {
-                if start.elapsed() >= timeout {
-                    return Err(merge_diagnosis(e, diagnose()));
+    crate::deadline::within(timeout, || {
+        let start = Instant::now();
+        loop {
+            match crate::deadline::distrust(attempt()) {
+                Ok(app) => return Ok(app),
+                Err(e @ Error::SelectorNotMatched { .. }) => {
+                    if start.elapsed() >= timeout
+                        || !crate::deadline::pause(start, timeout, LOOKUP_POLL_INTERVAL)
+                    {
+                        return Err(merge_diagnosis(e, crate::deadline::for_diagnosis(diagnose)));
+                    }
                 }
+                // A read the deadline cut short: the lookup timed out with
+                // that read still pending (issue #531). `diagnose` is not
+                // run: it enumerates applications, which is the read that
+                // just hung.
+                Err(e) => match crate::deadline::pending_of(&e) {
+                    Some(pending) => {
+                        let mut d = e.diagnosis().cloned().unwrap_or_default();
+                        d.pending = pending;
+                        return Err(Error::timeout(start.elapsed()).diagnose(d));
+                    }
+                    None => return Err(e),
+                },
             }
-            Err(e) => return Err(e),
         }
-        std::thread::sleep(LOOKUP_POLL_INTERVAL);
-    }
+    })
 }
 
 /// Merge terminal-site context into an error that may already carry a cheap
@@ -403,7 +417,10 @@ impl App {
             // The loop gave up. Ask the backend whether it knows why the
             // process stayed unreachable, once, for the error the caller sees.
             Error::SelectorNotMatched { .. } => {
-                match provider.app_by_pid_failure(pid, start.elapsed()) {
+                let failure = crate::deadline::for_diagnosis(|| {
+                    provider.app_by_pid_failure(pid, start.elapsed())
+                });
+                match failure {
                     // Still "app absent": keep the loop's diagnosis (the
                     // running-apps candidates) under the hook's own fields.
                     Some(better @ Error::SelectorNotMatched { .. }) => {
@@ -708,25 +725,49 @@ impl App {
     /// [`Error::Timeout`] whose diagnosis says how many web areas it saw.
     /// `Duration::ZERO` checks once.
     pub fn enable_web_accessibility(&self, timeout: Duration) -> Result<()> {
-        self.provider.enable_web_accessibility(&self.data)?;
+        crate::deadline::within(timeout, || self.enable_web_accessibility_within(timeout))
+    }
+
+    /// The body of [`Self::enable_web_accessibility`], run inside its
+    /// deadline.
+    fn enable_web_accessibility_within(&self, timeout: Duration) -> Result<()> {
         let start = Instant::now();
+        let condition = || {
+            format!(
+                "web content of {} (a web_area with at least one child)",
+                self.describe()
+            )
+        };
+        let mut previous: Option<WebContent> = None;
+        let timed_out = |observed: Option<&WebContent>, pending: Option<String>| {
+            let mut d = Diagnosis::new().condition(condition());
+            d.last_observed = observed.map(WebContent::describe);
+            d.pending = pending;
+            Error::timeout(start.elapsed()).diagnose(d)
+        };
+        let read = |r: Result<WebContent>, previous: Option<&WebContent>| {
+            crate::deadline::distrust(r).map_err(|e| match crate::deadline::pending_of(&e) {
+                Some(pending) => timed_out(previous, pending),
+                None => e,
+            })
+        };
+        read(
+            self.provider
+                .enable_web_accessibility(&self.data)
+                .map(|()| WebContent::default()),
+            None,
+        )?;
         loop {
-            let observed = self.web_content()?;
+            let observed = read(self.web_content(), previous.as_ref())?;
             if observed.populated > 0 {
                 return Ok(());
             }
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(Error::timeout(elapsed).diagnose(
-                    Diagnosis::new()
-                        .condition(format!(
-                            "web content of {} (a web_area with at least one child)",
-                            self.describe()
-                        ))
-                        .last_observed(observed.describe()),
-                ));
+            if start.elapsed() >= timeout
+                || !crate::deadline::pause(start, timeout, LOOKUP_POLL_INTERVAL)
+            {
+                return Err(timed_out(Some(&observed), None));
             }
-            std::thread::sleep(LOOKUP_POLL_INTERVAL);
+            previous = Some(observed);
         }
     }
 

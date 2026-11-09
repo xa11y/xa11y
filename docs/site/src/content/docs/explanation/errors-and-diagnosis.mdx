@@ -75,6 +75,22 @@ Reading it back:
 Selector misses from fail-fast calls (`element()`, `tree()`, `dump()`)
 carry the same context on `SelectorNotMatchedError`.
 
+## A timeout is an upper bound
+
+A `timeout` covers the whole operation, including every read the platform
+makes on its behalf. An application that stops answering mid-read does not
+stretch a one-second wait into the platform's own five-second limit. On
+Linux and macOS, xa11y hands each read the time left before the deadline.
+On Windows UI Automation, which has no per-call limit, no read starts after
+the deadline, and the one in flight keeps the limit UI Automation gives it.
+
+When the deadline cut a call short, the timeout names that call in
+`pending`, for example `Accessible.Name on /org/a11y/atspi/accessible/42
+(:1.87)`. That separates an application that stopped answering from one
+that answered with the wrong state. An action whose call the deadline cut
+short reads `delivery: unknown`, because the application may have acted on
+it after xa11y stopped waiting.
+
 Diagnosis collection is **bounded and failure-path-only**: candidate lists
 and snapshots are truncated (a miss against a huge tree cannot produce a
 megabyte message), and nothing is collected unless the operation has

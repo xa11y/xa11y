@@ -209,6 +209,12 @@ pub struct Diagnosis {
     pub delivery: Option<Delivery>,
     /// Requested and checked geometry when no display contains a pointer target.
     pub pointer_target: Option<PointerTargetDiagnosis>,
+    /// The platform call that was still in flight when the operation's
+    /// deadline expired, and what it was addressed to, e.g.
+    /// `"GetChildren on :1.42 /org/a11y/atspi/accessible/7 (pid 4242)"`.
+    /// `None` when the deadline expired between calls, or when the failure
+    /// was not a deadline expiry. See [`crate::deadline`].
+    pub pending: Option<String>,
 }
 
 impl Diagnosis {
@@ -273,6 +279,13 @@ impl Diagnosis {
         self
     }
 
+    /// Set the platform call that was in flight when the deadline expired.
+    #[must_use]
+    pub fn pending(mut self, pending: impl Into<String>) -> Self {
+        self.pending = Some(pending.into());
+        self
+    }
+
     /// Override the delivery disposition of the error this is attached to.
     #[must_use]
     pub fn delivery(mut self, delivery: Delivery) -> Self {
@@ -291,6 +304,7 @@ impl Diagnosis {
             && self.scope.is_none()
             && self.delivery.is_none()
             && self.pointer_target.is_none()
+            && self.pending.is_none()
     }
 }
 
@@ -332,6 +346,9 @@ impl std::fmt::Display for Diagnosis {
         }
         if let Some(outcome) = self.auto_scroll {
             write!(f, "; auto-scroll: {outcome}")?;
+        }
+        if let Some(pending) = &self.pending {
+            write!(f, "; still pending: {pending}")?;
         }
         if !self.candidates.is_empty() {
             write!(f, "; candidates: {}", self.candidates.join(", "))?;

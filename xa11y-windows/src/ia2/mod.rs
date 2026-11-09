@@ -912,6 +912,15 @@ impl Ia2Provider {
     ) -> Result<T> {
         self.call_with_timeout(CALL_TIMEOUT, f)
     }
+    /// Run `f` on the IA2 worker, bounded by `timeout` and by the caller's
+    /// open [`Deadline`](xa11y_core::Deadline) (#531).
+    ///
+    /// The two bounds mean different things. `timeout` is the stall
+    /// detector: a request still running when it expires disables the
+    /// worker, because a hung native call cannot be taken back. The caller's
+    /// deadline is the caller choosing to stop waiting: the worker stops at
+    /// its next native operation (`State::check_deadline`), a request still
+    /// queued never starts, and the worker stays usable.
     fn call_with_timeout<T: Send + 'static>(
         &self,
         timeout: Duration,
@@ -922,17 +931,20 @@ impl Ia2Provider {
                 "IA2 worker timed out previously; restart the host before using IA2 again",
             ));
         }
+        let bound = xa11y_core::call_timeout(timeout, || PENDING.to_string())?;
+        let caller = bound.deadline.clone();
         let (tx, rx) = mpsc::sync_channel(1);
         let expires = Instant::now() + timeout;
+        let stop_at = caller.as_ref().map_or(expires, |d| d.at().min(expires));
         let stalled = Arc::clone(&self.worker.stalled);
         self.worker
             .sender
             .try_send(Box::new(move |state| {
-                let result = if stalled.load(Ordering::Acquire) || Instant::now() >= expires {
+                let result = if stalled.load(Ordering::Acquire) || Instant::now() >= stop_at {
                     Err(platform("IA2 request expired before dispatch"))
                 } else {
                     state.dispatched = false;
-                    state.deadline=Some(expires);
+                    state.deadline=Some(stop_at);
                     let result=f(state);
                     state.deadline=None;
                     if Instant::now()>=expires{
@@ -944,8 +956,23 @@ impl Ia2Provider {
                 let _ = tx.send(result);
             }))
             .map_err(|e| platform(format!("IA2 request queue is full or disconnected: {e}")))?;
-        match rx.recv_timeout(timeout) {
-            Ok(result) => result,
+        match rx.recv_timeout(bound.duration) {
+            Ok(result) => {
+                if result.is_err() && caller.as_ref().is_some_and(|d| d.is_expired()) {
+                    // The worker stopped at the caller's deadline. Recording
+                    // the cut is the point; core builds the error the caller
+                    // sees from it.
+                    let _ = bound.expired(PENDING);
+                }
+                result
+            }
+            Err(_) if bound.is_deadline() => {
+                // The caller stopped waiting, not the worker: it stops at its
+                // next native operation, and stays usable.
+                Err(bound
+                    .expired(PENDING)
+                    .unwrap_or_else(|| platform("IA2 request outlived the caller's deadline")))
+            }
             Err(error) => {
                 self.worker.stalled.store(true, Ordering::Release);
                 let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
@@ -963,6 +990,11 @@ impl Ia2Provider {
         }
     }
 }
+
+/// What a deadline diagnosis names as pending for an IA2 request. The
+/// request runs on the worker thread, so the caller knows only that it was
+/// one; `call_for` adds the element to the error message.
+const PENDING: &str = "an MSAA/IA2 request on the IA2 worker thread";
 
 impl Provider for Ia2Provider {
     fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
@@ -1303,6 +1335,52 @@ mod tests {
             .expect("worker drains expired request and exits");
         thread.join().expect("worker exit");
         assert!(!delivered.load(Ordering::Acquire));
+    }
+    #[test]
+    fn a_callers_deadline_cuts_the_wait_without_disabling_the_worker() {
+        let (sender, receiver) = mpsc::sync_channel::<Job>(32);
+        let (id_tx, id_rx) = mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            id_tx
+                .send(unsafe { GetCurrentThreadId() })
+                .expect("thread id");
+            let mut state = State::new();
+            while let Ok(job) = receiver.recv() {
+                job(&mut state);
+            }
+        });
+        let p = Ia2Provider {
+            worker: Arc::new(Worker {
+                sender,
+                thread: id_rx.recv().expect("thread id"),
+                stalled: Arc::new(AtomicBool::new(false)),
+            }),
+        };
+        let deadline = xa11y_core::Deadline::after(Duration::from_millis(50));
+        let probe = deadline.clone();
+        let started = Instant::now();
+        let error = deadline
+            .scope(|| {
+                p.call(|_| {
+                    std::thread::sleep(Duration::from_millis(300));
+                    Ok(())
+                })
+            })
+            .expect_err("the caller's deadline cuts the wait");
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "waited past the deadline"
+        );
+        assert!(matches!(error, Error::Timeout { .. }), "got {error:?}");
+        assert_eq!(probe.cut_short(), Some(PENDING));
+        assert!(
+            !p.worker.stalled.load(Ordering::Acquire),
+            "a caller's deadline is not a stalled worker"
+        );
+        p.call(|_| Ok(()))
+            .expect("the worker still serves requests");
+        drop(p);
+        thread.join().expect("worker stopped");
     }
     #[test]
     fn expired_handles_do_not_grow_the_registry_order_queue() {

@@ -148,6 +148,7 @@ test('TimeoutError carries a structured diagnosis when the selector never matche
       assert.equal(err.lastObserved, 'selector never matched');
       assert.equal(err.hiddenReason, null);
       assert.equal(err.autoScroll, null);
+      assert.equal(err.pending, null);
       assert.ok(err.candidates.includes('button "Back"'), `candidates: ${err.candidates}`);
       assert.ok(err.scope.includes('TestApp'), `scope: ${err.scope}`);
       assert.ok(err.elapsedMs >= 300, `elapsedMs: ${err.elapsedMs}`);
@@ -209,6 +210,8 @@ test('diagnosis fields default to null/[] when a path produces no context', asyn
       assert.equal(t.hiddenReason, null);
       assert.equal(t.autoScroll, null);
       assert.equal(new SelectorNotMatchedError('x').autoScroll, null);
+      assert.equal(t.pending, null);
+      assert.equal(new SelectorNotMatchedError('x').pending, null);
       assert.deepEqual(t.candidates, []);
       assert.equal(t.scope, null);
       assert.equal(t.elapsedMs, null);

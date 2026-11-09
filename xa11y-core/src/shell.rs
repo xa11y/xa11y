@@ -303,13 +303,47 @@ impl ShellSurface {
         // not addressable by selector, but the lookup's error reads like every
         // other not-found in the API.
         let selector = format!("shell_surface[kind={kind}]");
+        crate::deadline::within(timeout, || {
+            Self::by_kind_within(provider, kind, timeout, selector)
+        })
+    }
+
+    /// The body of [`Self::by_kind_with`], run inside its deadline.
+    fn by_kind_within(
+        provider: Arc<dyn Provider>,
+        kind: ShellSurfaceKind,
+        timeout: Duration,
+        selector: String,
+    ) -> Result<Self> {
         let start = Instant::now();
+        let mut previous_others: Option<usize> = None;
         loop {
             // Split rather than filter: the surfaces of other kinds are the
             // candidate list a "no such surface" failure owes the caller.
             let mut matched: Vec<Self> = Vec::new();
             let mut others: Vec<Self> = Vec::new();
-            for surface in Self::list_with(Arc::clone(&provider))? {
+            let surfaces = crate::deadline::distrust(Self::list_with(Arc::clone(&provider)))
+                .map_err(|e| {
+                    match crate::deadline::pending_of(&e) {
+                        // The deadline cut an enumeration short (issue #531).
+                        Some(pending) => {
+                            let mut d =
+                                Diagnosis::new().condition(format!("a {kind} shell surface"));
+                            d.selector = Some(selector.clone());
+                            d.last_observed = Some(match previous_others {
+                                Some(n) => format!(
+                                    "no {kind} surface present on the last complete enumeration; \
+                                 {n} other shell surface(s) enumerated"
+                                ),
+                                None => "no enumeration completed".to_string(),
+                            });
+                            d.pending = pending;
+                            Error::timeout(start.elapsed()).diagnose(d)
+                        }
+                        None => e,
+                    }
+                })?;
+            for surface in surfaces {
                 if surface.kind == kind {
                     matched.push(surface);
                 } else {
@@ -335,7 +369,9 @@ impl ShellSurface {
             if let Some(surface) = matched.pop() {
                 return Ok(surface);
             }
-            if start.elapsed() >= timeout {
+            if start.elapsed() >= timeout
+                || !crate::deadline::pause(start, timeout, LOOKUP_POLL_INTERVAL)
+            {
                 return Err(Error::selector_not_matched(selector).diagnose(
                     Diagnosis::new()
                         .condition(format!("a {kind} shell surface"))
@@ -346,7 +382,7 @@ impl ShellSurface {
                         .candidates(surface_candidates(&others)),
                 ));
             }
-            std::thread::sleep(LOOKUP_POLL_INTERVAL);
+            previous_others = Some(others.len());
         }
     }
 

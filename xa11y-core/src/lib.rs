@@ -2,6 +2,7 @@ pub mod app;
 pub mod capabilities;
 pub mod capture;
 pub mod config;
+pub mod deadline;
 pub mod element;
 pub mod error;
 pub mod event;
@@ -36,6 +37,7 @@ pub use capture::{
     CapturedText, RelationTarget, Truncation,
 };
 pub use config::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
+pub use deadline::{call_timeout, CallTimeout, Deadline};
 pub use element::{
     Element, ElementData, HiddenReason, RawPlatformData, Rect, StateSet, Toggled, TreeNode,
 };

@@ -36,6 +36,7 @@ _DIAGNOSIS_FIELDS = (
     "hidden_reason",
     "delivery",
     "auto_scroll",
+    "pending",
     "pointer_target",
     "candidates",
     "scope",
