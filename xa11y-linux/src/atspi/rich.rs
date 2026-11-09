@@ -15,8 +15,8 @@
 //!   tree-view column headers have the role but no `TableCell` interface, so
 //!   they carry a header kind and no position.
 //! - Object attributes `posinset` / `setsize` / `level` (1-based, as in ARIA)
-//!   → [`CollectionInfo`], read only for list items, tree items, tabs, radio
-//!   buttons and rows.
+//!   → [`CollectionInfo`], read for every role that can be a set member
+//!   ([`is_collection_role`]).
 //!
 //! AT-SPI has no row-index API for a row object, so [`RowInfo`] is never
 //! populated on Linux; a row's cells carry the row.
@@ -151,7 +151,6 @@ pub(super) fn declared_count(attrs: &HashMap<String, String>, key: &str) -> Opti
         .map(Count::from_signed)
 }
 
-/// Roles whose elements can sit in a set.
 /// Roles whose object attributes can carry document semantics: heading
 /// level, landmark kind, ARIA role and live-region settings. Live regions sit
 /// on generic sections (`group`) and status / alert elements; a bound keeps
@@ -231,10 +230,41 @@ pub(crate) fn semantics_from_attributes(role: Role, attrs: &HashMap<String, Stri
     }
 }
 
+/// Roles whose elements can sit in a set, and so carry `posinset` /
+/// `setsize` / `level`.
+///
+/// IA2 and UIA read the position for every role. AT-SPI cannot do that for
+/// free: the position lives in the object attributes, which a snapshot
+/// reads only for the roles that need them (`GetAttributes` is a round trip
+/// per element, paid across every tree read). So the gate stays, widened to
+/// every role ARIA lets carry `aria-posinset` and that the backend maps
+/// distinctly:
+///
+/// - `ListItem`: list items and listbox options;
+/// - `TreeItem`;
+/// - `Tab`;
+/// - `RadioButton`: radio buttons and radio menu items;
+/// - `TableRow`: table and tree-grid rows;
+/// - `MenuItem`: menu items, tear-off items included;
+/// - `CheckBox`: check menu items (`menuitemcheckbox`), which AT-SPI folds
+///   into the check-box role;
+/// - `Group`: comments, nested by `level`. A group's attributes are already
+///   read for its document semantics, so this costs nothing.
+///
+/// `Heading` is left out on purpose: its `level` is the heading level
+/// ([`semantics_from_attributes`]), not a depth in a set. ARIA `article`
+/// (a feed member) maps to no distinct role here, so it is not covered.
 fn is_collection_role(role: Role) -> bool {
     matches!(
         role,
-        Role::ListItem | Role::TreeItem | Role::Tab | Role::RadioButton | Role::TableRow
+        Role::ListItem
+            | Role::TreeItem
+            | Role::Tab
+            | Role::RadioButton
+            | Role::TableRow
+            | Role::MenuItem
+            | Role::CheckBox
+            | Role::Group
     )
 }
 
@@ -1582,6 +1612,26 @@ mod tests {
             Some(HeaderKind::Row)
         );
         assert_eq!(header_kind_for(56, "table cell"), None);
+    }
+
+    #[test]
+    fn every_set_member_role_reads_its_position_and_headings_do_not() {
+        for role in [
+            Role::ListItem,
+            Role::TreeItem,
+            Role::Tab,
+            Role::RadioButton,
+            Role::TableRow,
+            Role::MenuItem,
+            Role::CheckBox,
+            Role::Group,
+        ] {
+            assert!(is_collection_role(role), "{role:?}");
+        }
+        // A heading's `level` is its heading level, not a set depth.
+        for role in [Role::Heading, Role::Button, Role::StaticText, Role::Window] {
+            assert!(!is_collection_role(role), "{role:?}");
+        }
     }
 
     #[test]
