@@ -86,23 +86,12 @@ pub(crate) fn offset_unit_for(toolkit: Option<&str>) -> OffsetUnit {
 }
 
 /// Read `bus`'s offset unit from `proxy`, which must address the
-/// application object's `org.a11y.atspi.Application` interface. Shared by
-/// the provider's per-bus cache and the event subscription, which resolves
-/// each application's unit once when it subscribes.
-pub(crate) fn read_offset_unit(proxy: &Proxy<'_>, bus: &str) -> Result<OffsetUnit> {
-    read_offset_unit_unless_gone(proxy, bus)?.ok_or_else(|| Error::Platform {
-        code: -1,
-        message: format!(
-            "reading Application.ToolkitName of {bus} to choose the text offset unit failed: \
-             the application has gone"
-        ),
-    })
-}
-
-/// [`read_offset_unit`], answering `None` when the application has left the
-/// bus. The event subscription reads every sender's unit; an application
-/// that exits between being found and being asked has no events to
-/// interpret, and must not fail the whole subscription.
+/// application object's `org.a11y.atspi.Application` interface, answering
+/// `None` when the application has left the bus. Shared by the provider's
+/// per-bus cache, which turns `None` into the element's stale error, and the
+/// event subscription, which reads every sender's unit: an application that
+/// exits between being found and being asked has no events to interpret,
+/// and must not fail the whole subscription.
 pub(crate) fn read_offset_unit_unless_gone(
     proxy: &Proxy<'_>,
     bus: &str,
@@ -873,7 +862,10 @@ impl<S: TextSource> TextAccess<S> {
         }
     }
 
-    /// The attribute run at UTF-16 `offset`.
+    /// The attribute run at UTF-16 `offset`. An offset on the second half
+    /// of a surrogate pair answers for the pair, as [`Self::range_at`] does,
+    /// for both toolkits: GTK's code-point conversion would otherwise refuse
+    /// it while Qt's UTF-16 offsets pass it through.
     fn run_at(&self, offset: u32) -> Result<TextRun> {
         let past_end = |length: Option<u32>| Error::InvalidTextRange {
             start: offset,
@@ -887,14 +879,28 @@ impl<S: TextSource> TextAccess<S> {
                 if offset >= len {
                     return Err(past_end(Some(len)));
                 }
-                (to_i32(offset, Some(len))?, None)
+                let at = if self.splits_pair(offset, len)? {
+                    offset - 1
+                } else {
+                    offset
+                };
+                (to_i32(at, Some(len))?, None)
             }
             OffsetUnit::CodePoints => {
                 let p = self.prefix_covering(offset.saturating_add(1))?;
                 if let Some(len) = p.length().filter(|&len| offset >= len) {
                     return Err(past_end(Some(len)));
                 }
-                let n = utf16_to_char_offset(&p.text, offset).map_err(|e| p.fix(e))?;
+                // The prefix holds unit `offset`: a whole one has more than
+                // `offset` units (checked above), a partial one at least
+                // `offset + 1`.
+                let low_half = p
+                    .text
+                    .encode_utf16()
+                    .nth(offset as usize)
+                    .is_some_and(|u| (0xDC00..=0xDFFF).contains(&u));
+                let at = if low_half { offset - 1 } else { offset };
+                let n = utf16_to_char_offset(&p.text, at).map_err(|e| p.fix(e))?;
                 (to_i32(n, p.length())?, Some(p))
             }
         };
@@ -1278,8 +1284,11 @@ impl LinuxProvider {
 
     // ── Text ────────────────────────────────────────────────────────
 
-    /// The offset unit of `bus`'s toolkit, cached per bus.
-    pub(super) fn offset_unit(&self, bus: &str) -> Result<OffsetUnit> {
+    /// The offset unit of the toolkit behind `element` (found at `aref`),
+    /// cached per bus. An application that has left the bus fails as stale,
+    /// like every other read of a departed element.
+    fn offset_unit(&self, aref: &AccessibleRef, element: &ElementData) -> Result<OffsetUnit> {
+        let bus = aref.bus_name.as_str();
         if let Some(unit) = self
             .gtk4
             .offset_units
@@ -1290,7 +1299,9 @@ impl LinuxProvider {
             return Ok(*unit);
         }
         let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application")?;
-        let unit = read_offset_unit(&proxy, bus)?;
+        let Some(unit) = read_offset_unit_unless_gone(&proxy, bus)? else {
+            return Err(self.gone(aref, xa11y_core::error::stale_subject(element)));
+        };
         let mut units = self
             .gtk4
             .offset_units
@@ -1307,7 +1318,7 @@ impl LinuxProvider {
 
     fn text_access(&self, element: &ElementData) -> Result<TextAccess<Proxy<'_>>> {
         let aref = self.with_interface(element, "org.a11y.atspi.Text", "text")?;
-        let unit = self.offset_unit(&aref.bus_name)?;
+        let unit = self.offset_unit(&aref, element)?;
         let source = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Text")?;
         Ok(TextAccess { source, unit })
     }
@@ -1829,6 +1840,24 @@ mod tests {
                     gtk.range_at(offset, unit),
                     &format!("range_at({offset}, {unit:?})"),
                 );
+            }
+            // Runs are cut in native units, so the two toolkits' runs
+            // differ; both must answer (or refuse) the same offsets, and
+            // each answer must hold the character at `offset`.
+            let qt_run = qt.run_at(offset).map(|r| r.range);
+            let gtk_run = gtk.run_at(offset).map(|r| r.range);
+            match (&qt_run, &gtk_run) {
+                (Ok(q), Ok(g)) => {
+                    let ch = qt.range_at(offset, TextUnit::Character).unwrap();
+                    for (who, run) in [("UTF-16", q), ("code points", g)] {
+                        assert!(
+                            run.start <= ch.start && ch.start < run.end,
+                            "run_at({offset}) for {who} is {run:?}, missing {ch:?}"
+                        );
+                    }
+                }
+                (Err(_), Err(_)) => {}
+                _ => panic!("run_at({offset}): UTF-16 {qt_run:?} vs code points {gtk_run:?}"),
             }
             for end in offset..=len + 1 {
                 let range = TextRange { start: offset, end };
