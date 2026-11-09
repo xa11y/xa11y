@@ -3288,12 +3288,14 @@ mod wait_stable_tests {
 
     #[test]
     fn a_timeout_after_a_hidden_poll_reports_the_restarted_window() {
-        // Poll 1 sees it hidden; poll 2 (the last before the 150 ms
-        // deadline) sees it visible. Earlier hidden time cannot count as
-        // unchanged bounds.
+        // Poll 1 sees it hidden; poll 2 (the last before the deadline) sees
+        // it visible. Earlier hidden time cannot count as unchanged bounds.
+        // A third poll cannot start before 200 ms (two 100 ms intervals), and
+        // no poll runs past the deadline (#531), so any timeout under that
+        // gives exactly two; 195 ms leaves a slow runner room for poll 2.
         let (_p, loc) = animated(vec![(Some(rect(110)), false), (Some(rect(110)), true)]);
         let err = loc
-            .wait_stable(Duration::from_millis(150))
+            .wait_stable(Duration::from_millis(195))
             .expect_err("a hidden poll resets the comparison");
         let observed = observed(&err);
         assert!(
