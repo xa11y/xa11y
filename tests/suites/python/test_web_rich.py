@@ -260,7 +260,9 @@ def test_web_list_items_report_no_collection_on_macos(app):
     # Chromium exposes an <li> to AX as an AXGroup with no position, so the
     # declared posinset / setsize do not reach AX clients at all.
     items = by_name(app, "Paged List").children()
-    assert [text_of(i) for i in items] == ["Item 41", "Item 42"]
+    assert [i.role for i in items] == ["group", "group"]
+    # The bullet is a text child of its own, so the item reads "• Item 41".
+    assert [text_of(i).lstrip("• ") for i in items] == ["Item 41", "Item 42"]
     assert all(i.collection is None for i in items)
 
 
