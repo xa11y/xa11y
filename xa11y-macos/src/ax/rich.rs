@@ -89,7 +89,6 @@ extern "C" {
     ) -> bool;
     fn safe_cf_string_copy_utf16(value: CFTypeRef, buffer: *mut u16, capacity: CFIndex) -> CFIndex;
     fn safe_ax_decode_text_run(attributed: CFTypeRef, out: *mut XA11yTextRun) -> i32;
-    fn safe_ax_is_element(value: CFTypeRef) -> bool;
     #[cfg(test)]
     fn xa11y_test_font_traits(name: CFStringRef, size: f64, italic: *mut i32) -> i32;
 }
@@ -378,11 +377,23 @@ fn individual_range(element: AXUIElementRef, attribute: &str) -> Option<(i64, i6
     r
 }
 
+/// The roles whose snapshot carries a [`CollectionInfo`].
+fn is_collection_role(role: Role) -> bool {
+    matches!(
+        role,
+        Role::ListItem | Role::TreeItem | Role::Tab | Role::RadioButton | Role::TableRow
+    )
+}
+
 impl PositionAttrs {
     /// The individual-read path's counterpart of the batch slots. Reads only
     /// the attributes the element's AX role can carry, so the fallback does
     /// not pay eight extra round trips on every element.
-    pub(super) fn read_individually(element: AXUIElementRef, ax_role: &str) -> Self {
+    pub(super) fn read_individually(
+        element: AXUIElementRef,
+        ax_role: &str,
+        subrole: Option<&str>,
+    ) -> Self {
         let mut attrs = Self::default();
         match ax_role {
             "AXTable" | "AXGrid" | "AXOutline" => {
@@ -399,9 +410,11 @@ impl PositionAttrs {
             }
             _ => {}
         }
-        // The AX roles `to_metadata` turns into a collection role (row, tree
-        // item, tab, radio button); a position read elsewhere is discarded.
-        if matches!(ax_role, "AXRow" | "AXRadioButton") {
+        // Only where `to_metadata` builds a collection; a position read
+        // elsewhere is discarded. Decided on the mapped role, as there, so a
+        // tab that is an `AXButton` with the `AXTabButton` subrole keeps
+        // its position on this path as it does on the batch one.
+        if is_collection_role(map_ax_role(ax_role, subrole)) {
             attrs.pos_in_set = individual_i64(element, "AXARIAPosInSet");
             attrs.set_size = individual_i64(element, "AXARIASetSize");
         }
@@ -463,11 +476,7 @@ impl PositionAttrs {
             .then(|| self.index.and_then(|n| u32::try_from(n).ok()))
             .flatten()
             .map(|index| RowParts { index: Some(index) }.into());
-        let collection = matches!(
-            role,
-            Role::ListItem | Role::TreeItem | Role::Tab | Role::RadioButton | Role::TableRow
-        )
-        .then(|| {
+        let collection = is_collection_role(role).then(|| {
             let info: CollectionInfo = CollectionParts {
                 index: self.pos_in_set.and_then(index_from_one_based),
                 // 0 is "not set"; -1 explicitly "unknown".
@@ -1065,8 +1074,9 @@ impl MacOSProvider {
         range: TextRange,
     ) -> Result<Option<Rect>> {
         let ax = self.get_cached(element.handle)?;
-        let length = ax_text_length(ax.as_ptr(), element)?;
-        check_in_bounds(range, length)?;
+        // Refused inside a surrogate pair, as a read or a selection is, so a
+        // range is valid or not the same way on every platform.
+        validate(ax.as_ptr(), element, range)?;
         let param = range_value(range)?;
         let Some(v) = read_param(ax.as_ptr(), "AXBoundsForRange", param.ptr())?.value() else {
             return Ok(None);
