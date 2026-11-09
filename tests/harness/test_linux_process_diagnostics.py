@@ -44,3 +44,23 @@ def test_missing_trace_tool_is_reported_without_losing_process_evidence(monkeypa
     result = diagnostic.collect(42)
     assert '"owned_pid": 42' in result
     assert '"unavailable"' in result and "strace" in result
+
+
+def test_trace_watchdog_preserves_partial_evidence_and_has_a_hard_kill(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(diagnostic, "snapshot", lambda pid: {"owned_pid": pid})
+    monkeypatch.setattr(diagnostic.shutil, "which", lambda tool: tool)
+
+    def blocked_trace(command, **kwargs):
+        assert "--kill-after=0.25s" in command
+        assert command[command.index("-p") + 1] == "42"
+        assert kwargs["timeout"] == 3
+        kwargs["stderr"].write(b"native ioctl remained blocked")
+        raise subprocess.TimeoutExpired(command, 3)
+
+    monkeypatch.setattr(diagnostic.subprocess, "run", blocked_trace)
+    result = diagnostic.collect(42)
+    assert "native ioctl remained blocked" in result
+    assert "TimeoutExpired" in result
+    assert '"owned_pid": 42' in result

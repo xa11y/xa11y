@@ -77,6 +77,7 @@ def collect(pid: int) -> str:
                         "sudo",
                         "-n",
                         "timeout",
+                        "--kill-after=0.25s",
                         "2s",
                         "strace",
                         "-f",
