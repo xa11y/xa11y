@@ -399,12 +399,191 @@ mod tests {
         }
     }
 
-    // Announcement, StructureChanged, SelectionChanged, Window* —
-    // AccessKit's AT-SPI bridge may or may not synthesize these for the
-    // specific widgets in the test app. They're covered by the dispatch
-    // table's unit tests (xa11y-linux::events::tests); when the bridge
-    // does emit them, the test-app-independent pathway forwards them
+    // ── Event targets are live handles (#480) ──
+
+    /// The target of a real event is a handle into the subscribing
+    /// provider, not a snapshot: wrapped in an `Element`, it advertises the
+    /// actions a queried element would and `press` reaches the live node.
+    ///
+    /// Pressing the checkbox through its own event's target flips it back,
+    /// which is both the proof and the cleanup.
+    #[test]
+    #[ignore]
+    fn event_target_is_actionable_linux() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let chk = app
+            .locator("check_box")
+            .element()
+            .expect("check_box not found");
+        let was_on = chk.states.checked == Some(Toggled::On);
+
+        let sub = app.subscribe().expect("subscribe");
+        chk.press().expect("press failed");
+        let event = sub
+            .wait_for(
+                |e| {
+                    matches!(
+                        e.kind,
+                        EventKind::StateChanged {
+                            flag: StateFlag::Checked,
+                            ..
+                        }
+                    )
+                },
+                Duration::from_secs(3),
+            )
+            .expect("StateChanged{Checked} must be delivered within 3s");
+        drop(sub);
+
+        let data = event.target.expect("StateChanged target must be populated");
+        assert_ne!(data.handle, 0, "an event target is a live handle");
+        assert_eq!(data.role, Role::CheckBox);
+        assert_eq!(
+            data.actions, chk.actions,
+            "the target advertises what a queried element advertises"
+        );
+        let target = Element::new(data, std::sync::Arc::clone(app.provider()));
+        target.check_alive().expect("the target names a live node");
+        assert!(
+            target.same_as(&chk).expect("identity"),
+            "the target is the checkbox that changed"
+        );
+
+        target.press().expect("press through the event target");
+        let flipped_back = (0..30).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            let now = app
+                .locator("check_box")
+                .element()
+                .expect("check_box not found (after)");
+            (now.states.checked == Some(Toggled::On)) == was_on
+        });
+        assert!(
+            flipped_back,
+            "pressing the event target must toggle the live checkbox back"
+        );
+    }
+
+    /// A subscription covers windows the application opens after it
+    /// started (#480): the dialog's "Close Dialog" button takes focus when
+    /// the dialog opens, and that focus event arrives with a live target
+    /// inside the dialog. Pressing the target closes the dialog, after which
+    /// the same target is stale rather than acting on whatever its handle
+    /// would resolve to now.
+    #[test]
+    #[ignore]
+    fn event_subscription_covers_windows_opened_after_subscribe_linux() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let sub = app.subscribe().expect("subscribe");
+        let mut dialog = DialogCleanup;
+        app.locator(r#"button[name="Open Dialog"]"#)
+            .press()
+            .expect("press Open Dialog");
+
+        let event = sub
+            .wait_for(
+                |e| {
+                    e.kind == EventKind::FocusChanged
+                        && e.target
+                            .as_ref()
+                            .is_some_and(|t| t.name.as_deref() == Some("Close Dialog"))
+                },
+                Duration::from_secs(5),
+            )
+            .expect("FocusChanged on the new dialog's button must be delivered within 5s");
+        let target = Element::new(
+            event.target.expect("FocusChanged target"),
+            std::sync::Arc::clone(app.provider()),
+        );
+        assert_eq!(target.role, Role::Button);
+        assert!(
+            target.actions.iter().any(|a| a == "press"),
+            "the target advertises press: {:?}",
+            target.actions
+        );
+        // The handle navigates like a queried element: its window is the
+        // dialog opened after `subscribe`.
+        let mut window = target.clone();
+        while !matches!(window.role, Role::Window | Role::Dialog) {
+            window = window
+                .parent()
+                .expect("parent of the event target")
+                .expect("the target sits in a window");
+        }
+        assert_eq!(window.name.as_deref(), Some("xa11y Test Dialog"));
+
+        target
+            .press()
+            .expect("press Close Dialog through the event target");
+        dialog.wait_closed();
+
+        match target.press() {
+            Err(Error::ElementStale { .. }) => {}
+            other => panic!("press on a closed dialog's button: expected stale, got {other:?}"),
+        }
+
+        // The closed window's own target is a handle too, and an action on
+        // a destroyed window is stale, not performed on whatever answers.
+        let closed = sub
+            .wait_for(
+                |e| {
+                    e.kind == EventKind::WindowClosed
+                        && e.target
+                            .as_ref()
+                            .is_some_and(|t| t.name.as_deref() == Some("xa11y Test Dialog"))
+                },
+                Duration::from_secs(5),
+            )
+            .expect("WindowClosed for the dialog must be delivered within 5s");
+        let window = Element::new(
+            closed.target.expect("WindowClosed target"),
+            std::sync::Arc::clone(app.provider()),
+        );
+        assert_ne!(window.handle, 0, "a WindowClosed target is a handle");
+        match window.close() {
+            Err(Error::ElementStale { .. }) => {}
+            other => panic!("close on a closed window: expected stale, got {other:?}"),
+        }
+    }
+
+    /// Closes the test app's dialog if a test leaves it open, so the shared
+    /// app instance the suite runs against starts every test with one window.
+    struct DialogCleanup;
+
+    impl DialogCleanup {
+        /// Wait until "Close Dialog" is gone from the accessibility tree.
+        fn wait_closed(&mut self) {
+            use std::time::Duration;
+            h::app_root()
+                .locator(r#"button[name="Close Dialog"]"#)
+                .wait_detached(Duration::from_secs(5))
+                .expect("the dialog closes");
+        }
+    }
+
+    impl Drop for DialogCleanup {
+        fn drop(&mut self) {
+            // Best effort: `Drop` must not unwind, and a dialog that is
+            // already closed has nothing to clean up.
+            if let Ok(btn) = h::app_root()
+                .locator(r#"button[name="Close Dialog"]"#)
+                .element()
+            {
+                let _ = btn.press();
+            }
+        }
+    }
+
+    // StructureChanged, SelectionChanged, WindowOpened and the window
+    // activation kinds — AccessKit's AT-SPI bridge may or may not synthesize
+    // these for the specific widgets in the test app. They're covered by the
+    // dispatch table's unit tests (xa11y-linux::events::tests); when the
+    // bridge does emit them, the test-app-independent pathway forwards them
     // correctly. A dedicated Linux-specific test harness (or AccessKit
     // bridge widgets that reliably emit these signals) would be the right
-    // place to add end-to-end coverage later.
+    // place to add end-to-end coverage later. Announcement has its own test
+    // above, and WindowClosed is asserted by
+    // `event_subscription_covers_windows_opened_after_subscribe_linux`.
 }

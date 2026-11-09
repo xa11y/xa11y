@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
 use xa11y_core::RelationKind;
 
@@ -64,11 +64,13 @@ pub struct LinuxProvider {
     /// The accessibility-bus connection. Behind a lock so a connection the
     /// bus closed can be replaced; see [`LinuxProvider::connection`].
     a11y_bus: Mutex<Connection>,
-    /// Cached AT-SPI accessible refs keyed by handle ID.
-    handle_cache: Mutex<BoundedHandleCache<AccessibleRef>>,
+    /// Cached AT-SPI accessible refs keyed by handle ID. Shared with every
+    /// event subscription (see [`HandleRegistrar`]), so an event's target is
+    /// a handle into this same cache.
+    handle_cache: Arc<Mutex<BoundedHandleCache<AccessibleRef>>>,
     /// Cached AT-SPI2 action indices keyed by element handle.
     /// Maps each action name (snake_case) to the integer index used by `DoAction(i)`.
-    action_indices: Mutex<BoundedHandleCache<HashMap<String, i32>>>,
+    action_indices: Arc<Mutex<BoundedHandleCache<HashMap<String, i32>>>>,
     /// Native X11/Wayland window-manager channel, selected independently of
     /// the AT-SPI accessibility connection.
     window_manager: WindowManager,
@@ -161,6 +163,73 @@ pub(crate) fn read_interfaces(accessible: &Proxy<'_>) -> Result<Interfaces> {
     Ok(Interfaces::from_names(&names))
 }
 
+/// Read the actions an object's `org.a11y.atspi.Action` proxy reports, with
+/// each one's `DoAction` index, keeping the first index of each canonical
+/// name ([`map_atspi_action_name`]). Best-effort: an object that does not
+/// answer reports no actions. Shared by the query path
+/// (`LinuxProvider::get_actions`) and event targets, so both advertise the
+/// same list for the same object.
+pub(crate) fn read_actions(proxy: &Proxy<'_>) -> (Vec<String>, HashMap<String, i32>) {
+    let mut actions = Vec::new();
+    let mut indices = HashMap::new();
+    // NActions may be returned as i32 or u32 depending on AT-SPI implementation.
+    let n_actions = proxy
+        .get_property::<i32>("NActions")
+        .or_else(|_| proxy.get_property::<u32>("NActions").map(|n| n as i32))
+        .unwrap_or(0);
+    for i in 0..n_actions {
+        if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
+            if let Ok(name) = reply.body().deserialize::<String>() {
+                if let Some(action_name) = map_atspi_action_name(&name) {
+                    if !actions.contains(&action_name) {
+                        indices.insert(action_name.clone(), i);
+                        actions.push(action_name);
+                    }
+                }
+            }
+        }
+    }
+    (actions, indices)
+}
+
+/// Mints handles into a [`LinuxProvider`]'s handle and action-index caches
+/// from outside the provider: an event subscription's worker thread, which
+/// holds no reference to the provider, uses one to make each event's target
+/// a live handle (issue #480).
+///
+/// A handle minted here is indistinguishable from one a query minted: the
+/// provider resolves it through [`LinuxProvider::get_cached`], every action
+/// revalidates it first, and a reconnect forgets it with the rest.
+#[derive(Clone)]
+pub(crate) struct HandleRegistrar {
+    handle_cache: Arc<Mutex<BoundedHandleCache<AccessibleRef>>>,
+    action_indices: Arc<Mutex<BoundedHandleCache<HashMap<String, i32>>>>,
+}
+
+impl HandleRegistrar {
+    /// Register `aref` and the action indices read for it, returning the
+    /// new handle. An empty `action_indices` stores nothing, as
+    /// `build_element_data` stores nothing for an element without actions.
+    pub(crate) fn register(
+        &self,
+        aref: AccessibleRef,
+        action_indices: HashMap<String, i32>,
+    ) -> u64 {
+        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+        self.handle_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle, aref);
+        if !action_indices.is_empty() {
+            self.action_indices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(handle, action_indices);
+        }
+        handle
+    }
+}
+
 impl LinuxProvider {
     /// Create a new Linux accessibility provider.
     ///
@@ -173,8 +242,8 @@ impl LinuxProvider {
         let a11y_bus = Self::connect_a11y_bus()?;
         Ok(Self {
             a11y_bus: Mutex::new(a11y_bus),
-            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         })
@@ -996,29 +1065,12 @@ impl LinuxProvider {
     /// Probes the interface directly rather than relying on the Interfaces property,
     /// which some AT-SPI adapters (e.g. AccessKit) don't expose.
     fn get_actions(&self, aref: &AccessibleRef) -> (Vec<String>, HashMap<String, i32>) {
-        let mut actions = Vec::new();
-        let mut indices = HashMap::new();
-
         // Try Action interface directly
-        if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action") {
-            // NActions may be returned as i32 or u32 depending on AT-SPI implementation.
-            let n_actions = proxy
-                .get_property::<i32>("NActions")
-                .or_else(|_| proxy.get_property::<u32>("NActions").map(|n| n as i32))
-                .unwrap_or(0);
-            for i in 0..n_actions {
-                if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
-                    if let Ok(name) = reply.body().deserialize::<String>() {
-                        if let Some(action_name) = map_atspi_action_name(&name) {
-                            if !actions.contains(&action_name) {
-                                indices.insert(action_name.clone(), i);
-                                actions.push(action_name);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let (actions, indices) =
+            match self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action") {
+                Ok(proxy) => read_actions(&proxy),
+                Err(_) => (Vec::new(), HashMap::new()),
+            };
 
         // NOTE: We do NOT add implicit "focus" based on Component interface existence.
         // On GTK4, GrabFocus() often returns false even when Component interface exists,
@@ -1289,6 +1341,15 @@ impl LinuxProvider {
             .unwrap_or_else(|e| e.into_inner())
             .insert(handle, aref);
         handle
+    }
+
+    /// A [`HandleRegistrar`] minting handles into this provider's caches,
+    /// for an event subscription's worker thread.
+    pub(crate) fn handle_registrar(&self) -> HandleRegistrar {
+        HandleRegistrar {
+            handle_cache: Arc::clone(&self.handle_cache),
+            action_indices: Arc::clone(&self.action_indices),
+        }
     }
 
     /// Look up a cached AccessibleRef by handle.
@@ -4052,7 +4113,7 @@ fn role_has_value(role: Role) -> bool {
 /// callable, and the state-mutating verbs are `Unsupported` on AT-SPI — so
 /// admitting them here would only earn a pointless GetActions probe
 /// returning no usable entries.
-fn role_has_actions(role: Role) -> bool {
+pub(crate) fn role_has_actions(role: Role) -> bool {
     matches!(
         role,
         Role::Button
@@ -4957,7 +5018,7 @@ fn map_atspi_action_name(action_name: &str) -> Option<String> {
 /// container does not implement Action. Parentage and children cannot separate
 /// the two: GTK reparents the popup under its owning entry and exposes submenu
 /// items directly as children of that same entry.
-fn refine_menu_role(role: Role, actions: &[String]) -> Role {
+pub(crate) fn refine_menu_role(role: Role, actions: &[String]) -> Role {
     if role == Role::Menu && actions.iter().any(|action| action == "press") {
         Role::MenuItem
     } else {
@@ -5974,8 +6035,8 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -6181,8 +6242,8 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -6328,7 +6389,7 @@ mod tests {
         ];
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(
+            handle_cache: Arc::new(Mutex::new(
                 paths
                     .iter()
                     .enumerate()
@@ -6342,8 +6403,8 @@ mod tests {
                         )
                     })
                     .collect(),
-            ),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            )),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -6506,8 +6567,8 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = std::sync::Arc::new(LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         });
@@ -6620,8 +6681,8 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -6990,8 +7051,8 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = std::sync::Arc::new(LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         });
@@ -7182,8 +7243,8 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -7256,8 +7317,8 @@ mod tests {
         let _server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -7306,13 +7367,83 @@ mod tests {
         }
     }
 
+    /// #480: a handle an event subscription mints through its registrar
+    /// is one the provider resolves, with its action indices, and a
+    /// reconnect forgets it like any other.
+    #[test]
+    fn registrar_handles_resolve_in_the_provider_and_go_stale_on_reconnect() {
+        let (server, client) = p2p_pair();
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(client.clone()),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        // A clone of the provider's caches, as the event thread holds it.
+        let registrar = provider.handle_registrar();
+        let pressable = registrar.register(
+            AccessibleRef {
+                bus_name: ":1.7".into(),
+                path: "/org/a11y/atspi/accessible/3".into(),
+            },
+            HashMap::from([("press".to_string(), 2)]),
+        );
+        let inert = registrar.register(
+            AccessibleRef {
+                bus_name: ":1.7".into(),
+                path: "/org/a11y/atspi/accessible/4".into(),
+            },
+            HashMap::new(),
+        );
+        assert_ne!(pressable, 0, "0 is the snapshot sentinel");
+        assert_ne!(pressable, inert);
+        // Handles share the provider's counter, so a query never reuses one.
+        let queried = provider.cache_element(AccessibleRef {
+            bus_name: ":1.7".into(),
+            path: "/org/a11y/atspi/accessible/5".into(),
+        });
+        assert!(queried > inert);
+
+        let aref = provider.get_cached(pressable).expect("registered handle");
+        assert_eq!(aref.path, "/org/a11y/atspi/accessible/3");
+        assert_eq!(provider.get_action_index(pressable, "press").ok(), Some(2));
+        assert!(provider.get_cached(inert).is_ok());
+        assert!(
+            provider.get_action_index(inert, "press").is_err(),
+            "no actions read, none stored"
+        );
+
+        drop(server);
+        wait_closed(&client);
+        let (_server2, client2) = p2p_pair();
+        let fresh = provider
+            .connection_with(|| Ok(client2))
+            .expect("reconnected");
+        assert!(!fresh.is_closed());
+        assert!(matches!(
+            provider.get_cached(pressable),
+            Err(Error::ElementStale { .. })
+        ));
+        assert!(provider.get_action_index(pressable, "press").is_err());
+        // The registrar still feeds the replacement cache.
+        let after = registrar.register(
+            AccessibleRef {
+                bus_name: ":1.8".into(),
+                path: "/org/a11y/atspi/accessible/1".into(),
+            },
+            HashMap::new(),
+        );
+        assert!(provider.get_cached(after).is_ok());
+    }
+
     #[test]
     fn closed_connection_is_replaced_and_old_handles_go_stale() {
         let (server, client) = p2p_pair();
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(client.clone()),
-            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };
@@ -7500,8 +7631,8 @@ mod tests {
         let server = server.join().expect("server thread");
         let provider = LinuxProvider {
             a11y_bus: Mutex::new(connection),
-            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
-            action_indices: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            handle_cache: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
             window_manager: WindowManager::new(),
             gtk4: Gtk4Geometry::default(),
         };

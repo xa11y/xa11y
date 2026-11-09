@@ -38,8 +38,9 @@ use xa11y_core::{
 };
 
 use crate::atspi::{
-    is_listable_top_level, is_password_role, read_interfaces, read_offset_unit_unless_gone,
-    role_from_atspi, try_map_atspi_role_number, AccessibleRef, Interfaces, LinuxProvider,
+    is_listable_top_level, is_password_role, read_actions, read_interfaces,
+    read_offset_unit_unless_gone, refine_menu_role, role_from_atspi, role_has_actions,
+    try_map_atspi_role_number, AccessibleRef, HandleRegistrar, Interfaces, LinuxProvider,
     OffsetUnit,
 };
 
@@ -173,6 +174,7 @@ pub(crate) fn subscribe_for_pid(
         windows: Mutex::new(windows),
         window_snapshots: Mutex::new(window_snapshots),
         offset_units,
+        registrar: provider.handle_registrar(),
     });
 
     // Activate the broadcast receiver *before* spawning the worker. If we
@@ -261,9 +263,47 @@ struct EventContext {
     window_snapshots: Mutex<HashMap<String, ElementData>>,
     /// Each sender bus's text offset unit (see [`text_change_from_signal`]).
     offset_units: HashMap<String, OffsetUnit>,
+    /// Mints each emitted target's handle into the subscribing provider's
+    /// cache (see [`EventContext::make_live`]).
+    registrar: HandleRegistrar,
 }
 
 impl EventContext {
+    /// Make `target` (a snapshot of `aref`) a live handle in the subscribing
+    /// provider's cache, so a consumer can act on it like a queried element
+    /// (issue #480). A target that already has a handle is returned as is.
+    ///
+    /// Runs only for a target that is about to be emitted, never for the
+    /// many signals that map to no event: each call mints a cache entry and,
+    /// for a role that carries actions, reads them. The actions are read
+    /// here rather than in [`build_event_snapshot`] for the same reason.
+    /// They are read so that `actions` and the stored `DoAction` indices
+    /// come from the same evidence, as they do for a queried element: a
+    /// target that advertised nothing but accepted `press` would be the
+    /// mismatch tenet 3 rules out.
+    ///
+    /// Whether the handle still names the element is not decided here.
+    /// Every action revalidates first (`revalidate_atspi`, against the
+    /// snapshot's `atspi_role`), so an action on the target of a destroyed
+    /// element, a `WindowClosed` window included, is `ElementStale`.
+    fn make_live(&self, aref: &AccessibleRef, mut target: ElementData) -> ElementData {
+        if target.handle != 0 {
+            return target;
+        }
+        let (actions, indices) = if role_has_actions(target.role) {
+            get_actions(&self.conn, aref)
+        } else {
+            (vec![], HashMap::new())
+        };
+        // GTK 3's `menu` role covers both a popup menu and the entry that
+        // opens it; the query path tells them apart by the entry's `press`
+        // action (`refine_menu_role`), and the target must agree with it.
+        target.role = refine_menu_role(target.role, &actions);
+        target.actions = actions;
+        target.handle = self.registrar.register(aref.clone(), indices);
+        target
+    }
+
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
         self.emit_with(kind, target, None, None);
     }
@@ -341,6 +381,14 @@ impl EventContext {
             detail1,
             target_role,
         );
+        // One handle per signal, shared by every event it maps to. A signal
+        // that maps to nothing mints none here; if the window lifecycle
+        // below emits for it, `window_listed_with` makes the target live.
+        let target = if kinds.is_empty() {
+            target
+        } else {
+            target.map(|t| self.make_live(&target_ref, t))
+        };
 
         let announcement =
             announcement_from_signal(iface.as_str(), member.as_str(), detail1, any_data.clone());
@@ -456,7 +504,8 @@ impl EventContext {
             let target = match target() {
                 Some(t) if is_window_role(t.role) => Some(t),
                 other => snapshots.get(&key).cloned().or(other),
-            };
+            }
+            .map(|t| self.make_live(aref, t));
             // A closed window's entry goes with it, so neither map grows
             // with every window the application ever opened.
             if listed {
@@ -1415,9 +1464,8 @@ fn build_event_snapshot(
             stable_id: Some(aref.path.clone()),
             pid,
             raw,
-            // Snapshots are read-only targets, not live handles into the main
-            // provider's cache. Consumers wanting to drive actions must
-            // re-resolve through the regular locator path.
+            // Not yet a handle: `EventContext::make_live` registers the
+            // target, and reads its actions, only once it is emitted.
             handle: 0,
         }
         .into(),
@@ -1435,6 +1483,15 @@ fn make_proxy<'a>(conn: &'a Connection, bus: &str, path: &str, iface: &str) -> O
         .cache_properties(zbus::proxy::CacheProperties::No)
         .build()
         .ok()
+}
+
+/// The actions `aref`'s Action interface reports, with each one's
+/// `DoAction` index, read over the subscription's connection.
+fn get_actions(conn: &Connection, aref: &AccessibleRef) -> (Vec<String>, HashMap<String, i32>) {
+    match make_proxy(conn, &aref.bus_name, &aref.path, "org.a11y.atspi.Action") {
+        Some(proxy) => read_actions(&proxy),
+        None => (Vec::new(), HashMap::new()),
+    }
 }
 
 fn get_role_name(conn: &Connection, aref: &AccessibleRef) -> Option<String> {

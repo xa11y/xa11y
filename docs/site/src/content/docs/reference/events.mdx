@@ -77,7 +77,7 @@ The `flag` carried by `StateChanged`:
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `kind` (Rust) / `event_type` (Python) / `type` (JavaScript) | `EventKind` / string | What happened |
-| `target` | Element snapshot, optional | The element that triggered the event. Absent when the element is unavailable or already destroyed. |
+| `target` | Element, optional | The element that triggered the event. Absent when the element is unavailable or already destroyed. Its properties are read when the event arrives. On Linux it is also a live handle, described under [Acting on a target](#acting-on-a-target). |
 | `app_name` | string | Name of the application that produced the event |
 | `app_pid` | integer | Process ID of that application |
 | `timestamp` | monotonic instant | Time of receipt. Rust only. |
@@ -126,6 +126,25 @@ On Windows, a `target` snapshot is thinner than a queried element. It has no
 `uia_framework_id` in `raw` and never offers `Press` through the MSAA default
 action. [Action mapping](/reference/platform-details/#action-mapping) has the
 details. Query the element again to get both.
+
+### Acting on a target
+
+On Linux, a `target` is a handle into the same cache a query fills, so it
+supports everything a queried element does: actions, navigation, `same_as`
+and `check_alive`. Like every element, it is checked for staleness before
+each action. An action on the target of an element that has since been
+destroyed fails with `ElementStale`, and so does one on a `WindowClosed`
+target. The target lists the element's AT-SPI actions, read when the event
+is delivered. A window target leaves out the window-manager verbs (`close`,
+`minimize` and the rest) that a queried window lists. Query the window again
+to see them.
+
+In Rust, wrap the data with the provider of the application you subscribed
+to: `Element::new(target, Arc::clone(app.provider()))`. In Python and
+JavaScript, `event.target` is already an `Element`.
+
+On macOS and Windows, a target is still a snapshot. Query the element again
+before acting on it.
 
 ## Subscribing
 
