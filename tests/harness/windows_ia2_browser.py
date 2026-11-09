@@ -7,7 +7,6 @@ Windows-only pywin32 test dependency; the product does not depend on it.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import json
 import os
 import shutil
@@ -15,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 MARKERS = ("xa11y IA2 document A", "xa11y IA2 document B")
@@ -218,7 +218,10 @@ def _remove_owned_directory(directory: Path, original: Path):
             # already-stopped fixture directory, for at most two seconds.
             if isinstance(exc, FileNotFoundError) and not directory.exists():
                 return
-            if getattr(exc, "winerror", None) not in (2, 32) or time.monotonic() >= deadline:
+            if (
+                getattr(exc, "winerror", None) not in (2, 32)
+                or time.monotonic() >= deadline
+            ):
                 raise
             time.sleep(0.1)
 
@@ -273,6 +276,50 @@ def _owned_log_tail(log: Path):
         return {"error": f"{type(exc).__name__}: {str(exc)[:512]}"}
 
 
+def _run_phase(run, command, label, *, timeout=30):
+    started = time.monotonic()
+    print(f"IA2 phase started: {label}", file=sys.stderr, flush=True)
+    try:
+        result = run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired may carry bytes even with text=True. Keep the native
+        # phase markers: the old bare exception lost the only step evidence.
+        def bounded(value):
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            return (value or "")[-8000:]
+
+        raise AssertionError(
+            f"IA2 {label} exceeded {timeout}s; "
+            f"stdout tail={bounded(exc.stdout)!r}; stderr tail={bounded(exc.stderr)!r}"
+        ) from exc
+    if result.returncode != 0:
+        raise AssertionError(
+            f"Native IA2 probe failed during {label} ({result.returncode}): "
+            f"stdout={result.stdout[-8000:]!r}; stderr={result.stderr[-8000:]!r}"
+        )
+    if result.stderr:
+        print(
+            f"IA2 {label} diagnostics (truncated={len(result.stderr) > 8000}):\n"
+            f"{result.stderr[-8000:]}",
+            file=sys.stderr,
+            flush=True,
+        )
+    print(
+        f"IA2 phase passed: {label} ({time.monotonic() - started:.2f}s)",
+        file=sys.stderr,
+        flush=True,
+    )
+    return result
+
+
 def run_fixture(
     probe: Path,
     executable: Path,
@@ -318,7 +365,8 @@ def run_fixture(
         hwnd, pid = window
         reports = []
         for active, inactive in (MARKERS, MARKERS[::-1]):
-            result = run(
+            result = _run_phase(
+                run,
                 [
                     str(probe),
                     "--hwnd",
@@ -330,30 +378,46 @@ def run_fixture(
                     "--inactive-marker",
                     inactive,
                 ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=30,
-                check=False,
+                f"native probe pid={pid} active={active!r}",
             )
-            if result.returncode != 0:
-                raise AssertionError(
-                    f"Native IA2 probe failed ({result.returncode}): "
-                    f"stdout={result.stdout[:8000]!r}; stderr={result.stderr[:8000]!r}"
-                )
             report = _validate_report(json.loads(result.stdout), pid, active, inactive)
             job.verify_event_window(report["window_handle"], report["event_pid"], hwnd)
+            if os.environ.get("XA11Y_IA2_CONSUMERS") and "rich_text_table" in report:
+                consumers = _run_phase(
+                    run,
+                    [
+                        sys.executable,
+                        str(Path(__file__).with_name("windows_ia2_consumers.py")),
+                        str(pid),
+                    ],
+                    f"consumer sources pid={pid} active={active!r}",
+                )
+                sources = json.loads(consumers.stdout)
+                assert sources == dict.fromkeys(
+                    ("python", "javascript", "cli", "mcp"), True
+                ), sources
+                report["consumer_sources"] = sources
             reports.append(report)
         timeout_report = None
         if exercise_timeout:
             with job.paused_owner(hwnd, pid):
-                stalled = run([str(probe), "--hung", str(pid)], capture_output=True,
-                              text=True, encoding="utf-8", timeout=12, check=False)
+                stalled = run(
+                    [str(probe), "--hung", str(pid)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=12,
+                    check=False,
+                )
                 if stalled.returncode != 0:
-                    raise AssertionError(f"Hung IA2 probe failed: {stalled.stderr[:8000]}")
+                    raise AssertionError(
+                        f"Hung IA2 probe failed: {stalled.stderr[:8000]}"
+                    )
                 timeout_report = json.loads(stalled.stdout)
                 if timeout_report.get("worker_disabled") is not True:
-                    raise AssertionError(f"Hung probe did not prove worker disabled: {timeout_report}")
+                    raise AssertionError(
+                        f"Hung probe did not prove worker disabled: {timeout_report}"
+                    )
         return {
             "browser": str(executable),
             "configuration": list(BROWSER_FLAGS),
