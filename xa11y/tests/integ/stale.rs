@@ -163,6 +163,7 @@ fn every_action_on_a_destroyed_gtk3_widget_is_stale() {
         ("button.focus", button.focus()),
         ("button.scroll_into_view", button.scroll_into_view()),
         ("entry.focus", entry.focus()),
+        ("entry.blur", entry.blur()),
         ("entry.set_value", entry.set_value("written to a zombie")),
         ("entry.type_text", entry.type_text("typed into a zombie")),
         ("entry.select_text", entry.select_text(0, 2)),

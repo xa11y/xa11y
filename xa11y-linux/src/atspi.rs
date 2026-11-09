@@ -3465,6 +3465,11 @@ impl Provider for LinuxProvider {
 
     fn blur(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
+        // Blur acts on the parent, so without this check a destroyed GTK 3
+        // widget (whose zombie accessible still answers) would report
+        // ActionNotSupported or grab focus elsewhere instead of failing as
+        // stale (#586).
+        self.ensure_attached(&target)?;
         // Grab focus on parent element to blur the current one. We propagate
         // every failure — no silent fallbacks (tenet 1): callers need to see
         // when blur can't do anything useful.
@@ -3954,24 +3959,47 @@ impl Provider for LinuxProvider {
         // Get cursor position from Text interface, then insert at that position.
         // The caret offset comes back in the toolkit's own offset unit and
         // goes straight back into InsertText, so it needs no conversion.
-        let text_proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text");
-        let insert_pos = text_proxy
-            .as_ref()
-            .ok()
-            .and_then(|p| p.get_property::<i32>("CaretOffset").ok())
-            .unwrap_or(-1); // -1 = append at end
-
-        let proxy = self
-            .make_proxy(
-                &target.bus_name,
-                &target.path,
-                "org.a11y.atspi.EditableText",
-            )
-            .map_err(|_| Error::TextValueNotSupported)?;
-        let pos = if insert_pos >= 0 {
-            insert_pos
-        } else {
-            i32::MAX
+        let text_proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text")?;
+        let caret = match text_proxy.get_property::<i32>("CaretOffset") {
+            Ok(offset) => Some(offset),
+            // An object with no Text interface (or one that does not report
+            // CaretOffset) has no caret to insert at: append at the end,
+            // which is what AT-SPI's own `-1` caret means too.
+            Err(e) if is_property_absent(&e) => None,
+            // Anything else (the peer hanging or a deadline cutting the read,
+            // the application leaving the bus) is a failure. Treating it as
+            // "no caret" would insert at the wrong place and report success.
+            Err(e) if is_timeout(&e) => {
+                return Err(self.unresponsive_peer(&target, "Text.CaretOffset"))
+            }
+            Err(e) if is_peer_gone(&e) => {
+                return Err(self.gone(&target, xa11y_core::error::stale_subject(element)))
+            }
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "reading Text.CaretOffset of {}{} to place type_text failed: {e}",
+                        target.bus_name, target.path
+                    ),
+                })
+            }
+        };
+        // `make_proxy` only builds a local handle and never asks the object
+        // what it implements, so its failures are connection failures, not
+        // a missing interface. A missing EditableText surfaces from the
+        // InsertText call below, which `editable_text_call_error` maps to
+        // TextValueNotSupported.
+        let proxy = self.make_proxy(
+            &target.bus_name,
+            &target.path,
+            "org.a11y.atspi.EditableText",
+        )?;
+        // A negative caret (AT-SPI's "none") or no Text interface at all
+        // appends at the end.
+        let pos = match caret {
+            Some(offset) if offset >= 0 => offset,
+            _ => i32::MAX,
         };
         let length = self.insert_text_length(&target, text)?;
         let reply = proxy
