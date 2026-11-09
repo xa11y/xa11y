@@ -504,6 +504,10 @@ def test_controls_of_a_minimized_window_are_not_visible(
     what an auto-waiting action depends on, so absence passes too.
     """
     win = _window_advertising(app, "minimize")
+    if APP == "uwp":
+        assert win is not None and "restore" in win.actions, (
+            "the UWP fixture must expose its minimizable, restorable frame"
+        )
     if win is None or "restore" not in win.actions:
         pytest.skip("no window advertises both minimize and restore")
     button = app.locator(f'button[name="{app_config["ok_button_name"]}"]')

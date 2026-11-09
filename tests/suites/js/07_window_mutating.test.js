@@ -351,6 +351,10 @@ test('js-window suite resolves the shared app', async () => {
 test('a window that advertises minimize is minimized and restored', async (t) => {
   const app = await getApp();
   const win = await windowAdvertising(app, 'minimize');
+  if (appEnv === 'uwp') {
+    assert.ok(win && win.actions.includes('restore'),
+      'the UWP fixture must expose its minimizable, restorable frame');
+  }
   if (!win || !win.actions.includes('restore')) {
     t.skip('no window advertises both minimize and restore');
     return;
