@@ -424,7 +424,7 @@ Selectors use CSS-like syntax to query the accessibility tree. They support matc
 - `window button` — descendant combinator
 - `button:nth(2)` — positional filter (1-based)
 
-Selectors can filter on any attribute in the attributes map, not just name/value/description. This allows selectors like `check_box[checked="true"]` or `[color_value="#FF0000"]`.
+Selectors can filter on any attribute in the attributes map, not just name/value/description. This allows selectors like `check_box[checked="on"]` or `[color_value="#FF0000"]`.
 
 **Not supported:** comma (or) combinators, `:not()`, `:first`/`:last` pseudo-classes, sibling combinators (`+`, `~`), and universal selector (`*`). The selector language is intentionally minimal — complex queries are better expressed as multiple Locator calls or filtering in application code.
 
