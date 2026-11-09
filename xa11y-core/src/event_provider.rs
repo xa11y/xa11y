@@ -248,10 +248,17 @@ impl EventReceiver {
             Source::Ring(ring) => ring.recv(timeout),
             Source::Channel(rx) => {
                 use std::sync::mpsc::RecvTimeoutError;
-                let deadline = std::time::Instant::now() + timeout;
+                // A timeout too large for an `Instant` (`Duration::MAX`)
+                // means no deadline, as in `Deadline::after`.
+                let deadline = std::time::Instant::now().checked_add(timeout);
                 loop {
-                    let left = deadline.saturating_duration_since(std::time::Instant::now());
-                    let event = match rx.recv_timeout(left) {
+                    let received = match deadline {
+                        Some(d) => {
+                            rx.recv_timeout(d.saturating_duration_since(std::time::Instant::now()))
+                        }
+                        None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                    };
+                    let event = match received {
                         Ok(event) => event,
                         Err(RecvTimeoutError::Timeout) => return RecvStatus::Timeout,
                         Err(RecvTimeoutError::Disconnected) => return RecvStatus::Disconnected,
@@ -389,7 +396,9 @@ impl Ring {
     }
 
     fn recv(&self, timeout: Duration) -> RecvStatus {
-        let deadline = std::time::Instant::now() + timeout;
+        // A timeout too large for an `Instant` (`Duration::MAX`) means no
+        // deadline, as in `Deadline::after`.
+        let deadline = std::time::Instant::now().checked_add(timeout);
         let mut state = self.lock();
         loop {
             if let Some(event) = state.queue.pop_front() {
@@ -398,15 +407,19 @@ impl Ring {
             if state.senders == 0 {
                 return RecvStatus::Disconnected;
             }
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                return RecvStatus::Timeout;
-            }
-            state = self
-                .ready
-                .wait_timeout(state, left)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            state = match deadline {
+                Some(d) => {
+                    let left = d.saturating_duration_since(std::time::Instant::now());
+                    if left.is_zero() {
+                        return RecvStatus::Timeout;
+                    }
+                    self.ready
+                        .wait_timeout(state, left)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+                None => self.ready.wait(state).unwrap_or_else(|e| e.into_inner()),
+            };
         }
     }
 }
@@ -577,6 +590,33 @@ mod tests {
 
     fn named(kind: EventKind) -> Event {
         Event::new(kind, "test", 0)
+    }
+
+    #[test]
+    fn an_unrepresentable_timeout_waits_without_a_deadline() {
+        // `Instant::now() + Duration::MAX` overflows; both sources must
+        // treat it as "no deadline" rather than panic.
+        let (tx, rx) = event_channel();
+        let sub = Subscription::new(rx, CancelHandle::noop());
+        tx.send(make_event()).expect("subscribed");
+        assert!(sub.recv(Duration::MAX).is_ok());
+        let waiter = std::thread::spawn(move || sub.recv_status(Duration::MAX));
+        std::thread::sleep(Duration::from_millis(20));
+        drop(tx);
+        assert!(matches!(
+            waiter.join().expect("no panic"),
+            RecvStatus::Disconnected
+        ));
+
+        let (tx, rx) = mpsc::channel::<Event>();
+        let rx = EventReceiver::new(rx);
+        tx.send(make_event()).expect("open");
+        assert!(rx.recv_timeout(Duration::MAX).is_some());
+        drop(tx);
+        assert!(matches!(
+            rx.recv_timeout_status(Duration::MAX),
+            RecvStatus::Disconnected
+        ));
     }
 
     #[test]
