@@ -38,7 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use xa11y_core::input::{InputProvider, Point};
 use xa11y_core::{ElementData, Error, Provider, ScreenshotProvider};
 use xa11y_windows::{
-    WindowsInputProvider, WindowsProvider, WindowsScreenshot, __dpi_scope_switches,
+    __dpi_scope_switches, WindowsInputProvider, WindowsProvider, WindowsScreenshot,
 };
 
 /// The AccessKit test app's process name, as the synthesized app node reports it.

@@ -40,10 +40,14 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Vale
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          url="https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz"
-          curl -fsSL "$url" | tar -xz -C /usr/local/bin vale
+          gh release download "v${VALE_VERSION}" --repo errata-ai/vale \
+            --pattern "vale_${VALE_VERSION}_Linux_64-bit.tar.gz" \
+            --output "$RUNNER_TEMP/vale.tar.gz"
+          tar -xzf "$RUNNER_TEMP/vale.tar.gz" -C /usr/local/bin vale
           vale --version
 
       # Fetches the style package named in .vale.ini into .github/styles/.

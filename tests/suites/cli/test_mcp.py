@@ -432,6 +432,7 @@ def test_the_text_tool_states_its_offset_unit_and_operations(mcp):
         "read",
         "find",
         "range-at",
+        "object-at",
         "lines",
         "bounds",
         "runs",
