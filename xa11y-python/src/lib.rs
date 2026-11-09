@@ -1666,8 +1666,12 @@ fn subscribe_options(kinds: Option<Vec<String>>, buffer: Option<usize>) -> xa11y
 }
 
 impl Subscription {
+    /// Run `f` on the open subscription. `recv` holds this lock for its
+    /// whole timeout, so every caller must already have released the GIL
+    /// (`py.detach`); a thread waiting here with the GIL held would freeze
+    /// the interpreter for as long as another thread's `recv` blocks.
     fn with_sub<T>(&self, f: impl FnOnce(&xa11y::Subscription) -> T) -> PyResult<T> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let sub = guard.as_ref().ok_or_else(|| {
             to_py_err(xa11y::Error::Platform {
                 code: -1,
@@ -1683,18 +1687,18 @@ impl Subscription {
     /// How many events the buffer has dropped, in total, because it was full.
     /// A dropped event leaves a gap in ``Event.sequence``.
     #[getter]
-    fn dropped(&self) -> PyResult<u64> {
-        self.with_sub(|sub| sub.dropped())
+    fn dropped(&self, py: Python<'_>) -> PyResult<u64> {
+        py.detach(|| self.with_sub(|sub| sub.dropped()))
     }
 
-    fn try_recv(&self) -> PyResult<Option<Event>> {
+    fn try_recv(&self, py: Python<'_>) -> PyResult<Option<Event>> {
         let provider = self.provider.clone();
-        self.with_sub(|sub| sub.try_recv().map(|e| Event::from_core(e, provider)))
+        py.detach(|| self.with_sub(|sub| sub.try_recv().map(|e| Event::from_core(e, provider))))
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn recv(&self, py: Python<'_>, timeout: f64) -> PyResult<Event> {
-        let dur = Duration::from_secs_f64(timeout);
+        let dur = parse_duration(timeout)?;
         let provider = self.provider.clone();
         py.detach(|| self.with_sub(|sub| sub.recv(dur).map(|e| Event::from_core(e, provider))))
             .and_then(|r| r.map_err(to_py_err))
@@ -1702,7 +1706,7 @@ impl Subscription {
 
     #[pyo3(signature = (predicate, timeout=5.0))]
     fn wait_for(&self, py: Python<'_>, predicate: Py<PyAny>, timeout: f64) -> PyResult<Event> {
-        let dur = Duration::from_secs_f64(timeout);
+        let dur = parse_duration(timeout)?;
         let start = std::time::Instant::now();
         let mut seen: usize = 0;
 
@@ -1752,8 +1756,11 @@ impl Subscription {
         }
     }
 
-    fn close(&self) {
-        self.inner.lock().unwrap().take();
+    fn close(&self, py: Python<'_>) {
+        // Released GIL: a concurrent `recv` holds this lock until it returns.
+        let sub = py.detach(|| self.inner.lock().unwrap_or_else(|e| e.into_inner()).take());
+        // Dropping cancels the platform subscription, which can block too.
+        py.detach(move || drop(sub));
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -1763,11 +1770,12 @@ impl Subscription {
     #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
     fn __exit__(
         &self,
+        py: Python<'_>,
         _exc_type: Option<&Bound<'_, pyo3::types::PyAny>>,
         _exc_val: Option<&Bound<'_, pyo3::types::PyAny>>,
         _exc_tb: Option<&Bound<'_, pyo3::types::PyAny>>,
     ) -> bool {
-        self.close();
+        self.close(py);
         false
     }
 
