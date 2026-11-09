@@ -572,7 +572,7 @@ MSAA provides navigation and standard role/name/state properties.
 | Table and cell metadata | `IAccessibleTable2.nRows` / `nColumns`, with the required `IAccessibleTableCell` index and extent methods |
 | Cell lookup | `Table2.cellAt`, including merged spans, without realizing content |
 | Cell headers | `TableCell.columnHeaderCells` / `rowHeaderCells`, preserving signed native identities |
-| Table headers | Collect the cell header relationships, keeping each native identity once. Requires a known table size of at most 256 cells |
+| Table headers | Per column (or row), the header relationships of the first cell that is not itself such a header, reading a spanning cell once and keeping each native identity once. At most 4096 rows and 4096 columns. A missing cell along the walk fails with `Unsupported` |
 | Selected items | `Table2.selectedCells`, at most 4096. List selection enumeration remains unsupported |
 | Document semantics | Heading role and `level`, landmarks and `web_role` from `xml-roles`, live-region settings from object attributes, link URLs from `Hyperlink.anchorTarget` |
 | Relations | Shared relation kinds from `IAccessibleRelation`. At most 256 relations and 1024 targets per request. `owns` and `linked` are unsupported |
@@ -600,12 +600,17 @@ at most 8192 handles, expiring them after five minutes. Expired or evicted
 handles fail as stale. Signed IDs are validated against their event window
 and owning process generation, without resolving a replacement by name.
 
-Each request has a five-second stall bound. A shorter caller deadline stops
-waiting and prevents queued work or later writes from starting; it leaves
-the worker usable. The five-second stall bound disables the worker and
-requests COM cancellation. Cancellation is best effort, so
-native cleanup may continue after the caller returns. An in-flight action
-has unknown delivery. Restart the host before issuing further IA2 requests.
+Each request has a five-second budget that starts when the worker runs it.
+A full queue makes the caller wait for space within that budget. A request
+still queued when its caller stops waiting is withdrawn and never runs. It
+fails as a timeout with `not_delivered` delivery and leaves the worker usable.
+A request whose budget or caller deadline expires between native operations
+stops before the next one. That is an ordinary timeout, and the worker stays
+usable. Only a native call still running after its budget disables the worker.
+Then xa11y requests COM cancellation of that caller's own call. Cancellation
+is best effort, so native cleanup may continue after the caller returns. An
+in-flight action has unknown delivery. Restart the host before issuing
+further IA2 requests.
 An initialization failure also disables this process's IA2 source.
 Native range, attribute and array allocations occur inside the provider
 before their sizes can be checked. Oversized results are refused. Releasing
