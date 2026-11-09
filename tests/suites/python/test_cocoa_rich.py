@@ -1,8 +1,8 @@
 """Text by range, tables and collections through macOS accessibility.
 
 Reads the Cocoa test app (``test-apps/cocoa/main.swift``): its "Rich" box
-(attributed ``NSTextView`` "Rich Text", ``NSOutlineView`` "Produce Tree") and
-the view-based ``NSTableView`` "Users Table".
+(attributed ``NSTextView`` "Rich Text", two-column ``NSOutlineView``
+"Produce Tree") and the view-based ``NSTableView`` "Users Table".
 
 What AX shows, and so what is pinned here:
 
@@ -17,6 +17,11 @@ What AX shows, and so what is pinned here:
 - **Header cells are AppKit sort buttons**, not cells, so they carry no
   ``cell`` metadata; the header queries still return them.
 - **Cells have no name.** The text is the static text inside each cell.
+- **An outline is a list that answers the table APIs.** ``AXOutline`` keeps
+  the ``list`` role, so selectors written against it keep matching, but an
+  ``NSOutlineView`` is an ``NSTableView`` underneath: it reports ``table``
+  dimensions and answers ``cell_at`` and the header queries like the users
+  table does.
 
 macOS only: the widgets are AppKit's.
 """
@@ -311,6 +316,58 @@ def test_headers(users):
     assert user.row_header_cells() == []
 
 
+# Mirrors produceRoots and the "Kind" column in test-apps/cocoa/main.swift,
+# in expanded row order.
+PRODUCE = [
+    ("Vegetables", "Group"),
+    ("Carrot", "Item"),
+    ("Leek", "Item"),
+    ("Dairy", "Group"),
+    ("Milk", "Item"),
+]
+
+
+def test_outline_keeps_the_list_role_and_reports_table_dimensions(tree):
+    assert tree.role == "list"
+    info = tree.table
+    assert info is not None
+    assert (info.row_count, info.column_count) == (len(PRODUCE), 2)
+
+
+def test_outline_cell_at_reads_every_column(tree):
+    for row, (name, kind) in enumerate(PRODUCE):
+        first = tree.cell_at(row, 0)
+        assert first is not None, row
+        assert content(first) == [name]
+        assert (first.cell.row, first.cell.column) == (row, 0)
+
+        second = tree.cell_at(row, 1)
+        assert second is not None, row
+        assert content(second) == [kind]
+        assert (second.cell.row, second.cell.column) == (row, 1)
+
+    assert tree.cell_at(len(PRODUCE), 0) is None
+    assert tree.cell_at(0, 2) is None
+
+
+def test_outline_selector_matches_cell_positions(app):
+    matched = app.locator(
+        'list[name="Produce Tree"] table_cell[row="3"][column="1"]'
+    ).elements()
+    assert len(matched) == 1
+    assert content(matched[0]) == ["Group"]
+
+
+def test_outline_headers(tree):
+    assert [h.name for h in tree.column_headers()] == ["Produce", "Kind"]
+    assert tree.row_headers() == []
+
+    leek = tree.cell_at(2, 1)
+    assert leek is not None
+    assert [h.name for h in leek.column_header_cells()] == ["Kind"]
+    assert leek.row_header_cells() == []
+
+
 def test_a_non_table_refuses_table_calls(rich):
     with pytest.raises(xa11y.ActionNotSupportedError):
         rich.cell_at(0, 0)
@@ -323,13 +380,8 @@ def test_a_non_table_refuses_table_calls(rich):
 
 def test_outline_rows_report_depth_and_row_index(app):
     rows = app.locator('[name="Produce Tree"] > tree_item').elements()
-    assert [content(row) for row in rows] == [
-        ["Vegetables"],
-        ["Carrot"],
-        ["Leek"],
-        ["Dairy"],
-        ["Milk"],
-    ]
+    # A row holds one cell per column, in column order.
+    assert [content(row) for row in rows] == [list(pair) for pair in PRODUCE]
     assert [row.collection.depth for row in rows] == [0, 1, 1, 0, 1]
     assert [row.table_row.index for row in rows] == [0, 1, 2, 3, 4]
     # AppKit reports no position within the parent or set size.
@@ -339,5 +391,5 @@ def test_outline_rows_report_depth_and_row_index(app):
 
 def test_selected_items_reports_the_selected_row(tree):
     selected = tree.selected_items()
-    assert [content(row) for row in selected] == [["Carrot"]]
+    assert [content(row) for row in selected] == [["Carrot", "Item"]]
     assert selected[0].table_row.index == 1

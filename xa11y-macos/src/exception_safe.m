@@ -202,9 +202,14 @@ int safe_ax_set_messaging_timeout(AXUIElementRef element, float timeoutInSeconds
 // ── AXValue Extraction ──────────────────────────────────────────────────────
 
 // Safe wrapper for AXValueGetValue.
-// Returns false if an ObjC exception was thrown.
+// Returns false if an ObjC exception was thrown, or if `value` is NULL or
+// not an AXValue at all: an app can answer AXPosition / AXSize with any CF
+// type, and AXValueGetValue would read a non-AXValue object as one.
 Boolean safe_ax_value_get_value(AXValueRef value, AXValueType type, void *valuePtr) {
     @try {
+        if (value == NULL || CFGetTypeID(value) != AXValueGetTypeID()) {
+            return false;
+        }
         return AXValueGetValue(value, type, valuePtr);
     } @catch (NSException *e) {
         return false;

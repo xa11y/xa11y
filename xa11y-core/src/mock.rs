@@ -728,15 +728,13 @@ impl Provider for MockProvider {
             "enter_fullscreen" => self.enter_fullscreen(el),
             "restore" => self.restore(el),
             "close" => self.close(el),
-            "move_to" => Err(Error::InvalidActionData {
-                message: "perform_action(\"move_to\") requires coordinates; call move_to(x, y)"
-                    .to_string(),
-            }),
-            "resize_to" => Err(Error::InvalidActionData {
-                message: "perform_action(\"resize_to\") requires dimensions; call \
-                           resize_to(width, height)"
-                    .to_string(),
-            }),
+            "move_to" => Err(Error::invalid_action_data(
+                "perform_action(\"move_to\") requires coordinates; call move_to(x, y)",
+            )),
+            "resize_to" => Err(Error::invalid_action_data(
+                "perform_action(\"resize_to\") requires dimensions; call \
+                           resize_to(width, height)",
+            )),
             _ => self.record(el, action, None),
         }
     }

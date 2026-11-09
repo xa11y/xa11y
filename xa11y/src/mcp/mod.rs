@@ -35,8 +35,8 @@
 mod base64;
 mod events;
 mod protocol;
-mod refs;
-mod tools;
+pub(crate) mod refs;
+pub(crate) mod tools;
 mod transport;
 
 use std::io::{BufReader, IsTerminal};

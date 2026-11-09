@@ -188,9 +188,11 @@ impl std::fmt::Display for CliError {
                 };
                 write!(
                     f,
-                    "ref \"{reference}\" is not held: the server keeps the refs of its most \
-                     recent `tree` and `find` results only, and never re-resolves one by \
-                     selector. Call `tree` or `find` again for a fresh ref; {held}"
+                    "ref \"{reference}\" is not held: the server keeps the refs of its {} most \
+                     recent {} only, and never re-resolves one by selector. Call `tree` or \
+                     `find` again for a fresh ref; {held}",
+                    crate::mcp::refs::MAX_CAPTURES,
+                    crate::mcp::refs::ISSUERS,
                 )
             }
             CliError::Xa11y(e) => write!(f, "{e}"),
@@ -288,7 +290,7 @@ fn delivery_line(command: &str, error: &CliError) -> Option<String> {
 /// produces the exit code.
 pub fn run(args: &[String]) -> CliResult<()> {
     match args.first().map(|s| s.as_str()) {
-        Some("apps") => cmd_apps(),
+        Some("apps") => cmd_apps(&args[1..]),
         Some("shell") => cmd_shell(&args[1..]),
         Some("windows") => cmd_windows(&args[1..]),
         Some("enable-web-accessibility") => cmd_enable_web_accessibility(&args[1..]),
@@ -330,12 +332,16 @@ xa11y — accessibility tree explorer
 Usage:
 
 Accessibility tree:
-  xa11y apps                                List running applications
+  xa11y apps   [--backend B]                List running applications
   xa11y shell                               List OS shell surfaces: KIND PID NAME
   xa11y windows [--app NAME | --pid PID]    List top-level windows
   xa11y tree   [TARGET] [--max-nodes N] [--max-depth N]
+                   [--detail text|formatting|relations,...]
                                             Print the accessibility tree, at
-                                            most N nodes (default 2000)
+                                            most N nodes (default 2000).
+                                            --detail adds each element's text,
+                                            formatting runs (implies text)
+                                            or relations under its line
   xa11y find   SELECTOR [TARGET] [-o pretty|bounds|center] [--stable]
                                             Find elements matching a selector.
                                             --stable waits (up to the default
@@ -344,10 +350,10 @@ Accessibility tree:
                                             for at least 750 ms; the selector must
                                             then match exactly one element
   xa11y action ACTION SELECTOR [TARGET] [--value V]
-                                            [--at X,Y] [--size W,H]
+                   [--range START,END] [--at X,Y] [--size W,H]
                                             Perform an action on an element
   xa11y text   OP SELECTOR [TARGET] [--range START,END]
-                   [--find TEXT [--occurrence N]] [--offset N --unit U]
+                   [--find TEXT [--occurrence N]] [--offset N [--unit U]]
                    [--limit N]              Read an element's text by range;
                                             prints JSON; see Text below
   xa11y table  OP SELECTOR [TARGET] [--row N --column N]
@@ -385,6 +391,14 @@ TARGET — what tree/find/action search (--shell and --app are exclusive):
       status_items and dock are macOS only, taskbar is Windows only,
       panel is Linux only, desktop and flyout are macOS and Windows.
       `xa11y shell` lists what this machine actually has.
+  --backend B                               Accessibility source for an
+                                            application: {backends} (default:
+                                            XA11Y_ACCESSIBILITY_SOURCE, else
+                                            native; uia and ia2 are Windows
+                                            only). Every command that takes
+                                            --app takes it, and so does apps;
+                                            not with --shell
+  A flag a command does not take is a usage error, not ignored.
 
 Text (offsets are UTF-16 code units: an emoji outside the BMP is two):
   OP is one of {text_ops}.
@@ -394,7 +408,9 @@ Text (offsets are UTF-16 code units: an emoji outside the BMP is two):
   find       the --occurrence-th (0-based) exact match of --find, searched
              within --range when given; `found: false` when there is none
   range-at   the --unit (character, word, line, paragraph) at --offset
-  lines      rendered lines of --range, --limit per page (default {page})
+  object-at  the embedded control or link at --offset, as `object` (role,
+             name, value, bounds, ...), or null when there is none
+  lines     rendered lines of --range, --limit per page (default {page})
   bounds     screen rectangles of --range, one per rendered line
   runs       formatting runs of --range, --limit per page (default {page})
   read/lines/bounds/runs take their range as --range START,END or as
@@ -458,19 +474,29 @@ Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
   scroll-into-view, increment, decrement,
   set-value (requires --value), type-text (requires --value),
   set-numeric-value (requires --value),
-  select-text (requires --value START,END, in UTF-16 code units),
+  select-text (requires --range START,END, in UTF-16 code units;
+    --value START,END is accepted too, but not both),
   minimize, maximize, enter-fullscreen, restore, close, activate,
   move-to (requires --at X,Y), resize-to (requires --size W,H)
+  --value, --range, --at and --size are refused on any verb not listed
+  with them here.
 
 Exit codes:
   0  success
   1  operation failed (app not found, no selector match, platform error)
-  2  usage error (unknown flag value, missing or invalid argument)",
+  2  usage error (unknown flag, a flag the command does not take, bad flag
+     value, missing or invalid argument)
+
+When an action command (action, click, move, drag, scroll, key, type,
+enable-web-accessibility) fails with exit 1, a `delivery:` line follows the
+error on stderr: `not_delivered` (nothing reached the application, so a retry
+is safe) or `unknown` (it may have been applied: re-read the state first).",
         // Derived, not spelled out: see `shell_kind_names`.
         kinds = shell_kind_names().join(", "),
         text_ops = TEXT_OPS.join(", "),
         table_ops = TABLE_OPS.join(", "),
         relation_kinds = relation_kind_names().join(", "),
+        backends = BACKENDS.join(", "),
         read_default = TEXT_READ_DEFAULT_UNITS,
         read_max = TEXT_READ_MAX_UNITS,
         page = TEXT_PAGE_DEFAULT,
@@ -592,6 +618,10 @@ pub(crate) struct Opts {
     pub max_nodes: Option<usize>,
     /// `tree --max-depth N`: the depth limit (default none).
     pub max_depth: Option<usize>,
+    /// `tree --detail K,K`: the extra reads per node, one entry per
+    /// occurrence of the flag (each a comma-separated list), parsed by
+    /// [`parse_tree_detail`].
+    pub detail: Vec<String>,
     // `text` / `table`
     /// `--range START,END`: a text range in UTF-16 code units.
     pub range: Option<String>,
@@ -636,22 +666,290 @@ fn flag_value_parsed<T: std::str::FromStr>(
     })
 }
 
+/// Every accessibility source `--backend` (and the MCP tools' `backend`)
+/// accepts. The library's own parser is what finally interprets the name;
+/// `backend_names_are_the_ones_the_library_accepts` holds the two together.
+pub(crate) const BACKENDS: [&str; 3] = ["native", "uia", "ia2"];
+
+/// Validate a backend name, so a typo is a usage error that names the
+/// argument the caller typed (`--backend`, or MCP's `"backend"`) rather than
+/// an operation failure naming `XA11Y_ACCESSIBILITY_SOURCE`, an environment
+/// variable the caller never set.
+pub(crate) fn parse_backend(raw: &str, name: &str) -> CliResult<String> {
+    if BACKENDS.contains(&raw) {
+        Ok(raw.to_string())
+    } else {
+        Err(CliError::Usage(format!(
+            "unknown {name} value {raw:?} (expected {})",
+            BACKENDS.join(", ")
+        )))
+    }
+}
+
+/// Every flag [`parse_opts`] recognises. A command accepts a subset of them,
+/// declared in its [`CommandFlags`]; `known_flags_all_parse` keeps this list
+/// and the parser's arms in step.
+const KNOWN_FLAGS: &[&str] = &[
+    "--backend",
+    "--app",
+    "--pid",
+    "--shell",
+    "--value",
+    "--at",
+    "--size",
+    "--from",
+    "--to",
+    "--button",
+    "--count",
+    "--held",
+    "--dx",
+    "--dy",
+    "--duration-ms",
+    "--region",
+    "--out",
+    "--annotate",
+    "--legend",
+    "-o",
+    "--range",
+    "--find",
+    "--occurrence",
+    "--offset",
+    "--unit",
+    "--limit",
+    "--kinds",
+    "--max-nodes",
+    "--max-depth",
+    "--detail",
+    "--row",
+    "--column",
+    "--stable",
+];
+
+/// What one command's argument list may contain.
+///
+/// Every command shares one flag parser, so without this a flag meant for one
+/// command parsed cleanly on all of them and was then ignored by the ones that
+/// do not read it: `tree --limit 5` printed the whole tree, `apps --backend
+/// uia` listed through the default source. Each command declares the flags
+/// its handler reads, and anything else is a usage error (tenet 1).
+pub(crate) struct CommandFlags {
+    /// The command's name, as the error message spells it.
+    pub command: &'static str,
+    /// The flags the handler reads. Anything else in [`KNOWN_FLAGS`] is
+    /// refused.
+    pub flags: &'static [&'static str],
+    /// The most positional arguments the handler reads; `None` for no limit.
+    pub max_positional: Option<usize>,
+    /// Positionals are literal text (`type TEXT`), so one that starts with
+    /// `--` is text to type rather than a misspelt flag.
+    pub literal_positionals: bool,
+}
+
+/// The target flags every element-reading command takes, plus `extra`.
+macro_rules! target_flags {
+    ($($extra:literal),* $(,)?) => {
+        &["--app", "--pid", "--shell", "--backend" $(, $extra)*]
+    };
+}
+
+const APPS_FLAGS: CommandFlags = CommandFlags {
+    command: "apps",
+    flags: &["--backend"],
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+// `windows`, `enable-web-accessibility` and `events` take `--shell` only so
+// that each can refuse it with a message saying why.
+const WINDOWS_FLAGS: CommandFlags = CommandFlags {
+    command: "windows",
+    flags: target_flags!(),
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const ENABLE_WEB_FLAGS: CommandFlags = CommandFlags {
+    command: "enable-web-accessibility",
+    flags: target_flags!(),
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const TREE_FLAGS: CommandFlags = CommandFlags {
+    command: "tree",
+    flags: target_flags!("--max-nodes", "--max-depth", "--detail"),
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const FIND_FLAGS: CommandFlags = CommandFlags {
+    command: "find",
+    flags: target_flags!("-o", "--stable"),
+    max_positional: Some(1),
+    literal_positionals: false,
+};
+const ACTION_FLAGS: CommandFlags = CommandFlags {
+    command: "action",
+    flags: target_flags!("--value", "--range", "--at", "--size"),
+    max_positional: Some(2),
+    literal_positionals: false,
+};
+const TEXT_FLAGS: CommandFlags = CommandFlags {
+    command: "text",
+    flags: target_flags!(
+        "--range",
+        "--find",
+        "--occurrence",
+        "--offset",
+        "--unit",
+        "--limit"
+    ),
+    max_positional: Some(2),
+    literal_positionals: false,
+};
+const TABLE_FLAGS: CommandFlags = CommandFlags {
+    command: "table",
+    flags: target_flags!("--row", "--column"),
+    max_positional: Some(2),
+    literal_positionals: false,
+};
+const RELATIONS_FLAGS: CommandFlags = CommandFlags {
+    command: "relations",
+    flags: target_flags!(),
+    max_positional: None,
+    literal_positionals: false,
+};
+const EVENTS_FLAGS: CommandFlags = CommandFlags {
+    command: "events",
+    flags: target_flags!("--kinds"),
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const CLICK_FLAGS: CommandFlags = CommandFlags {
+    command: "click",
+    flags: &["--at", "--button", "--count", "--held"],
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const MOVE_FLAGS: CommandFlags = CommandFlags {
+    command: "move",
+    flags: &["--at"],
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const DRAG_FLAGS: CommandFlags = CommandFlags {
+    command: "drag",
+    flags: &["--from", "--to", "--button", "--duration-ms", "--held"],
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const SCROLL_FLAGS: CommandFlags = CommandFlags {
+    command: "scroll",
+    flags: &["--at", "--dx", "--dy"],
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+const KEY_FLAGS: CommandFlags = CommandFlags {
+    command: "key",
+    flags: &["--held"],
+    max_positional: Some(1),
+    literal_positionals: false,
+};
+const TYPE_FLAGS: CommandFlags = CommandFlags {
+    command: "type",
+    flags: &[],
+    max_positional: Some(1),
+    literal_positionals: true,
+};
+const SCREENSHOT_FLAGS: CommandFlags = CommandFlags {
+    command: "screenshot",
+    flags: target_flags!("--region", "--out", "--annotate", "--legend"),
+    max_positional: Some(0),
+    literal_positionals: false,
+};
+
+/// Parse `args` for the command `spec` describes: [`parse_opts`], then refuse
+/// every flag the command does not read, any unrecognised `--flag`, and any
+/// positional argument beyond what the command takes.
+///
+/// A refused flag is reported before its value is parsed, so `click --pid x`
+/// says `--pid` does not apply rather than that `x` is not a pid.
+pub(crate) fn parse_command_opts(
+    spec: &CommandFlags,
+    args: &[String],
+) -> CliResult<(Opts, Vec<String>)> {
+    let accepted = || {
+        if spec.flags.is_empty() {
+            format!("`xa11y {}` takes no flags", spec.command)
+        } else {
+            format!("`xa11y {}` takes {}", spec.command, spec.flags.join(", "))
+        }
+    };
+    let (opts, positional) = parse_opts_checked(args, &|flag| {
+        if spec.flags.contains(&flag) {
+            Ok(())
+        } else {
+            Err(CliError::Usage(format!(
+                "{flag} does not apply to `xa11y {}`; {}",
+                spec.command,
+                accepted()
+            )))
+        }
+    })?;
+    if !spec.literal_positionals {
+        if let Some(flag) = positional
+            .iter()
+            .find(|p| p.starts_with("--") && p.len() > 2)
+        {
+            return Err(CliError::Usage(format!(
+                "unknown flag {flag}; {}",
+                accepted()
+            )));
+        }
+    }
+    if let Some(max) = spec.max_positional {
+        if let Some(extra) = positional.get(max) {
+            return Err(CliError::Usage(format!(
+                "xa11y {}: unexpected argument: {extra}",
+                spec.command
+            )));
+        }
+    }
+    Ok((opts, positional))
+}
+
 /// Parse known flags from a slice, returning the parsed Opts and the
 /// remaining positional arguments.
 ///
-/// Unknown flags are left in the positional output (so downstream callers
-/// see them and can surface a sensible error) rather than swallowed. Known
-/// flags require a value: a trailing flag or an unparsable numeric value is
-/// a usage error, not a silently-absent option.
+/// Accepts every flag in [`KNOWN_FLAGS`]; commands go through
+/// [`parse_command_opts`], which narrows that to the flags each one reads.
+/// Unknown flags are left in the positional output rather than swallowed.
+/// Known flags require a value: a trailing flag or an unparsable numeric
+/// value is a usage error, not a silently-absent option.
+///
+/// Test-only: every command parses through [`parse_command_opts`], and this
+/// unrestricted form is what the per-flag parsing tests exercise.
+#[cfg(test)]
 pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
+    parse_opts_checked(args, &|_| Ok(()))
+}
+
+/// [`parse_opts`], asking `allow` about each recognised flag before its value
+/// is read.
+fn parse_opts_checked(
+    args: &[String],
+    allow: &dyn Fn(&str) -> CliResult<()>,
+) -> CliResult<(Opts, Vec<String>)> {
     let mut opts = Opts::default();
     let mut positional = Vec::new();
     let mut i = 0;
     while i < args.len() {
+        if let Some(flag) = KNOWN_FLAGS.iter().find(|f| **f == args[i]) {
+            allow(flag)?;
+        }
         match args[i].as_str() {
             "--backend" => {
                 i += 1;
-                opts.backend = Some(flag_value(args, i, "--backend")?.to_string());
+                opts.backend = Some(parse_backend(
+                    flag_value(args, i, "--backend")?,
+                    "--backend",
+                )?);
             }
             "--app" => {
                 i += 1;
@@ -797,6 +1095,13 @@ pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
                     "--max-depth",
                     "a 0-based depth",
                 )?);
+            }
+            // Repeatable, like `--annotate`: a second occurrence adds to the
+            // first rather than silently replacing it.
+            "--detail" => {
+                i += 1;
+                opts.detail
+                    .push(flag_value(args, i, "--detail")?.to_string());
             }
             "--row" => {
                 i += 1;
@@ -1256,17 +1561,19 @@ pub(crate) fn resolve_target(opts: &Opts) -> CliResult<Target> {
 
 // ── Output helpers ──────────────────────────────────────────────────────────
 
+/// One element on one line. Text fields are quoted and escaped (`{:?}`), so
+/// a multi-line value cannot split a `tree` node across lines or forge one.
 pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     let mut parts = Vec::new();
 
     parts.push(el.role.to_snake_case().to_string());
 
     if let Some(name) = &el.name {
-        parts.push(format!("\"{}\"", name));
+        parts.push(format!("{name:?}"));
     }
 
     if let Some(value) = &el.value {
-        parts.push(format!("value=\"{}\"", value));
+        parts.push(format!("value={value:?}"));
     }
 
     if let Some(nv) = el.numeric_value {
@@ -1281,7 +1588,7 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     }
 
     if let Some(desc) = &el.description {
-        parts.push(format!("description=\"{}\"", desc));
+        parts.push(format!("description={desc:?}"));
     }
 
     // Table and collection positions, spelled as the selector attributes that
@@ -1464,16 +1771,21 @@ fn cmd_guide(args: &[String]) -> CliResult<()> {
 ///
 /// A bad platform name or version is a usage error: it is the caller's
 /// argument, not an operation that failed.
+///
+/// `backend` is the accessibility source to describe (already validated by
+/// [`parse_backend`] under the caller's own spelling of the argument); `None`
+/// keeps the library default.
 pub(crate) fn resolve_capabilities(
     platform: Option<&str>,
     os_version: Option<&str>,
+    backend: Option<&str>,
 ) -> CliResult<Capabilities> {
     let usage = |e: Error| match e {
-        Error::InvalidActionData { message } => CliError::Usage(message),
+        Error::InvalidActionData { message, .. } => CliError::Usage(message),
         other => CliError::Xa11y(other),
     };
     let platform = platform.map(Platform::parse).transpose().map_err(usage)?;
-    crate::capabilities_with(platform, os_version).map_err(usage)
+    crate::capabilities_for_backend(platform, os_version, backend).map_err(usage)
 }
 
 /// The entries of `caps` that `filters` select: each filter is a feature
@@ -1515,7 +1827,9 @@ pub(crate) fn select_capabilities<'a>(
         } else {
             match caps.get(filter) {
                 Ok(c) => out.push(c),
-                Err(Error::InvalidActionData { message }) => return Err(CliError::Usage(message)),
+                Err(Error::InvalidActionData { message, .. }) => {
+                    return Err(CliError::Usage(message))
+                }
                 Err(other) => return Err(CliError::Xa11y(other)),
             }
         }
@@ -1551,7 +1865,10 @@ fn cmd_capabilities(args: &[String]) -> CliResult<()> {
         match args[i].as_str() {
             "--backend" => {
                 i += 1;
-                backend = Some(flag_value(args, i, "--backend")?);
+                backend = Some(parse_backend(
+                    flag_value(args, i, "--backend")?,
+                    "--backend",
+                )?);
             }
             "--platform" => {
                 i += 1;
@@ -1572,14 +1889,7 @@ fn cmd_capabilities(args: &[String]) -> CliResult<()> {
         }
         i += 1;
     }
-    let caps = match backend {
-        Some(b) => crate::capabilities_for_backend(
-            platform.map(Platform::parse).transpose()?,
-            os_version,
-            Some(b),
-        )?,
-        None => resolve_capabilities(platform, os_version)?,
-    };
+    let caps = resolve_capabilities(platform, os_version, backend.as_deref())?;
     let selected = select_capabilities(&caps, &filters)?;
     if json {
         let out = serde_json::json!({
@@ -1611,8 +1921,9 @@ fn cmd_capabilities(args: &[String]) -> CliResult<()> {
     Ok(())
 }
 
-fn cmd_apps() -> CliResult<()> {
-    let apps = App::list()?;
+fn cmd_apps(args: &[String]) -> CliResult<()> {
+    let (opts, _) = parse_command_opts(&APPS_FLAGS, args)?;
+    let apps = App::list_with(selected_provider(&opts)?)?;
     if apps.is_empty() {
         println!("No applications found.");
         return Ok(());
@@ -1722,12 +2033,7 @@ pub(crate) fn window_key(data: &ElementData) -> String {
 /// partial result the MCP `windows` tool returns in its `errors` array
 /// (tenet 1: the failure is surfaced, never swallowed).
 fn cmd_windows(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
-    if let Some(arg) = positional.first() {
-        return Err(CliError::Usage(format!(
-            "usage: xa11y windows [--app NAME | --pid PID]; unexpected argument: {arg}"
-        )));
-    }
+    let (opts, _) = parse_command_opts(&WINDOWS_FLAGS, args)?;
     // `--shell` names an OS shell surface (`xa11y shell`), which this command
     // does not enumerate. Silently ignoring the flag would list every
     // application's windows instead of the requested surface — a filter that
@@ -1814,12 +2120,7 @@ pub(crate) fn enable_web_accessibility(opts: &Opts) -> CliResult<App> {
 
 fn cmd_enable_web_accessibility(args: &[String]) -> CliResult<()> {
     const USAGE: &str = "usage: xa11y enable-web-accessibility (--app NAME | --pid PID)";
-    let (opts, positional) = parse_opts(args)?;
-    if let Some(arg) = positional.first() {
-        return Err(CliError::Usage(format!(
-            "{USAGE}; unexpected argument: {arg}"
-        )));
-    }
+    let (opts, _) = parse_command_opts(&ENABLE_WEB_FLAGS, args)?;
     // A shell surface has no web content switch; refuse the flag rather than
     // ignore it (tenet 1).
     if opts.shell.is_some() {
@@ -1833,8 +2134,62 @@ fn cmd_enable_web_accessibility(args: &[String]) -> CliResult<()> {
     Ok(())
 }
 
+/// What `tree` reads per node besides structure: `xa11y tree --detail` and
+/// the MCP `tree` tool's `detail`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TreeDetail {
+    /// Each element's text (`text`, and implied by `formatting`).
+    pub text: bool,
+    /// Each element's formatting runs (`formatting`).
+    pub formatting: bool,
+    /// Each element's relations (`relations`).
+    pub relations: bool,
+}
+
+impl TreeDetail {
+    /// `options` with these reads switched on.
+    pub(crate) fn apply(self, options: CaptureOptions) -> CaptureOptions {
+        options
+            .text(self.text)
+            .formatting(self.formatting)
+            .relations(self.relations)
+    }
+}
+
+/// Every `detail` name `tree` accepts, on both surfaces.
+pub(crate) const TREE_DETAILS: &[&str] = &["text", "formatting", "relations"];
+
+/// Parse `detail` names into a [`TreeDetail`]. `name` spells the argument as
+/// the calling surface does (`--detail`, or MCP's `"detail"`). An unknown
+/// name is a usage error, never ignored: a typo'd `relation` silently reading
+/// no relations would look like an element that has none.
+pub(crate) fn parse_tree_detail<'a>(
+    items: impl IntoIterator<Item = &'a str>,
+    name: &str,
+) -> CliResult<TreeDetail> {
+    let mut detail = TreeDetail::default();
+    for item in items {
+        match item {
+            "text" => detail.text = true,
+            // Runs are offsets into the text, which is meaningless without it.
+            "formatting" => {
+                detail.text = true;
+                detail.formatting = true;
+            }
+            "relations" => detail.relations = true,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown {name} {other:?}; expected one of {}",
+                    TREE_DETAILS.join(", ")
+                )))
+            }
+        }
+    }
+    Ok(detail)
+}
+
 fn cmd_tree(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&TREE_FLAGS, args)?;
     let max_nodes = opts
         .max_nodes
         .unwrap_or(xa11y_core::capture::DEFAULT_MAX_NODES);
@@ -1843,13 +2198,21 @@ fn cmd_tree(args: &[String]) -> CliResult<()> {
             "--max-nodes must be at least 1: the root is a node".into(),
         ));
     }
+    // `--detail text,relations`: each occurrence is a comma-separated list.
+    let detail = parse_tree_detail(
+        opts.detail
+            .iter()
+            .flat_map(|list| list.split(','))
+            .map(str::trim),
+        "--detail",
+    )?;
     let target = resolve_target(&opts)?;
-    let mut options = CaptureOptions::new().max_nodes(max_nodes);
+    let mut options = detail.apply(CaptureOptions::new().max_nodes(max_nodes));
     if let Some(depth) = opts.max_depth {
         options = options.max_depth(depth);
     }
     let cap = target.capture(&options)?;
-    for line in format_capture(&cap) {
+    for line in format_capture(&cap)? {
         println!("{line}");
     }
     Ok(())
@@ -1859,8 +2222,18 @@ fn cmd_tree(args: &[String]) -> CliResult<()> {
 /// with box-drawing connectors. A node whose children were cut ends with a
 /// `… N more` line naming the limit, and a capture cut by a limit ends with a
 /// summary line, so a shortened tree never reads as a complete one.
-pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
-    fn walk(cap: &Capture, index: usize, prefix: &str, is_last: bool, out: &mut Vec<String>) {
+///
+/// What `--detail` read sits under its element's line, before its children,
+/// each line led by the reading's name (`text`, `run`, a relation kind) so
+/// it cannot be mistaken for a child.
+pub(crate) fn format_capture(cap: &Capture) -> CliResult<Vec<String>> {
+    fn walk(
+        cap: &Capture,
+        index: usize,
+        prefix: &str,
+        is_last: bool,
+        out: &mut Vec<String>,
+    ) -> CliResult<()> {
         let node = &cap.nodes[index];
         let is_root = index == 0;
         let connector = match (is_root, is_last) {
@@ -1889,9 +2262,19 @@ pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
         let not_read =
             node.children_truncated && node.children_count.is_none() && errors.is_empty();
         let tail = errors.len() + usize::from(missing > 0 || not_read);
+        // The branch line keeps running past the detail lines when anything
+        // hangs below them.
+        let bar = if node.children.is_empty() && tail == 0 {
+            "  "
+        } else {
+            "│ "
+        };
+        for line in detail_lines(cap, node)? {
+            out.push(format!("{child_prefix}{bar}{line}"));
+        }
         for (i, &child) in node.children.iter().enumerate() {
             let last = i + 1 == node.children.len() && tail == 0;
-            walk(cap, child, &child_prefix, last, out);
+            walk(cap, child, &child_prefix, last, out)?;
         }
         let mut left = tail;
         let mut tail_line = |text: String, out: &mut Vec<String>| {
@@ -1916,10 +2299,11 @@ pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
         } else if not_read {
             tail_line("… children not read (out of time)".into(), out);
         }
+        Ok(())
     }
 
     let mut out = Vec::new();
-    walk(cap, 0, "", true, &mut out);
+    walk(cap, 0, "", true, &mut out)?;
     let t = cap.truncated;
     if t.any() {
         let mut why = Vec::new();
@@ -1932,8 +2316,23 @@ pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
         if t.by_depth {
             why.push("the depth limit (--max-depth)".to_string());
         }
+        if t.by_text {
+            why.push(format!(
+                "the text limit of {} bytes (--detail text)",
+                cap.options.max_text_bytes
+            ));
+        }
+        if t.by_formatting {
+            why.push(format!(
+                "the run limit of {} (--detail formatting)",
+                cap.options.max_runs
+            ));
+        }
         if t.by_time {
             why.push("the time budget".to_string());
+        }
+        if t.by_cancel {
+            why.push("cancellation".to_string());
         }
         out.push(format!(
             "(truncated: {} nodes shown, cut by {})",
@@ -1941,11 +2340,78 @@ pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
             why.join(" and ")
         ));
     }
-    out
+    Ok(out)
+}
+
+/// The `--detail` readings of one captured node, one line each: its text,
+/// its formatting runs, its relations, and any of those reads that failed.
+/// Empty when no detail was asked for.
+fn detail_lines(cap: &Capture, node: &xa11y_core::CapturedNode) -> CliResult<Vec<String>> {
+    let mut lines = Vec::new();
+    for err in &node.errors {
+        let what = match err.step {
+            CaptureStep::Text => "text",
+            CaptureStep::Formatting => "formatting",
+            CaptureStep::Relations => "relations",
+            // Children and cycles are reported in the child list; identity
+            // only feeds cycle detection and relation resolution, whose
+            // failures are reported there.
+            _ => continue,
+        };
+        lines.push(format!("<{what} error: {}>", err.error));
+    }
+    if let Some(text) = &node.text {
+        // Debug-quoted, so a newline in the text cannot start a line that
+        // reads as another element.
+        lines.push(format!(
+            "text ({} units{}): {:?}",
+            text.length,
+            if text.truncated {
+                ", cut by the text limit"
+            } else {
+                ""
+            },
+            text.content
+        ));
+        if let Some(runs) = &text.runs {
+            for run in runs {
+                lines.push(format!(
+                    "run [{},{}): {}",
+                    run.range.start,
+                    run.range.end,
+                    json_without_nulls("text attributes", &run.attributes)?
+                ));
+            }
+            if text.runs_truncated {
+                lines.push("… more runs (cut by the run limit)".to_string());
+            }
+        }
+    }
+    for (kind, targets) in &node.relations {
+        for target in targets {
+            let described = match target {
+                xa11y_core::RelationTarget::Node(i) => describe_brief(&cap.nodes[*i].element),
+                xa11y_core::RelationTarget::Outside(el) => {
+                    format!("{} (outside the tree)", describe_brief(el))
+                }
+            };
+            lines.push(format!("{} → {described}", kind.to_snake_case()));
+        }
+    }
+    Ok(lines)
+}
+
+/// `role "name"`, the part of an element's line that tells a relation target
+/// apart; the target's full line is in the tree when it was captured.
+fn describe_brief(el: &ElementData) -> String {
+    match &el.name {
+        Some(name) => format!("{} \"{name}\"", el.role.to_snake_case()),
+        None => el.role.to_snake_case().to_string(),
+    }
 }
 
 fn cmd_find(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&FIND_FLAGS, args)?;
     let selector = positional.first().ok_or_else(|| {
         CliError::Usage(
             "usage: xa11y find SELECTOR [--app NAME | --pid PID | --shell KIND] \
@@ -2244,11 +2710,11 @@ fn check_center_output(capability: Result<bool>) -> CliResult<()> {
 }
 
 fn cmd_action(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&ACTION_FLAGS, args)?;
     if positional.len() < 2 {
         return Err(CliError::Usage(
             "usage: xa11y action ACTION SELECTOR [--app NAME | --pid PID | --shell KIND] \
-             [--value V] [--at X,Y] [--size W,H]"
+             [--value V] [--range START,END] [--at X,Y] [--size W,H]"
                 .into(),
         ));
     }
@@ -2261,11 +2727,18 @@ fn cmd_action(args: &[String]) -> CliResult<()> {
     // even when the target itself would also be unresolvable — and must not
     // spend an app-resolution / accessibility round-trip first (parse
     // arguments before the first OS call).
+    let range = opts
+        .range
+        .as_deref()
+        .map(|raw| parse_range_flag(raw, "--range"))
+        .transpose()?;
     let action_args = parse_action_args(
         action_name,
         value.as_deref(),
+        range,
         opts.at.as_deref(),
         opts.size.as_deref(),
+        &CLI_ACTION_ARG_NAMES,
     )?;
 
     let target = resolve_target(&opts)?;
@@ -2308,12 +2781,60 @@ pub(crate) const ACTION_NAMES: &[&str] = &[
 
 /// Actions that require a `--value` (MCP: `value`) argument.
 pub(crate) const ACTIONS_REQUIRING_VALUE: &[&str] =
-    &["set-value", "set-numeric-value", "type-text", "select-text"];
+    &["set-value", "set-numeric-value", "type-text"];
+
+/// Actions that require a text range: `--range START,END` (MCP: `start` and
+/// `end`), or the same range as `--value START,END` (MCP: `value`).
+pub(crate) const ACTIONS_REQUIRING_RANGE: &[&str] = &["select-text"];
 
 /// Actions that require a geometry argument: `--at X,Y` (MCP: `at`) for
 /// `move-to`, `--size W,H` (MCP: `size`) for `resize-to`.
 pub(crate) const ACTIONS_REQUIRING_AT: &[&str] = &["move-to"];
 pub(crate) const ACTIONS_REQUIRING_SIZE: &[&str] = &["resize-to"];
+
+/// How a surface spells the action arguments, for usage errors.
+pub(crate) struct ActionArgNames {
+    /// The value argument (`--value`, MCP `"value"`).
+    pub value: &'static str,
+    /// The `select-text` range (`--range`, MCP `"start"`/`"end"`).
+    pub range: &'static str,
+    /// How a caller writes a range in that argument, for the message that
+    /// says one is missing (`--range START,END`, MCP `"start" and "end"`).
+    pub range_form: &'static str,
+    /// The `move-to` point (`--at`, MCP `"at"`).
+    pub at: &'static str,
+    /// The `resize-to` size (`--size`, MCP `"size"`).
+    pub size: &'static str,
+}
+
+/// The CLI's flag spellings.
+pub(crate) const CLI_ACTION_ARG_NAMES: ActionArgNames = ActionArgNames {
+    value: "--value",
+    range: "--range",
+    range_form: "--range START,END",
+    at: "--at",
+    size: "--size",
+};
+
+/// Verbs that read `--value` (MCP `value`): the value verbs, plus
+/// `select-text`, which takes its range there as `START,END`.
+const ACTIONS_READING_VALUE: &[&str] =
+    &["set-value", "set-numeric-value", "type-text", "select-text"];
+
+/// Refuses an argument given to a verb that does not read it.
+///
+/// An argument the verb would ignore is refused rather than dropped: a caller
+/// who passed `value` to `press` expected it to do something, and silently
+/// pressing reads as having done it.
+fn refuse_unread_arg(action: &str, given: bool, name: &str, readers: &[&str]) -> CliResult<()> {
+    if given && !readers.contains(&action) {
+        return Err(CliError::Usage(format!(
+            "{name} applies only to {}, not {action}",
+            readers.join(", ")
+        )));
+    }
+    Ok(())
+}
 
 /// Parsed action payload, built up front by [`parse_action_args`] so the
 /// callers can validate it before resolving the target.
@@ -2341,12 +2862,33 @@ pub(crate) struct ActionArgs {
 /// round-trip first. Verbs without a payload ignore `value` / `at` / `size`,
 /// exactly as dispatch ignores them (a stray `--at` on `press` is still not
 /// an error).
+///
+/// `select-text` takes its range either as `range` (CLI `--range START,END`,
+/// MCP integer `start` / `end`, the spelling the `text` command uses) or as
+/// the older `value` string `START,END`. Giving both is refused rather than
+/// one silently winning, and `range` on any other verb is refused: the
+/// argument is new and has no other meaning.
 pub(crate) fn parse_action_args(
     action: &str,
     value: Option<&str>,
+    range: Option<TextRange>,
     at: Option<&str>,
     size: Option<&str>,
+    names: &ActionArgNames,
 ) -> CliResult<ActionArgs> {
+    // An unknown verb is reported as unknown by the dispatcher, not as a
+    // verb that does not take this argument.
+    if ACTION_NAMES.contains(&action) {
+        refuse_unread_arg(action, value.is_some(), names.value, ACTIONS_READING_VALUE)?;
+        refuse_unread_arg(
+            action,
+            range.is_some(),
+            names.range,
+            ACTIONS_REQUIRING_RANGE,
+        )?;
+        refuse_unread_arg(action, at.is_some(), names.at, ACTIONS_REQUIRING_AT)?;
+        refuse_unread_arg(action, size.is_some(), names.size, ACTIONS_REQUIRING_SIZE)?;
+    }
     let need_value = |verb: &str| -> CliResult<&str> {
         value.ok_or_else(|| CliError::Usage(format!("{verb} requires a value")))
     };
@@ -2359,16 +2901,46 @@ pub(crate) fn parse_action_args(
             // cannot ever succeed.
             args.numeric = Some(parse_numeric_value(need_value(action)?)?);
         }
-        "select-text" => args.range = Some(parse_text_range(need_value(action)?)?),
+        "select-text" => {
+            args.range = Some(match (range, value) {
+                (Some(_), Some(_)) => {
+                    return Err(CliError::Usage(format!(
+                        "select-text takes its range as {} or as {}, not both",
+                        names.range, names.value
+                    )))
+                }
+                (Some(r), None) => {
+                    // Refused here for the same reason `parse_text_range`
+                    // refuses it: the provider's check would only run after
+                    // the auto-wait.
+                    if r.start > r.end {
+                        return Err(CliError::Usage(format!(
+                            "select-text {} start must not exceed end, got {}..{}",
+                            names.range, r.start, r.end
+                        )));
+                    }
+                    (r.start, r.end)
+                }
+                (None, Some(raw)) => parse_text_range(raw)?,
+                (None, None) => {
+                    return Err(CliError::Usage(format!(
+                        "select-text requires a range: {} (or {} as START,END), \
+                         in UTF-16 code units",
+                        names.range_form, names.value
+                    )))
+                }
+            });
+        }
         "move-to" => {
-            let raw = at.ok_or_else(|| CliError::Usage(format!("{action} requires --at X,Y")))?;
-            let pt = parse_point_arg(raw, "--at")?;
+            let raw =
+                at.ok_or_else(|| CliError::Usage(format!("{action} requires {} X,Y", names.at)))?;
+            let pt = parse_point_arg(raw, names.at)?;
             args.at = Some((pt.x, pt.y));
         }
         "resize-to" => {
-            let raw =
-                size.ok_or_else(|| CliError::Usage(format!("{action} requires --size W,H")))?;
-            args.size = Some(parse_size_arg(raw, "--size")?);
+            let raw = size
+                .ok_or_else(|| CliError::Usage(format!("{action} requires {} W,H", names.size)))?;
+            args.size = Some(parse_size_arg(raw, names.size)?);
         }
         _ => {}
     }
@@ -2994,9 +3566,27 @@ pub(crate) fn json_without_nulls<T: serde::Serialize>(
     Ok(v)
 }
 
+/// How the CLI's `text object-at` reports the element it found. The rest of
+/// a `text` result is JSON, so the element is too: the same capped,
+/// snake_case encoding MCP returns, without the `ref` a one-shot process has
+/// nothing to resolve against.
+pub(crate) fn text_object_cli(element: &Element) -> serde_json::Value {
+    crate::mcp::tools::element_data_json(element, false)
+}
+
 /// Run a `text` operation against `text`, producing the result both surfaces
 /// report. Offsets everywhere are UTF-16 code units.
-pub(crate) fn run_text_op(text: &Text, op: &TextOp) -> CliResult<serde_json::Value> {
+///
+/// `render_object` encodes the element `object-at` finds, the way the calling
+/// surface renders every other element: [`text_object_cli`] on the CLI, and
+/// MCP's element encoding plus a `ref`. Serializing the raw `ElementData`
+/// instead leaked its PascalCase role, its platform `raw` blob and uncapped
+/// strings, and gave MCP nothing to act on.
+pub(crate) fn run_text_op(
+    text: &Text,
+    op: &TextOp,
+    render_object: &mut dyn FnMut(&Element) -> serde_json::Value,
+) -> CliResult<serde_json::Value> {
     use serde_json::json;
     Ok(match op {
         TextOp::Info => {
@@ -3061,8 +3651,11 @@ pub(crate) fn run_text_op(text: &Text, op: &TextOp) -> CliResult<serde_json::Val
             })
         }
         TextOp::ObjectAt { offset } => {
-            let object = text.object_at(*offset)?;
-            json!({ "offset": offset, "object": object.as_ref().map(|e| e.data()) })
+            let object = match text.object_at(*offset)? {
+                Some(element) => render_object(&element),
+                None => serde_json::Value::Null,
+            };
+            json!({ "offset": offset, "object": object })
         }
         TextOp::RangeAt { offset, unit } => {
             let r = text.range_at(*offset, *unit)?;
@@ -3127,7 +3720,7 @@ pub(crate) fn run_text_op(text: &Text, op: &TextOp) -> CliResult<serde_json::Val
 }
 
 fn cmd_text(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&TEXT_FLAGS, args)?;
     if positional.len() < 2 {
         return Err(CliError::Usage(format!(
             "usage: xa11y text OP SELECTOR [--app NAME | --pid PID | --shell KIND] \
@@ -3163,7 +3756,7 @@ fn cmd_text(args: &[String]) -> CliResult<()> {
             }))
         }
     };
-    let result = run_text_op(&element.text()?, &op)?;
+    let result = run_text_op(&element.text()?, &op, &mut text_object_cli)?;
     let rendered = serde_json::to_string_pretty(&result).map_err(|e| {
         CliError::Xa11y(Error::Platform {
             code: -1,
@@ -3308,7 +3901,7 @@ pub(crate) fn no_cell_message(table: &ElementData, row: u32, column: u32) -> Str
 }
 
 fn cmd_table(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&TABLE_FLAGS, args)?;
     if positional.len() < 2 {
         return Err(CliError::Usage(format!(
             "usage: xa11y table OP SELECTOR [--app NAME | --pid PID | --shell KIND] \
@@ -3364,7 +3957,7 @@ pub(crate) fn parse_relation_kinds<S: AsRef<str>>(names: &[S]) -> CliResult<Vec<
 }
 
 fn cmd_relations(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&RELATIONS_FLAGS, args)?;
     let Some((selector, kind_names)) = positional.split_first() else {
         return Err(CliError::Usage(format!(
             "usage: xa11y relations SELECTOR [KIND...] [--app NAME | --pid PID | --shell KIND]  \
@@ -3394,7 +3987,7 @@ fn cmd_relations(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_events(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&EVENTS_FLAGS, args)?;
     // Events are subscribed per application; there is no surface-level event
     // story yet (see design/shell-surfaces/PROPOSAL.md §10). Saying so beats
     // letting `--shell` fall through to "specify --app NAME or --pid PID",
@@ -3612,12 +4205,10 @@ pub(crate) fn clip_utf16(s: &str, max: u32) -> (&str, bool) {
     (s, false)
 }
 
-/// An event's [`TextChange`] as `events_poll` reports it: `kind`, `range`
-/// (`null` when the platform reported none), and `text` (`null` when not
-/// supplied), cut to [`RANGE_TEXT_MAX_UNITS`] UTF-16 units. A cut text says so
-/// with `text_truncated: true` and the full `text_length`, so a shortened
-/// string never reads as the whole edit.
-/// An announcement's payload as MCP reports it: each field only when set.
+/// An announcement's payload as `events_poll` reports it: `origin`, then each
+/// other field only when set. `text` is cut to [`RANGE_TEXT_MAX_UNITS`]
+/// UTF-16 units the way [`text_change_json`] cuts an edit's, and says so the
+/// same way, with `text_truncated: true` and the full `text_length`.
 pub(crate) fn announcement_json(a: &crate::AnnouncementInfo) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("origin".into(), a.origin.to_snake_case().into());
@@ -3626,6 +4217,7 @@ pub(crate) fn announcement_json(a: &crate::AnnouncementInfo) -> serde_json::Valu
         out.insert("text".into(), shown.into());
         if truncated {
             out.insert("text_truncated".into(), true.into());
+            out.insert("text_length".into(), utf16_units(text).into());
         }
     }
     if let Some(p) = a.politeness {
@@ -3640,6 +4232,11 @@ pub(crate) fn announcement_json(a: &crate::AnnouncementInfo) -> serde_json::Valu
     serde_json::Value::Object(out)
 }
 
+/// An event's [`TextChange`] as `events_poll` reports it: `kind`, `range`
+/// (`null` when the platform reported none), and `text` (`null` when not
+/// supplied), cut to [`RANGE_TEXT_MAX_UNITS`] UTF-16 units. A cut text says so
+/// with `text_truncated: true` and the full `text_length`, so a shortened
+/// string never reads as the whole edit.
 pub(crate) fn text_change_json(change: &TextChange) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("kind".into(), format_text_change_kind(change.kind).into());
@@ -3669,7 +4266,7 @@ pub(crate) fn text_change_json(change: &TextChange) -> serde_json::Value {
 // ── Input simulation ────────────────────────────────────────────────────────
 
 fn cmd_click(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&CLICK_FLAGS, args)?;
     let at = parse_point_arg(
         opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
         "--at",
@@ -3701,7 +4298,7 @@ pub(crate) fn build_click_options(opts: &Opts) -> CliResult<ClickOptions> {
 }
 
 fn cmd_move(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&MOVE_FLAGS, args)?;
     let at = parse_point_arg(
         opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
         "--at",
@@ -3713,7 +4310,7 @@ fn cmd_move(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_drag(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&DRAG_FLAGS, args)?;
     let from = parse_point_arg(
         opts.from.as_deref().ok_or_else(|| missing("--from X,Y"))?,
         "--from",
@@ -3748,7 +4345,7 @@ pub(crate) fn build_drag_options(opts: &Opts) -> CliResult<DragOptions> {
 }
 
 fn cmd_scroll(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&SCROLL_FLAGS, args)?;
     let at = parse_point_arg(
         opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
         "--at",
@@ -3762,7 +4359,7 @@ fn cmd_scroll(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_key(args: &[String]) -> CliResult<()> {
-    let (opts, positional) = parse_opts(args)?;
+    let (opts, positional) = parse_command_opts(&KEY_FLAGS, args)?;
     let name = positional
         .first()
         .ok_or_else(|| CliError::Usage("usage: xa11y key KEY [--held K,K]".into()))?;
@@ -3779,7 +4376,7 @@ fn cmd_key(args: &[String]) -> CliResult<()> {
 }
 
 fn cmd_type(args: &[String]) -> CliResult<()> {
-    let (_opts, positional) = parse_opts(args)?;
+    let (_opts, positional) = parse_command_opts(&TYPE_FLAGS, args)?;
     let text = positional
         .first()
         .ok_or_else(|| CliError::Usage("usage: xa11y type TEXT".into()))?;
@@ -3826,7 +4423,7 @@ pub(crate) fn parse_legend_format(raw: &str) -> CliResult<LegendFormat> {
 const MAX_LEGEND_OMISSION_DETAILS: usize = 5;
 
 fn cmd_screenshot(args: &[String]) -> CliResult<()> {
-    let (opts, _pos) = parse_opts(args)?;
+    let (opts, _) = parse_command_opts(&SCREENSHOT_FLAGS, args)?;
     let out = opts
         .out
         .as_deref()
@@ -3840,6 +4437,26 @@ fn cmd_screenshot(args: &[String]) -> CliResult<()> {
             return Err(CliError::Usage(format!(
                 "--legend {raw} has nothing to describe: add --annotate SELECTOR, or drop \
                  --legend"
+            )));
+        }
+        // A target is read only to resolve --annotate selectors; it never
+        // crops the capture. Capturing the whole screen and printing nothing
+        // about the ignored flag would read as a capture of that target.
+        let named: Vec<&str> = [
+            ("--app", opts.app.is_some()),
+            ("--pid", opts.pid.is_some()),
+            ("--shell", opts.shell.is_some()),
+            ("--backend", opts.backend.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(flag, given)| given.then_some(flag))
+        .collect();
+        if !named.is_empty() {
+            return Err(CliError::Usage(format!(
+                "{} without --annotate does nothing: a target is only read to resolve \
+                 annotation selectors, and it never crops the capture. Add --annotate \
+                 SELECTOR, or use --region X,Y,W,H to capture part of the screen",
+                named.join(", ")
             )));
         }
         let shot = match region {
@@ -4556,8 +5173,15 @@ mod tests {
         // `X,Y` cannot burn the timeout or touch the platform (tenet 4's
         // "parse arguments before the first OS call").
         let provider = xa11y_core::mock::build_provider();
-        let err = parse_action_args("move-to", None, Some("10,not-a-number"), None)
-            .expect_err("malformed --at must be refused");
+        let err = parse_action_args(
+            "move-to",
+            None,
+            None,
+            Some("10,not-a-number"),
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect_err("malformed --at must be refused");
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
         assert!(
             provider.actions().is_empty(),
@@ -4571,11 +5195,25 @@ mod tests {
         let provider = xa11y_core::mock::build_provider();
         let app = mock_app(&provider);
         let locator = app.locator("window");
-        let move_args = parse_action_args("move-to", None, Some("10,20"), None)
-            .expect("a valid move-to must parse");
+        let move_args = parse_action_args(
+            "move-to",
+            None,
+            None,
+            Some("10,20"),
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("a valid move-to must parse");
         perform_action(&locator, "move-to", &move_args).expect("a valid move-to must succeed");
-        let resize_args = parse_action_args("resize-to", None, None, Some("800,600"))
-            .expect("a valid resize-to must parse");
+        let resize_args = parse_action_args(
+            "resize-to",
+            None,
+            None,
+            None,
+            Some("800,600"),
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("a valid resize-to must parse");
         perform_action(&locator, "resize-to", &resize_args)
             .expect("a valid resize-to must succeed");
         let actions = provider.actions();
@@ -5010,6 +5648,18 @@ mod tests {
     }
 
     #[test]
+    fn format_element_keeps_multiline_text_on_one_line() {
+        let mut el = make_element(Role::TextArea, Some("Say \"hi\""));
+        el.value = Some("Line 1\nLine 2".into());
+        el.description = Some("a\tb".into());
+        let out = format_element_oneline(&el);
+        assert!(!out.contains('\n'), "{out}");
+        assert!(out.contains(r#""Say \"hi\"""#), "{out}");
+        assert!(out.contains(r#"value="Line 1\nLine 2""#), "{out}");
+        assert!(out.contains(r#"description="a\tb""#), "{out}");
+    }
+
+    #[test]
     fn format_element_with_bounds() {
         let mut el = make_element(Role::Button, Some("X"));
         el.bounds = Some(Rect {
@@ -5254,6 +5904,26 @@ mod tests {
     }
 
     #[test]
+    fn announcement_json_reports_the_full_length_of_a_cut_text() {
+        // The same contract as a text change: a shortened string never reads
+        // as the whole announcement.
+        let long = "😀".repeat(300);
+        let info: crate::AnnouncementInfo = crate::AnnouncementParts {
+            origin: crate::AnnouncementOrigin::Request,
+            text: Some(long),
+            politeness: None,
+            platform_priority: None,
+            activity_id: None,
+        }
+        .into();
+        let json = announcement_json(&info);
+        let shown = json["text"].as_str().expect("text");
+        assert_eq!(shown.encode_utf16().count(), RANGE_TEXT_MAX_UNITS as usize);
+        assert_eq!(json["text_truncated"], true);
+        assert_eq!(json["text_length"], 600);
+    }
+
+    #[test]
     fn clip_utf16_never_splits_a_surrogate_pair() {
         assert_eq!(clip_utf16("a😀", 2), ("a", true));
         assert_eq!(clip_utf16("a😀", 3), ("a😀", false));
@@ -5485,6 +6155,9 @@ mod tests {
             assert!(ACTION_NAMES.contains(verb), "{verb} is not an action");
         }
         for verb in ACTIONS_REQUIRING_SIZE {
+            assert!(ACTION_NAMES.contains(verb), "{verb} is not an action");
+        }
+        for verb in ACTIONS_REQUIRING_RANGE {
             assert!(ACTION_NAMES.contains(verb), "{verb} is not an action");
         }
     }
@@ -5786,11 +6459,9 @@ mod tests {
             panic!("bounds that are not screen coordinates must withhold the center");
         };
         assert!(reason.contains("not screen coordinates"), "{reason}");
-        let PointerCenter::Unavailable(reason) =
-            PointerCenter::from_capability(Err(Error::InvalidActionData {
-                message: "invalid XA11Y_LINUX_INPUT_BACKEND value \"xyz\"".into(),
-            }))
-        else {
+        let PointerCenter::Unavailable(reason) = PointerCenter::from_capability(Err(
+            Error::invalid_action_data("invalid XA11Y_LINUX_INPUT_BACKEND value \"xyz\""),
+        )) else {
             panic!("an unknown coordinate space must withhold the center");
         };
         assert!(reason.contains("XA11Y_LINUX_INPUT_BACKEND"), "{reason}");
@@ -6466,7 +7137,8 @@ mod tests {
     fn the_tree_printer_marks_every_cut() {
         let provider = xa11y_core::mock::build_provider();
         let target = Target::App(mock_app(&provider));
-        let full = format_capture(&target.capture(&CaptureOptions::new()).expect("capture"));
+        let full = format_capture(&target.capture(&CaptureOptions::new()).expect("capture"))
+            .expect("formats");
         assert!(full
             .iter()
             .all(|l| !l.contains("more") && !l.starts_with("(truncated")));
@@ -6477,7 +7149,8 @@ mod tests {
             &target
                 .capture(&CaptureOptions::new().max_nodes(3))
                 .expect("capture"),
-        );
+        )
+        .expect("formats");
         let last = cut.last().expect("lines");
         assert!(
             last.starts_with("(truncated: 3 nodes shown, cut by the node limit of 3"),
@@ -6492,12 +7165,272 @@ mod tests {
             &target
                 .capture(&CaptureOptions::new().max_depth(1))
                 .expect("capture"),
-        );
+        )
+        .expect("formats");
         assert!(
             shallow
                 .iter()
                 .any(|l| l.contains("more (cut by --max-depth)")),
             "{shallow:?}"
+        );
+    }
+
+    #[test]
+    fn tree_detail_parses_like_the_mcp_detail_and_refuses_unknown_names() {
+        let (opts, _) = parse_command_opts(
+            &TREE_FLAGS,
+            &strs(&["--detail", "text,relations", "--detail", "formatting"]),
+        )
+        .expect("flags parse");
+        assert_eq!(opts.detail, ["text,relations", "formatting"]);
+        assert_eq!(
+            parse_tree_detail(["formatting"], "--detail").expect("valid"),
+            TreeDetail {
+                text: true,
+                formatting: true,
+                relations: false
+            },
+            "formatting implies text"
+        );
+        for bad in ["styles", "text,", ""] {
+            let err = cmd_tree(&strs(&["--detail", bad, "--pid", "1"])).expect_err(bad);
+            assert!(matches!(err, CliError::Usage(_)), "{bad}: {err}");
+            assert!(err.to_string().contains("--detail"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_tree_printer_shows_detail_under_its_element() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let target = Target::App(mock_app(&provider));
+        let options = TreeDetail {
+            text: true,
+            formatting: true,
+            relations: false,
+        }
+        .apply(CaptureOptions::new());
+        let lines = format_capture(&target.capture(&options).expect("capture")).expect("formats");
+        let notes = lines
+            .iter()
+            .position(|l| l.contains("text_area \"Notes\""))
+            .unwrap_or_else(|| panic!("no Notes line: {lines:?}"));
+        let text = &lines[notes + 1];
+        assert!(
+            text.ends_with(r#"text (26 units): "Hello 😀 world\nsecond line""#),
+            "the text is one escaped line under its element: {text}"
+        );
+        assert!(lines[notes + 2].contains("run [0,"), "{lines:?}");
+        assert!(
+            lines[notes + 2].contains("\"font_weight\":700"),
+            "{lines:?}"
+        );
+
+        let provider = xa11y_core::mock::build_document_provider();
+        let target = Target::App(mock_app(&provider));
+        let options = TreeDetail {
+            text: false,
+            formatting: false,
+            relations: true,
+        }
+        .apply(CaptureOptions::new());
+        let lines = format_capture(&target.capture(&options).expect("capture")).expect("formats");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.ends_with(r#"labelled_by → static_text "Email address""#)),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_tree_summary_names_a_text_budget_cut() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let target = Target::App(mock_app(&provider));
+        let options = TreeDetail {
+            text: true,
+            formatting: false,
+            relations: false,
+        }
+        .apply(CaptureOptions::new().max_text_bytes(4));
+        let cap = target.capture(&options).expect("capture");
+        assert!(cap.truncated.by_text, "a 4-byte budget cuts the notes");
+        let lines = format_capture(&cap).expect("formats");
+        let last = lines.last().expect("lines");
+        assert!(
+            last.contains("the text limit of 4 bytes (--detail text)"),
+            "{last}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("cut by the text limit):")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn every_action_argument_is_refused_on_a_verb_that_does_not_read_it() {
+        let range = Some(TextRange { start: 0, end: 1 });
+        for verb in ACTION_NAMES {
+            let value_ok = ACTIONS_READING_VALUE.contains(verb);
+            let cases: [(&str, bool, CliResult<ActionArgs>); 4] = [
+                (
+                    "--value",
+                    value_ok,
+                    parse_action_args(verb, Some("1"), None, None, None, &CLI_ACTION_ARG_NAMES),
+                ),
+                (
+                    "--range",
+                    ACTIONS_REQUIRING_RANGE.contains(verb),
+                    parse_action_args(verb, None, range, None, None, &CLI_ACTION_ARG_NAMES),
+                ),
+                (
+                    "--at",
+                    ACTIONS_REQUIRING_AT.contains(verb),
+                    parse_action_args(verb, None, None, Some("1,2"), None, &CLI_ACTION_ARG_NAMES),
+                ),
+                (
+                    "--size",
+                    ACTIONS_REQUIRING_SIZE.contains(verb),
+                    parse_action_args(verb, None, None, None, Some("3,4"), &CLI_ACTION_ARG_NAMES),
+                ),
+            ];
+            for (flag, reads, result) in cases {
+                match result {
+                    Err(CliError::Usage(msg))
+                        if msg.starts_with(&format!("{flag} applies only to")) =>
+                    {
+                        assert!(!reads, "{verb} reads {flag} but refused it: {msg}");
+                        assert!(msg.ends_with(&format!(", not {verb}")), "{msg}");
+                    }
+                    // A verb that reads the flag may still refuse this payload
+                    // for another reason (e.g. a reversed range, a missing
+                    // companion), but never as "applies only to".
+                    _ => assert!(reads, "{verb} accepted {flag}, which it never reads"),
+                }
+            }
+        }
+        // An unknown verb stays an unknown verb, not one that "does not take"
+        // the argument.
+        parse_action_args(
+            "frobnicate",
+            Some("x"),
+            None,
+            None,
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("unknown verbs are refused by the dispatcher");
+    }
+
+    #[test]
+    fn cli_action_refuses_an_unread_flag_before_the_target_is_resolved() {
+        let err = cmd_action(&strs(&[
+            "press",
+            "button",
+            "--app",
+            "NoSuchAppAnywhere",
+            "--value",
+            "x",
+        ]))
+        .expect_err("refused");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "usage error: --value applies only to set-value, set-numeric-value, type-text, \
+             select-text, not press",
+        );
+    }
+
+    #[test]
+    fn select_text_takes_range_or_value_but_not_both() {
+        let r = |start, end| Some(TextRange { start, end });
+        let ok = parse_action_args(
+            "select-text",
+            None,
+            r(1, 4),
+            None,
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("--range alone");
+        assert_eq!(ok.range, Some((1, 4)));
+        let ok = parse_action_args(
+            "select-text",
+            Some("1,4"),
+            None,
+            None,
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("--value alone");
+        assert_eq!(ok.range, Some((1, 4)));
+        for (value, range, needle) in [
+            (Some("1,4"), r(1, 4), "not both"),
+            (None, r(4, 1), "must not exceed"),
+            (None, None, "requires a range: --range START,END"),
+        ] {
+            let err = parse_action_args(
+                "select-text",
+                value,
+                range,
+                None,
+                None,
+                &CLI_ACTION_ARG_NAMES,
+            )
+            .expect_err(needle);
+            assert!(matches!(err, CliError::Usage(_)), "{err}");
+            assert!(err.to_string().contains(needle), "{err}");
+        }
+        let err = parse_action_args("press", None, r(0, 1), None, None, &CLI_ACTION_ARG_NAMES)
+            .expect_err("range on another verb");
+        assert!(
+            err.to_string()
+                .contains("--range applies only to select-text"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn cli_select_text_range_is_refused_before_the_target_is_resolved() {
+        // `--app` names nothing; a range mistake must still win as exit 2.
+        for args in [
+            &["--range", "0,2", "--value", "0,2"][..],
+            &["--range", "x"][..],
+            &[][..],
+        ] {
+            let mut argv = strs(&["select-text", "text_field", "--app", "NoSuchAppAnywhere"]);
+            argv.extend(strs(args));
+            let err = cmd_action(&argv).expect_err("refused");
+            assert!(matches!(err, CliError::Usage(_)), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn cli_select_text_range_reaches_the_provider() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let app = mock_app(&provider);
+        let args = parse_action_args(
+            "select-text",
+            None,
+            Some(TextRange { start: 0, end: 5 }),
+            None,
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("parses");
+        perform_action(
+            &app.locator(r#"text_area[name="Notes"]"#),
+            "select-text",
+            &args,
+        )
+        .expect("select-text by --range");
+        assert!(
+            provider
+                .actions()
+                .iter()
+                .any(|(_, name, data)| name == "set_text_selection"
+                    && data.as_deref() == Some("0..5")),
+            "{:?}",
+            provider.actions()
         );
     }
 
@@ -6509,6 +7442,20 @@ mod tests {
         assert_eq!(opts.max_depth, Some(2));
         let err = cmd_tree(&strs(&["--max-nodes", "0", "--pid", "1"])).expect_err("refused");
         assert!(matches!(err, CliError::Usage(_)), "{err}");
+    }
+
+    #[test]
+    fn cli_text_object_at_renders_the_element_like_other_cli_output() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let target = Target::App(mock_app(&provider));
+        let element = resolve_table_element(&target, r#"table[name="Prices"]"#)
+            .expect("resolves")
+            .expect("one table");
+        let rendered = text_object_cli(&element);
+        assert_eq!(rendered["role"], "table", "{rendered}");
+        assert_eq!(rendered["name"], "Prices", "{rendered}");
+        assert!(rendered.get("raw").is_none(), "{rendered}");
+        assert!(rendered.get("ref").is_none(), "{rendered}");
     }
 
     #[test]
@@ -6527,7 +7474,12 @@ mod tests {
             &CLI_TEXT_ARG_NAMES,
         )
         .expect("valid");
-        let out = run_text_op(&element.text().expect("has text"), &op).expect("reads");
+        let out = run_text_op(
+            &element.text().expect("has text"),
+            &op,
+            &mut text_object_cli,
+        )
+        .expect("reads");
         assert_eq!(out["match"]["text"], "line");
         assert_eq!(out["match"]["start"], 22);
     }
@@ -6599,6 +7551,192 @@ mod tests {
         for op in TEXT_OPS.iter().chain(TABLE_OPS) {
             assert!(help.contains(op), "--help omits {op}");
         }
-        assert!(help.contains("select-text (requires --value START,END, in UTF-16 code units)"));
+        assert!(help.contains("select-text (requires --range START,END, in UTF-16 code units"));
+    }
+
+    const ALL_COMMAND_FLAGS: [&CommandFlags; 17] = [
+        &APPS_FLAGS,
+        &WINDOWS_FLAGS,
+        &ENABLE_WEB_FLAGS,
+        &TREE_FLAGS,
+        &FIND_FLAGS,
+        &ACTION_FLAGS,
+        &TEXT_FLAGS,
+        &TABLE_FLAGS,
+        &RELATIONS_FLAGS,
+        &EVENTS_FLAGS,
+        &CLICK_FLAGS,
+        &MOVE_FLAGS,
+        &DRAG_FLAGS,
+        &SCROLL_FLAGS,
+        &KEY_FLAGS,
+        &TYPE_FLAGS,
+        &SCREENSHOT_FLAGS,
+    ];
+
+    /// A sample value each flag's parser accepts.
+    fn sample_value(flag: &str) -> Option<&'static str> {
+        match flag {
+            "--stable" => None,
+            "--backend" => Some("native"),
+            "--pid" | "--count" | "--dx" | "--dy" | "--duration-ms" | "--occurrence"
+            | "--offset" | "--limit" | "--max-nodes" | "--max-depth" | "--row" | "--column" => {
+                Some("1")
+            }
+            _ => Some("v"),
+        }
+    }
+
+    #[test]
+    fn known_flags_all_parse() {
+        // KNOWN_FLAGS is what `parse_command_opts` checks against; a flag the
+        // parser has an arm for but the list lacks would slip past every
+        // command's allow-list as a positional.
+        for flag in KNOWN_FLAGS {
+            let mut args = vec![flag.to_string()];
+            args.extend(sample_value(flag).map(str::to_string));
+            let (_, pos) = parse_opts(&args).unwrap_or_else(|e| panic!("{flag}: {e}"));
+            assert!(pos.is_empty(), "{flag} was not consumed: {pos:?}");
+        }
+    }
+
+    #[test]
+    fn every_command_flag_is_a_known_flag() {
+        for spec in ALL_COMMAND_FLAGS {
+            for flag in spec.flags {
+                assert!(
+                    KNOWN_FLAGS.contains(flag),
+                    "{} lists {flag}, which the parser does not know",
+                    spec.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_command_accepts_its_own_flags() {
+        for spec in ALL_COMMAND_FLAGS {
+            for flag in spec.flags {
+                let mut args = vec![flag.to_string()];
+                args.extend(sample_value(flag).map(str::to_string));
+                parse_command_opts(spec, &args)
+                    .unwrap_or_else(|e| panic!("{} {flag}: {e}", spec.command));
+            }
+        }
+    }
+
+    #[test]
+    fn a_flag_the_command_does_not_read_is_a_usage_error() {
+        for (argv, flag) in [
+            (&["tree", "--app", "X", "--limit", "5"][..], "--limit"),
+            (
+                &["find", "button", "--app", "X", "--kinds", "focus_changed"],
+                "--kinds",
+            ),
+            (&["text", "info", "x", "--app", "X", "--stable"], "--stable"),
+            (
+                &["table", "cell-at", "x", "--app", "X", "--range", "0,1"],
+                "--range",
+            ),
+            (
+                &["action", "press", "x", "--app", "X", "--max-nodes", "3"],
+                "--max-nodes",
+            ),
+            (&["events", "--app", "X", "--max-depth", "2"], "--max-depth"),
+            (&["apps", "--app", "X"], "--app"),
+            (&["click", "--at", "1,2", "--find", "x"], "--find"),
+            (&["key", "a", "--unit", "word"], "--unit"),
+            (&["type", "hi", "--held", "Shift"], "--held"),
+            (&["screenshot", "--out", "x.png", "--row", "1"], "--row"),
+        ] {
+            let err = run(&strs(argv)).expect_err(&format!("{argv:?} must be refused"));
+            assert_eq!(err.exit_code(), 2, "{argv:?}: {err}");
+            assert!(
+                err.to_string().contains(&format!("{flag} does not apply")),
+                "{argv:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_flag_is_named_before_its_value_is_parsed() {
+        let err = run(&strs(&["click", "--at", "1,2", "--pid", "abc"])).expect_err("refused");
+        assert!(err.to_string().contains("--pid does not apply"), "{err}");
+    }
+
+    #[test]
+    fn unknown_flags_and_extra_positionals_are_usage_errors() {
+        for argv in [
+            &["tree", "--app", "X", "--bogus"][..],
+            &["apps", "extra"],
+            &["tree", "--app", "X", "button"],
+            &["events", "--app", "X", "focus_changed"],
+            &["find", "button", "label", "--app", "X"],
+            &["action", "press", "button", "extra", "--app", "X"],
+            &["key", "a", "b"],
+            &["type", "hello", "world"],
+            &["click", "--at", "1,2", "extra"],
+        ] {
+            let err = run(&strs(argv)).expect_err(&format!("{argv:?} must be refused"));
+            assert_eq!(err.exit_code(), 2, "{argv:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn type_text_may_look_like_a_flag() {
+        let (_, pos) =
+            parse_command_opts(&TYPE_FLAGS, &strs(&["--not-a-flag"])).expect("literal text");
+        assert_eq!(pos, vec!["--not-a-flag"]);
+    }
+
+    #[test]
+    fn a_bad_backend_is_a_usage_error_naming_the_flag() {
+        for argv in [
+            &["tree", "--app", "X", "--backend", "foo"][..],
+            &["apps", "--backend", "foo"],
+            &["capabilities", "--backend", "foo"],
+        ] {
+            let err = run(&strs(argv)).expect_err("unknown backend");
+            assert_eq!(err.exit_code(), 2, "{argv:?}: {err}");
+            let msg = err.to_string();
+            assert!(msg.contains("--backend"), "{msg}");
+            assert!(!msg.contains("XA11Y_ACCESSIBILITY_SOURCE"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn a_bad_platform_is_a_usage_error_with_or_without_backend() {
+        for argv in [
+            &["capabilities", "--platform", "bogus"][..],
+            &["capabilities", "--platform", "bogus", "--backend", "native"],
+        ] {
+            let err = run(&strs(argv)).expect_err("unknown platform");
+            assert_eq!(err.exit_code(), 2, "{argv:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn backend_names_are_the_ones_the_library_accepts() {
+        for backend in BACKENDS {
+            crate::capabilities_for_backend(Some(Platform::Windows), None, Some(backend))
+                .unwrap_or_else(|e| panic!("{backend}: {e}"));
+        }
+        assert!(crate::capabilities_for_backend(Some(Platform::Windows), None, Some("x")).is_err());
+    }
+
+    #[test]
+    fn screenshot_refuses_a_target_without_annotate() {
+        for flag in [
+            &["--app", "X"][..],
+            &["--pid", "1"],
+            &["--shell", "dock"],
+            &["--backend", "native"],
+        ] {
+            let mut argv = vec!["screenshot", "--out", "x.png"];
+            argv.extend_from_slice(flag);
+            let err = run(&strs(&argv)).expect_err("inert target");
+            assert_eq!(err.exit_code(), 2, "{argv:?}: {err}");
+            assert!(err.to_string().contains(flag[0]), "{err}");
+        }
     }
 }

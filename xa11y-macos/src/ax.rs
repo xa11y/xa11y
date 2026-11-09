@@ -92,6 +92,7 @@ extern "C" {
     ) -> i32;
     fn safe_ax_create_application(pid: i32) -> AXUIElementRef;
     fn safe_ax_create_system_wide() -> AXUIElementRef;
+    fn safe_ax_is_element(value: CFTypeRef) -> bool;
     fn safe_ax_get_pid(element: AXUIElementRef, out_pid: *mut i32) -> i32;
     fn safe_ax_set_messaging_timeout(element: AXUIElementRef, timeout_seconds: f32) -> i32;
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
@@ -179,6 +180,41 @@ impl AXElement {
     fn is_null(&self) -> bool {
         self.0.is_null()
     }
+}
+
+/// The process's system-wide element, created once and never released.
+///
+/// [`ax_bounded`] must recognise this element: a messaging timeout set on it
+/// is the *process-global* value, not a per-element one. Keeping a single
+/// instance alive for the life of the process makes pointer equality a sound
+/// identity for it (the pointer is never freed, so never reused), with no AX
+/// or CF call on the hot path.
+static SYSTEM_WIDE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// A retained reference to the process's system-wide element, or a NULL
+/// [`AXElement`] when `AXUIElementCreateSystemWide` returned NULL (callers
+/// check [`AXElement::is_null`], as they did for a fresh element).
+fn system_wide_element() -> AXElement {
+    if let Some(&ptr) = SYSTEM_WIDE.get() {
+        return AXElement::from_borrowed(ptr as AXUIElementRef);
+    }
+    let created = unsafe { safe_ax_create_system_wide() };
+    if created.is_null() {
+        return AXElement::from_owned(created);
+    }
+    // The static keeps the create-rule reference. A thread that lost the
+    // race releases its own and uses the winner's.
+    let ptr = *SYSTEM_WIDE.get_or_init(|| created as usize);
+    if ptr != created as usize {
+        unsafe { safe_cf_release(created) };
+    }
+    AXElement::from_borrowed(ptr as AXUIElementRef)
+}
+
+/// Whether `element` is the process's system-wide element (see
+/// [`system_wide_element`]).
+fn is_system_wide(element: AXUIElementRef) -> bool {
+    SYSTEM_WIDE.get().is_some_and(|&p| p == element as usize)
 }
 
 impl Clone for AXElement {
@@ -384,7 +420,14 @@ fn ax_bounded(
         // The deadline passed before the message was sent, and recorded it.
         Err(_) => return AX_ERROR_CANNOT_COMPLETE,
     };
-    if !timeout.is_deadline() {
+    // A messaging timeout set on the system-wide element is the process's
+    // *global* value, not a per-element one: lowering it would cut every
+    // other thread's AX message to this caller's deadline, and the release
+    // below (`0`) would reset the global to the system default rather than
+    // the bound `set_global_messaging_timeout` installed. So a message to the
+    // system-wide element runs at the global bound even under a nearer
+    // deadline; it can overrun the deadline by at most that bound.
+    if !timeout.is_deadline() || is_system_wide(element) {
         return send();
     }
     // `call_timeout` never hands back a zero duration, which AX would read
@@ -406,14 +449,15 @@ fn ax_bounded(
         bound
     };
     let _err = unsafe { safe_ax_set_messaging_timeout(element, release) };
+    // The deadline set the bound this message ran under, so a
+    // `kAXErrorCannotComplete` is the deadline cutting it. Recorded without
+    // re-checking `is_expired`: AX takes the bound as an `f32`, and rounding
+    // can return the timeout a moment before the deadline reads as passed,
+    // which would lose the cut. This mirrors the AT-SPI backend.
     if code == AX_ERROR_CANNOT_COMPLETE {
-        if let Some(d) = &timeout.deadline {
-            if d.is_expired() {
-                // Recording the cut is the point of this call; the error it
-                // returns is built again by core with the wait's own context.
-                let _ = timeout.expired(describe_ax_call(element, &call()));
-            }
-        }
+        // Recording the cut is the point of this call; the error it returns
+        // is built again by core with the wait's own context.
+        let _ = timeout.expired(describe_ax_call(element, &call()));
     }
     code
 }
@@ -569,7 +613,7 @@ fn ax_bool(element: AXUIElementRef, attribute: &str) -> Option<bool> {
 
 /// Whether `window` is the owning process's focused (key) window.
 fn focused_window_is(window: AXUIElementRef, pid: u32) -> bool {
-    let system = AXElement::from_owned(unsafe { safe_ax_create_system_wide() });
+    let system = system_wide_element();
     if system.is_null() {
         return false;
     }
@@ -961,9 +1005,19 @@ fn ax_element_list_strict(element: AXUIElementRef, attribute: &str) -> Result<Ve
                 let mut windows = Vec::with_capacity(count as usize);
                 for i in 0..count {
                     let w = safe_cf_array_get_value(value, i);
-                    if !w.is_null() {
-                        windows.push(AXElement::from_borrowed(w));
+                    // AX calls on a non-element are undefined, and a dropped
+                    // item would read as a shorter list (tenet 1).
+                    if !safe_ax_is_element(w) {
+                        safe_cf_release(value);
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: format!(
+                                "{attribute} item {i} is not an AXUIElement; the provider \
+                                 answered malformed"
+                            ),
+                        });
                     }
+                    windows.push(AXElement::from_borrowed(w));
                 }
                 safe_cf_release(value);
                 Ok(windows)
@@ -1055,12 +1109,14 @@ fn tolerate_churn<T>(result: Result<T>) -> Result<Option<T>> {
 /// button` with nested groups finds the button under each group) arrives as
 /// two different pointers. `CFEqual` compares the underlying object, and
 /// `CFHash` is consistent with it, so hashing buckets the candidates and
-/// keeps this linear for distinct results. The pointers must stay valid for
-/// the call; the search's are retained by the handle cache.
-fn dedup_by_ax_identity<T>(items: Vec<(usize, AXUIElementRef, T)>, limit: Option<usize>) -> Vec<T> {
-    let mut buckets: HashMap<u64, Vec<AXUIElementRef>> = HashMap::new();
+/// keeps this linear for distinct results. Each item owns a retained
+/// reference, so the pointers compared stay valid for the whole call — the
+/// handle cache is bounded and evicts, so it cannot be what keeps them alive.
+fn dedup_by_ax_identity<T>(items: Vec<(usize, AXElement, T)>, limit: Option<usize>) -> Vec<T> {
+    let mut buckets: HashMap<u64, Vec<AXElement>> = HashMap::new();
     let mut out = Vec::with_capacity(items.len());
-    for (_, ptr, item) in items {
+    for (_, ax, item) in items {
+        let ptr = ax.as_ptr();
         if limit.is_some_and(|l| out.len() >= l) {
             break;
         }
@@ -1069,11 +1125,11 @@ fn dedup_by_ax_identity<T>(items: Vec<(usize, AXUIElementRef, T)>, limit: Option
             .or_default();
         if bucket
             .iter()
-            .any(|&seen| unsafe { safe_cf_equal(seen as CFTypeRef, ptr as CFTypeRef) })
+            .any(|seen| unsafe { safe_cf_equal(seen.as_ptr() as CFTypeRef, ptr as CFTypeRef) })
         {
             continue;
         }
-        bucket.push(ptr);
+        bucket.push(ax);
         out.push(item);
     }
     out
@@ -1264,7 +1320,8 @@ fn container_selection_contains(element: AXUIElementRef, max_hops: usize) -> boo
 /// For snapshots, where a missing action list only narrows `actions`.
 /// Dispatch decisions use [`try_ax_action_names`].
 fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
-    try_ax_action_names(element).unwrap_or_default()
+    // The error is discarded, so it is built in the cheap snapshot form.
+    action_names_in(element, CannotCompleteContext::Snapshot).unwrap_or_default()
 }
 
 /// The element's native action names, error-preserving: an element that
@@ -1272,11 +1329,26 @@ fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
 /// reply is `Error::Platform`. A dispatch that picks its AX action from this
 /// list must not mistake a failed read for an empty one (tenet 1).
 fn try_ax_action_names(element: AXUIElementRef) -> Result<Vec<String>> {
+    action_names_in(element, CannotCompleteContext::PreAction)
+}
+
+/// [`try_ax_action_names`], with `context` deciding how much a
+/// `kAXErrorCannotComplete` costs to describe (see [`cannot_complete_error`]).
+fn action_names_in(element: AXUIElementRef, context: CannotCompleteContext) -> Result<Vec<String>> {
     let mut names: CFArrayRef = std::ptr::null();
-    let err = ffi_copy_action_names(element, &mut names);
-    match err {
+    let call = AxCall::timed(|| ffi_copy_action_names(element, &mut names));
+    match call.code {
         AX_ERROR_SUCCESS => {}
         AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => return Ok(vec![]),
+        // Say which process did not answer, and whether it timed out.
+        AX_ERROR_CANNOT_COMPLETE => {
+            return Err(cannot_complete_error(
+                element,
+                "AXUIElementCopyActionNames failed",
+                call.elapsed,
+                context,
+            ))
+        }
         code => {
             return Err(Error::Platform {
                 code: i64::from(code),
@@ -1835,10 +1907,12 @@ impl ResolvedAttrs {
                 });
             }
         };
-        let rich = rich::PositionAttrs::read_individually(element, &role_str);
+        let subrole_str = ax_string(element, "AXSubrole");
+        let rich =
+            rich::PositionAttrs::read_individually(element, &role_str, subrole_str.as_deref());
         Ok(Self {
             role_str,
-            subrole_str: ax_string(element, "AXSubrole"),
+            subrole_str,
             ax_title: ax_string(element, "AXTitle"),
             ax_description: ax_string(element, "AXDescription"),
             ax_help: ax_string(element, "AXHelp"),
@@ -1998,7 +2072,7 @@ const AX_MESSAGING_TIMEOUT_SECS: f32 = 2.0;
 /// "use the current global value". That is what the shell scan's release
 /// (`unbound_shell_probe`) writes, so a released probe returns to this bound.
 fn set_global_messaging_timeout() -> Result<()> {
-    let system_wide = AXElement::from_owned(unsafe { safe_ax_create_system_wide() });
+    let system_wide = system_wide_element();
     if system_wide.is_null() {
         return Err(Error::Platform {
             code: -1,
@@ -2027,6 +2101,11 @@ enum CannotCompleteContext {
     /// window-list copy), and the message warns that the action may already
     /// have been delivered.
     Action,
+    /// A read an action makes before sending anything: the stale-handle
+    /// check and the action-name lookup that picks the AX action. Terminal
+    /// like [`Action`](Self::Action), so the app name is looked up, but
+    /// nothing has been sent yet, so there is no delivery warning.
+    PreAction,
     /// A snapshot read. Enumeration, attach and churn handling read this
     /// error as a retry signal and often discard it, so it carries the PID
     /// only (tenet 6: no expensive diagnosis on a retry-signal path).
@@ -2064,7 +2143,11 @@ fn cannot_complete_error(
     let pid_known = !el_ptr.is_null()
         && unsafe { safe_ax_get_pid(el_ptr, &mut pid) } == AX_ERROR_SUCCESS
         && pid > 0;
-    let name = if pid_known && context == CannotCompleteContext::Action {
+    let name = if pid_known
+        && matches!(
+            context,
+            CannotCompleteContext::Action | CannotCompleteContext::PreAction
+        ) {
         MacOSProvider::list_gui_apps()
             .into_iter()
             .find(|(p, _)| *p == pid)
@@ -2265,12 +2348,17 @@ fn activate_owning_app(el_ptr: AXUIElementRef, action: &str, role: Role) -> Resu
     set_bool_attr(app.as_ptr(), "AXFrontmost", true, action, role)
 }
 
-/// The application-element attributes that ask a Chromium-based app to build
-/// its web content's accessibility tree, in the order they are tried.
-/// Electron answers `AXManualAccessibility`, which has no side effects on the
-/// app's native UI. Chrome answers only `AXEnhancedUserInterface`, which is
-/// what VoiceOver sets, so it is tried second.
-const WEB_ACCESSIBILITY_ATTRS: [&str; 2] = ["AXManualAccessibility", "AXEnhancedUserInterface"];
+/// The application-element attribute that asks a Chromium-based app to build
+/// its web content's accessibility tree. Electron answers it, and it has no
+/// side effects on the app's native UI.
+///
+/// `AXEnhancedUserInterface` (what VoiceOver sets) is deliberately not tried
+/// when this one is refused: it changes how the app behaves for every client
+/// (it is known to disable window animations and to confuse window managers),
+/// and trying it after a refusal would be the silent fallback tenet 1 rules
+/// out. An app that ignores this attribute is launched with
+/// `--force-renderer-accessibility` instead.
+const WEB_ACCESSIBILITY_ATTR: &str = "AXManualAccessibility";
 
 /// What reading a web-accessibility switch back returned.
 #[derive(Debug, PartialEq)]
@@ -2322,13 +2410,12 @@ fn read_switch(el_ptr: AXUIElementRef, attr_name: &str) -> SwitchReadBack {
 
 /// Ask the application `app` to build its web content's accessibility tree.
 ///
-/// Each switch in [`WEB_ACCESSIBILITY_ATTRS`] is set and then read back, in
-/// order, and the first one that reads back `true` is the success; later
-/// switches are not touched. A switch that took stays set: it is not
-/// restored. The set call's return code is recorded but proves nothing: Chrome
-/// answers
-/// `kAXErrorNotImplemented` to a set it carried out. When neither
-/// takes, the error names what each returned.
+/// [`WEB_ACCESSIBILITY_ATTR`] is set and then read back. Either a successful
+/// write or a `true` read-back is the success, because apps prove it
+/// differently: Chromium has answered `kAXErrorNotImplemented` to a set it
+/// carried out, and Electron accepts the set and reads back `false`. The
+/// attribute stays set: it is not restored. When neither holds, the error
+/// names what the write and the read returned and what to do instead.
 fn enable_web_accessibility_for(app: &ElementData) -> Result<()> {
     const ACTION: &str = "enable_web_accessibility";
     if app.role != Role::Application {
@@ -2350,33 +2437,39 @@ fn enable_web_accessibility_for(app: &ElementData) -> Result<()> {
             message: format!("AXUIElementCreateApplication({pid}) failed while running {ACTION}"),
         });
     }
-    let mut attempts = Vec::with_capacity(WEB_ACCESSIBILITY_ATTRS.len());
-    for attr_name in WEB_ACCESSIBILITY_ATTRS {
-        let attr = CFString::new(attr_name);
-        let set = do_set_attribute(
-            app_el.as_ptr(),
-            &attr,
-            core_foundation::boolean::CFBoolean::true_value().as_CFTypeRef(),
-        );
-        let read = read_switch(app_el.as_ptr(), attr_name);
-        if read == SwitchReadBack::Flag(true) {
-            return Ok(());
-        }
-        attempts.push(format!(
-            "{attr_name}: set returned AXError {}, read back {read}",
-            set.code
-        ));
+    let attr = CFString::new(WEB_ACCESSIBILITY_ATTR);
+    let set = do_set_attribute(
+        app_el.as_ptr(),
+        &attr,
+        core_foundation::boolean::CFBoolean::true_value().as_CFTypeRef(),
+    );
+    // One request, two pieces of evidence that the app took it, because apps
+    // disagree on which they give: Chromium can answer the write with an
+    // error and still read back `true`, while Electron accepts the write and
+    // reads back `false`. Either one means the request was taken; neither is
+    // a second mechanism.
+    let read = read_switch(app_el.as_ptr(), WEB_ACCESSIBILITY_ATTR);
+    if set.code == 0 || read == SwitchReadBack::Flag(true) {
+        return Ok(());
     }
     let name = app.name.clone().unwrap_or_default();
     Err(Error::AccessibilityNotEnabled {
         app: format!("{name} (pid={pid})"),
-        instructions: format!(
-            "neither web accessibility switch read back as set ({}). Chromium-based \
-             apps (Electron, Chrome) honour them; other apps may ignore both or accept \
-             one without having web content.",
-            attempts.join("; ")
-        ),
+        instructions: web_accessibility_refused(set.code, &read),
     })
+}
+
+/// The guidance of the error `enable_web_accessibility` returns when the app
+/// neither accepted the [`WEB_ACCESSIBILITY_ATTR`] write nor reads it back as
+/// set.
+fn web_accessibility_refused(set_code: i32, read: &SwitchReadBack) -> String {
+    format!(
+        "the app refused {WEB_ACCESSIBILITY_ATTR} (the write returned AXError \
+         {set_code}, and it reads back {read}). Electron and Chromium take it. Relaunch an app that \
+         does not with --force-renderer-accessibility. xa11y does not set \
+         AXEnhancedUserInterface instead, because that changes the app's behaviour \
+         for every client."
+    )
 }
 
 /// Clear a boolean attribute when it currently reads `true`.
@@ -3495,17 +3588,22 @@ fn ax_relation_attribute(kind: xa11y_core::RelationKind) -> Option<(&'static str
 }
 
 /// One element-valued attribute: `Ok(None)` when absent, an error when the
-/// app did not answer (never read as "no element", tenet 1).
+/// app did not answer or answered with something other than an element
+/// (never read as "no element", tenet 1).
 fn ax_single_element(element: AXUIElementRef, attribute: &str) -> Result<Option<AXElement>> {
     match read_raw_attr(element, attribute) {
         RawAttr::Value(v) => {
-            let is_element =
-                unsafe { safe_cf_get_type_id(v) == safe_cf_get_type_id(element as CFTypeRef) };
-            if is_element {
+            if unsafe { safe_ax_is_element(v) } {
                 Ok(Some(AXElement::from_owned(v as AXUIElementRef)))
             } else {
                 unsafe { safe_cf_release(v) };
-                Ok(None)
+                Err(Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "{attribute} returned a non-element value; the provider answered \
+                         malformed, not empty"
+                    ),
+                })
             }
         }
         RawAttr::Absent => Ok(None),
@@ -3660,12 +3758,21 @@ fn ax_action_to_name(ax_name: &str) -> Option<&'static str> {
 /// element's activation action: Finder sidebar items, for example, advertise
 /// `AXOpen` and no `AXPress`. This is the primary-activation reading of
 /// tenet 3, the same way Windows `press` dispatches to the element's
-/// activation pattern. Nothing is tried after a failure (tenet 1). Every other
-/// shape keeps `AXPress`, which is what `press` has always sent.
+/// activation pattern. Nothing is tried after a failure (tenet 1).
+///
+/// Failing both, `AXConfirm` when the element advertises it: the snapshot
+/// lists `press` for an `AXConfirm`-only element (`ax_action_to_name`), and
+/// tenet 3 requires that the advertised action is the one invoked rather
+/// than an `AXPress` the element never offered. Every other shape keeps
+/// `AXPress`, which is what `press` has always sent.
 fn press_ax_action(ax_actions: &[String]) -> &'static str {
     let has = |name: &str| ax_actions.iter().any(|a| a == name);
-    if !has("AXPress") && has("AXOpen") {
+    if has("AXPress") {
+        "AXPress"
+    } else if has("AXOpen") {
         "AXOpen"
+    } else if has("AXConfirm") {
+        "AXConfirm"
     } else {
         "AXPress"
     }
@@ -4495,7 +4602,7 @@ fn build_snapshot_data(
         let (table, cell, table_row, collection) =
             attrs
                 .rich
-                .to_metadata(element, role, &attrs.role_str, attrs.subrole_str.as_deref());
+                .to_metadata(element, role, &attrs.role_str, attrs.subrole_str.as_deref())?;
 
         let numeric_value = match role {
             Role::Slider | Role::ProgressBar | Role::SpinButton | Role::ScrollBar => {
@@ -4837,7 +4944,7 @@ impl MacOSProvider {
         &self,
         apps: &[(i32, String)],
     ) -> Result<Option<(ShellSurfaceKind, ElementData)>> {
-        let system_wide = AXElement::from_owned(unsafe { safe_ax_create_system_wide() });
+        let system_wide = system_wide_element();
         if system_wide.is_null() {
             return Err(Error::Platform {
                 code: -1,
@@ -5191,7 +5298,10 @@ impl Provider for MacOSProvider {
     fn revalidate(&self, element: &ElementData) -> Result<()> {
         let ax = self.get_cached(element.handle)?;
         let subject = xa11y_core::error::stale_subject(element);
-        let live_role = match read_raw_attr(ax.as_ptr(), "AXRole") {
+        let read_start = Instant::now();
+        let read = read_raw_attr(ax.as_ptr(), "AXRole");
+        let read_elapsed = read_start.elapsed();
+        let live_role = match read {
             RawAttr::Value(v) => {
                 let is_string = unsafe { safe_cf_get_type_id(v) == safe_cf_string_get_type_id() };
                 if is_string {
@@ -5218,7 +5328,18 @@ impl Provider for MacOSProvider {
                         Error::stale(reason, subject)
                     }
                     // A busy or wedged app is not a stale element: report it
-                    // as the platform failure it is.
+                    // as the platform failure it is, naming the app and
+                    // whether it timed out as every other path does.
+                    ElementChurn::Unreachable | ElementChurn::Fatal
+                        if code == AX_ERROR_CANNOT_COMPLETE =>
+                    {
+                        cannot_complete_error(
+                            ax.as_ptr(),
+                            &format!("AXRole read for {subject} failed"),
+                            read_elapsed,
+                            CannotCompleteContext::PreAction,
+                        )
+                    }
                     ElementChurn::Unreachable | ElementChurn::Fatal => Error::Platform {
                         code: i64::from(code),
                         message: format!("AXRole read for {subject} failed (AXError {code})"),
@@ -5349,7 +5470,7 @@ impl Provider for MacOSProvider {
         // second pass has no bound left to hide a match, and a drop there is
         // the ordinary concurrent-mutation case the retry signal covers.
         let mut walk_limit = phase1_walk_limit;
-        let phase1_data_by_clause: Vec<Vec<(usize, AXUIElementRef, ElementData)>> = loop {
+        let phase1_data_by_clause: Vec<Vec<(usize, AXElement, ElementData)>> = loop {
             let phase1: Vec<(usize, AXElement)> = self.collect_matching_ax_group(
                 &root_ax,
                 root_data.role,
@@ -5365,11 +5486,11 @@ impl Provider for MacOSProvider {
             // belongs to. The per-clause entries keep their original walk
             // positions, so bucketing as we snapshot cannot affect the merge.
             let mut dropped = false;
-            let mut data_by_clause: Vec<Vec<(usize, AXUIElementRef, ElementData)>> =
+            let mut data_by_clause: Vec<Vec<(usize, AXElement, ElementData)>> =
                 (0..group.clauses.len()).map(|_| Vec::new()).collect();
             for (pos, (clause_idx, ax)) in phase1.into_iter().enumerate() {
                 match self.build_element_data(&ax, root_data.pid) {
-                    Ok(data) => data_by_clause[clause_idx].push((pos, ax.as_ptr(), data)),
+                    Ok(data) => data_by_clause[clause_idx].push((pos, ax, data)),
                     Err(err) => match classify_element_churn(&err) {
                         ElementChurn::Gone => dropped = true,
                         ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
@@ -5387,7 +5508,7 @@ impl Provider for MacOSProvider {
             walk_limit = None;
         };
 
-        let mut merged: Vec<(usize, AXUIElementRef, ElementData)> = Vec::new();
+        let mut merged: Vec<(usize, AXElement, ElementData)> = Vec::new();
         for (clause_idx, mut phase1_data) in phase1_data_by_clause.into_iter().enumerate() {
             if phase1_data.is_empty() {
                 continue;
@@ -5414,7 +5535,7 @@ impl Provider for MacOSProvider {
             // Multi-segment narrowing per clause. We anchor each narrowed
             // descendant at its phase-1 ancestor's walk_pos so the doc-order
             // sort puts cross-clause results in the right global order.
-            for (anchor_pos, _anchor_ptr, head) in phase1_data {
+            for (anchor_pos, _anchor_ax, head) in phase1_data {
                 let narrowed = self.narrow_multi_segment(
                     vec![head],
                     &clause.segments[1..],
@@ -5424,12 +5545,13 @@ impl Provider for MacOSProvider {
                 for n in narrowed {
                     // Anchor identity is for dedup vs other clauses' phase-1
                     // hits; for phase-2 outputs we use the narrowed element's
-                    // own AXUIElement (resolved via the cache, which retains
-                    // it, so the pointer stays valid for the merge below).
+                    // own AXUIElement, resolved via the cache and held as a
+                    // retained reference: the cache evicts, so it cannot be
+                    // what keeps the pointer alive through the merge below.
                     // The handle was minted by this call; a miss is a bug,
                     // not an element to keep without identity.
-                    let ptr = self.get_cached(n.handle)?.as_ptr();
-                    merged.push((anchor_pos, ptr, n));
+                    let ax = self.get_cached(n.handle)?;
+                    merged.push((anchor_pos, ax, n));
                 }
             }
         }
@@ -5689,7 +5811,7 @@ impl Provider for MacOSProvider {
     /// as "no app is foreground" rather than a failure. A NULL system-wide
     /// element is a genuine platform failure and propagates.
     fn focused_app(&self) -> Result<ElementData> {
-        let system_wide = AXElement::from_owned(unsafe { safe_ax_create_system_wide() });
+        let system_wide = system_wide_element();
         if system_wide.is_null() {
             return Err(Error::Platform {
                 code: -1,
@@ -6287,15 +6409,13 @@ impl Provider for MacOSProvider {
             // Payload verbs have no arguments on the generic escape hatch;
             // fail surfaceably with how to call them instead of guessing
             // (tenet 1: no silent fallback).
-            "move_to" => Err(Error::InvalidActionData {
-                message: "perform_action(\"move_to\") requires coordinates; call move_to(x, y)"
-                    .to_string(),
-            }),
-            "resize_to" => Err(Error::InvalidActionData {
-                message: "perform_action(\"resize_to\") requires dimensions; call \
-                           resize_to(width, height)"
-                    .to_string(),
-            }),
+            "move_to" => Err(Error::invalid_action_data(
+                "perform_action(\"move_to\") requires coordinates; call move_to(x, y)",
+            )),
+            "resize_to" => Err(Error::invalid_action_data(
+                "perform_action(\"resize_to\") requires dimensions; call \
+                           resize_to(width, height)",
+            )),
             _ => {
                 // Custom action resolution: snake_case → AXPascalCase
                 let ax = self.get_cached(element.handle)?;
@@ -6759,8 +6879,15 @@ impl MacOSProvider {
                     return;
                 }
                 safe_cf_run_loop_add_source(source);
-                let rl = safe_cf_run_loop_get_current();
-                let _ = rl_tx.send(rl as usize);
+                // Retained for the cancel handle, which may still call
+                // CFRunLoopStop on it after this thread (and its run loop's
+                // last owner) has exited. Released after the join.
+                let rl = safe_cf_retain(safe_cf_run_loop_get_current());
+                if rl_tx.send(rl as usize).is_err() {
+                    // subscribe gave up waiting and will never cancel us.
+                    safe_cf_release(rl);
+                    return;
+                }
                 safe_cf_run_loop_run();
             }
         });
@@ -6800,11 +6927,21 @@ impl MacOSProvider {
         let ctx_usize = ctx_ptr as usize;
 
         let cancel = CancelHandle::new(move || {
-            unsafe {
-                safe_cf_run_loop_stop(run_loop_usize as CFTypeRef);
+            // CFRunLoopStop only stops a loop that is already running. The
+            // worker reports its run loop before it calls CFRunLoopRun, so a
+            // cancel right after subscribe can land in between; a single
+            // stop is then lost and the join below waits forever. Repeat the
+            // stop until the worker has exited. The run loop is retained, so
+            // a stop that races the worker's exit is harmless.
+            while !handle.is_finished() {
+                unsafe { safe_cf_run_loop_stop(run_loop_usize as CFTypeRef) };
+                std::thread::sleep(Duration::from_millis(5));
             }
+            // The thread has finished; join only collects its result. A
+            // panic in it was already reported on stderr by the runtime.
             let _ = handle.join();
             unsafe {
+                safe_cf_release(run_loop_usize as CFTypeRef);
                 drop(Box::from_raw(ctx_usize as *mut ObserverContext));
                 safe_cf_release(observer_usize as CFTypeRef);
             }
@@ -7617,11 +7754,7 @@ mod tests {
         let other = AXElement::from_owned(unsafe { safe_ax_create_application(1) });
         assert_ne!(a.as_ptr(), b.as_ptr(), "fixture needs two distinct refs");
 
-        let items = vec![
-            (0, a.as_ptr(), "a"),
-            (1, other.as_ptr(), "other"),
-            (2, b.as_ptr(), "b"),
-        ];
+        let items = vec![(0, a, "a"), (1, other, "other"), (2, b, "b")];
         assert_eq!(
             dedup_by_ax_identity(items.clone(), None),
             vec!["a", "other"]
@@ -7714,6 +7847,22 @@ mod tests {
         let val = core_foundation::boolean::CFBoolean::true_value();
         let err = do_set_attribute(std::ptr::null(), &attr, val.as_CFTypeRef());
         assert_ne!(err, AX_ERROR_SUCCESS);
+    }
+
+    /// A refused `AXManualAccessibility` names what the set and the read
+    /// returned and the relaunch flag, and says why there is no
+    /// `AXEnhancedUserInterface` fallback.
+    #[test]
+    fn web_accessibility_refusal_names_the_attempt_and_the_remedy() {
+        let message = web_accessibility_refused(-25205, &SwitchReadBack::Absent);
+        assert!(message.contains("AXManualAccessibility"), "{message}");
+        assert!(message.contains("AXError -25205"), "{message}");
+        assert!(message.contains("no such attribute"), "{message}");
+        assert!(
+            message.contains("--force-renderer-accessibility"),
+            "{message}"
+        );
+        assert!(message.contains("AXEnhancedUserInterface"), "{message}");
     }
 
     /// Both spellings of a password field are flagged, and nothing else
@@ -7830,8 +7979,12 @@ mod tests {
         // AXPress wins whenever the element has it (issue #517 decision).
         assert_eq!(press_ax_action(&names(&["AXOpen", "AXPress"])), "AXPress");
         assert_eq!(press_ax_action(&names(&["AXPress"])), "AXPress");
-        // No AXOpen: unchanged from before.
-        assert_eq!(press_ax_action(&names(&["AXConfirm"])), "AXPress");
+        // AXConfirm alone is what `press` advertises, so it is what it sends.
+        assert_eq!(press_ax_action(&names(&["AXConfirm"])), "AXConfirm");
+        assert_eq!(
+            press_ax_action(&names(&["AXConfirm", "AXPress"])),
+            "AXPress"
+        );
         // AXConfirm does not count as AXPress: an element with AXConfirm and
         // AXOpen but no AXPress opens.
         assert_eq!(press_ax_action(&names(&["AXConfirm", "AXOpen"])), "AXOpen");

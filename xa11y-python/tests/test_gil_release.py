@@ -70,7 +70,7 @@ def test_pointer_geometry_query_releases_gil():
     simulator = _make_test_input(delay_ms=1000)
 
     def blocked():
-        with pytest.raises(xa11y.SelectorNotMatchedError):
+        with pytest.raises(xa11y.InvalidActionDataError):
             simulator.click((500, 500))
 
     assert _ticks_during(blocked) >= _MIN_TICKS

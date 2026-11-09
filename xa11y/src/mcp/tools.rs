@@ -17,15 +17,15 @@
 //! reported in the payload — a silently shortened tree reads as a complete
 //! one, which is worse than no tree.
 
-use super::refs::RefTable;
+use super::refs::{Capture, RefTable};
 use serde_json::{json, Map, Value};
 
 use super::base64;
 use super::events::{Registry, BUFFER_CAPACITY, EXPIRY, MAX_SUBSCRIPTIONS};
 use crate::cli::{
     self, parse_button, parse_held, parse_key_name, resolve_app, resolve_target, CliError,
-    CliResult, Opts, Target, ACTIONS_REQUIRING_AT, ACTIONS_REQUIRING_SIZE, ACTIONS_REQUIRING_VALUE,
-    ACTION_NAMES,
+    CliResult, Opts, Target, TreeDetail, ACTIONS_REQUIRING_AT, ACTIONS_REQUIRING_RANGE,
+    ACTIONS_REQUIRING_SIZE, ACTIONS_REQUIRING_VALUE, ACTION_NAMES, TREE_DETAILS,
 };
 use crate::{
     App, AppExt, ClickOptions, ClickTarget, DragOptions, Element, Locator, Rect, ScrollDelta,
@@ -34,7 +34,8 @@ use crate::{
 
 /// Depth used by `tree` when the caller does not ask for one.
 const TREE_DEFAULT_MAX_DEPTH: usize = 12;
-/// Hard ceiling on nodes in one `tree` result, whatever depth was requested.
+/// Hard ceiling on nodes in one `tree` result, whatever depth was requested,
+/// and the default of its `max_nodes`.
 const TREE_MAX_NODES: usize = 2_000;
 /// Matches returned by `find` when the caller does not ask for a limit.
 const FIND_DEFAULT_LIMIT: usize = 50;
@@ -86,6 +87,12 @@ const PID: Bounds = Bounds {
 /// `tree`'s `max_depth`. The ceiling is far past any real UI: it exists so a
 /// caller cannot ask for a walk the node budget would have to cut anyway.
 const TREE_DEPTH: Bounds = Bounds { min: 0, max: 64 };
+/// `tree`'s `max_nodes`. At least the root; at most the ceiling that keeps a
+/// result inside a context window, which is also the default.
+const TREE_NODES: Bounds = Bounds {
+    min: 1,
+    max: TREE_MAX_NODES as i64,
+};
 /// `find`'s `limit`. Zero would return nothing while reporting matches.
 const FIND_LIMIT: Bounds = Bounds {
     min: 1,
@@ -383,7 +390,7 @@ impl ToolHost for Xa11yTools {
             "apps" => tool_apps(),
             "capabilities" => tool_capabilities(args),
             "shell" => tool_shell(),
-            "windows" => tool_windows(args),
+            "windows" => tool_windows(args, &self.refs),
             "enable_web_accessibility" => tool_enable_web_accessibility(args),
             "tree" => tool_tree(args, &self.refs),
             "find" => tool_find(args, &self.refs),
@@ -429,7 +436,7 @@ fn app_properties() -> Map<String, Value> {
                             `pid`, or `shell`.",
         }),
     );
-    props.insert("backend".into(), json!({"type":"string", "enum":["native","uia","ia2"], "description":"Accessibility source for this attachment; default: server environment. IA2 requires Windows."}));
+    props.insert("backend".into(), json!({"type":"string", "enum": cli::BACKENDS, "description":"Accessibility source for this attachment; default: server environment. IA2 requires Windows."}));
     props.insert(
         "pid".into(),
         PID.property(
@@ -452,14 +459,16 @@ fn ref_property() -> Value {
     json!({
         "type": "string",
         "description": format!(
-            "An element `ref` from a recent `tree`, `find` or `relations` result (`c3:17`), in place of \
-             `selector`: give exactly one of the two, and no `app` / `pid` / `shell` with a \
-             ref. A ref names exactly that element. If it was removed, its application \
-             restarted, or its id now names a different element, the call fails with \
-             `element_stale` (and `stale_reason`) rather than finding a similar one. The \
-             server keeps the refs of its {} most recent `tree` / `find` / `relations` results; an older \
-             ref fails with `ref_expired`.",
-            super::refs::MAX_CAPTURES
+            "An element `ref` (`c3:17`) from a recent {issuers}, in place of \
+             `selector`: give exactly one of the two, and no `app` / `pid` / `shell` / \
+             `backend` with a ref. A ref names exactly that element. If it was removed, its \
+             application restarted, or its id now names a different element, the call fails \
+             with `element_stale` (and `stale_reason`) rather than finding a similar one. \
+             The server keeps the refs of its {max} most recent results that returned \
+             elements; an older ref fails with `ref_expired`, and an index past the end of a \
+             result it still holds with `invalid_arguments`.",
+            issuers = super::refs::ISSUERS,
+            max = super::refs::MAX_CAPTURES,
         ),
     })
 }
@@ -533,7 +542,7 @@ fn tool_definition(name: &str) -> Value {
         ),
         "capabilities" => {
             let mut props = Map::new();
-            props.insert("backend".into(), json!({"type":"string", "enum":["native","uia","ia2"]}));
+            props.insert("backend".into(), json!({"type":"string", "enum": cli::BACKENDS, "description":"Accessibility source to describe. Default: the server environment's source for the running platform, and native for another `platform`. IA2 has its own table, including unsupported events."}));
             props.insert(
                 "platform".into(),
                 json!({
@@ -619,8 +628,11 @@ fn tool_definition(name: &str) -> Value {
                  Each window reports its `name`, `bounds`, `states` (including \
                  `minimized` / `maximized` / `fullscreen` when the platform can \
                  report them) \
-                 and the actions it advertises — the same shape `find` returns \
-                 for elements. Results are capped at the `limit`, and \
+                 and the actions it advertises, in the element shape `find` \
+                 uses. Each window carries a `ref` (`c3:0`) that `action`, \
+                 `text`, `table` and `relations` accept in place of a selector, \
+                 to act on exactly that window; a window selector works too. \
+                 Results are capped at the `limit`, and \
                  `truncated` in the result says whether anything was dropped. \
                  If one application cannot be enumerated, it is skipped and \
                  reported in `errors` (with `count` covering only the windows \
@@ -656,14 +668,14 @@ fn tool_definition(name: &str) -> Value {
                  macOS only. The request is never made implicitly. Linux and Windows \
                  return an `unsupported` failure saying what to do instead (on Linux, \
                  relaunch the app with `--force-renderer-accessibility`). On macOS it \
-                 sets `AXManualAccessibility`, then `AXEnhancedUserInterface`, on the \
-                 application and reads each back; an app where neither reads back as set \
-                 returns `accessibility_not_enabled` naming what each returned. An app \
-                 that keeps a value but has no web content, such as a native one, ends in \
-                 a `timeout` instead. The attribute stays set to true afterwards and is \
-                 not restored: `AXEnhancedUserInterface` can disable window animations \
-                 or confuse a window manager in an app that reacts to it, so call this \
-                 only for apps whose web content you need.\n\n\
+                 sets `AXManualAccessibility` on the application; an app that neither \
+                 accepts the write nor reads it back as set returns \
+                 `accessibility_not_enabled` naming what the write and the read returned (relaunch such an app with \
+                 `--force-renderer-accessibility`). `AXEnhancedUserInterface` is never \
+                 set. An app that keeps the value but has no web content, such as a native \
+                 one, ends in a `timeout` instead. The attribute stays set to true \
+                 afterwards and is not restored, so call this only for apps whose web \
+                 content you need.\n\n\
                  The wait runs up to the default timeout, currently {timeout}. Set \
                  {timeout_env} (in seconds) in the environment the server is launched \
                  with to change it. A `timeout` failure says how many web areas the app \
@@ -680,9 +692,18 @@ fn tool_definition(name: &str) -> Value {
                 TREE_DEPTH.property(format!(
                     "How deep to walk. Default {TREE_DEFAULT_MAX_DEPTH}. \
                      0 returns the application node alone. Results are also \
-                     capped at {TREE_MAX_NODES} nodes; `truncated` in the result \
+                     capped at `max_nodes` nodes; `truncated` in the result \
                      says whether either limit was hit, and each node that lost \
                      children to one is marked where it happened."
+                )),
+            );
+            props.insert(
+                "max_nodes".into(),
+                TREE_NODES.property(format!(
+                    "Most nodes to return, read breadth-first. Default and maximum \
+                     {TREE_MAX_NODES}: a larger value is refused rather than \
+                     lowered, so ask for less to keep a result small, and use \
+                     `find` or a deeper `tree` on one node to see past the cap."
                 )),
             );
             props.insert(
@@ -716,8 +737,8 @@ fn tool_definition(name: &str) -> Value {
                      understand a window before acting on it, and again afterwards to \
                      confirm what an action changed. Pass `shell` in place of `app` / \
                      `pid` to read an OS shell surface's tree instead.\n\n\
-                     A node whose children were left out by `max_depth` or the \
-                     {TREE_MAX_NODES}-node cap carries `subtree_truncated: true` and \
+                     A node whose children were left out by `max_depth` or \
+                     `max_nodes` (at most {TREE_MAX_NODES}) carries `subtree_truncated: true` and \
                      `children_count` (how many children it really has; `children`, \
                      if present, holds only the first of them). A node without \
                      `subtree_truncated` is complete: no `children` means a leaf. To \
@@ -809,10 +830,13 @@ fn tool_definition(name: &str) -> Value {
                     "enum": ACTION_NAMES,
                     "description": format!(
                         "Accessibility action to perform. These require `value`: {}. \
+                         `{range_verb}` requires a range: `start` and `end`, or the \
+                         same range as `value` `START,END` (not both). \
                          `{at_verb}` requires `at` (X,Y) and `{size_verb}` requires \
                          `size` (W,H): the platform needs coordinates and cannot be \
                          told a feature off the action name alone.",
                         ACTIONS_REQUIRING_VALUE.join(", "),
+                        range_verb = ACTIONS_REQUIRING_RANGE[0],
                         at_verb = ACTIONS_REQUIRING_AT[0],
                         size_verb = ACTIONS_REQUIRING_SIZE[0],
                     ),
@@ -838,20 +862,32 @@ fn tool_definition(name: &str) -> Value {
                 json!({
                     "type": "string",
                     "description": "Argument for actions that need one: the text for `set-value` \
-                                    and `type-text`, a number for `set-numeric-value` (e.g. \
-                                    \"88\", within the element's `min_value`..`max_value`), or \
-                                    `START,END` for `select-text`, in UTF-16 code units \
-                                    (an emoji outside the Basic Multilingual Plane is two \
-                                    units). The `text` tool reports ranges in the same \
-                                    units, so copy its `start` / `end` here.",
+                                    and `type-text`, or a number for `set-numeric-value` (e.g. \
+                                    \"88\", within the element's `min_value`..`max_value`). \
+                                    `select-text` also accepts its range here as `START,END` \
+                                    in UTF-16 code units, in place of `start` / `end` and \
+                                    never together with them. Refused on any other verb.",
                 }),
             );
+            for (key, which) in [("start", "first"), ("end", "one past the last")] {
+                props.insert(
+                    key.into(),
+                    TEXT_OFFSET.property(format!(
+                        "`select-text` only: the {which} UTF-16 code unit of the range to \
+                         select (0-based, half-open; an emoji outside the Basic \
+                         Multilingual Plane is two units). Give `start` and `end` \
+                         together. The `text` tool reports ranges in the same units and \
+                         spelling, so copy its `start` / `end` here. Refused on any \
+                         other verb."
+                    )),
+                );
+            }
             props.insert(
                 "at".into(),
                 json!({
                     "type": "string",
                     "description": "`X,Y` desktop coordinates (physical pixels on Windows, logical points elsewhere) for `move-to`. \
-                                    Required for `move-to`; ignored otherwise.",
+                                    Required for `move-to`; refused on any other verb.",
                 }),
             );
             props.insert(
@@ -859,7 +895,7 @@ fn tool_definition(name: &str) -> Value {
                 json!({
                     "type": "string",
                     "description": "`W,H` desktop dimensions (physical pixels on Windows, logical points elsewhere) for `resize-to`, both positive. \
-                                    Required for `resize-to`; ignored otherwise.",
+                                    Required for `resize-to`; refused on any other verb.",
                 }),
             );
             props.insert("ref".into(), ref_property());
@@ -876,6 +912,11 @@ fn tool_definition(name: &str) -> Value {
                      what it matched, rather than applied to the first of them. Pass a \
                      `ref` from `tree` or `find` instead to act on exactly the element \
                      you read: it acts at once (no wait) or fails `element_stale`.\n\n\
+                     A verb takes only its own arguments: `value` goes with the value \
+                     verbs and `select-text`, `start` / `end` with `select-text`, `at` \
+                     with `move-to`, `size` with `resize-to`. Any of them on another \
+                     verb is refused with `invalid_arguments` naming the verbs that take \
+                     it, before anything is looked up, rather than ignored.\n\n\
                      Auto-waits for the selector to match an element that is visible and \
                      enabled, re-resolving as it polls, and only then acts. The window verbs \
                      (`activate`, `minimize`, `maximize`, `enter-fullscreen`, `restore`, \
@@ -1105,7 +1146,10 @@ fn tool_definition(name: &str) -> Value {
                     "description": "What to read. `info`: `length`, `caret` and the \
                                     selected ranges. `read`: the text of the range. \
                                     `find`: the `occurrence`-th match of `find`. \
-                                    `range-at`: the `unit` containing `offset`. `lines`: \
+                                    `range-at`: the `unit` containing `offset`. \
+                                    `object-at`: the embedded control or link at \
+                                    `offset`, as `object` in the shape `find` returns, with a `ref`, or null when \
+                                    there is none. `lines`: \
                                     the rendered lines of the range. `bounds`: screen \
                                     rectangles of the range, one per rendered line. \
                                     `runs`: formatting runs of the range.",
@@ -1160,8 +1204,9 @@ fn tool_definition(name: &str) -> Value {
             props.insert(
                 "offset".into(),
                 TEXT_OFFSET.property(
-                    "For `range-at`: the offset, in UTF-16 code units. At the end of the \
-                     text it names the unit that ends there."
+                    "For `range-at` and `object-at`: the offset, in UTF-16 code units. \
+                     For `range-at`, at the end of the text it names the unit that ends \
+                     there."
                         .into(),
                 ),
             );
@@ -1196,7 +1241,8 @@ fn tool_definition(name: &str) -> Value {
                 &format!(
                     "Read an element's text by range: caret and selection, a range of \
                      text, an exact search, the word / line / paragraph at an offset, \
-                     rendered lines, their screen rectangles, and formatting runs. Use it \
+                     the embedded control or link at an offset, rendered lines, their \
+                     screen rectangles, and formatting runs. Use it \
                      instead of slicing `value`, which `tree` and `find` cut to \
                      {MAX_FIELD_BYTES} bytes.\n\n\
                      Every offset is a UTF-16 code unit, on input and output alike: an \
@@ -1333,7 +1379,7 @@ fn tool_definition(name: &str) -> Value {
                     "Ask a table about its structure: the cell at a row and column, the \
                      header cells of the table or of one cell, and what a list, tree or \
                      table has selected. Elements come back in the shape `find` returns, \
-                     including `cell` (`row`, `column`, `row_span`, `column_span`, \
+                     each with a `ref`, including `cell` (`row`, `column`, `row_span`, `column_span`, \
                      `header`), `table_row`, `table` (`row_count`, `column_count`) and \
                      `collection` (`index`, `size`, `depth`). Every index is 0-based. \
                      A count reads \"unknown\" when the platform says it does not know \
@@ -1423,7 +1469,7 @@ fn tool_definition(name: &str) -> Value {
 /// a schema advertises but a handler refuses is worse than one that is absent.
 fn events_start_properties() -> Map<String, Value> {
     let mut props = Map::new();
-    props.insert("backend".into(), json!({"type":"string", "enum":["native","uia","ia2"], "description":"Explicit accessibility source; IA2 event subscriptions are unsupported."}));
+    props.insert("backend".into(), json!({"type":"string", "enum": cli::BACKENDS, "description":"Explicit accessibility source; IA2 event subscriptions are unsupported."}));
     props.insert(
         "app".into(),
         json!({
@@ -1510,13 +1556,21 @@ fn events_poll_description() -> String {
          Each event carries a `kind`, a `sequence` (monotonic, so a gap is exactly \
          what was dropped), `at_ms` since the subscription started, `time_ms` (when it was received, \
          milliseconds since the Unix epoch), and the `target` \
-         element in the same shape `find` returns — bounds, states and all. A \
+         element in the element shape `find` uses (bounds, states and all) but \
+         without a `ref`: it is a snapshot from when the event fired, so call \
+         `find` for an element to act on. A \
          `state_changed` event also carries `state_flag` and `state_value`. A \
          `text_changed` event carries `text_change` when the platform reports the \
          edit (Linux only): `kind` (`inserted` / `deleted`), `range` in UTF-16 units \
          or null when the platform counts in another unit, and `text` or null, cut \
          to {range_cap} units with `text_truncated` and `text_length` \
-         when longer. `text_selection_changed` means the caret or text selection \
+         when longer. An `announcement` event carries `announcement`: `origin` \
+         (`request` when the application asked for text to be spoken, \
+         `live_region` or `alert` when one changed or appeared, which carry no \
+         text: read the target), and when the platform reports them `text` (cut \
+         the same way, with `text_truncated` and `text_length`), `politeness` \
+         (`polite` / `assertive`), `platform_priority` as the platform spells it, \
+         and `activity_id` (Windows). `text_selection_changed` means the caret or text selection \
          moved; it carries no offsets, so read them with the `text` tool.\n\n\
          Two fields say what the events alone cannot. `dropped` counts events lost \
          to buffer eviction since the previous poll — poll more often, narrow \
@@ -1737,17 +1791,22 @@ fn annotate_selectors(args: &Value) -> CliResult<Vec<String>> {
 /// [`target`] refuses a call with none of them, but its message answers "which
 /// application?" and not "why does a screenshot need one at all". `screenshot`
 /// asks this first so it can say that `annotate` is what needs the target.
+///
+/// `backend` is not one: it says how to attach to a target, not which.
 fn has_target(args: &Value) -> bool {
-    !target_keys(args).is_empty()
+    target_keys(args).iter().any(|key| *key != "backend")
 }
 
-/// The target-naming arguments this call actually passed, in schema order.
+/// The target arguments this call actually passed, in schema order: the three
+/// that name a target, and `backend`, which picks how to attach to it.
 ///
 /// `screenshot` names them back to the caller when they were passed without
 /// `annotate`, because "a target does nothing here" is only actionable if the
-/// answer says which of the three it means.
+/// answer says which of them it means. `backend` is listed because it is just
+/// as inert there; leaving it out let a `backend` without `annotate` be
+/// dropped while the call reported success.
 fn target_keys(args: &Value) -> Vec<&'static str> {
-    ["app", "pid", "shell"]
+    ["app", "pid", "shell", "backend"]
         .into_iter()
         .filter(|key| !matches!(args.get(*key), None | Some(Value::Null)))
         .collect()
@@ -1761,6 +1820,15 @@ fn quoted_list(names: &[&str]) -> String {
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
     }
+}
+
+/// Read the `backend` argument. An unknown name is `invalid_arguments`
+/// naming `"backend"`, not an `invalid_action_data` failure naming the
+/// server's `XA11Y_ACCESSIBILITY_SOURCE` variable, which the caller never set.
+fn backend_arg(args: &Value) -> CliResult<Option<String>> {
+    opt_str(args, "backend")?
+        .map(|raw| cli::parse_backend(raw, "\"backend\""))
+        .transpose()
 }
 
 /// Read the `pid` argument, range-checked and narrowed.
@@ -1789,7 +1857,7 @@ fn pid_arg(args: &Value) -> CliResult<Option<u32>> {
 /// surfaces cannot drift on what `app` or `shell` means.
 fn target(args: &Value) -> CliResult<Target> {
     let opts = Opts {
-        backend: opt_str(args, "backend")?.map(str::to_string),
+        backend: backend_arg(args)?,
         app: opt_str(args, "app")?.map(str::to_string),
         pid: pid_arg(args)?,
         shell: opt_str(args, "shell")?.map(str::to_string),
@@ -1819,7 +1887,7 @@ fn target(args: &Value) -> CliResult<Target> {
 /// / `resolve_apps`, so the two surfaces cannot drift on what `app` means.
 fn target_opts(args: &Value) -> CliResult<Opts> {
     let opts = Opts {
-        backend: opt_str(args, "backend")?.map(str::to_string),
+        backend: backend_arg(args)?,
         app: opt_str(args, "app")?.map(str::to_string),
         pid: pid_arg(args)?,
         ..Default::default()
@@ -1892,14 +1960,8 @@ fn tool_capabilities(args: &Value) -> CliResult<ToolOutput> {
             .collect::<CliResult<_>>()?,
         Some(_) => return Err(usage("\"names\" must be an array of strings".to_string())),
     };
-    let caps = match opt_str(args, "backend")? {
-        Some(b) => crate::capabilities_for_backend(
-            platform.map(crate::Platform::parse).transpose()?,
-            os_version,
-            Some(b),
-        )?,
-        None => crate::cli::resolve_capabilities(platform, os_version)?,
-    };
+    let backend = backend_arg(args)?;
+    let caps = crate::cli::resolve_capabilities(platform, os_version, backend.as_deref())?;
     let selected = crate::cli::select_capabilities(&caps, &names)?;
     let listed: Vec<Value> = selected
         .iter()
@@ -1934,13 +1996,14 @@ fn tool_shell() -> CliResult<ToolOutput> {
 
 fn tool_tree(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     let max_depth = opt_usize(args, "max_depth", TREE_DEFAULT_MAX_DEPTH, TREE_DEPTH)?;
+    let max_nodes = opt_usize(args, "max_nodes", TREE_MAX_NODES, TREE_NODES)?;
     let detail = tree_detail(args)?;
     let target = target(args)?;
     let center = cli::pointer_center();
     let (node, cap) = tree_json(
         &target,
         max_depth,
-        TREE_MAX_NODES,
+        max_nodes,
         detail,
         center.is_usable(),
         refs,
@@ -1953,7 +2016,7 @@ fn tool_tree(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     let mut truncated = Map::new();
     truncated.insert("by_depth".into(), json!(cap.truncated.by_depth));
     truncated.insert("by_node_limit".into(), json!(cap.truncated.by_nodes));
-    truncated.insert("node_limit".into(), json!(TREE_MAX_NODES));
+    truncated.insert("node_limit".into(), json!(max_nodes));
     if detail.text {
         truncated.insert("by_text".into(), json!(cap.truncated.by_text));
         truncated.insert("text_limit_bytes".into(), json!(cap.options.max_text_bytes));
@@ -1969,42 +2032,22 @@ fn tool_tree(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     Ok(ToolOutput::json(Value::Object(out)))
 }
 
-/// What `tree` reads besides structure.
-#[derive(Debug, Clone, Copy, Default)]
-struct TreeDetail {
-    text: bool,
-    formatting: bool,
-    relations: bool,
-}
-
-/// The `detail` names `tree` accepts.
-const TREE_DETAILS: &[&str] = &["text", "formatting", "relations"];
-
+/// Read `tree`'s `detail` array; the names are parsed by the CLI's
+/// [`cli::parse_tree_detail`], so `--detail` and `detail` accept one list.
 fn tree_detail(args: &Value) -> CliResult<TreeDetail> {
-    let mut detail = TreeDetail::default();
     let items = match args.get("detail") {
-        None | Some(Value::Null) => return Ok(detail),
+        None | Some(Value::Null) => return Ok(TreeDetail::default()),
         Some(Value::Array(items)) => items,
         Some(_) => return Err(usage("\"detail\" must be an array of strings")),
     };
-    for item in items {
-        match item.as_str() {
-            Some("text") => detail.text = true,
-            Some("formatting") => {
-                detail.text = true;
-                detail.formatting = true;
-            }
-            Some("relations") => detail.relations = true,
-            Some(other) => {
-                return Err(usage(format!(
-                    "unknown detail {other:?}; expected one of {}",
-                    TREE_DETAILS.join(", ")
-                )))
-            }
-            None => return Err(usage("\"detail\" must be an array of strings")),
-        }
-    }
-    Ok(detail)
+    let names = items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .ok_or_else(|| usage("\"detail\" must be an array of strings"))
+        })
+        .collect::<CliResult<Vec<_>>>()?;
+    cli::parse_tree_detail(names, "detail")
 }
 
 /// Capture `target` and encode it as nested JSON, every node with a ref.
@@ -2025,12 +2068,11 @@ fn tree_json(
     center: bool,
     refs: &RefTable,
 ) -> CliResult<(Value, crate::Capture)> {
-    let options = crate::CaptureOptions::new()
-        .max_depth(max_depth)
-        .max_nodes(max_nodes)
-        .text(detail.text)
-        .formatting(detail.formatting)
-        .relations(detail.relations);
+    let options = detail.apply(
+        crate::CaptureOptions::new()
+            .max_depth(max_depth)
+            .max_nodes(max_nodes),
+    );
     let cap = target.capture(&options)?;
 
     let mut capture = refs.begin();
@@ -2253,19 +2295,39 @@ fn resolve_ref_for_read(refs: &RefTable, reference: &str) -> CliResult<Element> 
     Ok(element)
 }
 
+/// How the `action` tool spells its arguments, for usage errors.
+const MCP_ACTION_ARG_NAMES: cli::ActionArgNames = cli::ActionArgNames {
+    value: "\"value\"",
+    range: "\"start\"/\"end\"",
+    range_form: "\"start\" and \"end\"",
+    at: "\"at\"",
+    size: "\"size\"",
+};
+
 fn tool_action(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     let action = req_str(args, "action")?;
     let subject = subject(args)?;
     let value = opt_str(args, "value")?;
     let at = opt_str(args, "at")?;
     let size = opt_str(args, "size")?;
+    // `select-text`'s range, spelled as the `text` tool spells it.
+    let range = match (
+        opt_u32(args, "start", TEXT_OFFSET)?,
+        opt_u32(args, "end", TEXT_OFFSET)?,
+    ) {
+        (Some(start), Some(end)) => Some(crate::TextRange { start, end }),
+        (None, None) => None,
+        // Half a range would have to be completed by guessing.
+        _ => return Err(usage("give \"start\" and \"end\" together, or neither")),
+    };
     // Field parsing and the action-payload parse come before target
     // resolution (parse arguments before the first OS call): a malformed
     // `at` / `size` / `value` is a usage error, and it must win over an
     // app-resolution failure rather than be masked by one — a model that
     // typed a bad point must be told the point is bad, not that an app was
     // not found.
-    let action_args = cli::parse_action_args(action, value, at, size)?;
+    let action_args =
+        cli::parse_action_args(action, value, range, at, size, &MCP_ACTION_ARG_NAMES)?;
     match subject {
         Subject::Selector(selector) => {
             let target = target(args)?;
@@ -2414,31 +2476,59 @@ fn tool_text(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     match subject {
         Subject::Selector(selector) => {
             let target = target(args)?;
-            tool_text_parsed(&target, selector, &op)
+            tool_text_parsed(&target, selector, &op, refs)
         }
         Subject::Ref(reference) => {
             let element = resolve_ref_for_read(refs, reference)?;
-            let result = cli::run_text_op(&element.text()?, &op)?;
             let mut out = Map::new();
             out.insert("ref".into(), json!(reference));
-            out.insert("units".into(), json!("utf16"));
-            out.insert("result".into(), result);
-            Ok(ToolOutput::json(Value::Object(out)))
+            text_output(out, &element, &op, refs)
         }
     }
 }
 
 /// The resolving half of [`tool_text`], against an explicit target, so the
 /// mock provider can drive it.
-fn tool_text_parsed(target: &Target, selector: &str, op: &cli::TextOp) -> CliResult<ToolOutput> {
+fn tool_text_parsed(
+    target: &Target,
+    selector: &str,
+    op: &cli::TextOp,
+    refs: &RefTable,
+) -> CliResult<ToolOutput> {
     let element = match cli::resolve_text_element(target, selector)? {
         Ok(element) => element,
         Err(matches) => return Err(ambiguous(selector, &matches)),
     };
-    let result = cli::run_text_op(&element.text()?, op)?;
     let mut out = Map::new();
     out.insert("selector".into(), json!(selector));
     target_fields(target, &mut out);
+    text_output(out, &element, op, refs)
+}
+
+/// The rest of a `text` result after its header fields.
+///
+/// The element `object-at` finds is encoded like every other element this
+/// server returns, with a `ref` so the model can act on the embedded control
+/// or link it found. A capture is started only when there is an element to
+/// hold, so the other operations never push an older result's refs out.
+fn text_output(
+    mut out: Map<String, Value>,
+    element: &Element,
+    op: &cli::TextOp,
+    refs: &RefTable,
+) -> CliResult<ToolOutput> {
+    let center = matches!(op, cli::TextOp::ObjectAt { .. }).then(cli::pointer_center);
+    let mut capture = None;
+    let usable = center.as_ref().is_some_and(cli::PointerCenter::is_usable);
+    let result = cli::run_text_op(&element.text()?, op, &mut |found| {
+        element_with_ref(&mut capture, refs, found, usable)
+    })?;
+    if let Some(capture) = capture {
+        refs.keep(capture);
+    }
+    if let Some(center) = &center {
+        note_center(&mut out, center);
+    }
     out.insert("units".into(), json!("utf16"));
     out.insert("result".into(), result);
     Ok(ToolOutput::json(Value::Object(out)))
@@ -2465,6 +2555,7 @@ fn tool_table(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
                 op,
                 limit,
                 &cli::pointer_center(),
+                refs,
             )
         }
         Subject::Ref(reference) => {
@@ -2480,6 +2571,7 @@ fn tool_table(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
                 &found,
                 limit,
                 &cli::pointer_center(),
+                refs,
             ))
         }
     }
@@ -2590,6 +2682,7 @@ fn tool_table_parsed(
     op: cli::TableOp,
     limit: usize,
     center: &cli::PointerCenter,
+    refs: &RefTable,
 ) -> CliResult<ToolOutput> {
     let element = match cli::resolve_table_element(target, selector)? {
         Ok(element) => element,
@@ -2600,11 +2693,30 @@ fn tool_table_parsed(
     out.insert("op".into(), json!(op_name));
     out.insert("selector".into(), json!(selector));
     target_fields(target, &mut out);
-    Ok(table_output(out, &element, op, &found, limit, center))
+    Ok(table_output(out, &element, op, &found, limit, center, refs))
+}
+
+/// Encode `element` like [`element_data_json`] plus a `ref` held in
+/// `capture`, which is started on the first element. A result that returns no
+/// element so starts no capture, and cannot push an older result's refs out
+/// of the table.
+fn element_with_ref(
+    capture: &mut Option<Capture>,
+    refs: &RefTable,
+    element: &Element,
+    center: bool,
+) -> Value {
+    let mut encoded = element_data_json(element, center);
+    let reference = capture.get_or_insert_with(|| refs.begin()).add(element);
+    if let Some(obj) = encoded.as_object_mut() {
+        obj.insert("ref".into(), json!(reference));
+    }
+    encoded
 }
 
 /// The rest of a `table` result after its header fields: the cell for
-/// `cell-at`, otherwise the bounded element list.
+/// `cell-at`, otherwise the bounded element list. Each element carries a
+/// `ref`, as `find`'s matches do.
 fn table_output(
     mut out: Map<String, Value>,
     element: &Element,
@@ -2612,15 +2724,21 @@ fn table_output(
     found: &[Element],
     limit: usize,
     center: &cli::PointerCenter,
+    refs: &RefTable,
 ) -> ToolOutput {
     note_center(&mut out, center);
+    let mut capture = None;
     if let cli::TableOp::CellAt { row, column } = op {
         out.insert("row".into(), json!(row));
         out.insert("column".into(), json!(column));
         out.insert("found".into(), json!(!found.is_empty()));
         match found.first() {
             Some(cell) => {
-                out.insert("cell".into(), element_data_json(cell, center.is_usable()));
+                let encoded = element_with_ref(&mut capture, refs, cell, center.is_usable());
+                out.insert("cell".into(), encoded);
+                if let Some(capture) = capture {
+                    refs.keep(capture);
+                }
             }
             None => {
                 out.insert("cell".into(), Value::Null);
@@ -2635,8 +2753,11 @@ fn table_output(
     let listed: Vec<Value> = found
         .iter()
         .take(limit)
-        .map(|el| element_data_json(el, center.is_usable()))
+        .map(|el| element_with_ref(&mut capture, refs, el, center.is_usable()))
         .collect();
+    if let Some(capture) = capture {
+        refs.keep(capture);
+    }
     out.insert("count".into(), json!(found.len()));
     out.insert("returned".into(), json!(listed.len()));
     out.insert("truncated".into(), json!(found.len() > listed.len()));
@@ -2651,7 +2772,7 @@ fn table_output(
 /// one process node whose `windows()` are its top-level windows. Bounded by
 /// `limit` with an explicit `truncated` flag: a silently shortened result
 /// reads as a complete one, which is worse than no result.
-fn tool_windows(args: &Value) -> CliResult<ToolOutput> {
+fn tool_windows(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     // `windows` enumerates application windows; a shell target is not one.
     // The schema does not advertise `shell`, but a client may send it anyway
     // (MCP input schemas are not always enforced) — refuse it rather than
@@ -2672,12 +2793,12 @@ fn tool_windows(args: &Value) -> CliResult<ToolOutput> {
         // against listing the same process twice.
         cli::resolve_apps(&target_opts(args)?)?
     } else {
-        App::list_with(match opt_str(args, "backend")? {
-            Some(b) => crate::provider_for_backend(b)?,
+        App::list_with(match backend_arg(args)? {
+            Some(b) => crate::provider_for_backend(&b)?,
             None => crate::provider()?,
         })?
     };
-    tool_windows_with(&apps, limit, &cli::pointer_center())
+    tool_windows_with(&apps, limit, &cli::pointer_center(), refs)
 }
 
 /// `enable_web_accessibility` tool. Resolution and the wait are the CLI's
@@ -2706,6 +2827,7 @@ fn tool_windows_with(
     apps: &[App],
     limit: usize,
     center: &cli::PointerCenter,
+    refs: &RefTable,
 ) -> CliResult<ToolOutput> {
     let mut windows: Vec<Element> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -2730,11 +2852,21 @@ fn tool_windows_with(
     windows.retain(|w| seen.insert(cli::window_key(w.data())));
 
     let total = windows.len();
+    // Each listed window gets a ref, as `find` matches do; only the listed
+    // ones, so the capture is bounded by `limit` like the result.
+    let mut capture = refs.begin();
     let listed: Vec<Value> = windows
         .iter()
         .take(limit)
-        .map(|w| element_data_json(w, center.is_usable()))
+        .map(|w| {
+            let mut encoded = element_data_json(w, center.is_usable());
+            if let Some(obj) = encoded.as_object_mut() {
+                obj.insert("ref".into(), json!(capture.add(w)));
+            }
+            encoded
+        })
         .collect();
+    refs.keep(capture);
 
     // The error list is capped like the window list: each entry carries an
     // `Error` whose diagnosis can be large (a bounded snapshot, but a
@@ -3077,7 +3209,7 @@ fn events_app(args: &Value) -> CliResult<crate::App> {
         ));
     }
     let opts = Opts {
-        backend: opt_str(args, "backend")?.map(str::to_string),
+        backend: backend_arg(args)?,
         app: opt_str(args, "app")?.map(str::to_string),
         pid: pid_arg(args)?,
         ..Default::default()
@@ -3181,7 +3313,7 @@ pub(super) fn note_center(out: &mut Map<String, Value>, policy: &cli::PointerCen
 /// The caller decides once per result from [`cli::pointer_center`] and, when
 /// it is withheld, says why with [`note_center`] — a node whose `center` is
 /// simply missing would read as an element without bounds (issue #573).
-pub(super) fn element_data_json(data: &crate::ElementData, center: bool) -> Value {
+pub(crate) fn element_data_json(data: &crate::ElementData, center: bool) -> Value {
     let mut node = Map::new();
     node.insert("role".into(), json!(data.role.to_snake_case()));
     insert_text(&mut node, "name", data.name.as_deref());
@@ -3418,7 +3550,7 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
             );
         }
         CliError::Xa11y(inner) => {
-            if let Some(diagnosis) = diagnosis_of(inner) {
+            if let Some(diagnosis) = inner.diagnosis() {
                 let mut encoded = diagnosis_json(diagnosis);
                 // A `SelectorNotMatched` carries its selector on the error
                 // rather than in the diagnosis, because the message already
@@ -3461,14 +3593,6 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
 }
 
 /// Borrow the [`Diagnosis`] an error carries, if any.
-fn diagnosis_of(err: &crate::Error) -> Option<&crate::Diagnosis> {
-    match err {
-        crate::Error::SelectorNotMatched { diagnosis, .. }
-        | crate::Error::Timeout { diagnosis, .. } => diagnosis.as_deref(),
-        _ => None,
-    }
-}
-
 fn diagnosis_json(d: &crate::Diagnosis) -> Value {
     let mut out = Map::new();
     insert_some(
@@ -4109,6 +4233,9 @@ mod tests {
             // An empty `annotate` is the plain-capture path too, so it is
             // refused for the same reason an absent one is.
             (json!({ "annotate": [], "pid": 42 }), vec!["\"pid\""]),
+            // `backend` picks how to attach to a target and is just as inert
+            // without `annotate`; it used to be dropped silently.
+            (json!({ "backend": "native" }), vec!["\"backend\""]),
         ] {
             let err = tool_screenshot(&args(arguments.clone()))
                 .expect_err(&format!("{arguments} must be refused"));
@@ -4121,6 +4248,37 @@ mod tests {
             assert!(msg.contains("annotate"), "{arguments}: {msg}");
             assert!(msg.contains("plain capture"), "{arguments}: {msg}");
         }
+    }
+
+    #[test]
+    fn a_backend_alone_does_not_count_as_an_annotation_target() {
+        let err = tool_screenshot(&args(
+            json!({ "annotate": ["button"], "backend": "native" }),
+        ))
+        .expect_err("annotate needs a target");
+        assert!(err.to_string().contains("names none"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_backend_is_invalid_arguments_naming_the_argument() {
+        for (tool, arguments) in [
+            ("tree", json!({ "app": "X", "backend": "foo" })),
+            ("windows", json!({ "backend": "foo" })),
+            ("capabilities", json!({ "backend": "foo" })),
+            ("events_start", json!({ "app": "X", "backend": "foo" })),
+        ] {
+            let err = Xa11yTools::new()
+                .call(tool, &args(arguments.clone()))
+                .expect_err("unknown backend");
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{tool}: {err}");
+            let msg = err.to_string();
+            assert!(msg.contains("\"backend\""), "{tool}: {msg}");
+            assert!(!msg.contains("XA11Y_ACCESSIBILITY_SOURCE"), "{tool}: {msg}");
+        }
+        // A bad platform beside a valid backend is the caller's argument too.
+        let err = tool_capabilities(&args(json!({ "platform": "bogus", "backend": "native" })))
+            .expect_err("unknown platform");
+        assert_eq!(failure_kind(&err), "invalid_arguments", "{err}");
     }
 
     #[test]
@@ -4396,7 +4554,9 @@ mod tests {
         let (target, provider) = mock_target_app();
         let refs = RefTable::default();
         let back = ref_named(&target, &refs, "Back");
-        let args = cli::parse_action_args("press", None, None, None).expect("args");
+        let args =
+            cli::parse_action_args("press", None, None, None, None, &cli::CLI_ACTION_ARG_NAMES)
+                .expect("args");
         let out = tool_action_on_ref(&refs, "press", &back, &args).expect("press by ref");
         let body = out.structured.expect("structured");
         assert_eq!(body["ok"], json!(true));
@@ -4412,7 +4572,9 @@ mod tests {
         let back = ref_named(&target, &refs, "Back");
         provider.remove_node("Back");
         let before = provider.actions().len();
-        let args = cli::parse_action_args("press", None, None, None).expect("args");
+        let args =
+            cli::parse_action_args("press", None, None, None, None, &cli::CLI_ACTION_ARG_NAMES)
+                .expect("args");
         let err = tool_action_on_ref(&refs, "press", &back, &args).expect_err("stale");
         assert_eq!(failure_kind(&err), "element_stale");
         let (_, structured) = describe_failure("action", &err);
@@ -4432,7 +4594,9 @@ mod tests {
         for _ in 0..super::super::refs::MAX_CAPTURES {
             ref_named(&target, &refs, "Forward");
         }
-        let args = cli::parse_action_args("press", None, None, None).expect("args");
+        let args =
+            cli::parse_action_args("press", None, None, None, None, &cli::CLI_ACTION_ARG_NAMES)
+                .expect("args");
         let err = tool_action_on_ref(&refs, "press", &back, &args).expect_err("expired");
         assert_eq!(failure_kind(&err), "ref_expired");
         let (_, structured) = describe_failure("action", &err);
@@ -4782,7 +4946,7 @@ mod tests {
         ));
         let err = CliError::Xa11y(input.mouse().click(point).unwrap_err());
         let (text, structured) = describe_failure("click", &err);
-        assert_eq!(structured["kind"], "no_match");
+        assert_eq!(structured["kind"], "invalid_action_data");
         assert_eq!(structured["delivery"], "not_delivered");
         let geometry = &structured["diagnosis"]["pointer_target"];
         assert_eq!(geometry["point"], json!({"x": 500, "y": 500}));
@@ -5170,8 +5334,13 @@ mod tests {
             panic!("the mock target must be an app");
         };
         let apps = vec![app];
-        let out = tool_windows_with(&apps, FIND_DEFAULT_LIMIT, &cli::PointerCenter::Usable)
-            .expect("the windows listing must succeed");
+        let out = tool_windows_with(
+            &apps,
+            FIND_DEFAULT_LIMIT,
+            &cli::PointerCenter::Usable,
+            &RefTable::default(),
+        )
+        .expect("the windows listing must succeed");
         let structured = out.structured.expect("windows results are structured");
         assert_eq!(structured["count"], json!(1), "{structured}");
         assert_eq!(structured["returned"], json!(1), "{structured}");
@@ -5185,8 +5354,9 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["name"], json!("Main Window"), "{structured}");
         // Bounding: a limit below the count truncates and says so.
-        let truncated = tool_windows_with(&apps, 0, &cli::PointerCenter::Usable)
-            .expect("a zero-limit listing is still a valid call");
+        let truncated =
+            tool_windows_with(&apps, 0, &cli::PointerCenter::Usable, &RefTable::default())
+                .expect("a zero-limit listing is still a valid call");
         let structured = truncated.structured.expect("structured");
         assert_eq!(structured["count"], json!(1), "{structured}");
         assert_eq!(structured["returned"], json!(0), "{structured}");
@@ -5210,8 +5380,13 @@ mod tests {
             .next()
             .expect("mock must vend one app");
         main.data.role = crate::Role::Window;
-        let out = tool_windows_with(&[main], FIND_DEFAULT_LIMIT, &cli::PointerCenter::Usable)
-            .expect("the listing must succeed");
+        let out = tool_windows_with(
+            &[main],
+            FIND_DEFAULT_LIMIT,
+            &cli::PointerCenter::Usable,
+            &RefTable::default(),
+        )
+        .expect("the listing must succeed");
         let structured = out.structured.expect("structured");
         assert_eq!(structured["count"], json!(0), "{structured}");
         let errors = structured["errors"].as_array().expect("errors is an array");
@@ -5256,6 +5431,7 @@ mod tests {
             &[first, second],
             FIND_DEFAULT_LIMIT,
             &cli::PointerCenter::Usable,
+            &RefTable::default(),
         )
         .expect("the listing must succeed");
         let structured = out.structured.expect("windows results are structured");
@@ -5291,7 +5467,7 @@ mod tests {
         // A client that sends `shell` anyway (MCP input schemas are not
         // always enforced) gets a refusal naming the flag, not the
         // unfiltered all-apps listing.
-        let err = tool_windows(&json!({ "shell": "taskbar" }))
+        let err = tool_windows(&json!({ "shell": "taskbar" }), &RefTable::default())
             .expect_err("a shell target must be refused by `windows`");
         assert!(err.to_string().contains("shell"), "{err}");
     }
@@ -5319,8 +5495,15 @@ mod tests {
         // arguments before the first OS call) — a malformed `at` is a usage
         // error, and no verb reaches the provider.
         let (_target, provider) = mock_target_app();
-        let err = cli::parse_action_args("move-to", None, Some("12,not-a-number"), None)
-            .expect_err("malformed --at must be refused");
+        let err = cli::parse_action_args(
+            "move-to",
+            None,
+            None,
+            Some("12,not-a-number"),
+            None,
+            &cli::CLI_ACTION_ARG_NAMES,
+        )
+        .expect_err("malformed --at must be refused");
         assert!(err.to_string().contains("--at"), "{err}");
         assert!(
             provider.actions().is_empty(),
@@ -5337,19 +5520,35 @@ mod tests {
             }),
             &RefTable::default(),
         )
-        .expect_err("malformed --at must be refused");
-        assert!(tool_err.to_string().contains("--at"), "{tool_err}");
+        .expect_err("malformed at must be refused");
+        // Named in the tool's own spelling: there are no flags on this surface.
+        assert!(tool_err.to_string().contains("in \"at\""), "{tool_err}");
+        assert!(!tool_err.to_string().contains("--"), "{tool_err}");
     }
 
     #[test]
     fn action_geometry_reaches_the_window_verb_with_valid_arguments() {
         let (target, provider) = mock_target_app();
-        let move_args = cli::parse_action_args("move-to", None, Some("10,20"), None)
-            .expect("a valid move-to must parse");
+        let move_args = cli::parse_action_args(
+            "move-to",
+            None,
+            None,
+            Some("10,20"),
+            None,
+            &cli::CLI_ACTION_ARG_NAMES,
+        )
+        .expect("a valid move-to must parse");
         tool_action_parsed(&target, "move-to", "window", &move_args)
             .expect("a valid move-to must succeed");
-        let resize_args = cli::parse_action_args("resize-to", None, None, Some("800,600"))
-            .expect("a valid resize-to must parse");
+        let resize_args = cli::parse_action_args(
+            "resize-to",
+            None,
+            None,
+            None,
+            Some("800,600"),
+            &cli::CLI_ACTION_ARG_NAMES,
+        )
+        .expect("a valid resize-to must parse");
         tool_action_parsed(&target, "resize-to", "window", &resize_args)
             .expect("a valid resize-to must succeed");
         let actions = provider.actions();
@@ -5605,11 +5804,214 @@ mod tests {
     }
 
     #[test]
+    fn an_argument_the_verb_does_not_read_is_refused_in_mcp_spelling() {
+        let refs = RefTable::default();
+        for (call, expected) in [
+            (
+                json!({ "action": "press", "value": "x" }),
+                "\"value\" applies only to set-value, set-numeric-value, type-text, \
+                 select-text, not press",
+            ),
+            (
+                json!({ "action": "activate", "at": "1,2" }),
+                "\"at\" applies only to move-to, not activate",
+            ),
+            (
+                json!({ "action": "move-to", "at": "1,2", "size": "3,4" }),
+                "\"size\" applies only to resize-to, not move-to",
+            ),
+        ] {
+            let mut call = call;
+            call["selector"] = json!("button");
+            call["app"] = json!("NoSuchAppAnywhere");
+            let err = tool_action(&call, &refs).expect_err("refused");
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{call}: {err}");
+            assert!(err.to_string().ends_with(expected), "{call}: {err}");
+            assert!(
+                !err.to_string().contains("--"),
+                "no flags on this surface: {err}"
+            );
+        }
+        // The geometry messages name the MCP argument too.
+        let err = tool_action(
+            &json!({ "action": "move-to", "selector": "window", "app": "NoSuchAppAnywhere" }),
+            &refs,
+        )
+        .expect_err("needs at");
+        assert!(err.to_string().contains("requires \"at\" X,Y"), "{err}");
+    }
+
+    #[test]
+    fn select_text_range_mistakes_are_refused_before_the_target_is_resolved() {
+        // `app` names nothing: each mistake must be reported as itself, not
+        // masked by the app lookup.
+        let refs = RefTable::default();
+        for (extra, needle) in [
+            (json!({ "start": 1 }), "together"),
+            (json!({ "end": 1 }), "together"),
+            (json!({ "start": 0, "end": 2, "value": "0,2" }), "not both"),
+            (json!({ "start": 5, "end": 2 }), "must not exceed"),
+            (json!({}), "requires a range: \"start\" and \"end\""),
+            (json!({ "start": -1, "end": 2 }), "between 0 and"),
+        ] {
+            let mut call = json!({
+                "action": "select-text",
+                "selector": "text_field",
+                "app": "NoSuchAppAnywhere",
+            });
+            for (k, v) in extra.as_object().expect("object") {
+                call[k] = v.clone();
+            }
+            let err = tool_action(&call, &refs).expect_err(needle);
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{call}: {err}");
+            assert!(err.to_string().contains(needle), "{call}: {err}");
+        }
+        let err = tool_action(
+            &json!({ "action": "press", "selector": "button", "app": "NoSuchAppAnywhere",
+                     "start": 0, "end": 1 }),
+            &refs,
+        )
+        .expect_err("a range on another verb");
+        assert!(
+            err.to_string()
+                .contains("\"start\"/\"end\" applies only to select-text"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn select_text_start_and_end_reach_the_provider() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let app = App::list_with(provider.clone() as std::sync::Arc<dyn xa11y_core::Provider>)
+            .expect("apps")
+            .remove(0);
+        let args = cli::parse_action_args(
+            "select-text",
+            None,
+            Some(crate::TextRange { start: 2, end: 6 }),
+            None,
+            None,
+            &MCP_ACTION_ARG_NAMES,
+        )
+        .expect("parses");
+        tool_action_parsed(&Target::App(app), "select-text", NOTES, &args).expect("selects");
+        assert!(
+            provider
+                .actions()
+                .iter()
+                .any(|(_, name, data)| name == "set_text_selection"
+                    && data.as_deref() == Some("2..6")),
+            "{:?}",
+            provider.actions()
+        );
+    }
+
+    #[test]
+    fn a_tree_node_cap_outside_its_bounds_is_refused() {
+        let refs = RefTable::default();
+        for bad in [0, -1, TREE_MAX_NODES as i64 + 1] {
+            let err = tool_tree(
+                &json!({ "app": "NoSuchAppAnywhere", "max_nodes": bad }),
+                &refs,
+            )
+            .expect_err("out of bounds");
+            assert_eq!(failure_kind(&err), "invalid_arguments", "{bad}: {err}");
+            assert!(
+                err.to_string()
+                    .contains(&format!("between 1 and {TREE_MAX_NODES}")),
+                "{err}"
+            );
+        }
+        let max_nodes = tool_definition("tree")["inputSchema"]["properties"]["max_nodes"].clone();
+        assert_eq!(max_nodes["minimum"], json!(1), "{max_nodes}");
+        assert_eq!(max_nodes["maximum"], json!(TREE_MAX_NODES), "{max_nodes}");
+    }
+
+    #[test]
+    fn a_listed_window_carries_a_ref_that_acts_on_it() {
+        let (target, provider) = mock_target_app();
+        let Target::App(app) = target else {
+            panic!("the mock target must be an app");
+        };
+        let refs = RefTable::default();
+        let out = tool_windows_with(
+            &[app],
+            FIND_DEFAULT_LIMIT,
+            &cli::PointerCenter::Usable,
+            &refs,
+        )
+        .expect("listing");
+        let structured = out.structured.expect("structured");
+        let reference = structured["windows"][0]["ref"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a window carries a ref: {structured}"))
+            .to_string();
+        assert_eq!(
+            refs.resolve(&reference).expect("resolves").name.as_deref(),
+            Some("Main Window")
+        );
+        let args =
+            cli::parse_action_args("activate", None, None, None, None, &MCP_ACTION_ARG_NAMES)
+                .expect("args");
+        tool_action_on_ref(&refs, "activate", &reference, &args).expect("activates by ref");
+        assert!(
+            provider
+                .actions()
+                .iter()
+                .any(|(_, name, _)| name == "activate"),
+            "{:?}",
+            provider.actions()
+        );
+        // A zero limit lists nothing, so it issues no refs either.
+        let refs = RefTable::default();
+        let (target, _) = mock_target_app();
+        let Target::App(app) = target else {
+            panic!("the mock target must be an app");
+        };
+        let none = tool_windows_with(&[app], 0, &cli::PointerCenter::Usable, &refs)
+            .expect("listing")
+            .structured
+            .expect("structured");
+        assert_eq!(none["windows"], json!([]), "{none}");
+        assert!(refs.resolve("c1:0").is_err(), "no ref was issued");
+    }
+
+    #[test]
+    fn the_windows_description_promises_refs_and_events_poll_does_not() {
+        let windows = tool_definition("windows")["description"]
+            .as_str()
+            .expect("description")
+            .to_string();
+        assert!(windows.contains("carries a `ref`"), "{windows}");
+        assert!(!windows.contains("without a `ref`"), "{windows}");
+        let poll = tool_definition("events_poll")["description"]
+            .as_str()
+            .expect("description")
+            .to_string();
+        assert!(poll.contains("without a `ref`"), "{poll}");
+    }
+
+    #[test]
     fn a_reversed_text_range_is_refused_before_the_wait() {
-        let err = cli::parse_action_args("select-text", Some("5,2"), None, None)
-            .expect_err("start > end");
+        let err = cli::parse_action_args(
+            "select-text",
+            Some("5,2"),
+            None,
+            None,
+            None,
+            &cli::CLI_ACTION_ARG_NAMES,
+        )
+        .expect_err("start > end");
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
-        cli::parse_action_args("select-text", Some("2,2"), None, None).expect("empty range");
+        cli::parse_action_args(
+            "select-text",
+            Some("2,2"),
+            None,
+            None,
+            None,
+            &cli::CLI_ACTION_ARG_NAMES,
+        )
+        .expect("empty range");
     }
 
     #[test]
@@ -5805,7 +6207,8 @@ mod tests {
         let Target::App(app) = target else {
             panic!("the mock target must be an app");
         };
-        let out = tool_windows_with(&[app], FIND_DEFAULT_LIMIT, &policy).expect("listing");
+        let out = tool_windows_with(&[app], FIND_DEFAULT_LIMIT, &policy, &RefTable::default())
+            .expect("listing");
         let structured = out.structured.expect("structured");
         assert!(
             structured.get(CENTER_UNAVAILABLE_FIELD).is_some(),
@@ -6125,7 +6528,8 @@ mod tests {
     /// Run a `text` call against the fixture and return its `result`.
     fn text_result(call: Value) -> Value {
         let op = text_op_from_args(&call).expect("valid text arguments");
-        let out = tool_text_parsed(&table_target(), NOTES, &op).expect("text call succeeds");
+        let out = tool_text_parsed(&table_target(), NOTES, &op, &RefTable::default())
+            .expect("text call succeeds");
         let structured = out.structured.expect("structured result");
         assert_eq!(structured["units"], "utf16");
         structured["result"].clone()
@@ -6133,7 +6537,8 @@ mod tests {
 
     fn text_err(call: Value) -> CliError {
         let op = text_op_from_args(&call).expect("valid text arguments");
-        tool_text_parsed(&table_target(), NOTES, &op).expect_err("text call fails")
+        tool_text_parsed(&table_target(), NOTES, &op, &RefTable::default())
+            .expect_err("text call fails")
     }
 
     #[test]
@@ -6276,10 +6681,16 @@ mod tests {
     fn text_refuses_ambiguity_and_elements_without_text() {
         let target = table_target();
         let op = cli::TextOp::Info;
-        let err = tool_text_parsed(&target, "table_cell", &op).expect_err("several cells");
+        let err = tool_text_parsed(&target, "table_cell", &op, &RefTable::default())
+            .expect_err("several cells");
         assert_eq!(failure_kind(&err), "ambiguous_selector");
-        let err = tool_text_parsed(&target, r#"table_cell[name="Price"]"#, &op)
-            .expect_err("a cell with no value has no text interface");
+        let err = tool_text_parsed(
+            &target,
+            r#"table_cell[name="Price"]"#,
+            &op,
+            &RefTable::default(),
+        )
+        .expect_err("a cell with no value has no text interface");
         assert_eq!(failure_kind(&err), "action_not_supported");
     }
 
@@ -6345,6 +6756,7 @@ mod tests {
             parsed,
             limit,
             &cli::PointerCenter::Usable,
+            &RefTable::default(),
         )
         .expect("table call succeeds")
         .structured
@@ -6398,6 +6810,69 @@ mod tests {
     }
 
     #[test]
+    fn element_with_ref_encodes_like_find_and_starts_a_capture_lazily() {
+        // `text object-at` renders its element through this; it used to
+        // serialize `ElementData` whole (PascalCase role, the `raw` blob, no
+        // ref). No mock provider answers `object_at`, so the encoding is held
+        // here.
+        let refs = RefTable::default();
+        let mut capture = None;
+        let element = cli::resolve_table_element(&table_target(), PRICES)
+            .expect("resolves")
+            .expect("one table");
+        let encoded = element_with_ref(&mut capture, &refs, &element, true);
+        assert_eq!(encoded["role"], "table");
+        assert!(encoded.get("raw").is_none(), "{encoded}");
+        assert!(encoded.get("handle").is_none(), "{encoded}");
+        let r = encoded["ref"].as_str().expect("a ref").to_owned();
+        refs.keep(capture.expect("the first element starts a capture"));
+        assert_eq!(
+            refs.resolve(&r).expect("resolves").name.as_deref(),
+            Some("Prices")
+        );
+    }
+
+    #[test]
+    fn table_elements_carry_refs_that_resolve() {
+        // The `table` description promises find's shape, and find's matches
+        // carry a ref; without one a model could see a cell and not act on it.
+        let refs = RefTable::default();
+        let call = |op: &str, selector: &str, row, column| {
+            let parsed =
+                cli::parse_table_op(op, row, column, "\"row\"", "\"column\"").expect("valid op");
+            tool_table_parsed(
+                &table_target(),
+                selector,
+                op,
+                parsed,
+                50,
+                &cli::PointerCenter::Usable,
+                &refs,
+            )
+            .expect("table call succeeds")
+            .structured
+            .expect("structured")
+        };
+        let cell = call("cell-at", PRICES, Some(0), Some(2));
+        let r = cell["cell"]["ref"]
+            .as_str()
+            .expect("the cell carries a ref");
+        assert_eq!(
+            refs.resolve(r).expect("resolves").name.as_deref(),
+            Some("Price")
+        );
+        let headers = call("column-headers", PRICES, None, None);
+        for el in headers["elements"].as_array().expect("elements") {
+            let r = el["ref"].as_str().expect("each element carries a ref");
+            assert!(refs.resolve(r).is_ok(), "{r}");
+        }
+        // A miss starts no capture, so it cannot age out an earlier one.
+        let before = call("cell-at", PRICES, Some(9), Some(0));
+        assert_eq!(before["cell"], Value::Null);
+        assert!(refs.resolve(r).is_ok());
+    }
+
+    #[test]
     fn table_arguments_are_checked_before_anything_resolves() {
         let err = cli::parse_table_op("cell-at", Some(1), None, "\"row\"", "\"column\"")
             .expect_err("column missing");
@@ -6415,6 +6890,7 @@ mod tests {
             cli::TableOp::Headers(crate::HeaderKind::Column),
             50,
             &cli::PointerCenter::Usable,
+            &RefTable::default(),
         )
         .expect_err("a text area is not a table");
         assert_eq!(failure_kind(&err), "action_not_supported");

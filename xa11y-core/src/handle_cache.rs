@@ -5,10 +5,15 @@
 //! and path). Without a bound that map grows for as long as the provider
 //! lives, which in a long-running test session or MCP server is forever.
 //!
-//! Handles are minted from a counter and never reused, so insertion order is
-//! enough: an evicted handle can never resolve to a newer object. A lookup
-//! miss is therefore [`StaleReason::Evicted`](crate::StaleReason::Evicted),
-//! never a re-resolution.
+//! Handles are minted from a counter and never reused once evicted, so
+//! insertion order is enough: an evicted handle can never resolve to a newer
+//! object. A lookup miss is therefore
+//! [`StaleReason::Evicted`](crate::StaleReason::Evicted), never a
+//! re-resolution. A backend may hand the *same* resident handle out again for
+//! the same native object (Linux keys handles by bus name and path); it
+//! learns which handles left the table from
+//! [`BoundedHandleCache::insert_evicting`], so its reverse map never names an
+//! evicted handle.
 //!
 //! Not public API (`#[doc(hidden)]` at the re-export): shared by the backend
 //! crates only.
@@ -23,11 +28,18 @@ pub const MAX_CACHED_ELEMENTS: usize = 65_536;
 ///
 /// Updating an existing key refreshes its age, which lets repeated
 /// enumeration keep a still-live entry resident while old ones age out.
+///
+/// A refresh is O(1) amortized: the age queue holds `(handle, stamp)` pairs
+/// and only the pair whose stamp matches the entry's is live, so a refresh
+/// pushes a new pair instead of searching the queue for the old one. Dead
+/// pairs are skipped at eviction and compacted away once the queue holds
+/// twice the capacity.
 #[derive(Debug)]
 pub struct BoundedHandleCache<T> {
-    entries: HashMap<u64, T>,
-    order: VecDeque<u64>,
+    entries: HashMap<u64, (T, u64)>,
+    order: VecDeque<(u64, u64)>,
     capacity: usize,
+    next_stamp: u64,
 }
 
 impl<T> BoundedHandleCache<T> {
@@ -37,33 +49,56 @@ impl<T> BoundedHandleCache<T> {
             entries: HashMap::new(),
             order: VecDeque::new(),
             capacity: capacity.max(1),
+            next_stamp: 0,
         }
     }
 
     /// Insert or refresh `handle`, evicting the oldest entries past capacity.
     pub fn insert(&mut self, handle: u64, value: T) {
-        if self.entries.insert(handle, value).is_some() {
-            self.order.retain(|candidate| *candidate != handle);
-        }
-        self.order.push_back(handle);
+        // The caller keeps no reverse map, so the evicted entries are just
+        // dropped.
+        drop(self.insert_evicting(handle, value));
+    }
+
+    /// [`insert`](Self::insert), returning the `(handle, entry)` pairs it
+    /// evicted, oldest first. Never includes `handle` itself.
+    pub fn insert_evicting(&mut self, handle: u64, value: T) -> Vec<(u64, T)> {
+        let stamp = self.next_stamp;
+        self.next_stamp += 1;
+        self.entries.insert(handle, (value, stamp));
+        self.order.push_back((handle, stamp));
+        let mut evicted = Vec::new();
         while self.entries.len() > self.capacity {
-            match self.order.pop_front() {
-                Some(oldest) => {
-                    self.entries.remove(&oldest);
+            let Some((oldest, oldest_stamp)) = self.order.pop_front() else {
+                break;
+            };
+            let live = self
+                .entries
+                .get(&oldest)
+                .is_some_and(|(_, stamp)| *stamp == oldest_stamp);
+            if live {
+                if let Some((value, _)) = self.entries.remove(&oldest) {
+                    evicted.push((oldest, value));
                 }
-                None => break,
             }
         }
+        if self.order.len() > 2 * self.capacity {
+            let entries = &self.entries;
+            self.order.retain(|(handle, stamp)| {
+                entries.get(handle).is_some_and(|(_, live)| live == stamp)
+            });
+        }
+        evicted
     }
 
     /// The entry for `handle`, if the table still holds it.
     pub fn get(&self, handle: &u64) -> Option<&T> {
-        self.entries.get(handle)
+        self.entries.get(handle).map(|(value, _)| value)
     }
 
     /// Mutable access to the entry for `handle`.
     pub fn get_mut(&mut self, handle: &u64) -> Option<&mut T> {
-        self.entries.get_mut(handle)
+        self.entries.get_mut(handle).map(|(value, _)| value)
     }
 
     /// Drop every entry (a backend whose native ids were invalidated
@@ -75,7 +110,9 @@ impl<T> BoundedHandleCache<T> {
 
     /// Every `(handle, entry)` pair, in no particular order.
     pub fn iter(&self) -> impl Iterator<Item = (&u64, &T)> {
-        self.entries.iter()
+        self.entries
+            .iter()
+            .map(|(handle, (value, _))| (handle, value))
     }
 
     /// How many entries the table holds.
@@ -118,5 +155,33 @@ mod tests {
         assert_eq!(cache.len(), 2);
         cache.clear();
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn insert_evicting_reports_exactly_the_evicted_entries() {
+        let mut cache = BoundedHandleCache::new(2);
+        assert!(cache.insert_evicting(1, "a").is_empty());
+        assert!(cache.insert_evicting(2, "b").is_empty());
+        // Refreshing a resident handle evicts nothing.
+        assert!(cache.insert_evicting(1, "a2").is_empty());
+        assert_eq!(cache.insert_evicting(3, "c"), vec![(2, "b")]);
+        assert_eq!(cache.insert_evicting(4, "d"), vec![(1, "a2")]);
+        assert_eq!(cache.len(), 2);
+    }
+
+    /// Repeated refreshes of resident handles neither evict them nor grow
+    /// the age queue without bound.
+    #[test]
+    fn refreshes_keep_the_age_queue_bounded() {
+        let mut cache = BoundedHandleCache::new(4);
+        for round in 0..1000 {
+            for handle in 0..4 {
+                assert!(cache.insert_evicting(handle, round).is_empty());
+            }
+            assert!(cache.order.len() <= 2 * cache.capacity);
+        }
+        assert_eq!(cache.len(), 4);
+        // The least recently refreshed handle is still the first to go.
+        assert_eq!(cache.insert_evicting(9, 0), vec![(0, 999)]);
     }
 }

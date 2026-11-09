@@ -105,6 +105,21 @@ fn attach_diagnosis_attrs(
     err
 }
 
+/// Set `pointer_target` on an `InvalidActionDataError`: the geometry of an
+/// off-display pointer target as a plain dict, otherwise `None`. Always set,
+/// so a caller never needs `hasattr`.
+fn attach_pointer_target(err: PyErr, diagnosis: Option<&xa11y::Diagnosis>) -> PyErr {
+    Python::attach(|py| {
+        let geometry = serde_json::json!(diagnosis.and_then(|d| d.pointer_target.as_ref()));
+        // Best-effort like `attach_diagnosis_attrs`: the message already
+        // renders the geometry, and a failed setattr must not replace the
+        // real error.
+        let _ = json_to_py(py, &geometry)
+            .and_then(|geometry| err.value(py).setattr("pointer_target", geometry));
+    });
+    err
+}
+
 /// Convert a core error into the matching Python exception, with the
 /// structured `delivery` attribute set on every one of them: whether the
 /// failed action may already have taken effect (`"not_delivered"` is safe to
@@ -215,7 +230,10 @@ fn map_to_py_err(e: xa11y::Error) -> PyErr {
                 length,
                 message,
             };
-            let py_err = InvalidTextRangeError::new_err(err.to_string());
+            // A subclass of InvalidActionDataError, so it carries that
+            // class's `pointer_target` too (always `None` here).
+            let py_err =
+                attach_pointer_target(InvalidTextRangeError::new_err(err.to_string()), None);
             Python::attach(|py| {
                 let value = py_err.value(py);
                 // Best-effort like `attach_diagnosis_attrs`: the message already
@@ -227,8 +245,14 @@ fn map_to_py_err(e: xa11y::Error) -> PyErr {
             });
             py_err
         }
-        xa11y::Error::InvalidActionData { message } => {
-            InvalidActionDataError::new_err(format!("Invalid action data: {message}"))
+        xa11y::Error::InvalidActionData { message, diagnosis } => {
+            // Reassemble so Display renders the diagnosis suffix (an
+            // off-display pointer target's geometry) into the message.
+            let err = xa11y::Error::InvalidActionData { message, diagnosis };
+            attach_pointer_target(
+                InvalidActionDataError::new_err(err.to_string()),
+                err.diagnosis(),
+            )
         }
         // Config errors are value errors (e.g. an unparsable
         // XA11Y_DEFAULT_TIMEOUT), matching the ValueError raised for an
@@ -497,8 +521,13 @@ struct Element {
 #[pymethods]
 impl Element {
     /// Whether ``other`` names the same platform node. Two elements found
-    /// separately compare equal when they are one node; two that merely
-    /// share a role and name do not. ``==`` uses this.
+    /// separately are the same node when this returns ``True``; two that
+    /// merely share a role and name are not.
+    ///
+    /// This is a live check: it asks the provider for both nodes' identity
+    /// (a platform call on Windows). ``==`` and ``hash`` are deliberately
+    /// *not* overloaded and keep Python's object identity, so ``in``,
+    /// ``set`` and ``dict`` never make a platform call or raise.
     ///
     /// Raises :class:`ElementStaleError` (``reason="evicted"``) when either
     /// handle is no longer held by the provider.
@@ -517,24 +546,6 @@ impl Element {
     fn check_alive(&self, py: Python<'_>) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         py.detach(move || element.check_alive()).map_err(to_py_err)
-    }
-
-    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let Ok(other) = other.cast::<Element>() else {
-            return Ok(py.NotImplemented());
-        };
-        let same = self.same_as(py, other.borrow())?;
-        Ok(pyo3::types::PyBool::new(py, same)
-            .to_owned()
-            .into_any()
-            .unbind())
-    }
-
-    fn __hash__(&self, py: Python<'_>) -> PyResult<u64> {
-        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        py.detach(move || element.identity())
-            .map(|identity| identity.hash_u64())
-            .map_err(to_py_err)
     }
 
     /// Get direct children (lazy — each call queries the provider).
@@ -1033,9 +1044,9 @@ impl Locator {
         // Reject n == 0 at the binding boundary instead of forwarding to
         // `Locator::nth`, which asserts and panics (crashes Python).
         if n == 0 {
-            return Err(to_py_err(xa11y::Error::InvalidActionData {
-                message: "Locator.nth is 1-based; got 0".to_string(),
-            }));
+            return Err(to_py_err(xa11y::Error::invalid_action_data(
+                "Locator.nth is 1-based; got 0",
+            )));
         }
         Ok(Self {
             inner: self.inner.clone().nth(n),
@@ -1666,8 +1677,12 @@ fn subscribe_options(kinds: Option<Vec<String>>, buffer: Option<usize>) -> xa11y
 }
 
 impl Subscription {
+    /// Run `f` on the open subscription. `recv` holds this lock for its
+    /// whole timeout, so every caller must already have released the GIL
+    /// (`py.detach`); a thread waiting here with the GIL held would freeze
+    /// the interpreter for as long as another thread's `recv` blocks.
     fn with_sub<T>(&self, f: impl FnOnce(&xa11y::Subscription) -> T) -> PyResult<T> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let sub = guard.as_ref().ok_or_else(|| {
             to_py_err(xa11y::Error::Platform {
                 code: -1,
@@ -1683,18 +1698,18 @@ impl Subscription {
     /// How many events the buffer has dropped, in total, because it was full.
     /// A dropped event leaves a gap in ``Event.sequence``.
     #[getter]
-    fn dropped(&self) -> PyResult<u64> {
-        self.with_sub(|sub| sub.dropped())
+    fn dropped(&self, py: Python<'_>) -> PyResult<u64> {
+        py.detach(|| self.with_sub(|sub| sub.dropped()))
     }
 
-    fn try_recv(&self) -> PyResult<Option<Event>> {
+    fn try_recv(&self, py: Python<'_>) -> PyResult<Option<Event>> {
         let provider = self.provider.clone();
-        self.with_sub(|sub| sub.try_recv().map(|e| Event::from_core(e, provider)))
+        py.detach(|| self.with_sub(|sub| sub.try_recv().map(|e| Event::from_core(e, provider))))
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn recv(&self, py: Python<'_>, timeout: f64) -> PyResult<Event> {
-        let dur = Duration::from_secs_f64(timeout);
+        let dur = parse_duration(timeout)?;
         let provider = self.provider.clone();
         py.detach(|| self.with_sub(|sub| sub.recv(dur).map(|e| Event::from_core(e, provider))))
             .and_then(|r| r.map_err(to_py_err))
@@ -1702,7 +1717,7 @@ impl Subscription {
 
     #[pyo3(signature = (predicate, timeout=5.0))]
     fn wait_for(&self, py: Python<'_>, predicate: Py<PyAny>, timeout: f64) -> PyResult<Event> {
-        let dur = Duration::from_secs_f64(timeout);
+        let dur = parse_duration(timeout)?;
         let start = std::time::Instant::now();
         let mut seen: usize = 0;
 
@@ -1752,8 +1767,11 @@ impl Subscription {
         }
     }
 
-    fn close(&self) {
-        self.inner.lock().unwrap().take();
+    fn close(&self, py: Python<'_>) {
+        // Released GIL: a concurrent `recv` holds this lock until it returns.
+        let sub = py.detach(|| self.inner.lock().unwrap_or_else(|e| e.into_inner()).take());
+        // Dropping cancels the platform subscription, which can block too.
+        py.detach(move || drop(sub));
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -1763,11 +1781,12 @@ impl Subscription {
     #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
     fn __exit__(
         &self,
+        py: Python<'_>,
         _exc_type: Option<&Bound<'_, pyo3::types::PyAny>>,
         _exc_val: Option<&Bound<'_, pyo3::types::PyAny>>,
         _exc_tb: Option<&Bound<'_, pyo3::types::PyAny>>,
     ) -> bool {
-        self.close();
+        self.close(py);
         false
     }
 
@@ -2149,15 +2168,14 @@ impl App {
     /// never makes it implicitly.
     ///
     /// On macOS it sets ``AXManualAccessibility`` (Electron) on the
-    /// application element and reads it back, then does the same with
-    /// ``AXEnhancedUserInterface`` (Chrome) if that did not read back as
-    /// set, raising ``AccessibilityNotEnabledError`` when neither does. It
-    /// does not check that the app is Chromium-based: an app that keeps
-    /// either value counts as having taken the request, and the call then
-    /// raises ``TimeoutError`` because no web content appears. The attribute
-    /// stays set to true afterwards and is not restored; on an app that
-    /// reacts to ``AXEnhancedUserInterface`` that can disable window
-    /// animations or confuse a window manager. It then waits up to
+    /// application element, raising ``AccessibilityNotEnabledError`` when the
+    /// app neither accepts the write nor reads it back as set;
+    /// relaunch such an app with ``--force-renderer-accessibility``. It
+    /// never sets ``AXEnhancedUserInterface``. It does not check that the
+    /// app is Chromium-based: an app that keeps the value counts as having
+    /// taken the request, and the call then raises ``TimeoutError`` because
+    /// no web content appears. The attribute stays set to true afterwards
+    /// and is not restored. It then waits up to
     /// ``timeout`` seconds (default: the
     /// process-wide default timeout) until some ``web_area`` has a child,
     /// raising ``TimeoutError`` with a diagnosis otherwise. On Linux and
@@ -2564,9 +2582,11 @@ impl ShellSurface {
 /// Mouse buttons are `"left"`, `"right"`, `"middle"`.
 ///
 /// Built-in backends reject points outside all active displays before sending
-/// input (Wayland uses the configured virtual input extent). This checks screen
-/// membership, not visibility or hit testing. `SelectorNotMatchedError.pointer_target`
-/// contains the point, checked coordinate space, displays, and element bounds/anchor.
+/// input (Wayland checks the compositor's logical output layout, or the
+/// `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` override). This checks screen
+/// membership, not visibility or hit testing. The refusal is an
+/// `InvalidActionDataError` whose `pointer_target` contains the point, checked
+/// coordinate space, displays, and element bounds/anchor.
 /// Both drag endpoints are checked before the gesture. Captured moves while this
 /// simulator holds a button, and releases, remain possible; explicit clicks and
 /// scrolls still require an on-display target.

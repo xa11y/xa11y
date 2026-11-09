@@ -103,9 +103,16 @@ serializable) and is made of a **process key** plus a **native key**:
 The process key is what makes "app restarted" detectable everywhere. The
 native-key reuse column is the honest limit, documented rather than hidden.
 
-Python gets `Element.__eq__` / `__hash__` from this; JS gets
-`element.sameAs(other)` (no operator overloading). Identity is computed
-lazily and memoised on the binding object.
+Python gets `Element.same_as(other)`; JS gets `element.sameAs(other)`.
+
+*As built:* Python does **not** overload `__eq__` / `__hash__`. Identity is
+not captured when an element is read: every backend computes it from the
+provider on demand (a `GetRuntimeId` call on Windows, a handle-cache lookup
+that raises `ElementStale(evicted)` on Linux and macOS, `Unsupported` for a
+simple MSAA child under IA2). An `==` or `hash` backed by that would make
+`in`, `set` and `dict` do IPC and raise, and a hash that can change or raise
+breaks containers. Python `==` therefore stays object identity, and
+`same_as` is the explicit live check, matching JS.
 
 #### 1b. Liveness check before every action
 

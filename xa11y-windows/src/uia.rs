@@ -2867,7 +2867,8 @@ struct UiaSemantics {
 }
 
 /// The landmark a UIA `LandmarkType` id names. A custom landmark's kind is
-/// in its localized name ("banner", "content information") or ARIA role.
+/// in its ARIA role or, failing that, its localized name ("banner",
+/// "content information").
 fn landmark_from_type_id(
     element: &IUIAutomationElement,
     id: i32,
@@ -2879,16 +2880,21 @@ fn landmark_from_type_id(
         id if id == UIA_MainLandmarkTypeId.0 => Landmark::Main,
         id if id == UIA_NavigationLandmarkTypeId.0 => Landmark::Navigation,
         id if id == UIA_SearchLandmarkTypeId.0 => Landmark::Search,
-        _ => uia_cached_bstr(element, UIA_LocalizedLandmarkTypePropertyId)
-            .as_deref()
-            .and_then(|name| {
-                if name.eq_ignore_ascii_case("content information") {
-                    Some(Landmark::ContentInfo)
-                } else {
-                    Landmark::from_aria_role(name)
-                }
+        // The ARIA role is not localized, so it is authoritative; the
+        // localized name only matches English, and is the last resort.
+        _ => web_role
+            .and_then(Landmark::from_aria_role)
+            .or_else(|| {
+                uia_cached_bstr(element, UIA_LocalizedLandmarkTypePropertyId)
+                    .as_deref()
+                    .and_then(|name| {
+                        if name.eq_ignore_ascii_case("content information") {
+                            Some(Landmark::ContentInfo)
+                        } else {
+                            Landmark::from_aria_role(name)
+                        }
+                    })
             })
-            .or_else(|| web_role.and_then(Landmark::from_aria_role))
             .unwrap_or(Landmark::Unknown),
     }
 }
@@ -4563,14 +4569,21 @@ impl Provider for WindowsProvider {
                 code: i64::from(e.code().0),
                 message: format!("CachedProcessId failed for the {kind} shell surface: {e}"),
             })? as u32;
-            // Mirror get_children(None): re-acquire via HWND so the window's
+            // Mirror build_app_window: re-acquire via HWND so the window's
             // UIA provider is activated, then repopulate the snapshot that
-            // build_element_data reads. Best-effort here, as in
-            // get_children — see the rationale there.
-            let el = match self.reacquire_via_hwnd(&el) {
-                Ok(re) => self.populate_cache(dpi, &re).unwrap_or(el),
-                Err(_) => el,
-            };
+            // build_element_data reads. A failure is a real COM failure;
+            // falling back to the un-reacquired element would hand back a
+            // surface whose provider was never activated (tenet 1).
+            let el = self.reacquire_via_hwnd(&el).map_err(|e| Error::Platform {
+                code: i64::from(e.code().0),
+                message: format!("re-acquiring the {kind} shell surface via HWND failed: {e}"),
+            })?;
+            let el = self.populate_cache(dpi, &el).map_err(|e| Error::Platform {
+                code: i64::from(e.code().0),
+                message: format!(
+                    "populating the re-acquired {kind} shell surface cache failed: {e}"
+                ),
+            })?;
             let data = self.build_element_data(dpi, &el, (pid != 0).then_some(pid))?;
             surfaces.push((rank, kind, data));
         }
@@ -6274,15 +6287,13 @@ impl Provider for WindowsProvider {
             // Payload verbs have no arguments on the generic escape hatch;
             // fail surfaceably with how to call them instead of guessing
             // (tenet 1: no silent fallback).
-            "move_to" => Err(Error::InvalidActionData {
-                message: "perform_action(\"move_to\") requires coordinates; call move_to(x, y)"
-                    .to_string(),
-            }),
-            "resize_to" => Err(Error::InvalidActionData {
-                message: "perform_action(\"resize_to\") requires dimensions; call \
-                           resize_to(width, height)"
-                    .to_string(),
-            }),
+            "move_to" => Err(Error::invalid_action_data(
+                "perform_action(\"move_to\") requires coordinates; call move_to(x, y)",
+            )),
+            "resize_to" => Err(Error::invalid_action_data(
+                "perform_action(\"resize_to\") requires dimensions; call \
+                           resize_to(width, height)",
+            )),
             _ => Err(Error::ActionNotSupported {
                 action: action.to_string(),
                 role: element.role,

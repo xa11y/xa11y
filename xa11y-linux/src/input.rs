@@ -29,7 +29,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, RwLock};
 
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{
     ConnectionExt as _, GetKeyboardMappingReply, Keycode, Screen, Window, BUTTON_PRESS_EVENT,
@@ -39,7 +39,8 @@ use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
 use xa11y_core::input::{
-    validate_pointer_regions, InputProvider, Key, MouseButton, Point, ScrollDelta,
+    note_display_source, validate_pointer_regions, InputProvider, Key, MouseButton, Point,
+    ScrollDelta,
 };
 use xa11y_core::{Error, Rect, Result};
 
@@ -98,9 +99,9 @@ pub(crate) fn key_to_keysym(key: &Key) -> Result<u32> {
         Key::PageDown => XK_PAGE_DOWN,
         Key::F(n) => {
             if *n < 1 || *n > 24 {
-                return Err(Error::InvalidActionData {
-                    message: format!("F{n} is out of range (1..=24)"),
-                });
+                return Err(Error::invalid_action_data(format!(
+                    "F{n} is out of range (1..=24)"
+                )));
             }
             XK_F1 + (*n as u32 - 1)
         }
@@ -235,35 +236,68 @@ pub(crate) struct X11InputBackend {
 }
 
 impl X11InputBackend {
-    fn display_regions(&self) -> Result<Vec<Rect>> {
+    /// The regions an X11 pointer target is checked against.
+    ///
+    /// RandR 1.5 `GetMonitors` (active monitors only) is the source of
+    /// record. A server without RandR, or with RandR older than 1.5, has no
+    /// monitor list to ask, and the rule there is the root window's geometry:
+    /// a deliberate, documented rule rather than a fallback, because nothing
+    /// else on such a server describes the screen. Which rule applied is
+    /// returned with the regions and recorded in a refusal's
+    /// `pointer_target.display_source`. A server that has RandR 1.5 but
+    /// answers zero active monitors is an [`Error::Platform`]: no target can
+    /// be on a display, and "not on any display" would blame the caller.
+    fn display_regions(&self) -> Result<X11Displays> {
         self.with_conn(|conn| {
-            let version = conn
-                .randr_query_version(1, 5)
-                .map_err(platform)?
-                .reply()
+            let randr = conn
+                .extension_information(x11rb::protocol::randr::X11_EXTENSION_NAME)
                 .map_err(platform)?;
-            if version.major_version < 1
-                || (version.major_version == 1 && version.minor_version < 5)
-            {
-                return Err(Error::Unsupported {
-                    feature: "X11 pointer validation requires RandR 1.5 monitor geometry".into(),
-                });
+            let version = match randr {
+                None => None,
+                Some(_) => {
+                    let reply = conn
+                        .randr_query_version(1, 5)
+                        .map_err(platform)?
+                        .reply()
+                        .map_err(platform)?;
+                    Some((reply.major_version, reply.minor_version))
+                }
+            };
+            match x11_region_rule(version) {
+                X11RegionRule::Monitors => {
+                    let reply = conn
+                        .randr_get_monitors(self.root, true)
+                        .map_err(platform)?
+                        .reply()
+                        .map_err(platform)?;
+                    let regions = monitor_regions(reply.monitors.iter().map(|monitor| Rect {
+                        x: i32::from(monitor.x),
+                        y: i32::from(monitor.y),
+                        width: u32::from(monitor.width),
+                        height: u32::from(monitor.height),
+                    }))?;
+                    Ok(X11Displays {
+                        regions,
+                        source: "RandR 1.5 active monitors".to_string(),
+                    })
+                }
+                X11RegionRule::RootWindow(why) => {
+                    let geometry = conn
+                        .get_geometry(self.root)
+                        .map_err(platform)?
+                        .reply()
+                        .map_err(platform)?;
+                    Ok(X11Displays {
+                        regions: vec![Rect {
+                            x: 0,
+                            y: 0,
+                            width: u32::from(geometry.width),
+                            height: u32::from(geometry.height),
+                        }],
+                        source: format!("X11 root window geometry ({why})"),
+                    })
+                }
             }
-            let reply = conn
-                .randr_get_monitors(self.root, true)
-                .map_err(platform)?
-                .reply()
-                .map_err(platform)?;
-            Ok(reply
-                .monitors
-                .into_iter()
-                .map(|monitor| Rect {
-                    x: i32::from(monitor.x),
-                    y: i32::from(monitor.y),
-                    width: u32::from(monitor.width),
-                    height: u32::from(monitor.height),
-                })
-                .collect())
         })
     }
 
@@ -493,8 +527,9 @@ impl LinuxInputProvider {
                     requested,
                     checked,
                     "x11 physical root pixels",
-                    &displays,
-                )?;
+                    &displays.regions,
+                )
+                .map_err(|error| note_display_source(error, &displays.source))?;
                 // XTest's wire coordinates are signed 16-bit. Do not silently
                 // clamp an on-display point to a different target.
                 if i16::try_from(checked.x).is_err() || i16::try_from(checked.y).is_err() {
@@ -712,6 +747,47 @@ fn button_mask(button: MouseButton) -> u8 {
     }
 }
 
+/// X11 display regions and the rule that produced them.
+struct X11Displays {
+    regions: Vec<Rect>,
+    source: String,
+}
+
+/// Which geometry an X11 server's pointer targets are checked against.
+#[derive(Debug, PartialEq, Eq)]
+enum X11RegionRule {
+    /// RandR 1.5 `GetMonitors`.
+    Monitors,
+    /// The root window, for the reason given (no RandR, or RandR < 1.5).
+    RootWindow(String),
+}
+
+/// `version` is the server's RandR version, `None` when it has no RandR.
+fn x11_region_rule(version: Option<(u32, u32)>) -> X11RegionRule {
+    match version {
+        Some((major, minor)) if (major, minor) >= (1, 5) => X11RegionRule::Monitors,
+        Some((major, minor)) => X11RegionRule::RootWindow(format!(
+            "the X server's RandR is {major}.{minor}, older than 1.5, so it has no monitor list"
+        )),
+        None => X11RegionRule::RootWindow(
+            "the X server has no RandR extension, so it has no monitor list".to_string(),
+        ),
+    }
+}
+
+/// RandR 1.5 monitors as pointer regions. Zero active monitors is a display
+/// problem, not a caller mistake, so it is a platform error that names itself.
+fn monitor_regions(monitors: impl Iterator<Item = Rect>) -> Result<Vec<Rect>> {
+    let regions: Vec<Rect> = monitors.collect();
+    if regions.is_empty() {
+        return Err(platform_msg(
+            "the X server reports no active monitors (RandR GetMonitors returned none), \
+             so no pointer target can be on a display",
+        ));
+    }
+    Ok(regions)
+}
+
 pub(crate) fn platform<E: std::fmt::Display>(e: E) -> Error {
     Error::Platform {
         code: -1,
@@ -743,6 +819,35 @@ fn button_number(button: MouseButton) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn x11_regions_come_from_monitors_only_on_randr_1_5() {
+        assert_eq!(x11_region_rule(Some((1, 5))), X11RegionRule::Monitors);
+        assert_eq!(x11_region_rule(Some((1, 6))), X11RegionRule::Monitors);
+        assert_eq!(x11_region_rule(Some((2, 0))), X11RegionRule::Monitors);
+        match x11_region_rule(Some((1, 4))) {
+            X11RegionRule::RootWindow(why) => assert!(why.contains("1.4"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        match x11_region_rule(None) {
+            X11RegionRule::RootWindow(why) => assert!(why.contains("no RandR"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_active_monitors_is_a_platform_error_not_an_off_display_target() {
+        let err = monitor_regions(std::iter::empty()).unwrap_err();
+        assert!(matches!(err, Error::Platform { .. }), "{err:?}");
+        assert!(err.to_string().contains("no active monitors"), "{err}");
+        let one = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+        assert_eq!(monitor_regions(std::iter::once(one)).unwrap(), vec![one]);
+    }
 
     /// A two-column X keymap starting at keycode 8:
     /// `a/A`, `b/B`, `Shift_L`.

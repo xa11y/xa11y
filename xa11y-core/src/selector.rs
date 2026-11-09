@@ -28,6 +28,13 @@
 //! is the first matching cell of the first row. `header` takes `"column"` or
 //! `"row"` and matches header cells: `table_cell[header="column"]`.
 //!
+//! Attributes with a closed set of values refuse any other value with `=`,
+//! since it could never match: the boolean states (`enabled`, `visible`,
+//! `password`, ...) take `"true"` or `"false"`, `checked` takes `"on"`,
+//! `"off"` or `"mixed"`, and `hidden_reason`, `landmark_type` and `live` take
+//! their enum's snake_case names (`"scrolled_out"`, `"contentinfo"`,
+//! `"polite"`). The substring operators are not checked.
+//!
 //! `*` is the universal selector and matches any element. It is equivalent to
 //! omitting the role, so `*[name="OK"]` and `[name="OK"]` are the same query;
 //! it exists for the positions where a role cannot simply be left out —
@@ -530,10 +537,67 @@ pub const NUMERIC_ATTRS: &[&str] = &[
     "heading_level",
 ];
 
-/// Attributes whose values are validated at parse time: the numeric ones
-/// and `header`, whose only values are `"column"` and `"row"`.
+/// Boolean state attributes: `"true"` or `"false"`, as [`resolve_attr`]
+/// formats them.
+const BOOL_ATTRS: &[&str] = &[
+    "enabled",
+    "visible",
+    "focused",
+    "active",
+    "focusable",
+    "selected",
+    "editable",
+    "modal",
+    "required",
+    "busy",
+    "password",
+    "expanded",
+    "minimized",
+    "maximized",
+    "fullscreen",
+];
+
+/// Attributes whose value is one of a closed set of names (an enum's
+/// snake_case spelling, or a boolean). An `=` comparison against any other
+/// value could never match, so it is refused at parse time; the substring
+/// operators are left alone, as they are for any string.
+fn is_enum_attr(attr: &str) -> bool {
+    matches!(attr, "checked" | "hidden_reason" | "landmark_type" | "live")
+        || BOOL_ATTRS.contains(&attr)
+}
+
+/// Check `value` against an enum attribute's spellings. `Ok(())` for an
+/// attribute that is not one.
+fn check_enum_value(attr: &str, value: &str) -> std::result::Result<(), String> {
+    // The serde spelling of these enums is their `to_snake_case`, which is
+    // what `resolve_attr` compares against (pinned by tests on each enum).
+    fn parses<T: serde::de::DeserializeOwned>(value: &str) -> std::result::Result<(), String> {
+        serde_json::from_value::<T>(serde_json::Value::String(value.to_string()))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    let checked = match attr {
+        "checked" => match value {
+            "on" | "off" | "mixed" => Ok(()),
+            _ => Err("expected one of `on`, `off`, `mixed`".to_string()),
+        },
+        "hidden_reason" => parses::<crate::element::HiddenReason>(value),
+        "landmark_type" => parses::<crate::semantics::Landmark>(value),
+        "live" => parses::<crate::semantics::Politeness>(value),
+        a if BOOL_ATTRS.contains(&a) => match value {
+            "true" | "false" => Ok(()),
+            _ => Err("expected one of `true`, `false`".to_string()),
+        },
+        _ => Ok(()),
+    };
+    checked.map_err(|why| format!("attribute {attr:?} cannot equal {value:?}: {why}"))
+}
+
+/// Attributes whose values are validated at parse time: the numeric ones,
+/// `header`, whose only values are `"column"` and `"row"`, and the enum
+/// attributes ([`is_enum_attr`]).
 fn is_typed_attr(attr: &str) -> bool {
-    attr == "header" || NUMERIC_ATTRS.contains(&attr)
+    attr == "header" || NUMERIC_ATTRS.contains(&attr) || is_enum_attr(attr)
 }
 
 /// Totals, which may also be `"unknown"` ([`crate::table::Count::Unknown`]).
@@ -546,6 +610,12 @@ fn numeric_filter_value(
     op: &MatchOp,
     value: &str,
 ) -> std::result::Result<String, String> {
+    if is_enum_attr(attr) {
+        if *op == MatchOp::Exact {
+            check_enum_value(attr, value)?;
+        }
+        return Ok(value.to_string());
+    }
     if attr == "header" {
         if *op != MatchOp::Exact {
             return Err(format!(
@@ -1372,6 +1442,71 @@ mod numeric_attr_tests {
                 matches!(Selector::parse(bad), Err(Error::InvalidSelector { .. })),
                 "{bad} should be refused"
             );
+        }
+    }
+
+    #[test]
+    fn enum_attrs_refuse_values_that_can_never_match_with_equals() {
+        for bad in [
+            r#"[hidden_reason="scrolledout"]"#,
+            r#"[landmark_type="ContentInfo"]"#,
+            r#"[live="rude"]"#,
+            r#"[password="yes"]"#,
+            r#"[enabled="True"]"#,
+            r#"[checked="true"]"#,
+        ] {
+            let err = Selector::parse(bad).expect_err(bad);
+            assert!(
+                matches!(&err, Error::InvalidSelector { message, .. } if message.contains("cannot equal")),
+                "{bad}: {err:?}"
+            );
+        }
+        for good in [
+            r#"[hidden_reason="scrolled_out"]"#,
+            r#"[hidden_reason="unknown"]"#,
+            r#"[landmark_type="contentinfo"]"#,
+            r#"[live="assertive"]"#,
+            r#"[password="false"]"#,
+            r#"[expanded="true"]"#,
+            r#"[checked="mixed"]"#,
+            // Substring operators are not checked.
+            r#"[hidden_reason*="scrolled"]"#,
+            r#"[landmark_type^="Nav"]"#,
+            r#"[password$="ue"]"#,
+        ] {
+            Selector::parse(good).unwrap_or_else(|e| panic!("{good}: {e}"));
+        }
+        // A filter built in Rust is checked by `validate` too.
+        let mut sel = Selector::parse(r#"[live="polite"]"#).unwrap();
+        sel.segments[0].simple.filters[0].value = "Polite".into();
+        assert!(matches!(sel.validate(), Err(Error::InvalidSelector { .. })));
+    }
+
+    #[test]
+    fn enum_attr_spellings_are_the_resolved_spellings() {
+        use crate::element::HiddenReason;
+        use crate::semantics::{Landmark, Politeness};
+        // Exhaustive (no `_` arm): a new variant fails to compile here.
+        let reasons = [
+            HiddenReason::WindowMinimized,
+            HiddenReason::ScrolledOut,
+            HiddenReason::NotShowing,
+            HiddenReason::Unknown,
+        ];
+        for r in reasons {
+            match r {
+                HiddenReason::WindowMinimized
+                | HiddenReason::ScrolledOut
+                | HiddenReason::NotShowing
+                | HiddenReason::Unknown => {}
+            }
+            check_enum_value("hidden_reason", r.to_snake_case()).expect("accepted");
+        }
+        for l in [Landmark::ContentInfo, Landmark::Main, Landmark::Unknown] {
+            check_enum_value("landmark_type", l.to_snake_case()).expect("accepted");
+        }
+        for p in [Politeness::Off, Politeness::Polite, Politeness::Assertive] {
+            check_enum_value("live", p.to_snake_case()).expect("accepted");
         }
     }
 

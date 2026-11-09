@@ -41,7 +41,11 @@ use crate::error::{Error, Result};
 /// reverse, so a new kind needs no work in a backend that cannot report it,
 /// and [`Unknown`](Self::Unknown) is the fallback for one a platform names
 /// but xa11y does not.
+///
+/// Serializes with the same spelling as [`Self::to_snake_case`]
+/// (`"contentinfo"`, not `"ContentInfo"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Landmark {
     /// `banner`: the site or app header.
@@ -273,15 +277,15 @@ impl RelationKind {
         Self::ALL
             .into_iter()
             .find(|k| k.to_snake_case() == name)
-            .ok_or_else(|| Error::InvalidActionData {
-                message: format!(
+            .ok_or_else(|| {
+                Error::invalid_action_data(format!(
                     "unknown relation kind {name:?}; expected one of {}",
                     Self::ALL
                         .iter()
                         .map(|k| k.to_snake_case())
                         .collect::<Vec<_>>()
                         .join(", ")
-                ),
+                ))
             })
     }
 
@@ -315,5 +319,41 @@ mod tests {
         assert_eq!(Landmark::from_aria_role("button"), None);
         assert_eq!(Politeness::parse("Assertive"), Some(Politeness::Assertive));
         assert_eq!(Politeness::parse("rude"), None);
+    }
+
+    #[test]
+    fn landmark_serde_spelling_is_the_snake_case_name() {
+        let all = [
+            Landmark::Banner,
+            Landmark::Complementary,
+            Landmark::ContentInfo,
+            Landmark::Form,
+            Landmark::Main,
+            Landmark::Navigation,
+            Landmark::Region,
+            Landmark::Search,
+            Landmark::Unknown,
+        ];
+        // Exhaustive (no `_` arm): a new variant fails to compile here, which
+        // points whoever adds it at `all`.
+        for kind in all {
+            match kind {
+                Landmark::Banner
+                | Landmark::Complementary
+                | Landmark::ContentInfo
+                | Landmark::Form
+                | Landmark::Main
+                | Landmark::Navigation
+                | Landmark::Region
+                | Landmark::Search
+                | Landmark::Unknown => {}
+            }
+            let json = serde_json::to_string(&kind).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", kind.to_snake_case()));
+            assert_eq!(
+                serde_json::from_str::<Landmark>(&json).expect("deserialize"),
+                kind
+            );
+        }
     }
 }

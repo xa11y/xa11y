@@ -64,7 +64,7 @@ def test_delivery_tells_the_model_whether_a_retry_is_safe():
 
 
 def test_pointer_geometry_is_forwarded_without_mutating_the_error():
-    error = fake_xa11y.SelectorNotMatchedError("point matches no display")
+    error = fake_xa11y.InvalidActionDataError("pointer target (1000, 1000) is not on any display")
     geometry = {
         "point": {"x": 1000, "y": 1000},
         "element_bounds": {"x": 900, "y": 900, "width": 50, "height": 50},
@@ -79,10 +79,11 @@ def test_pointer_geometry_is_forwarded_without_mutating_the_error():
     message = describe(error)
     assert f"pointer target: {geometry}" in message
     assert "delivery: not_delivered" in message
-    assert message.startswith("SelectorNotMatchedError: point matches no display")
+    assert message.startswith("InvalidActionDataError: pointer target (1000, 1000) is not on any display")
+    assert "pick a point inside one" in message
     assert error.pointer_target is geometry
-    assert str(error) == "point matches no display"
-    assert "pointer target" not in describe(fake_xa11y.SelectorNotMatchedError("no match"))
+    assert str(error) == "pointer target (1000, 1000) is not on any display"
+    assert "pointer target:" not in describe(fake_xa11y.InvalidActionDataError("bad offset"))
 
 
 def test_auto_scroll_says_whether_scrolling_was_already_tried():

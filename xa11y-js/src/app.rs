@@ -45,7 +45,7 @@ pub struct AppLookupOptions {
     /// `XA11Y_DEFAULT_TIMEOUT` environment variable. Pass `0` for a single
     /// attempt with no waiting. Only "not found" errors trigger a retry;
     /// other errors fail fast.
-    pub timeout: Option<u32>,
+    pub timeout: Option<f64>,
 }
 
 /// Options for `App.enableWebAccessibility`.
@@ -56,7 +56,7 @@ pub struct WebAccessibilityOptions {
     /// applies: 5000ms (5 seconds) unless overridden via
     /// `setDefaultTimeout()` or the `XA11Y_DEFAULT_TIMEOUT` environment
     /// variable. Pass `0` to check once.
-    pub timeout: Option<u32>,
+    pub timeout: Option<f64>,
 }
 
 #[napi]
@@ -85,7 +85,7 @@ impl App {
     ///
     /// See {@link App.byName} for the `options.timeout` behaviour.
     #[napi(ts_return_type = "Promise<App>")]
-    pub fn by_pid(pid: u32, options: Option<AppLookupOptions>) -> AsyncTask<FindByPidTask> {
+    pub fn by_pid(pid: f64, options: Option<AppLookupOptions>) -> AsyncTask<FindByPidTask> {
         AsyncTask::new(FindByPidTask {
             pid,
             timeout_ms: options.as_ref().and_then(|o| o.timeout),
@@ -213,15 +213,14 @@ impl App {
     /// never makes it implicitly.
     ///
     /// On macOS it sets `AXManualAccessibility` (Electron) on the
-    /// application element and reads it back, then does the same with
-    /// `AXEnhancedUserInterface` (Chrome) if that did not read back as set,
-    /// rejecting with `AccessibilityNotEnabledError` when neither does. It
-    /// does not check that the app is Chromium-based: an app that keeps
-    /// either value counts as having taken the request, and the call then
-    /// rejects with `TimeoutError` because no web content appears. The
-    /// attribute stays set to true afterwards and is not restored; on an app
-    /// that reacts to `AXEnhancedUserInterface` that can disable window
-    /// animations or confuse a window manager. It then waits up to
+    /// application element, rejecting with `AccessibilityNotEnabledError` when
+    /// the app neither accepts the write nor reads it back as set;
+    /// relaunch such an app with `--force-renderer-accessibility`. It never
+    /// sets `AXEnhancedUserInterface`. It does not check that the app is
+    /// Chromium-based: an app that keeps the value counts as having taken
+    /// the request, and the call then rejects with `TimeoutError` because no
+    /// web content appears. The attribute stays set to true afterwards and
+    /// is not restored. It then waits up to
     /// `options.timeout` ms until some
     /// `web_area` has a child, rejecting with `TimeoutError` and a diagnosis
     /// otherwise. On Linux and Windows it rejects with
@@ -250,15 +249,17 @@ impl App {
     }
 
     /// Subscribe to accessibility events from this application. See
-    /// `Element.subscribe` for `kinds` and `buffer`.
+    /// `Element.subscribe` for the options. The public `App` class in
+    /// `index.js` overrides this; the native function takes `(kinds, buffer)`
+    /// positionally and resolves to the internal `_NativeSubscription`.
     #[napi(
-        ts_args_type = "kinds?: Array<EventTypeName> | null, buffer?: number | null",
-        ts_return_type = "Promise<_NativeSubscription>"
+        ts_args_type = "options?: SubscribeOptions | null",
+        ts_return_type = "Promise<Subscription>"
     )]
     pub fn subscribe(
         &self,
         kinds: Option<Vec<String>>,
-        buffer: Option<u32>,
+        buffer: Option<f64>,
     ) -> AsyncTask<AppSubscribeTask> {
         AsyncTask::new(AppSubscribeTask {
             data: self.data.clone(),
@@ -269,9 +270,11 @@ impl App {
 
     /// Read the subtree into a bounded capture: every node read, pre-order,
     /// with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
-    /// the top of the tree is complete. `detail` adds `'text'` and/or
-    /// `'relations'`; `timeout` (ms) resolves with what was read when it runs
-    /// out, with `truncated.byTime`.
+    /// the top of the tree is complete. `detail` adds `'text'`,
+    /// `'formatting'` (text plus its attribute runs, at most `maxRuns` in
+    /// total) and/or `'relations'`. `timeout` (ms) resolves with what was
+    /// read when it runs out, with `truncated.byTime`; calling `cancel()` on
+    /// the `cancel` token does the same, with `truncated.byCancel`.
     ///
     /// The root is the application; its children are those of every native
     /// registration of the process, as in `children()`.
@@ -300,12 +303,13 @@ impl App {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<TreeNode>"
     )]
-    pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<TreeTask> {
-        AsyncTask::new(TreeTask::new_for_app(
+    pub fn tree(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<TreeTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(TreeTask::new_for_app(
             self.data.clone(),
             self.provider.clone(),
-            max_depth.map(|d| d as usize),
-        ))
+            max_depth,
+        )))
     }
 
     /// Render this application's accessibility tree as an indented string.
@@ -319,12 +323,13 @@ impl App {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<string>"
     )]
-    pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<DumpTask> {
-        AsyncTask::new(DumpTask::new_for_app(
+    pub fn dump(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<DumpTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(DumpTask::new_for_app(
             self.data.clone(),
             self.provider.clone(),
-            max_depth.map(|d| d as usize),
-        ))
+            max_depth,
+        )))
     }
 }
 
@@ -334,9 +339,12 @@ impl App {
 /// falls back to the process-wide default (`setDefaultTimeout()` /
 /// `XA11Y_DEFAULT_TIMEOUT`, else 5 seconds) — matching the auto-wait
 /// timeout used elsewhere in the API (e.g. `Locator.waitAttached`).
-pub(crate) fn effective_timeout_ms(timeout_ms: Option<u32>) -> napi::Result<Duration> {
+///
+/// Called first in each task's `compute`, so a negative, fractional or `NaN`
+/// timeout rejects with `InvalidActionDataError` before any platform call.
+pub(crate) fn effective_timeout_ms(timeout_ms: Option<f64>) -> napi::Result<Duration> {
     match timeout_ms {
-        Some(ms) => Ok(Duration::from_millis(ms.into())),
+        Some(ms) => crate::types::checked_millis(ms, "timeout").map_err(map_err),
         None => xa11y::default_timeout().map_err(map_err),
     }
 }
@@ -344,7 +352,7 @@ pub(crate) fn effective_timeout_ms(timeout_ms: Option<u32>) -> napi::Result<Dura
 pub struct FindByNameTask {
     backend: Option<String>,
     name: String,
-    timeout_ms: Option<u32>,
+    timeout_ms: Option<f64>,
 }
 
 impl Task for FindByNameTask {
@@ -367,8 +375,9 @@ impl Task for FindByNameTask {
 
 pub struct FindByPidTask {
     backend: Option<String>,
-    pid: u32,
-    timeout_ms: Option<u32>,
+    /// The raw JS number; checked first in `compute`.
+    pid: f64,
+    timeout_ms: Option<f64>,
 }
 
 impl Task for FindByPidTask {
@@ -376,12 +385,13 @@ impl Task for FindByPidTask {
     type JsValue = App;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        let pid = crate::types::checked_offset(self.pid, "pid")?;
         let timeout = effective_timeout_ms(self.timeout_ms)?;
         let provider = match self.backend.as_deref() {
             Some(b) => xa11y::provider_for_backend(b).map_err(map_err)?,
             None => crate::provider()?,
         };
-        xa11y::App::by_pid_with(provider, self.pid, timeout).map_err(map_err)
+        xa11y::App::by_pid_with(provider, pid, timeout).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -391,7 +401,7 @@ impl Task for FindByPidTask {
 
 pub struct ForegroundTask {
     backend: Option<String>,
-    timeout_ms: Option<u32>,
+    timeout_ms: Option<f64>,
 }
 
 impl Task for ForegroundTask {
@@ -483,7 +493,9 @@ impl Task for AppWindowsTask {
 pub struct AppSubscribeTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
-    options: xa11y::SubscribeOptions,
+    /// The parsed options, or why they were refused: `compute` rejects with
+    /// that before subscribing.
+    options: xa11y::Result<xa11y::SubscribeOptions>,
 }
 
 impl Task for AppSubscribeTask {
@@ -491,20 +503,27 @@ impl Task for AppSubscribeTask {
     type JsValue = NativeSubscription;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        let options = self.options.clone().map_err(map_err)?;
         xa11y::App::from_data(self.provider.clone(), self.data.clone())
-            .subscribe_with(&self.options)
+            .subscribe_with(&options)
             .map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(NativeSubscription::new(output, self.provider.clone()))
+        // `compute` only ran past `?` on `Ok` options.
+        let options = self.options.clone().unwrap_or_default();
+        Ok(NativeSubscription::with_options(
+            output,
+            self.provider.clone(),
+            &options,
+        ))
     }
 }
 
 pub struct EnableWebAccessibilityTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
-    timeout_ms: Option<u32>,
+    timeout_ms: Option<f64>,
 }
 
 impl Task for EnableWebAccessibilityTask {

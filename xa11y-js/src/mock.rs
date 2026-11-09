@@ -89,6 +89,32 @@ pub fn make_test_app(split: Option<bool>, events: Option<bool>) -> napi::Result<
     Ok(App::from_core(app))
 }
 
+/// A mock `App` whose `Navigation` node's children read fails with a timeout
+/// that names the pending call, so a capture records one `CaptureError`.
+/// Used only from the JS unit tests — not part of the public API.
+#[napi(js_name = "_makeTestCaptureFailureApp")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_capture_failure_app() -> napi::Result<App> {
+    let mock = xa11y::mock::build_provider();
+    mock.fail_children(
+        "Navigation",
+        xa11y::Error::timeout(std::time::Duration::from_millis(250)).diagnose(
+            xa11y::Diagnosis::new()
+                .condition("children read")
+                .pending("GetChildren on group \"Navigation\""),
+        ),
+    );
+    let provider = mock as Arc<dyn xa11y::Provider>;
+    let app = xa11y::App::find_with(provider, std::time::Duration::ZERO, |d| {
+        d.name.as_deref() == Some("TestApp")
+    })
+    .map_err(crate::map_err)?;
+    Ok(App::from_core(app))
+}
+
 /// Test handle that pairs a mock `Locator` with read-access to the mock's
 /// action log. Lets JS unit tests assert that an action method dispatched
 /// to the expected provider call. Not part of the public API.
@@ -336,6 +362,7 @@ pub fn make_disconnected_subscription() -> NativeSubscription {
     NativeSubscription::new(
         xa11y::mock::disconnected_subscription(),
         provider as Arc<dyn xa11y::Provider>,
+        xa11y::DEFAULT_EVENT_BUFFER,
     )
 }
 
@@ -351,6 +378,32 @@ pub fn make_test_text_event_subscription() -> NativeSubscription {
     NativeSubscription::new(
         xa11y::mock::scripted_subscription(xa11y::mock::text_edit_events()),
         provider as Arc<dyn xa11y::Provider>,
+        xa11y::DEFAULT_EVENT_BUFFER,
+    )
+}
+
+/// Create a `_NativeSubscription` whose queue to JS holds `buffer` events,
+/// over a stream of `count` focus events numbered `0..count` that then
+/// disconnects. The stream itself never drops, so whatever `dropped` counts
+/// was dropped on the JS side. Used only from the JS unit tests.
+#[napi(js_name = "_makeTestFloodSubscription")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_flood_subscription(count: u32, buffer: u32) -> NativeSubscription {
+    let provider = xa11y::mock::build_provider();
+    let events = (0..u64::from(count))
+        .map(|sequence| {
+            let mut event = xa11y::Event::new(xa11y::EventKind::FocusChanged, "Mock", 1);
+            event.sequence = sequence;
+            event
+        })
+        .collect();
+    NativeSubscription::new(
+        xa11y::mock::scripted_subscription(events),
+        provider as Arc<dyn xa11y::Provider>,
+        buffer as usize,
     )
 }
 

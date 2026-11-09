@@ -320,8 +320,8 @@ jobs:
           - { os: ubuntu-latest,  app: electron }
           - { os: macos-latest,   app: cocoa }
           # Electron on macOS is the only cell where Chromium's web
-          # accessibility tree is gated on AXManualAccessibility /
-          # AXEnhancedUserInterface (issue #511), so it is the end-to-end
+          # accessibility tree is gated on AXManualAccessibility
+          # (issue #511), so it is the end-to-end
           # cover for App.enable_web_accessibility on its real platform.
           - { os: macos-latest,   app: electron }
           - { os: macos-latest,   app: tauri }

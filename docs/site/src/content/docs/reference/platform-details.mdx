@@ -77,7 +77,7 @@ See [Explicit IA2 source on Windows](#explicit-ia2-source-on-windows).
 | `relation:member_of` | The group this element is a member of. | Supported (`MEMBER_OF`) | Unsupported (AX has no membership relation) | Unsupported (UIA has no membership relation) | Supported (IAccessibleRelation with bounded target enumeration) |
 | `relation:linked` | macOS linked elements: `aria-controls` and `aria-flowto` targets together. | Unsupported (AT-SPI reports controls and flows-to separately) | Supported (`AXLinkedUIElements`) | Unsupported (UIA reports controls and flows-to separately) | Unsupported (IA2 reports controls and flows-to separately) |
 | `action:blur` | Remove keyboard focus from an element (`Element.blur`). | Supported (focuses the parent with Component.GrabFocus; fails if the parent cannot take focus) | Supported (sets AXFocused to false) | Supported (focuses the desktop root) | Unsupported (IA2 has no semantic blur operation) |
-| `app:enable_web_accessibility` | Ask a Chromium or Electron app to build its web accessibility tree (`App.enable_web_accessibility`). | Unsupported (a launch-time switch on Linux; relaunch the app with `--force-renderer-accessibility`) | Supported (sets AXManualAccessibility, then AXEnhancedUserInterface) | Unsupported (not needed; Chromium builds the tree when a UI Automation client connects) | Unsupported (launch Chromium with `--force-renderer-accessibility=complete` before attaching IA2) |
+| `app:enable_web_accessibility` | Ask a Chromium or Electron app to build its web accessibility tree (`App.enable_web_accessibility`). | Unsupported (a launch-time switch on Linux; relaunch the app with `--force-renderer-accessibility`) | Supported (sets AXManualAccessibility) | Unsupported (not needed; Chromium builds the tree when a UI Automation client connects) | Unsupported (launch Chromium with `--force-renderer-accessibility=complete` before attaching IA2) |
 | `window:activate` | Bring a window to the foreground and focus it. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
 | `window:minimize` | Send a window to the taskbar or dock (`Element.minimize`). | Partial (X11 only; unsupported on Wayland) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
 | `window:maximize` | Make a window fill the screen without entering fullscreen (`Element.maximize`). | Partial (X11 only; unsupported on Wayland) | Unsupported (AX has no zoom state to read or set) | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
@@ -499,12 +499,12 @@ JavaScript.
 
 | Capability | Linux (AT-SPI) | macOS | Windows (UIA) |
 | --- | --- | --- | --- |
-| `table` (`row_count`, `column_count`) | The `rowcount` / `colcount` object attributes when the table declares them (Chromium sets them from `aria-rowcount` / `aria-colcount`), otherwise `Table.NRows` / `NColumns`; a negative value reads `unknown` | `AXRowCount` / `AXColumnCount`, or the length of `AXRows` / `AXColumns` where those are absent (AppKit) | Grid row and column counts |
+| `table` (`row_count`, `column_count`) | The `rowcount` / `colcount` object attributes when the table declares them (Chromium sets them from `aria-rowcount` / `aria-colcount`), otherwise `Table.NRows` / `NColumns`; a negative value reads `unknown` | `AXRowCount` / `AXColumnCount`, or the length of `AXRows` / `AXColumns` where those are absent (AppKit). Also set on an `AXOutline` (`NSOutlineView`), which keeps the `list` role and answers every table call below as a table does | Grid row and column counts |
 | `cell` (`row`, `column`, spans) | `TableCell.GetRowColumnSpan` | `AXRowIndexRange` / `AXColumnIndexRange` | GridItem properties |
 | `cell.header` | The `column header` / `row header` roles | Always `None`: AX marks no cell as a header | Cached ARIA header role, WPF header class, or parent Header orientation; explicit header requests label their returned cells |
 | `table_row` | Always `None`: AT-SPI has no row-index call for a row object, so read the row from a cell | `AXIndex` of an `AXRow`, including outline rows | GridItem row when the row object reports it |
 | `collection` (`index`, `size`, `depth`) | Object attributes `posinset`, `setsize`, `level`, converted from 1-based; read for list items, tree items, tabs, radio buttons and rows | `AXARIAPosInSet` / `AXARIASetSize` on rows, tabs and radio buttons, converted from 1-based. `depth` comes from `AXDisclosureLevel` on outline rows. Web list items are groups in AX, so they report none | PositionInSet, SizeOfSet and Level; indices converted from 1-based |
-| `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `AXCellForColumnAndRow`; for AppKit, the `AXCell` in row `AXRows[row]` whose index ranges cover the slot | Grid.GetItem; never realizes a virtual cell |
+| `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `AXCellForColumnAndRow`; for AppKit tables and outlines, the `AXCell` in row `AXRows[row]` whose index ranges cover the slot | Grid.GetItem; never realizes a virtual cell |
 | `column_headers()`, `row_headers()` | `Table.GetColumnHeader` / `GetRowHeader` per column or row; `Unsupported` above 1000 | `AXColumnHeaderUIElements` / `AXRowHeaderUIElements`; for AppKit, which answers neither, the `AXHeader` of each `AXColumn` | Table header arrays |
 | `column_header_cells()`, `row_header_cells()` | `TableCell.GetColumnHeaderCells` / `GetRowHeaderCells` | The cell's header attributes; for AppKit, the `AXHeader` of the cell's `AXColumn`, and no row headers | TableItem header arrays |
 | `selected_items()` | `Selection.GetSelectedChild` | `AXSelectedRows` on tables and outlines, `AXSelectedChildren` elsewhere | Selection.GetCurrentSelection |
@@ -572,7 +572,7 @@ MSAA provides navigation and standard role/name/state properties.
 | Table and cell metadata | `IAccessibleTable2.nRows` / `nColumns`, with the required `IAccessibleTableCell` index and extent methods |
 | Cell lookup | `Table2.cellAt`, including merged spans, without realizing content |
 | Cell headers | `TableCell.columnHeaderCells` / `rowHeaderCells`, preserving signed native identities |
-| Table headers | Collect the cell header relationships, keeping each native identity once. Requires a known table size of at most 256 cells |
+| Table headers | Per column (or row), the header relationships of the first cell that is not itself such a header, reading a spanning cell once and keeping each native identity once. At most 4096 rows and 4096 columns. A missing cell along the walk fails with `Unsupported` |
 | Selected items | `Table2.selectedCells`, at most 4096. List selection enumeration remains unsupported |
 | Document semantics | Heading role and `level`, landmarks and `web_role` from `xml-roles`, live-region settings from object attributes, link URLs from `Hyperlink.anchorTarget` |
 | Relations | Shared relation kinds from `IAccessibleRelation`. At most 256 relations and 1024 targets per request. `owns` and `linked` are unsupported |
@@ -600,12 +600,17 @@ at most 8192 handles, expiring them after five minutes. Expired or evicted
 handles fail as stale. Signed IDs are validated against their event window
 and owning process generation, without resolving a replacement by name.
 
-Each request has a five-second stall bound. A shorter caller deadline stops
-waiting and prevents queued work or later writes from starting; it leaves
-the worker usable. The five-second stall bound disables the worker and
-requests COM cancellation. Cancellation is best effort, so
-native cleanup may continue after the caller returns. An in-flight action
-has unknown delivery. Restart the host before issuing further IA2 requests.
+Each request has a five-second budget that starts when the worker runs it.
+A full queue makes the caller wait for space within that budget. A request
+still queued when its caller stops waiting is withdrawn and never runs. It
+fails as a timeout with `not_delivered` delivery and leaves the worker usable.
+A request whose budget or caller deadline expires between native operations
+stops before the next one. That is an ordinary timeout, and the worker stays
+usable. Only a native call still running after its budget disables the worker.
+Then xa11y requests COM cancellation of that caller's own call. Cancellation
+is best effort, so native cleanup may continue after the caller returns. An
+in-flight action has unknown delivery. Restart the host before issuing
+further IA2 requests.
 An initialization failure also disables this process's IA2 source.
 Native range, attribute and array allocations occur inside the provider
 before their sizes can be checked. Oversized results are refused. Releasing
@@ -738,7 +743,11 @@ Every other configuration fails closed to `1.0`, so the data is never wrong. The
 - **Multi-monitor mixed-DPI Wayland.** A single scalar can't represent per-monitor scales, so it falls back to the largest integer `wl_output.scale`.
 - **XWayland in a Wayland session.** Auto selection uses the Wayland screenshot portal and output scale. An explicit screenshot override of `x11` uses the X11 source, which stays `1.0` under XWayland.
 
-`Point` arguments to input simulation, after the logical→physical conversion, are mapped onto the uinput virtual coordinate range. Override the assumed screen size (default 1920×1080) with `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` env vars if your setup differs.
+`Point` arguments to uinput input simulation are logical layout coordinates. xa11y maps them onto the uinput absolute range through the bounding box of the compositor's outputs, which it reads from `xdg-output` (each output's logical position and size) at the start of every pointer gesture. Compositors map that absolute range onto the same layout box. A target must lie on one of the outputs.
+
+`XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` override the layout with one screen of that size at the origin. Set both, as positive integers, when there is no compositor to ask, such as a console session or `XA11Y_LINUX_INPUT_BACKEND=wayland` on X11. A value that isn't a positive integer, or only one of the two, is an `InvalidConfig` error. With no override, a compositor that can't be reached, offers no `xdg-output`, or leaves an output's geometry out fails the pointer action with a `Platform` error that names both variables. xa11y never assumes a screen size. Keyboard input needs neither.
+
+On X11, pointer targets are checked against the RandR 1.5 active monitors. A server without RandR, or with RandR older than 1.5, has no monitor list, so targets there are checked against the root window's geometry, and a refusal's `pointer_target.display_source` says so. A server whose RandR reports no active monitors fails with a `Platform` error.
 
 On Wayland, input simulation refuses pointer actions whose target is an `Element` (`click`, `drag`, `move_to`, `scroll`, and their variants) with an `Unsupported` error. Wayland clients don't know their global position, so the bounds AT-SPI reports are not screen coordinates, and a click computed from them would land somewhere else. Use a semantic action such as `press` or `focus`, or pass a raw screen point. Raw-point pointer actions and keyboard input work as before. For the same reason `xa11y find -o center` fails, and the MCP tools report no `center` for an element and add a `center_unavailable` field to the result.
 
@@ -759,7 +768,7 @@ Two WebKitGTK behaviors affect `<table>` content (verified against WebKitGTK 2.5
 
 On macOS, Electron and Chromium-based apps build their web content's accessibility tree only when an assistive client asks for it. Before that, the window contains a `web_area` with no children, and a selector for anything on the page misses. The miss's diagnosis points at the empty web area.
 
-`App.enable_web_accessibility(timeout=…)` in Python, `app.enableWebAccessibility({ timeout })` in JS, `xa11y enable-web-accessibility` on the command line, and the `enable_web_accessibility` MCP tool make that request. They set `AXManualAccessibility` on the application element, then `AXEnhancedUserInterface` if the first does not read back as set, and stop at the first that does. They then wait until some `web_area` has children. They raise `AccessibilityNotEnabledError` when neither attribute reads back as set, and `TimeoutError` when the content does not appear in time. The attribute stays set afterwards. See [the quirks page](/explanation/accessibility-quirks/#macos-web-content-needs-accessibility-turned-on-per-process) for why and for the side effects.
+`App.enable_web_accessibility(timeout=…)` in Python, `app.enableWebAccessibility({ timeout })` in JS, `xa11y enable-web-accessibility` on the command line, and the `enable_web_accessibility` MCP tool make that request. They set `AXManualAccessibility` on the application element, then wait until some `web_area` has children. The request counts as taken when the write succeeds or the attribute reads back set, because Chromium can refuse the write and still read back `true`, and Electron accepts the write and reads back `false`. They never set `AXEnhancedUserInterface`. They raise `AccessibilityNotEnabledError` when neither holds (relaunch such an app with `--force-renderer-accessibility`), and `TimeoutError` when the content does not appear in time. The attribute stays set afterwards. See [the quirks page](/explanation/accessibility-quirks/#macos-web-content-needs-accessibility-turned-on-per-process) for why and for the side effects.
 
 On Linux and Windows the call raises `ActionNotSupportedError` with guidance. Linux needs a launch flag, described in the next section. On Windows, Chromium builds the tree on its own when a UI Automation client connects.
 

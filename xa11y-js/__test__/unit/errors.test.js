@@ -104,9 +104,9 @@ test('InvalidActionDataError thrown from native (Locator.nth(0)) is instanceof p
 
 test('TimeoutError from waitDetached is instanceof public class', async () => {
   // `button` is always present in the mock tree, so wait_detached can never
-  // succeed. `waitDetached` takes seconds — a 0.05s budget keeps the test fast.
+  // succeed. `waitDetached` takes `{ timeout: ms }` — a 50 ms budget keeps the test fast.
   await assert.rejects(
-    _makeTestLocator().descendant('button').waitDetached(0.05),
+    _makeTestLocator().descendant('button').waitDetached({ timeout: 50 }),
     (err) => {
       assert.ok(err instanceof TimeoutError, 'instanceof TimeoutError');
       assert.ok(err instanceof XA11yError, 'instanceof XA11yError');
@@ -140,7 +140,7 @@ test('PlatformError from mock subscribe() is instanceof public class', async () 
 
 test('TimeoutError carries a structured diagnosis when the selector never matched', async () => {
   await assert.rejects(
-    _makeTestLocator().descendant('button[name="Nope"]').waitVisible(0.3),
+    _makeTestLocator().descendant('button[name="Nope"]').waitVisible({ timeout: 300 }),
     (err) => {
       assert.ok(err instanceof TimeoutError);
       assert.equal(err.condition, 'visible');
@@ -163,7 +163,7 @@ test('TimeoutError carries a structured diagnosis when the selector never matche
 test('TimeoutError names why a matched element is hidden', async () => {
   // static_text "Status" exists in the mock tree but is not visible.
   await assert.rejects(
-    _makeTestLocator().descendant('static_text[name="Status"]').waitVisible(0.3),
+    _makeTestLocator().descendant('static_text[name="Status"]').waitVisible({ timeout: 300 }),
     (err) => {
       assert.ok(err instanceof TimeoutError);
       assert.match(err.lastObserved, /visible=false/);
@@ -249,7 +249,7 @@ test('an invalid selector is not_delivered, even without a diagnosis payload', a
 
 test('a wait that gives up before acting is not_delivered', async () => {
   await assert.rejects(
-    _makeTestLocator().descendant('button').waitDetached(0.05),
+    _makeTestLocator().descendant('button').waitDetached({ timeout: 50 }),
     (err) => {
       assert.ok(err instanceof TimeoutError);
       assert.equal(err.delivery, 'not_delivered');

@@ -41,6 +41,10 @@ const MARKER = '/* patched by scripts/patch-native-dts.mjs */';
 
 const HEADER = `${MARKER}
 
+// \`CaptureError.error\` is the typed error class, which \`index.js\` defines
+// and \`index.d.ts\` declares; the native module only carries its encoding.
+import type { Subscription, SubscribeOptions, XA11yError } from './index.js';
+
 /** Checked state of a toggleable element. */
 export type CheckedState = 'on' | 'off' | 'mixed';
 

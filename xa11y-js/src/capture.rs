@@ -10,27 +10,28 @@ use napi::bindgen_prelude::Either;
 
 use crate::element::Element;
 use crate::map_err;
+use crate::types::{checked_count, checked_millis};
 
 /// Options for `capture()`.
 #[napi(object, object_to_js = false)]
 #[derive(Clone, Default)]
 pub struct CaptureOptions {
     /// Deepest level read; the root is depth 0. Omit for no depth limit.
-    pub max_depth: Option<u32>,
+    pub max_depth: Option<f64>,
     /// Most nodes in the capture, the root included. Default 2000.
-    pub max_nodes: Option<u32>,
+    pub max_nodes: Option<f64>,
     /// Most bytes of text, in total, that `'text'` detail reads. Default
     /// 65536.
-    pub max_text_bytes: Option<u32>,
+    pub max_text_bytes: Option<f64>,
     /// Extra reads per node: `'text'`, `'formatting'` (text plus its
     /// attribute runs) and/or `'relations'`.
     pub detail: Option<Vec<String>>,
     /// Time budget in milliseconds: when it runs out, the capture resolves
     /// with what was read and `truncated.byTime`.
-    pub timeout: Option<u32>,
+    pub timeout: Option<f64>,
     /// Most attribute runs, in total, that `'formatting'` detail reads.
     /// Default 4096.
-    pub max_runs: Option<u32>,
+    pub max_runs: Option<f64>,
     /// A token whose `cancel()` stops the walk between nodes; the capture
     /// resolves with what was read and `truncated.byCancel`.
     #[napi(ts_type = "CancelToken")]
@@ -82,20 +83,22 @@ impl CancelToken {
     }
 }
 
-/// Build core options. Runs before any platform call.
+/// Build core options. Runs before any platform call, so a bad number
+/// (negative, fractional, `NaN`) throws before the walk starts.
 pub(crate) fn parse_options(
     options: Option<CaptureOptions>,
 ) -> napi::Result<xa11y::CaptureOptions> {
     let o = options.unwrap_or_default();
     let mut out = xa11y::CaptureOptions::new();
+    let count = |value: f64, what: &str| checked_count(value, what).map_err(map_err);
     if let Some(depth) = o.max_depth {
-        out = out.max_depth(depth as usize);
+        out = out.max_depth(count(depth, "maxDepth")?);
     }
     if let Some(nodes) = o.max_nodes {
-        out = out.max_nodes(nodes as usize);
+        out = out.max_nodes(count(nodes, "maxNodes")?);
     }
     if let Some(bytes) = o.max_text_bytes {
-        out = out.max_text_bytes(bytes as usize);
+        out = out.max_text_bytes(count(bytes, "maxTextBytes")?);
     }
     for name in o.detail.unwrap_or_default() {
         out = match name.as_str() {
@@ -103,19 +106,17 @@ pub(crate) fn parse_options(
             "formatting" => out.formatting(true),
             "relations" => out.relations(true),
             other => {
-                return Err(map_err(xa11y::Error::InvalidActionData {
-                    message: format!(
-                        "unknown capture detail {other:?}; expected 'text', 'formatting' or 'relations'"
-                    ),
-                }))
+                return Err(map_err(xa11y::Error::invalid_action_data(format!(
+                "unknown capture detail {other:?}; expected 'text', 'formatting' or 'relations'"
+            ))))
             }
         };
     }
     if let Some(ms) = o.timeout {
-        out = out.timeout(std::time::Duration::from_millis(u64::from(ms)));
+        out = out.timeout(checked_millis(ms, "timeout").map_err(map_err)?);
     }
     if let Some(runs) = o.max_runs {
-        out = out.max_runs(runs as usize);
+        out = out.max_runs(count(runs, "maxRuns")?);
     }
     if let Some(token) = o.cancel {
         out = out.cancel(token.inner);
@@ -209,8 +210,8 @@ pub struct CapturedNode {
     pub relations: Vec<CapturedRelation>,
 }
 
-/// A read of one node that failed.
-#[napi(object)]
+/// A read of one node that failed. The capture continued past it.
+#[napi(object, object_from_js = false)]
 #[derive(Clone)]
 pub struct CaptureError {
     /// `'children'`, `'identity'`, `'text'`, `'formatting'`, `'relations'`
@@ -220,6 +221,14 @@ pub struct CaptureError {
     pub code: String,
     /// The error message.
     pub message: String,
+    /// The error the read raised, as the typed `XA11yError` subclass a
+    /// rejected call would carry, with its structured fields (`delivery`,
+    /// `pending`, `selector`, `reason`, ...). Same as Python's
+    /// `CaptureError.error`.
+    // Crosses as `map_err`'s encoded reason; `index.js` turns it into the
+    // typed error before the capture reaches the caller.
+    #[napi(ts_type = "XA11yError")]
+    pub error: String,
 }
 
 /// An element's text, as far as the capture's text budget reached.
@@ -256,12 +265,21 @@ pub(crate) fn epoch_ms(t: std::time::SystemTime) -> f64 {
     }
 }
 
-/// The `XA11Y_*` code `map_err` gives an error: the tag before its message.
-fn error_code(e: &xa11y::Error) -> String {
+/// One failed read, as JS sees it: `code` is the `XA11Y_*` tag `map_err`
+/// gives the error, and `error` its whole encoded reason (tag, message and
+/// structured payload), which `index.js` turns into the typed error.
+fn capture_error(step: &str, e: &xa11y::Error) -> CaptureError {
     let reason = map_err(e.clone()).reason;
-    reason
+    let code = reason
         .split_once(':')
-        .map_or(reason.clone(), |(code, _)| code.to_string())
+        .map_or(reason.as_str(), |(code, _)| code)
+        .to_string();
+    CaptureError {
+        step: step.to_string(),
+        code,
+        message: e.to_string(),
+        error: reason,
+    }
 }
 
 fn index(i: usize) -> u32 {
@@ -283,11 +301,7 @@ impl From<xa11y::Capture> for Capture {
                 errors: node
                     .errors
                     .iter()
-                    .map(|e| CaptureError {
-                        step: e.step.to_snake_case().to_string(),
-                        code: error_code(&e.error),
-                        message: e.error.to_string(),
-                    })
+                    .map(|e| capture_error(e.step.to_snake_case(), &e.error))
                     .collect(),
                 text: node.text.as_ref().map(|t| CapturedText {
                     content: t.content.clone(),

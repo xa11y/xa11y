@@ -79,6 +79,43 @@ def test_tree_max_depth_zero_shows_only_the_application(run_cli, app_pid):
     assert lines[-1].startswith("(truncated:"), stdout
 
 
+def test_tree_detail_prints_its_readings_under_each_element(run_cli, app_pid):
+    """`--detail` mirrors MCP `tree`'s `detail`; its lines never read as nodes."""
+    rc, stdout, stderr = run_cli(
+        "tree", "--pid", str(app_pid), "--detail", "formatting,relations"
+    )
+    assert rc == 0, stderr
+    lines = stdout.strip().splitlines()
+    assert lines[0].startswith("application"), stdout
+    for line in lines[1:]:
+        body = line.lstrip(" │")
+        # Every line is a node, a cut marker, a summary, or a detail reading.
+        assert body.startswith(
+            ("├── ", "└── ", "(truncated", "text (", "run [", "<")
+        ) or (" → " in body), line
+
+
+def test_tree_detail_unknown_name_is_a_usage_error(run_cli, app_pid):
+    rc, _stdout, stderr = run_cli("tree", "--pid", str(app_pid), "--detail", "styles")
+    assert rc == 2, stderr
+    assert "--detail" in stderr, stderr
+
+
 def test_tree_max_nodes_zero_is_a_usage_error(run_cli, app_pid):
     rc, _stdout, stderr = run_cli("tree", "--pid", str(app_pid), "--max-nodes", "0")
     assert rc == 2, stderr
+
+
+def test_tree_refuses_a_flag_it_does_not_read(run_cli, app_pid):
+    """A flag another command reads used to parse here and be ignored, so
+    `tree --limit 5` printed the whole tree."""
+    rc, _stdout, stderr = run_cli("tree", "--pid", str(app_pid), "--limit", "5")
+    assert rc == 2, stderr
+    assert "--limit does not apply" in stderr, stderr
+
+
+def test_an_unknown_backend_is_a_usage_error_naming_the_flag(run_cli, app_pid):
+    rc, _stdout, stderr = run_cli("tree", "--pid", str(app_pid), "--backend", "foo")
+    assert rc == 2, stderr
+    assert "--backend" in stderr, stderr
+    assert "XA11Y_ACCESSIBILITY_SOURCE" not in stderr, stderr

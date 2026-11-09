@@ -129,6 +129,13 @@ where
 {
     // Force the uinput branch — this test is about uinput, not XTest.
     unsafe { std::env::remove_var("DISPLAY") };
+    // No compositor runs here, so the pointer extent comes from the
+    // explicit override; without it pointer calls fail rather than assume
+    // a screen size.
+    unsafe {
+        std::env::set_var("XA11Y_SCREEN_WIDTH", "1920");
+        std::env::set_var("XA11Y_SCREEN_HEIGHT", "1080");
+    }
 
     let sim =
         LinuxInputProvider::new().expect("uinput backend should construct in the e2e container");
@@ -159,7 +166,7 @@ fn pointer_move_emits_abs_x_y() {
             .collect();
         assert!(!xs.is_empty(), "expected at least one ABS_X event");
         assert!(!ys.is_empty(), "expected at least one ABS_Y event");
-        // Default screen is 1920x1080 → COORD_MAX (32767) range:
+        // The 1920x1080 override → COORD_MAX (32767) range:
         //   x = 640 → 640*32767/1920 ≈ 10922
         //   y = 360 → 360*32767/1080 ≈ 10922
         // Allow ±50 for integer truncation across the divisor.
@@ -281,6 +288,13 @@ fn type_text_holds_shift_for_uppercase() {
 #[ignore]
 fn element_targets_are_refused_with_no_events_on_the_wire() {
     unsafe { std::env::remove_var("DISPLAY") };
+    // No compositor runs here, so the pointer extent comes from the
+    // explicit override; without it pointer calls fail rather than assume
+    // a screen size.
+    unsafe {
+        std::env::set_var("XA11Y_SCREEN_WIDTH", "1920");
+        std::env::set_var("XA11Y_SCREEN_HEIGHT", "1080");
+    }
     let provider =
         LinuxInputProvider::new().expect("uinput backend should construct in the e2e container");
     assert!(

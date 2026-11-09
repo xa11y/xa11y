@@ -20,7 +20,11 @@
 import { EventEmitter } from 'node:events';
 
 // Re-export Rust-generated classes (except App and _NativeSubscription,
-// which are shadowed by the JS wrapper classes below).
+// which are shadowed by the JS wrapper classes below). `Element.subscribe`
+// is replaced on the prototype by index.js; its generated declaration in
+// native.d.ts already names the public shape (`SubscribeOptions` in,
+// `Subscription` out, both imported from this file), identical to
+// `App.subscribe`.
 export {
   CancelToken,
   Capabilities,
@@ -92,10 +96,13 @@ export type {
   TextRuns,
   TextScriptName,
   TextUnitName,
+  TimeoutOptions,
+  DefaultTimeout,
 } from './native.js';
 import type {
   AnchorName,
   AutoScrollOutcomeName,
+  DefaultTimeout,
   Capture,
   CaptureOptions,
   Element,
@@ -121,7 +128,11 @@ export interface SubscribeOptions {
    * at once rather than never arriving.
    */
   kinds?: EventTypeName[];
-  /** Most events to buffer; the oldest are dropped first. Default 4096. */
+  /**
+   * Most events to buffer; the oldest are dropped first. Default 4096. A
+   * whole number of at least 1: anything else rejects with
+   * `InvalidActionDataError`.
+   */
   buffer?: number;
 }
 
@@ -372,15 +383,14 @@ export declare class App {
    * implicitly.
    *
    * On macOS it sets `AXManualAccessibility` (Electron) on the application
-   * element and reads it back, then does the same with
-   * `AXEnhancedUserInterface` (Chrome) if that did not read back as set,
-   * rejecting with `AccessibilityNotEnabledError` when neither does. It does
-   * not check that the app is Chromium-based: an app that keeps either value
-   * counts as having taken the request, and the call then rejects with
-   * `TimeoutError` because no web content appears. The attribute stays set
-   * to true afterwards and is not restored; on an app that reacts to
-   * `AXEnhancedUserInterface` that can disable window animations or confuse
-   * a window manager. It then waits up to `options.timeout` ms until some
+   * element, rejecting with `AccessibilityNotEnabledError` when the app
+   * neither accepts the write nor reads it back as set; relaunch such an app with
+   * `--force-renderer-accessibility`. It never sets
+   * `AXEnhancedUserInterface`. It does not check that the app is
+   * Chromium-based: an app that keeps the value counts as having taken the
+   * request, and the call then rejects with `TimeoutError` because no web
+   * content appears. The attribute stays set to true afterwards and is not
+   * restored. It then waits up to `options.timeout` ms until some
    * `web_area` has
    * a child, rejecting with `TimeoutError` and a diagnosis otherwise. On
    * Linux and Windows it rejects with `ActionNotSupportedError` saying what
@@ -401,9 +411,11 @@ export declare class App {
   /**
    * Read the subtree into a bounded capture: every node read, pre-order,
    * with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
-   * the top of the tree is complete. `detail` adds `'text'` and/or
-   * `'relations'`; `timeout` (ms) resolves with what was read when it runs
-   * out, with `truncated.byTime`.
+   * the top of the tree is complete. `detail` adds `'text'`,
+   * `'formatting'` (text plus its attribute runs, at most `maxRuns` in
+   * total) and/or `'relations'`. `timeout` (ms) resolves with what was
+   * read when it runs out, with `truncated.byTime`; calling `cancel()` on
+   * the `cancel` token does the same, with `truncated.byCancel`.
    */
   capture(options?: CaptureOptions | null): Promise<Capture>;
 
@@ -542,9 +554,11 @@ export declare class ShellSurface {
   /**
    * Read the subtree into a bounded capture: every node read, pre-order,
    * with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
-   * the top of the tree is complete. `detail` adds `'text'` and/or
-   * `'relations'`; `timeout` (ms) resolves with what was read when it runs
-   * out, with `truncated.byTime`.
+   * the top of the tree is complete. `detail` adds `'text'`,
+   * `'formatting'` (text plus its attribute runs, at most `maxRuns` in
+   * total) and/or `'relations'`. `timeout` (ms) resolves with what was
+   * read when it runs out, with `truncated.byTime`; calling `cancel()` on
+   * the `cancel` token does the same, with `truncated.byCancel`.
    */
   capture(options?: CaptureOptions | null): Promise<Capture>;
 
@@ -614,26 +628,30 @@ export interface ScreenshotOptions {
 export declare function screenshot(options?: ScreenshotOptions): Promise<Screenshot>;
 
 /**
- * Set the process-wide default timeout, in seconds.
+ * Set the process-wide default timeout, in milliseconds:
+ * `setDefaultTimeout({ timeout: 30000 })`.
  *
  * Becomes the default for every auto-waiting action method, `wait*` call,
  * and app lookup (`App.byName` / `App.byPid` / `App.find`) that doesn't
  * pass an explicit timeout. An explicit per-call timeout always wins. Takes
  * precedence over the `XA11Y_DEFAULT_TIMEOUT` environment variable
- * (seconds, read once on first use).
+ * (seconds, read once on first use, shared with the other bindings).
  *
- * Pass `0` for "single attempt, no polling" semantics; negative or
- * non-finite values throw.
+ * Pass `{ timeout: 0 }` for "single attempt, no polling" semantics. A bare
+ * number (this used to take seconds), a missing `timeout`, or one that is
+ * not a non-negative whole number of milliseconds throws
+ * `InvalidActionDataError`.
  */
-export declare function setDefaultTimeout(seconds: number): void;
+export declare function setDefaultTimeout(options: DefaultTimeout): void;
 
 /**
- * Get the effective process-wide default timeout, in seconds.
+ * Get the effective process-wide default timeout as `{ timeout: ms }`, the
+ * shape {@link setDefaultTimeout} takes.
  *
  * Resolution order: the {@link setDefaultTimeout} value, else the
- * `XA11Y_DEFAULT_TIMEOUT` environment variable, else the built-in 5.
+ * `XA11Y_DEFAULT_TIMEOUT` environment variable, else the built-in 5000 ms.
  */
-export declare function getDefaultTimeout(): number;
+export declare function getDefaultTimeout(): DefaultTimeout;
 
 // ── JS-only: typed error hierarchy ─────────────────────────────────────────
 
@@ -679,6 +697,13 @@ export interface PointerTargetDiagnosis {
   /** At most 32 regions; validation checks every region before truncating. */
   displays: Rect[];
   omittedDisplays: number;
+  /**
+   * Where the displays came from, when the backend records it (Linux: RandR
+   * monitors, the X11 root window on a server without RandR 1.5, the Wayland
+   * compositor's outputs, or the `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT`
+   * override); `null` on macOS and Windows.
+   */
+  displaySource: string | null;
 }
 
 /**
@@ -702,7 +727,10 @@ export class SelectorNotMatchedError extends XA11yError {
   autoScroll: AutoScrollOutcomeName | null;
   /** Always `null` for this class (parity with {@link TimeoutError}). */
   pending: string | null;
-  /** Geometry of an off-display pointer target, otherwise `null`. */
+  /**
+   * Always `null` for this class: an off-display pointer target rejects with
+   * {@link InvalidActionDataError}, whose `pointerTarget` carries the geometry.
+   */
   pointerTarget: PointerTargetDiagnosis | null;
   /** Bounded near-miss candidates (e.g. same-role elements). */
   candidates: string[];
@@ -792,8 +820,18 @@ export class TimeoutError extends XA11yError {
 /** The selector string has invalid syntax. */
 export class InvalidSelectorError extends XA11yError {}
 
-/** The data passed to an action method was rejected (e.g. out-of-range slider value). */
-export class InvalidActionDataError extends XA11yError {}
+/**
+ * The data passed to an action method was rejected (e.g. out-of-range slider
+ * value, or a pointer target that is not on any display).
+ */
+export class InvalidActionDataError extends XA11yError {
+  /**
+   * Geometry of an off-display pointer target: the requested point, the
+   * checked point and coordinate space, the displays checked, and any element
+   * bounds and anchor. `null` for every other invalid argument.
+   */
+  pointerTarget: PointerTargetDiagnosis | null;
+}
 
 /**
  * A text range is out of bounds, reversed, or splits a surrogate pair.

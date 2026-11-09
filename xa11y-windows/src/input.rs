@@ -398,9 +398,9 @@ fn vk_for(key: &Key) -> Result<(VIRTUAL_KEY, bool)> {
                 23 => VK_F23,
                 24 => VK_F24,
                 _ => {
-                    return Err(Error::InvalidActionData {
-                        message: format!("F{n} is out of range (1..=24)"),
-                    });
+                    return Err(Error::invalid_action_data(format!(
+                        "F{n} is out of range (1..=24)"
+                    )));
                 }
             };
             (vk, false)

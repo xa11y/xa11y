@@ -302,7 +302,7 @@ test('selectText rejects malformed arguments and out-of-range offsets', async ()
 });
 
 test('Locator.text() re-resolves on every read', async () => {
-  setDefaultTimeout(0);
+  setDefaultTimeout({ timeout: 0 });
   const text = _makeTestTableLocator().descendant('text_area[name="Missing"]').text();
   // Building the Text resolves nothing; the read is what fails.
   await assert.rejects(text.length(), XA11yError);

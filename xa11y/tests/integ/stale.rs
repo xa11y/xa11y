@@ -3,13 +3,15 @@
 //! GTK 3 keeps a destroyed widget's accessible answering D-Bus calls for
 //! roughly 15–20 s, and the zombie reports writes as performed. Every Linux
 //! action path therefore checks that the object is still attached to its
-//! parent before the platform call. GTK 4 answers a destroyed object at once
+//! parent before the platform call. On GTK 3 only, text and table reads run
+//! the same check, since the zombie also answers them with its last
+//! contents. GTK 4 answers a destroyed object at once
 //! and AccessKit removes nodes outright, so neither shows the bug; these
 //! tests drive `test-apps/stale/stale.py`, a GTK 3 window that
 //! `scripts/run_integ_tests.sh` launches next to the AccessKit test app.
 //!
-//! The fixture's "Rebuild" button destroys a button, an entry, a spin button
-//! and a second top-level window, and builds fresh ones with the same names.
+//! The fixture's "Rebuild" button destroys a button, an entry, a spin button,
+//! a table and a second top-level window, and builds fresh ones with the same names.
 //! A handle read before the rebuild must fail every action as
 //! [`Error::ElementStale`]; the same actions through a locator, which
 //! re-resolves to the fresh widgets, are the control that keeps a check
@@ -31,6 +33,7 @@ const REBUILD: &str = r#"button[name="Rebuild"]"#;
 const BUTTON: &str = r#"button[name="Doomed button"]"#;
 const ENTRY: &str = r#"text_field[name="Doomed entry"]"#;
 const SPIN: &str = r#"spin_button[name="Doomed spin"]"#;
+const TABLE: &str = r#"table[name="Doomed table"]"#;
 const WINDOW: &str = "Doomed window";
 
 fn fixture() -> App {
@@ -123,7 +126,7 @@ fn rebuild(app: &App) {
     // The fresh targets can trail the description by a moment.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let ready = [BUTTON, ENTRY, SPIN]
+        let ready = [BUTTON, ENTRY, SPIN, TABLE]
             .iter()
             .all(|s| matches!(app.locator(s).count(), Ok(1)))
             && matches!(
@@ -163,6 +166,7 @@ fn every_action_on_a_destroyed_gtk3_widget_is_stale() {
         ("button.focus", button.focus()),
         ("button.scroll_into_view", button.scroll_into_view()),
         ("entry.focus", entry.focus()),
+        ("entry.blur", entry.blur()),
         ("entry.set_value", entry.set_value("written to a zombie")),
         ("entry.type_text", entry.type_text("typed into a zombie")),
         ("entry.select_text", entry.select_text(0, 2)),
@@ -180,6 +184,78 @@ fn every_action_on_a_destroyed_gtk3_widget_is_stale() {
         wrong.is_empty(),
         "these actions on destroyed GTK 3 widgets did not fail as stale:\n  {}",
         wrong.join("\n  ")
+    );
+}
+
+#[test]
+#[ignore]
+fn text_and_table_reads_on_a_destroyed_gtk3_widget_are_stale() {
+    let _restore = RestoreForeground;
+    let app = fixture();
+    let entry = one(&app, ENTRY);
+    let table = one(&app, TABLE);
+    // Taken while the entry is live: `Text` holds the element, so its reads
+    // after the rebuild go to the destroyed widget.
+    let text = entry.text().expect("the entry has Text");
+    assert_eq!(
+        text.read_all().expect("read the live entry"),
+        "doomed text",
+        "fixture precondition"
+    );
+    assert!(
+        table
+            .cell_at(0, 0)
+            .expect("cell_at on the live table")
+            .is_some(),
+        "fixture precondition"
+    );
+
+    rebuild(&app);
+
+    // Inside the zombie window the destroyed widgets still answer these with
+    // their last contents; each must be refused as stale instead.
+    let outcomes: Vec<(&str, Result<()>)> = vec![
+        ("entry.text", entry.text().map(|_| ())),
+        ("text.length", text.length().map(|_| ())),
+        (
+            "text.read",
+            text.read(TextRange { start: 0, end: 4 }).map(|_| ()),
+        ),
+        ("text.caret", text.caret().map(|_| ())),
+        ("text.selections", text.selections().map(|_| ())),
+        ("table.cell_at", table.cell_at(0, 0).map(|_| ())),
+        ("table.column_headers", table.column_headers().map(|_| ())),
+        ("table.selected_items", table.selected_items().map(|_| ())),
+    ];
+    let wrong: Vec<String> = outcomes
+        .iter()
+        .filter(|(_, r)| !matches!(r, Err(Error::ElementStale { .. })))
+        .map(|(name, r)| format!("{name}: {r:?}"))
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "these reads of destroyed GTK 3 widgets did not fail as stale:\n  {}",
+        wrong.join("\n  ")
+    );
+
+    // The control: the rebuilt widgets read normally.
+    let fresh = app.locator(ENTRY).text();
+    assert_eq!(
+        fresh.read_all().expect("read the fresh entry"),
+        "doomed text"
+    );
+    let fresh_table = one(&app, TABLE);
+    assert!(fresh_table
+        .cell_at(0, 0)
+        .expect("cell_at on the fresh table")
+        .is_some());
+    // GTK 3 reports a selected row's cells, so this is not a row count.
+    assert!(
+        !fresh_table
+            .selected_items()
+            .expect("selected_items on the fresh table")
+            .is_empty(),
+        "the fresh table selects its first row"
     );
 }
 

@@ -68,7 +68,7 @@ opaque = [
     { type = "Platform", reason = "Crosses as the identically-spelled strings 'linux' | 'macos' | 'windows' via Platform::to_snake_case / Platform::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
     { type = "Support", reason = "Crosses as the identically-spelled strings 'supported' | 'partial' | 'unsupported' via Support::to_snake_case. See [[types.variant_coverage]]." },
     { type = "StaleReason", reason = "Crosses as the identically-spelled snake_case strings 'removed' | 'process_exited' | 'process_restarted' | 'identity_changed' | 'evicted', as the `reason` attribute of ElementStaleError in both bindings and the `stale_reason` of an MCP `element_stale` failure. See [[types.variant_coverage]]." },
-    { type = "NodeIdentity", reason = "Not a binding class: Python exposes identity as Element.__eq__ / __hash__ / same_as, JS as Element.sameAs. The identity value itself is session-local and opaque." },
+    { type = "NodeIdentity", reason = "Not a binding class: Both bindings expose identity as an explicit live check: Python Element.same_as, JS Element.sameAs. Python == / hash stay object identity. The identity value itself is session-local and opaque." },
     { type = "Landmark", reason = "Crosses as the ARIA landmark role string ('main', 'navigation', 'contentinfo', ...) as Element.landmark_type / landmarkType, identically spelled in both bindings. See [[types.variant_coverage]]." },
     { type = "Politeness", reason = "Crosses as the strings 'off' | 'polite' | 'assertive' (LiveRegionInfo.politeness). See [[types.variant_coverage]]." },
     { type = "RelationKind", reason = "Crosses as identically-spelled snake_case strings ('labelled_by', 'flows_to', ...): the keys of Element.relations() in Python, the `kind` of each entry in JS, and the accepted names of its `kinds` argument, parsed by RelationKind::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
@@ -80,7 +80,7 @@ opaque = [
     { type = "Capture", reason = "Python exposes a frozen Capture class (started/finished as epoch seconds); JS returns a plain object (epoch milliseconds). Same split as Rect: members are covered by the per-binding tests (test_capture.py, capture.test.js)." },
     { type = "CapturedNode", reason = "Python exposes a frozen CapturedNode class; JS returns a plain object. Both carry the node's Element as `element`. Same split as Rect: covered by test_capture.py and capture.test.js." },
     { type = "CapturedText", reason = "Python exposes a frozen CapturedText class; JS returns a plain { content, length, truncated, runs, runsTruncated } object. Same split as Rect." },
-    { type = "CaptureError", reason = "Python exposes a frozen CaptureError class whose `error` is the xa11y exception instance; JS returns a plain { step, code, message } object, since a rejected Error cannot be held as a value in a resolved one." },
+    { type = "CaptureError", reason = "Python exposes a frozen CaptureError class whose `error` is the xa11y exception instance; JS returns a plain { step, code, message, error } object whose `error` is the same typed XA11yError subclass, structured diagnosis fields included, that a rejected call would carry (index.js builds it from the native encoding)." },
     { type = "Truncation", reason = "Python exposes a frozen Truncation class (truthy when any limit cut); JS returns a plain { byDepth, byNodes, byText, byTime, byFormatting, byCancel } object. Same split as Rect." },
     { type = "CaptureStep", reason = "Crosses as identically-spelled snake_case strings ('children', 'identity', 'text', 'formatting', 'relations', 'cycle') via CaptureStep::to_snake_case, as CaptureError.step in both bindings; no binding matches on its variants." },
     { type = "CaptureStats", reason = "Capture.stats: Python exposes a frozen CaptureStats class; JS returns a plain { childrenReads, identityReads, textReads, formattingReads, relationReads, textBytes } object. Same split as Rect: covered by test_capture.py and capture.test.js." },
@@ -466,7 +466,7 @@ reason = "Both bindings surface the annotation legend on their Screenshot class 
 [python]
 # Core members deliberately not exposed to Python. key = "Type::member".
 rust_only = [
-    { method = "Element::identity", reason = "Identity crosses as Element.__eq__ / __hash__ (and same_as); the NodeIdentity value is opaque and not a binding class." },
+    { method = "Element::identity", reason = "Identity crosses as Element.same_as (== / hash stay object identity, since identity is read from the provider, not captured at read time); the NodeIdentity value is opaque and not a binding class." },
     { method = "Capabilities::current", reason = "Folded into the module function capabilities(platform=None, os_version=None): with no arguments it is current(). One name per operation (AGENTS.md: options fold into the primary verb)." },
     { method = "Capabilities::for_backend", reason = "Folded into capabilities backend option on both bindings." },
     { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities(platform, os_version): passing a platform or version is for_platform(). One name per operation." },

@@ -215,9 +215,9 @@ impl Capture {
     fn vanished(&self) -> usize {
         self.vanished
     }
-    /// When the walk began, in seconds since the epoch.
-    /// The source that read the tree: ``"atspi"``, ``"ax"``, ``"uia"`` or
-    /// ``"ia2"``; ``None`` when the root reported no identity.
+    /// Which platform API read the nodes: ``"atspi"``, ``"ax"``,
+    /// ``"uia"``, ``"ia2"`` or ``"mock"``; ``None`` when the root reported
+    /// no identity.
     #[getter]
     fn backend(&self) -> Option<&'static str> {
         self.backend
@@ -227,6 +227,7 @@ impl Capture {
     fn stats(&self) -> CaptureStats {
         self.stats.clone()
     }
+    /// When the walk began, in seconds since the epoch.
     #[getter]
     fn started(&self) -> f64 {
         self.started
@@ -388,7 +389,7 @@ pub(crate) struct CaptureError {
 #[pymethods]
 impl CaptureError {
     /// What was being read: ``"children"``, ``"identity"``, ``"text"``,
-    /// ``"relations"`` or ``"cycle"``.
+    /// ``"formatting"``, ``"relations"`` or ``"cycle"``.
     #[getter]
     fn step(&self) -> &'static str {
         self.step

@@ -17,8 +17,10 @@ import {
   InvalidActionDataError,
   InvalidTextRangeError,
   Text,
+  getDefaultTimeout,
   inputSim,
   screenshot,
+  setDefaultTimeout,
   type AppLookupOptions,
   type CellInfo,
   type CheckedState,
@@ -125,6 +127,22 @@ async function checks() {
 
   // close
   sub.close();
+
+  // Element.subscribe has App.subscribe's shape: options in, EventEmitter out.
+  const elSub: Subscription = await el.subscribe({ kinds: ['focusChanged'], buffer: 16 });
+  elSub.close();
+  // @ts-expect-error -- the old positional (kinds, buffer) shape is gone
+  await el.subscribe(['focusChanged'], 16);
+
+  // Timeouts are `{ timeout }` in milliseconds.
+  const _visible: Element = await loc.waitVisible({ timeout: 5000 });
+  await loc.waitDetached();
+  // @ts-expect-error -- a bare number (the old seconds argument) is refused
+  await loc.waitVisible(5);
+  setDefaultTimeout({ timeout: 30000 });
+  const _defaultMs: number = getDefaultTimeout().timeout;
+  // @ts-expect-error -- a bare number is refused here too
+  setDefaultTimeout(30);
 
   // app.waitForEvent (convenience)
   const ev2: Event = await app.waitForEvent('windowOpened', { timeout: 2000 });

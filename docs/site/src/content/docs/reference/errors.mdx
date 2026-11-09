@@ -31,7 +31,7 @@ variants onto a shared class, so the mapping columns are what you catch.
 | `TextValueNotSupported` | The platform cannot set a text value on this element. | `ActionNotSupportedError` | `ActionNotSupportedError` |
 | `Timeout` | A wait, or the auto-wait inside an action, exceeded its deadline. Always carries a diagnosis. | `TimeoutError` | `TimeoutError` |
 | `InvalidSelector` | The selector string could not be parsed. Raised before any platform call. | `InvalidSelectorError` | `InvalidSelectorError` |
-| `InvalidActionData` | An action argument failed validation. `select_text()` with `start > end` does this, as does an empty `Text.find()` needle, an unknown text unit name, an uppercase `Char` key, a malformed key name, or a bad target tuple. | `InvalidActionDataError` | `InvalidActionDataError` |
+| `InvalidActionData` | An action argument failed validation. `select_text()` with `start > end` does this, as does an empty `Text.find()` needle, an unknown text unit name, an uppercase `Char` key, a malformed key name, a bad target tuple, or a pointer target that is not on any display. An off-display target carries a diagnosis with its geometry. | `InvalidActionDataError` | `InvalidActionDataError` |
 | `InvalidTextRange` | A text range is past the end of the text, reversed, or splits a UTF-16 surrogate pair. Also raised by `Text.bounds()` for a range covering more than 1000 rendered lines. Carries `start`, `end`, and `length`. | `InvalidTextRangeError` (subclass of `InvalidActionDataError`) | `InvalidTextRangeError` (subclass of `InvalidActionDataError`) |
 | `InvalidConfig` | Process-wide configuration is invalid, such as an unparsable `XA11Y_DEFAULT_TIMEOUT`. | `ValueError` | `InvalidActionDataError` |
 | `NoElementBounds` | The element has no bounds, so no screen point can be computed for it. Off-screen and virtual nodes hit this. | `ValueError` | `InvalidActionDataError` |
@@ -61,8 +61,9 @@ surface:
 ## Structured fields
 
 `Timeout` and `SelectorNotMatched` carry a `Diagnosis` describing what the
-operation was waiting for and what it last saw. The fields are reachable
-without parsing the message:
+operation was waiting for and what it last saw. `InvalidActionData` carries
+one for an off-display pointer target, holding only `pointer_target`. The
+fields are reachable without parsing the message:
 
 | Rust (`Diagnosis`) | Python | JavaScript |
 | --- | --- | --- |
@@ -74,6 +75,7 @@ without parsing the message:
 | `candidates` | `candidates` | `candidates` |
 | `scope` | `scope` | `scope` |
 | `pending` | `pending` | `pending` |
+| `pointer_target` | `pointer_target` | `pointerTarget` |
 | `elapsed` (on `Timeout`) | `elapsed` (seconds) | `elapsedMs` |
 
 `InvalidTextRange` carries the refused range instead of a diagnosis. Offsets
@@ -87,7 +89,9 @@ are UTF-16 code units:
 
 In Python every attribute is always present, holding `None` or `[]` when it
 does not apply, so no `hasattr` guard is needed. On `SelectorNotMatchedError`,
-`elapsed` is always `None`.
+`elapsed` is always `None`. `InvalidActionDataError` has `pointer_target`
+(`pointerTarget` in JS) and no other diagnosis field; it is `None` (`null`)
+for every refusal except an off-display pointer target.
 
 See [Errors and diagnosis](/explanation/errors-and-diagnosis/) for what each
 field contains and how to read one.

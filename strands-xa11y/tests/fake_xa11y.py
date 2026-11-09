@@ -71,7 +71,9 @@ class InvalidSelectorError(XA11yError):
 
 
 class InvalidActionDataError(XA11yError):
-    pass
+    # Set by the real binding on every instance: an off-display pointer
+    # target's geometry, otherwise None.
+    pointer_target = None
 
 
 class InvalidTextRangeError(InvalidActionDataError):

@@ -88,10 +88,15 @@ impl From<xa11y::AnnouncementInfo> for AnnouncementInfo {
 /// Turn the JS event type names `kinds` takes (`'focusChanged'`, the same
 /// spelling as `Event.type`) into the core's snake_case names. Unknown names
 /// pass through for core to reject with the list.
+///
+/// `buffer` arrives as the raw JS number and is checked here (a negative,
+/// fractional or `NaN` buffer is refused rather than coerced by `ToUint32`).
+/// The error is returned, not thrown, so the subscribe task rejects with it
+/// before its first platform call.
 pub(crate) fn subscribe_options(
     kinds: Option<Vec<String>>,
-    buffer: Option<u32>,
-) -> xa11y::SubscribeOptions {
+    buffer: Option<f64>,
+) -> xa11y::Result<xa11y::SubscribeOptions> {
     let snake = |name: &str| {
         let mut out = String::with_capacity(name.len() + 4);
         for c in name.chars() {
@@ -107,9 +112,9 @@ pub(crate) fn subscribe_options(
     let mut options =
         xa11y::SubscribeOptions::new().kinds(kinds.unwrap_or_default().iter().map(|k| snake(k)));
     if let Some(buffer) = buffer {
-        options = options.buffer(buffer as usize);
+        options = options.buffer(crate::types::checked_count(buffer, "buffer")?);
     }
-    options
+    Ok(options)
 }
 
 impl Event {
@@ -217,26 +222,69 @@ impl Event {
 
 #[napi(js_name = "_NativeSubscription")]
 pub struct NativeSubscription {
+    /// Events the worker has received and JS has not drained yet. Bounded at
+    /// `capacity`: when JS falls behind, the oldest is dropped and counted in
+    /// `js_dropped`, as the core buffer does with its own.
     queue: Arc<Mutex<VecDeque<xa11y::Event>>>,
+    /// The subscription's `buffer` (or the core default), at least 1.
+    capacity: usize,
     cancelled: Arc<AtomicBool>,
     /// The core subscription's dropped count, refreshed by the worker after
     /// each receive (the subscription itself lives on the worker thread).
-    dropped: Arc<AtomicU64>,
+    core_dropped: Arc<AtomicU64>,
+    /// Events dropped from `queue` because JS had not drained it.
+    js_dropped: Arc<AtomicU64>,
     provider: Arc<dyn xa11y::Provider>,
     /// Holds the xa11y::Subscription until `start()` moves it to the worker.
     pending_sub: Mutex<Option<xa11y::Subscription>>,
 }
 
 impl NativeSubscription {
-    pub(crate) fn new(sub: xa11y::Subscription, provider: Arc<dyn xa11y::Provider>) -> Self {
+    /// `capacity` bounds the queue between the worker and JS; pass the
+    /// subscription's `buffer` (`options.buffer`, else
+    /// [`xa11y::DEFAULT_EVENT_BUFFER`]).
+    pub(crate) fn new(
+        sub: xa11y::Subscription,
+        provider: Arc<dyn xa11y::Provider>,
+        capacity: usize,
+    ) -> Self {
         Self {
-            dropped: Arc::new(AtomicU64::new(sub.dropped())),
+            core_dropped: Arc::new(AtomicU64::new(sub.dropped())),
+            js_dropped: Arc::new(AtomicU64::new(0)),
+            // Core refuses `buffer: 0`, so this is already >= 1; the floor
+            // only keeps `push` below from ever discarding the event it adds.
+            capacity: capacity.max(1),
             queue: Arc::new(Mutex::new(VecDeque::new())),
             cancelled: Arc::new(AtomicBool::new(false)),
             provider,
             pending_sub: Mutex::new(Some(sub)),
         }
     }
+
+    /// A subscription built with `options`, its queue bounded by their
+    /// buffer.
+    pub(crate) fn with_options(
+        sub: xa11y::Subscription,
+        provider: Arc<dyn xa11y::Provider>,
+        options: &xa11y::SubscribeOptions,
+    ) -> Self {
+        Self::new(
+            sub,
+            provider,
+            options.buffer.unwrap_or(xa11y::DEFAULT_EVENT_BUFFER),
+        )
+    }
+}
+
+/// Queue `event`, dropping the oldest first when `queue` already holds
+/// `capacity` events. Returns whether one was dropped.
+fn push_bounded(queue: &mut VecDeque<xa11y::Event>, capacity: usize, event: xa11y::Event) -> bool {
+    let full = queue.len() >= capacity;
+    if full {
+        queue.pop_front();
+    }
+    queue.push_back(event);
+    full
 }
 
 #[napi]
@@ -256,16 +304,27 @@ impl NativeSubscription {
             })?;
 
         let queue = self.queue.clone();
+        let capacity = self.capacity;
         let cancelled = self.cancelled.clone();
-        let dropped = self.dropped.clone();
+        let core_dropped = self.core_dropped.clone();
+        let js_dropped = self.js_dropped.clone();
 
         std::thread::spawn(move || {
             while !cancelled.load(Ordering::Acquire) {
                 let status = sub.recv_status(Duration::from_millis(100));
-                dropped.store(sub.dropped(), Ordering::Release);
+                core_dropped.store(sub.dropped(), Ordering::Release);
                 match status {
                     xa11y::RecvStatus::Event(evt) => {
-                        queue.lock().unwrap().push_back(*evt);
+                        // The core buffer bounds what waits for this worker;
+                        // this bounds what waits for JS, which drains only
+                        // when its event loop runs. An event dropped here
+                        // keeps its core `sequence`, so the gap reads the
+                        // same as a core drop.
+                        let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+                        if push_bounded(&mut q, capacity, *evt) {
+                            js_dropped.fetch_add(1, Ordering::AcqRel);
+                        }
+                        drop(q);
                         wakeup.call(Ok(()), ThreadsafeFunctionCallMode::NonBlocking);
                     }
                     xa11y::RecvStatus::Timeout => continue,
@@ -282,16 +341,28 @@ impl NativeSubscription {
         Ok(())
     }
 
-    /// How many events the buffer has dropped, in total, because it was full.
+    /// How many events the buffer has dropped, in total, because it was full:
+    /// those the platform delivered faster than the worker read them, plus
+    /// those the worker read faster than JS drained them. Each leaves a gap
+    /// in `Event.sequence`.
     #[napi(getter)]
     pub fn dropped(&self) -> i64 {
-        i64::try_from(self.dropped.load(Ordering::Acquire)).unwrap_or(i64::MAX)
+        let total = self
+            .core_dropped
+            .load(Ordering::Acquire)
+            .saturating_add(self.js_dropped.load(Ordering::Acquire));
+        i64::try_from(total).unwrap_or(i64::MAX)
     }
 
     /// Drain all queued events (called from the JS wake-up handler).
     #[napi]
     pub fn drain(&self) -> Vec<Event> {
-        let drained: Vec<_> = self.queue.lock().unwrap().drain(..).collect();
+        let drained: Vec<_> = self
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
         drained
             .into_iter()
             .map(|ev| Event::from_core(ev, self.provider.clone()))

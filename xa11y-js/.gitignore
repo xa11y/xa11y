@@ -14,3 +14,6 @@ npm/
 # Test/build outputs
 coverage/
 .nyc_output/
+# Captured by scripts/run_js_tests.sh
+.node-test*.log
+.xa11y-test-app.log

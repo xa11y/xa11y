@@ -774,17 +774,17 @@ fn parse_accessibility_source(value: Option<std::ffi::OsString>) -> Result<Strin
     let source = value.map_or_else(
         || Ok("native".to_string()),
         |value| {
-            value.into_string().map_err(|_| Error::InvalidActionData {
-                message: "XA11Y_ACCESSIBILITY_SOURCE must be UTF-8: native, uia, or ia2".into(),
+            value.into_string().map_err(|_| {
+                Error::invalid_action_data(
+                    "XA11Y_ACCESSIBILITY_SOURCE must be UTF-8: native, uia, or ia2",
+                )
             })
         },
     )?;
     if !matches!(source.as_str(), "native" | "uia" | "ia2") {
-        return Err(Error::InvalidActionData {
-            message: format!(
-                "unknown XA11Y_ACCESSIBILITY_SOURCE {source:?}; choose native, uia, or ia2"
-            ),
-        });
+        return Err(Error::invalid_action_data(format!(
+            "unknown XA11Y_ACCESSIBILITY_SOURCE {source:?}; choose native, uia, or ia2"
+        )));
     }
     Ok(source)
 }
@@ -847,11 +847,9 @@ fn create_provider_for_backend(source: &str) -> Result<Box<dyn Provider>> {
         match source {
             "native" | "uia" => Ok(Box::new(xa11y_windows::WindowsProvider::new()?)),
             "ia2" => Ok(Box::new(xa11y_windows::Ia2Provider::new()?)),
-            _ => Err(Error::InvalidActionData {
-                message: format!(
-                    "unknown XA11Y_ACCESSIBILITY_SOURCE {source:?}; choose native, uia, or ia2"
-                ),
-            }),
+            _ => Err(Error::invalid_action_data(format!(
+                "unknown XA11Y_ACCESSIBILITY_SOURCE {source:?}; choose native, uia, or ia2"
+            ))),
         }
     }
     #[cfg(target_os = "linux")]

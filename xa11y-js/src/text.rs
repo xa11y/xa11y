@@ -63,9 +63,9 @@ fn page_limit(limit: Option<f64>) -> napi::Result<usize> {
             let n = checked_offset(n, "limit")?;
             if n == 0 {
                 // A page that holds nothing never advances.
-                return Err(crate::map_err(xa11y::Error::InvalidActionData {
-                    message: "limit must be at least 1".to_string(),
-                }));
+                return Err(crate::map_err(xa11y::Error::invalid_action_data(
+                    "limit must be at least 1",
+                )));
             }
             Ok(n as usize)
         }
@@ -75,8 +75,7 @@ fn page_limit(limit: Option<f64>) -> napi::Result<usize> {
 /// The text of one element, read by range.
 ///
 /// Returned by `Element.text()` (bound to that element: a re-rendered
-/// control rejects with `SelectorNotMatchedError`, the class a stale element
-/// maps to) and `Locator.text()`
+/// control rejects with `ElementStaleError`) and `Locator.text()`
 /// (re-resolved on every call, waiting until the selector matches; reads do
 /// not require the element to be visible or enabled).
 ///
@@ -276,11 +275,9 @@ pub fn parse_text_unit(name: &str) -> napi::Result<xa11y::TextUnit> {
         "line" => xa11y::TextUnit::Line,
         "paragraph" => xa11y::TextUnit::Paragraph,
         other => {
-            return Err(map_err(xa11y::Error::InvalidActionData {
-                message: format!(
-                    "unknown text unit {other:?}; expected one of character, word, line, paragraph"
-                ),
-            }))
+            return Err(map_err(xa11y::Error::invalid_action_data(format!(
+                "unknown text unit {other:?}; expected one of character, word, line, paragraph"
+            ))))
         }
     })
 }

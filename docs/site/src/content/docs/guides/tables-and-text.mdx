@@ -179,6 +179,10 @@ On Linux, a table with more than 1000 columns (or rows, for `row_headers()`)
 raises `ActionNotSupportedError` from the table-level header methods. Ask the
 individual cells with `column_header_cells()` instead.
 
+On macOS, an `NSOutlineView` keeps the `list` role, and its rows are
+`tree_item` elements. It still answers `table`, `cell_at()`, and the header
+methods, so read a multi-column outline the same way as a table.
+
 ## Read a list or tree item's position
 
 `collection` carries an item's `index` in its set, the set's `size`, and the

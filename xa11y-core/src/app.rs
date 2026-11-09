@@ -697,23 +697,23 @@ impl App {
     /// building the tree costs the app memory and CPU for as long as it runs.
     ///
     /// - **macOS**: sets `AXManualAccessibility` (Electron) on the
-    ///   application element and reads it back. If that does not read back
-    ///   as set, it does the same with `AXEnhancedUserInterface` (Chrome),
-    ///   and stops at the first attribute that reads back set. The
-    ///   read-back is the proof that the app took the request, since Chrome
-    ///   answers the set call with an error even when it succeeds. If
-    ///   neither attribute reads back as set, this returns
-    ///   [`Error::AccessibilityNotEnabled`] naming what each returned.
-    ///   The method does not check that the app is Chromium-based: an app
-    ///   that keeps the value of either attribute counts as having taken the
-    ///   request, and then this waits for web content that may never appear
-    ///   and returns [`Error::Timeout`].
+    ///   application element and reads it back. The request counts as taken
+    ///   when the write succeeds or the value reads back set, because apps
+    ///   give different evidence: Chromium can answer the write with an error
+    ///   and still read back `true`, and Electron accepts the write and reads
+    ///   back `false`. When neither holds, this returns
+    ///   [`Error::AccessibilityNotEnabled`] naming what the write and the read
+    ///   returned; relaunch such an app with
+    ///   `--force-renderer-accessibility`. xa11y never sets
+    ///   `AXEnhancedUserInterface` (what VoiceOver sets), which changes the
+    ///   app's behaviour for every client. The method does not check that
+    ///   the app is Chromium-based: an app that keeps the value counts as
+    ///   having taken the request, and then this waits for web content that
+    ///   may never appear and returns [`Error::Timeout`].
     ///
     ///   **Side effect:** the attribute stays set to `true` on the app after
-    ///   this returns, and xa11y does not restore it. `AXEnhancedUserInterface`
-    ///   is known to disable window animations and to confuse some window
-    ///   managers in apps that react to it, so call this only on apps whose
-    ///   web content you need.
+    ///   this returns, and xa11y does not restore it, so call this only on
+    ///   apps whose web content you need.
     /// - **Linux and Windows**: return [`Error::Unsupported`] naming what to
     ///   do instead. On Linux the switch is a launch-time flag
     ///   (`--force-renderer-accessibility`, plus `ACCESSIBILITY_ENABLED=1` in
@@ -2698,7 +2698,7 @@ mod tests {
         let provider = Arc::new(WebProvider::new(
             Err(Error::AccessibilityNotEnabled {
                 app: "Web".to_string(),
-                instructions: "neither switch read back true".to_string(),
+                instructions: "AXManualAccessibility did not read back true".to_string(),
             }),
             true,
         ));

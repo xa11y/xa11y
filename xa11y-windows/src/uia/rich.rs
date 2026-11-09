@@ -25,6 +25,21 @@ fn property(element: &IUIAutomationElement, id: UIA_PROPERTY_ID) -> Result<Optio
     }
 }
 
+/// A cached UIA integer that must not be negative. UIA documents no
+/// negative sentinel for the grid properties read through this, so a
+/// negative value is a provider fault, not "absent" (matches IA2's
+/// `metadata`).
+fn non_negative(e: &IUIAutomationElement, id: UIA_PROPERTY_ID) -> Result<Option<u32>> {
+    property(e, id)?
+        .map(|n| {
+            u32::try_from(n).map_err(|_| Error::Platform {
+                code: 0,
+                message: format!("UIA property {id:?} returned negative value {n}"),
+            })
+        })
+        .transpose()
+}
+
 pub(super) fn table_info(e: &IUIAutomationElement) -> Result<Option<TableInfo>> {
     let info: TableInfo = TableParts {
         row_count: property(e, UIA_GridRowCountPropertyId)?.map(|n| Count::from_signed(n.into())),
@@ -36,8 +51,7 @@ pub(super) fn table_info(e: &IUIAutomationElement) -> Result<Option<TableInfo>> 
 }
 
 pub(super) fn cell_info(e: &IUIAutomationElement) -> Result<Option<CellInfo>> {
-    let index =
-        |id| -> Result<Option<u32>> { Ok(property(e, id)?.and_then(|n| u32::try_from(n).ok())) };
+    let index = |id| non_negative(e, id);
     let info: CellInfo = CellParts {
         row: index(UIA_GridItemRowPropertyId)?,
         column: index(UIA_GridItemColumnPropertyId)?,
@@ -119,8 +133,7 @@ pub(super) fn row_info(e: &IUIAutomationElement, role: Role) -> Result<Option<Ro
     if role != Role::TableRow {
         return Ok(None);
     }
-    Ok(property(e, UIA_GridItemRowPropertyId)?
-        .and_then(|n| u32::try_from(n).ok())
+    Ok(non_negative(e, UIA_GridItemRowPropertyId)?
         .map(|index| RowParts { index: Some(index) }.into()))
 }
 
@@ -162,14 +175,11 @@ impl WindowsProvider {
         let clip = self.walk_inherited_clip(dpi, &fresh)?;
         let host = self.walk_to_host_hwnd(&fresh)?;
         let pid = uia_call(|| unsafe { fresh.CachedProcessId() })?;
-        self.build_element_data_in(
-            dpi,
-            &fresh,
-            u32::try_from(pid).ok(),
-            host,
-            HostHint::Parent,
-            &clip,
-        )
+        let pid = u32::try_from(pid).map_err(|_| Error::Platform {
+            code: 0,
+            message: format!("UIA CachedProcessId returned negative value {pid}"),
+        })?;
+        self.build_element_data_in(dpi, &fresh, Some(pid), host, HostHint::Parent, &clip)
     }
 
     pub(super) fn rich_elements(

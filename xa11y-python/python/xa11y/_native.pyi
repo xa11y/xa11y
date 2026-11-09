@@ -20,6 +20,11 @@ class _PointerTargetDiagnosis(TypedDict):
     coordinate_space: str
     displays: list[dict[str, int]]
     omitted_displays: int
+    display_source: str | None
+    """Where the displays came from, when the backend records it (Linux:
+    RandR monitors, the X11 root window on a server without RandR 1.5, the
+    Wayland compositor's outputs, or the ``XA11Y_SCREEN_WIDTH`` /
+    ``XA11Y_SCREEN_HEIGHT`` override); ``None`` on macOS and Windows."""
 
 # Input-layer string values. These spellings are identical in the JS binding —
 # like key names, they are shared across bindings rather than spelled
@@ -132,7 +137,9 @@ class SelectorNotMatchedError(XA11yError):
     """Bounded rendering of the search scope: a depth-limited tree dump for
     scoped locators, or the application list for rootless ones."""
     pointer_target: _PointerTargetDiagnosis | None
-    """Geometry of an off-display pointer target, otherwise ``None``."""
+    """Always ``None`` for this class: an off-display pointer target raises
+    :class:`InvalidActionDataError`, whose ``pointer_target`` carries the
+    geometry (present here for attribute parity with older releases)."""
     elapsed: float | None
     """Always ``None`` for this class (present for attribute parity with
     :class:`TimeoutError`)."""
@@ -217,8 +224,14 @@ class InvalidSelectorError(XA11yError):
     """The selector string has invalid syntax."""
 
 class InvalidActionDataError(XA11yError):
-    """An action received invalid data (e.g. ``Locator.nth(0)``, or a
-    text-selection range with ``start > end``)."""
+    """An action received invalid data (e.g. ``Locator.nth(0)``, a
+    text-selection range with ``start > end``, or a pointer target that is
+    not on any display)."""
+
+    pointer_target: _PointerTargetDiagnosis | None
+    """Geometry of an off-display pointer target: the requested point, the
+    checked point and coordinate space, the displays checked, and any element
+    bounds and anchor. ``None`` for every other invalid argument."""
 
 class InvalidTextRangeError(InvalidActionDataError):
     """A text range is out of bounds, reversed, or splits a surrogate pair.
@@ -988,15 +1001,14 @@ class App:
         never makes it implicitly.
 
         On macOS it sets ``AXManualAccessibility`` (Electron) on the
-        application element and reads it back, then does the same with
-        ``AXEnhancedUserInterface`` (Chrome) if that did not read back as
-        set, raising ``AccessibilityNotEnabledError`` when neither does. It
-        does not check that the app is Chromium-based: an app that keeps
-        either value counts as having taken the request, and the call then
-        raises ``TimeoutError`` because no web content appears. The attribute
-        stays set to true afterwards and is not restored; on an app that
-        reacts to ``AXEnhancedUserInterface`` that can disable window
-        animations or confuse a window manager. It then waits up to
+        application element, raising ``AccessibilityNotEnabledError`` when the
+        app neither accepts the write nor reads it back as set;
+        relaunch such an app with ``--force-renderer-accessibility``. It
+        never sets ``AXEnhancedUserInterface``. It does not check that the
+        app is Chromium-based: an app that keeps the value counts as having
+        taken the request, and the call then raises ``TimeoutError`` because
+        no web content appears. The attribute stays set to true afterwards
+        and is not restored. It then waits up to
         ``timeout`` seconds (default: the
         process-wide default timeout) until some ``web_area`` has a child,
         raising ``TimeoutError`` with a diagnosis otherwise. On Linux and
@@ -1270,7 +1282,10 @@ class Element:
     def fullscreen(self) -> bool | None:
         """Whether the window is fullscreen. ``None`` = unknown / not a window."""
     def same_as(self, other: Element) -> bool:
-        """Whether ``other`` names the same platform node. ``==`` uses this.
+        """Whether ``other`` names the same platform node, checked live with
+        the provider. ``==`` and ``hash`` are not overloaded: they keep
+        Python's object identity, so ``in``, ``set`` and ``dict`` never make
+        a platform call or raise. Use this to compare two finds of one node.
 
         Raises :class:`ElementStaleError` (``reason="evicted"``) when either
         handle is no longer held by the provider."""
@@ -1278,8 +1293,6 @@ class Element:
         """Prove this element still names the node it was found as. Raises
         :class:`ElementStaleError` with the ``reason`` otherwise. Every action
         runs this check first."""
-    def __eq__(self, other: object) -> bool: ...
-    def __hash__(self) -> int: ...
     def children(self) -> list[Element]:
         """Get direct children (lazy — each call queries the provider)."""
     def parent(self) -> Element | None:
@@ -1671,10 +1684,12 @@ class InputSim:
     (drag-and-drop, scroll wheels, global shortcuts).
 
     Built-in backends reject pointer targets outside every active display
-    before sending input. On Wayland, raw points use the configured virtual
-    input extent. This checks screen membership, not visibility or hit testing.
-    ``SelectorNotMatchedError.pointer_target`` carries the requested point,
-    checked coordinate space, displays, and any element bounds and anchor.
+    before sending input, with :class:`InvalidActionDataError`. On Wayland,
+    raw points are checked against the compositor's logical output layout, or
+    the ``XA11Y_SCREEN_WIDTH`` / ``XA11Y_SCREEN_HEIGHT`` override. This checks
+    screen membership, not visibility or hit testing. The error's
+    ``pointer_target`` carries the requested point, checked coordinate space,
+    displays, and any element bounds and anchor.
     Both drag endpoints are checked before the gesture. Captured moves while
     this simulator holds a mouse button, and button releases, remain possible;
     explicit clicks and scrolls still require an on-display target.

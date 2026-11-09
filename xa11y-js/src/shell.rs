@@ -95,7 +95,7 @@ pub struct ShellSurfaceLookupOptions {
     /// variable. Pass `0` for a single attempt with no waiting. Only "no such
     /// surface yet" triggers a retry; an enumeration failure, and an ambiguous
     /// shell, fail fast.
-    pub timeout: Option<u32>,
+    pub timeout: Option<f64>,
 }
 
 #[napi]
@@ -195,9 +195,11 @@ impl ShellSurface {
 
     /// Read the subtree into a bounded capture: every node read, pre-order,
     /// with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
-    /// the top of the tree is complete. `detail` adds `'text'` and/or
-    /// `'relations'`; `timeout` (ms) resolves with what was read when it runs
-    /// out, with `truncated.byTime`.
+    /// the top of the tree is complete. `detail` adds `'text'`,
+    /// `'formatting'` (text plus its attribute runs, at most `maxRuns` in
+    /// total) and/or `'relations'`. `timeout` (ms) resolves with what was
+    /// read when it runs out, with `truncated.byTime`; calling `cancel()` on
+    /// the `cancel` token does the same, with `truncated.byCancel`.
     #[napi(
         ts_args_type = "options?: CaptureOptions | null",
         ts_return_type = "Promise<Capture>"
@@ -222,12 +224,13 @@ impl ShellSurface {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<TreeNode>"
     )]
-    pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<TreeTask> {
-        AsyncTask::new(TreeTask::new(
+    pub fn tree(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<TreeTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(TreeTask::new(
             self.data.clone(),
             self.provider.clone(),
-            max_depth.map(|d| d as usize),
-        ))
+            max_depth,
+        )))
     }
 
     /// Render this surface's accessibility tree as an indented string.
@@ -241,12 +244,13 @@ impl ShellSurface {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<string>"
     )]
-    pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<DumpTask> {
-        AsyncTask::new(DumpTask::new(
+    pub fn dump(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<DumpTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(DumpTask::new(
             self.data.clone(),
             self.provider.clone(),
-            max_depth.map(|d| d as usize),
-        ))
+            max_depth,
+        )))
     }
 }
 
@@ -270,7 +274,7 @@ impl Task for ListShellSurfacesTask {
 
 pub struct ByKindTask {
     kind: xa11y::ShellSurfaceKind,
-    timeout_ms: Option<u32>,
+    timeout_ms: Option<f64>,
 }
 
 impl Task for ByKindTask {

@@ -76,12 +76,23 @@ tests resilient to UI populating asynchronously.
 await app.locator('dialog[name="Save Changes?"] button[name="OK"]').press();
 ```
 
+Every timing argument is milliseconds, passed as `{ timeout }` in an options
+object. A bare number throws, so a call written for the old seconds argument
+fails loudly instead of waiting a thousandth as long:
+
+```js
+await app.locator('dialog').waitVisible({ timeout: 10000 });
+setDefaultTimeout({ timeout: 30000 }); // the 5-second budget, raised
+```
+
 ## Subscribing to events
 
 Subscriptions extend Node's `EventEmitter`, so you can use the familiar
 `.on()` / `.once()` / `.off()` API. Events are emitted both under their
 specific type name and the catch-all `'event'` name. Call `close()` (or
-pass an `AbortSignal`) to tear down the subscription.
+pass an `AbortSignal`) to tear down the subscription. `Element.subscribe()`
+takes the same options (`kinds`, `buffer`, `signal`) and returns the same
+`Subscription` as `App.subscribe()`.
 
 ```js
 const sub = await app.subscribe();

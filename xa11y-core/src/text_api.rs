@@ -136,11 +136,9 @@ impl TextUnit {
             "line" => Self::Line,
             "paragraph" => Self::Paragraph,
             other => {
-                return Err(Error::InvalidActionData {
-                    message: format!(
+                return Err(Error::invalid_action_data(format!(
                     "unknown text unit {other:?}; expected one of character, word, line, paragraph"
-                ),
-                })
+                )))
             }
         })
     }
@@ -467,12 +465,10 @@ impl Text {
     ///
     /// An empty `needle` fails with [`Error::InvalidActionData`].
     pub fn find_with(&self, needle: &str, options: FindOptions) -> Result<Option<TextRange>> {
-        let el = self.target()?;
         if needle.is_empty() {
-            return Err(Error::InvalidActionData {
-                message: "find needle must not be empty".to_string(),
-            });
+            return Err(Error::invalid_action_data("find needle must not be empty"));
         }
+        let el = self.target()?;
         el.provider().text_find(el.data(), needle, options)
     }
 
@@ -515,9 +511,12 @@ impl Text {
         let el = self.target()?;
         let p = el.provider();
         let data = el.data();
-        let (lines, next_start) = walk(range, limit, |pos| {
-            p.text_range_at(data, pos, TextUnit::Line)
-        })?;
+        let (lines, next_start) = walk(
+            range,
+            limit,
+            |pos| p.text_range_at(data, pos, TextUnit::Line),
+            || p.text_length(data),
+        )?;
         Ok(TextLines {
             truncated: next_start.is_some(),
             lines,
@@ -541,9 +540,12 @@ impl Text {
         if range.is_empty() {
             return Ok(p.text_range_bounds(data, range)?.into_iter().collect());
         }
-        let (lines, next_start) = walk(range, MAX_BOUNDS_LINES, |pos| {
-            p.text_range_at(data, pos, TextUnit::Line)
-        })?;
+        let (lines, next_start) = walk(
+            range,
+            MAX_BOUNDS_LINES,
+            |pos| p.text_range_at(data, pos, TextUnit::Line),
+            || p.text_length(data),
+        )?;
         if next_start.is_some() {
             return Err(Error::InvalidTextRange {
                 start: range.start,
@@ -572,12 +574,17 @@ impl Text {
         let p = el.provider();
         let data = el.data();
         let mut runs = Vec::new();
-        let (ranges, next_start) = walk(range, limit, |pos| {
-            let run = p.text_attributes_at(data, pos)?;
-            let r = run.range;
-            runs.push(run);
-            Ok(r)
-        })?;
+        let (ranges, next_start) = walk(
+            range,
+            limit,
+            |pos| {
+                let run = p.text_attributes_at(data, pos)?;
+                let r = run.range;
+                runs.push(run);
+                Ok(r)
+            },
+            || p.text_length(data),
+        )?;
         // `walk` clips each range; carry the clipping over to the runs.
         let runs = runs
             .into_iter()
@@ -612,9 +619,7 @@ pub fn find_with_reader(
 ) -> Result<Option<TextRange>> {
     let needle: Vec<u16> = needle.encode_utf16().collect();
     if needle.is_empty() {
-        return Err(Error::InvalidActionData {
-            message: "find needle must not be empty".to_string(),
-        });
+        return Err(Error::invalid_action_data("find needle must not be empty"));
     }
     let scope = options.within.unwrap_or(TextRange {
         start: 0,
@@ -626,9 +631,7 @@ pub fn find_with_reader(
 
 fn check_limit(limit: usize) -> Result<()> {
     if limit == 0 {
-        return Err(Error::InvalidActionData {
-            message: "page limit must be at least 1".to_string(),
-        });
+        return Err(Error::invalid_action_data("page limit must be at least 1"));
     }
     Ok(())
 }
@@ -658,10 +661,18 @@ pub fn check_in_bounds(range: TextRange, length: u32) -> Result<()> {
 /// Walk `range` unit by unit with `unit_at(pos)`, clipping each unit to the
 /// range. Returns the clipped units and, when `limit` stopped the walk, the
 /// offset to resume from.
+///
+/// `length` is read only when a unit fails to advance: at `pos == length` a
+/// backend reports the unit that *ends* there, so a range past the end of the
+/// text surfaces as that, and is then reported as
+/// [`Error::InvalidTextRange`] like [`Text::read`] reports it. Reading the
+/// length up front would cost every successful page a length read, which
+/// some platforms only answer by reading the whole text.
 fn walk(
     range: TextRange,
     limit: usize,
     mut unit_at: impl FnMut(u32) -> Result<TextRange>,
+    length: impl FnOnce() -> Result<u32>,
 ) -> Result<(Vec<TextRange>, Option<u32>)> {
     let mut out = Vec::new();
     let mut pos = range.start;
@@ -671,6 +682,8 @@ fn walk(
         }
         let unit = unit_at(pos)?;
         if unit.end <= pos || unit.start > pos {
+            // The range runs past the text: say so, as `read` does.
+            check_in_bounds(range, length()?)?;
             // A unit that does not contain `pos` and move forward would loop
             // forever; report the backend's answer instead.
             return Err(Error::Platform {
@@ -969,7 +982,7 @@ mod tests {
         // Lines of 4 units over 0..10.
         let line = |pos: u32| Ok(TextRange::new(pos / 4 * 4, pos / 4 * 4 + 4).unwrap());
         let r = TextRange { start: 2, end: 10 };
-        let (lines, next) = walk(r, 10, line).unwrap();
+        let (lines, next) = walk(r, 10, line, || Ok(10)).unwrap();
         assert_eq!(
             lines,
             vec![
@@ -979,7 +992,7 @@ mod tests {
             ]
         );
         assert_eq!(next, None);
-        let (lines, next) = walk(r, 2, line).unwrap();
+        let (lines, next) = walk(r, 2, line, || Ok(10)).unwrap();
         assert_eq!(lines.len(), 2);
         assert_eq!(next, Some(8));
     }
@@ -988,8 +1001,23 @@ mod tests {
     fn walk_refuses_a_unit_that_does_not_advance() {
         let stuck = |_pos: u32| Ok(TextRange { start: 0, end: 0 });
         assert!(matches!(
-            walk(TextRange { start: 0, end: 5 }, 10, stuck),
+            walk(TextRange { start: 0, end: 5 }, 10, stuck, || Ok(5)),
             Err(Error::Platform { .. })
+        ));
+    }
+
+    #[test]
+    fn walk_reports_a_range_past_the_end_as_invalid() {
+        // Lines of 4 units over a 6-unit text: at 6 the backend reports the
+        // line that ends there, which does not advance.
+        let line =
+            |pos: u32| Ok(TextRange::new(pos.min(5) / 4 * 4, (pos / 4 * 4 + 4).min(6)).unwrap());
+        assert!(matches!(
+            walk(TextRange { start: 0, end: 9 }, 10, line, || Ok(6)),
+            Err(Error::InvalidTextRange {
+                length: Some(6),
+                ..
+            })
         ));
     }
 
@@ -1201,11 +1229,43 @@ mod api_tests {
     }
 
     #[test]
+    fn lines_bounds_and_runs_past_the_end_are_invalid_ranges() {
+        let t = one("text_area").text().unwrap();
+        let past = r(0, 99);
+        let invalid = |res: Result<()>| {
+            assert!(
+                matches!(
+                    res,
+                    Err(Error::InvalidTextRange {
+                        length: Some(26),
+                        ..
+                    })
+                ),
+                "{res:?}"
+            )
+        };
+        invalid(t.lines(past, 10).map(|_| ()));
+        invalid(t.runs(past, 10).map(|_| ()));
+        invalid(t.bounds(past).map(|_| ()));
+    }
+
+    #[test]
     fn locator_text_re_resolves_and_ignores_disabled_state() {
         let p = build_table_provider();
         let t = locator(p, "text_area").text();
         assert_eq!(t.length().unwrap(), 26);
         let missing = locator(build_table_provider(), r#"text_area[name="Nope"]"#).text();
         assert!(matches!(missing.length(), Err(Error::Timeout { .. })));
+    }
+
+    #[test]
+    fn empty_find_needle_is_refused_before_resolving_the_target() {
+        // The locator matches nothing, so resolving it would time out: the
+        // argument error must come first.
+        let missing = locator(build_table_provider(), r#"text_area[name="Nope"]"#).text();
+        assert!(matches!(
+            missing.find(""),
+            Err(Error::InvalidActionData { .. })
+        ));
     }
 }

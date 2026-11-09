@@ -88,6 +88,7 @@ def test_cli_rejects_an_off_display_point(run_cli):
         f"expected rejected target, got {rc}\nstdout: {stdout}\nstderr: {stderr}"
     )
     assert "delivery: not_delivered" in stderr
+    assert "pointer target (1000000, 1000000) is not on any display" in stderr
     assert "pointer target: Point { x: 1000000, y: 1000000 }" in stderr
     assert "checked point:" in stderr
     assert "displays:" in stderr

@@ -37,23 +37,41 @@ impl From<xa11y::TreeNode> for TreeNode {
 #[derive(Clone)]
 pub struct Rect {
     /// Left edge, in screen coordinates.
-    pub x: i32,
+    pub x: f64,
     /// Top edge, in screen coordinates.
-    pub y: i32,
+    pub y: f64,
     /// Width in screen-coordinate units.
-    pub width: i32,
+    pub width: f64,
     /// Height in screen-coordinate units.
-    pub height: i32,
+    pub height: f64,
 }
 
+// The fields are `f64` rather than `i32` / `u32` because a `Rect` is also an
+// argument (`screenshot({ region })`, `Screenshot.crop`, ...), and napi's
+// integer conversions coerce silently: `NaN` becomes 0, `1.5` becomes 1 and
+// a negative width wraps. `to_core` checks the raw numbers instead.
 impl From<xa11y::Rect> for Rect {
     fn from(r: xa11y::Rect) -> Self {
         Self {
-            x: r.x,
-            y: r.y,
-            width: r.width as i32,
-            height: r.height as i32,
+            x: f64::from(r.x),
+            y: f64::from(r.y),
+            width: f64::from(r.width),
+            height: f64::from(r.height),
         }
+    }
+}
+
+impl Rect {
+    /// The core rect, refusing a non-finite, fractional or out-of-range
+    /// coordinate and a negative size with `InvalidActionDataError`.
+    /// `what` names the argument in the message (`"region"`, `"rect"`).
+    pub fn to_core(&self, what: &str) -> napi::Result<xa11y::Rect> {
+        Ok(xa11y::Rect {
+            x: crate::checked_window_coord(self.x, &format!("{what}.x"))?,
+            y: crate::checked_window_coord(self.y, &format!("{what}.y"))?,
+            width: checked_offset(self.width, &format!("{what}.width"))?,
+            height: checked_offset(self.height, &format!("{what}.height"))?,
+        })
     }
 }
 
@@ -308,9 +326,93 @@ pub fn checked_offset(value: f64, what: &str) -> napi::Result<u32> {
     if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= f64::from(u32::MAX) {
         Ok(value as u32)
     } else {
-        Err(crate::map_err(xa11y::Error::InvalidActionData {
-            message: format!("{what} must be a whole number in 0..=4294967295, got {value}"),
-        }))
+        Err(crate::map_err(xa11y::Error::invalid_action_data(format!(
+            "{what} must be a whole number in 0..=4294967295, got {value}"
+        ))))
+    }
+}
+
+/// Validate an optional `maxDepth` argument (`tree()` / `dump()`): a whole
+/// number in `0..=4294967295`, so `-1` cannot become an unbounded depth.
+pub fn checked_depth(value: Option<f64>) -> napi::Result<Option<usize>> {
+    value
+        .map(|d| checked_count(d, "maxDepth").map_err(crate::map_err))
+        .transpose()
+}
+
+/// Validate a JS-supplied count or size option (`maxNodes`, `buffer`, ...)
+/// as a whole number in `0..=4294967295`.
+///
+/// Same hazard as [`checked_offset`]: napi's `u32` conversion applies
+/// `ToUint32`, so `-1` would arrive as `4294967295` (an unbounded limit) and
+/// `NaN` as `0`. Returned as a core error so callers can either throw it now
+/// or carry it into a task that rejects before its first OS call.
+pub fn checked_count(value: f64, what: &str) -> xa11y::Result<usize> {
+    if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= f64::from(u32::MAX) {
+        Ok(value as usize)
+    } else {
+        Err(xa11y::Error::invalid_action_data(format!(
+            "{what} must be a whole number in 0..=4294967295, got {value}"
+        )))
+    }
+}
+
+/// The largest whole number of milliseconds a duration option accepts:
+/// `Number.MAX_SAFE_INTEGER`, past which a JS number no longer holds every
+/// integer.
+const MAX_SAFE_MS: f64 = 9_007_199_254_740_991.0;
+
+/// Validate a JS-supplied duration in milliseconds (`timeout`): a finite,
+/// non-negative whole number. `-1` and `NaN` are refused rather than wrapped
+/// by `ToUint32` into ~50 days or no wait at all.
+pub fn checked_millis(value: f64, what: &str) -> xa11y::Result<std::time::Duration> {
+    if value.is_finite() && value.fract() == 0.0 && (0.0..=MAX_SAFE_MS).contains(&value) {
+        Ok(std::time::Duration::from_millis(value as u64))
+    } else {
+        Err(xa11y::Error::invalid_action_data(format!(
+            "{what} must be a whole number of milliseconds in 0..=9007199254740991, got {value}"
+        )))
+    }
+}
+
+/// Options for the `Locator.wait*` methods and `setDefaultTimeout`.
+#[napi(object)]
+pub struct TimeoutOptions {
+    /// Timeout in milliseconds: a finite, non-negative whole number. `0`
+    /// means a single attempt with no polling. Omitted, the wait uses the
+    /// process-wide default (see `setDefaultTimeout`).
+    pub timeout: Option<f64>,
+}
+
+/// The process-wide default timeout, as `getDefaultTimeout()` reports it.
+/// The same shape `setDefaultTimeout` takes, so the two round-trip.
+#[napi(object)]
+pub struct DefaultTimeout {
+    /// The default timeout in whole milliseconds.
+    pub timeout: f64,
+}
+
+/// Parse a JS `{ timeout }` options argument into an optional duration.
+///
+/// A bare number is refused rather than read as milliseconds: these methods
+/// used to take seconds, and a caller still passing `5` must fail loudly
+/// instead of waiting 5 ms (or, read the other way, 1000× longer than they
+/// meant). Returned as a core error so a wait can carry it into its task and
+/// reject before its first OS call.
+pub fn parse_timeout_options(
+    options: Option<napi::Either<f64, TimeoutOptions>>,
+    method: &str,
+) -> xa11y::Result<Option<std::time::Duration>> {
+    match options {
+        None => Ok(None),
+        Some(napi::Either::A(n)) => Err(xa11y::Error::invalid_action_data(format!(
+            "{method}: pass {{ timeout: ms }} — a bare number ({n}) is not accepted; \
+             timeouts are milliseconds in an options object"
+        ))),
+        Some(napi::Either::B(TimeoutOptions { timeout: None })) => Ok(None),
+        Some(napi::Either::B(TimeoutOptions { timeout: Some(ms) })) => {
+            checked_millis(ms, "timeout").map(Some)
+        }
     }
 }
 
@@ -328,15 +430,12 @@ pub fn parse_select_range(
             let r = range.to_core("range")?;
             Ok((r.start, r.end))
         }
-        (napi::Either::A(_), None) => Err(crate::map_err(xa11y::Error::InvalidActionData {
-            message: "selectText(start, end) needs an end offset, or pass one {start, end} range"
-                .to_string(),
-        })),
-        (napi::Either::B(_), Some(_)) => Err(crate::map_err(xa11y::Error::InvalidActionData {
-            message:
-                "selectText takes either (start, end) or a single {start, end} range, not both"
-                    .to_string(),
-        })),
+        (napi::Either::A(_), None) => Err(crate::map_err(xa11y::Error::invalid_action_data(
+            "selectText(start, end) needs an end offset, or pass one {start, end} range",
+        ))),
+        (napi::Either::B(_), Some(_)) => Err(crate::map_err(xa11y::Error::invalid_action_data(
+            "selectText takes either (start, end) or a single {start, end} range, not both",
+        ))),
     }
 }
 

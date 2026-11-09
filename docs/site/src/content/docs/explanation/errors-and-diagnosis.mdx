@@ -123,7 +123,7 @@ already failed.
     import { TimeoutError } from '@crowecawcaw/xa11y';
 
     try {
-      await dialog.waitVisible(60);
+      await dialog.waitVisible({ timeout: 60000 });
     } catch (e) {
       if (e instanceof TimeoutError) {
         e.condition;    // 'visible'

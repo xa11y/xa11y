@@ -480,6 +480,29 @@ impl Element {
         self.provider.revalidate(&self.data)
     }
 
+    /// [`Self::check_alive`] as the first step of an action. Nothing has
+    /// been dispatched when it fails, so the error says so: a deadline that
+    /// expires during the check is a [`Error::Timeout`] whose
+    /// [`delivery`](Error::delivery) is
+    /// [`NotDelivered`](crate::Delivery::NotDelivered), not the `Unknown` a
+    /// timeout in the action call itself reports.
+    ///
+    /// A [`Error::Platform`] that is not a deadline cut carries no diagnosis
+    /// to hold the override, so it still reports `Unknown`.
+    fn revalidate_for_action(&self) -> crate::error::Result<()> {
+        self.provider.revalidate(&self.data).map_err(|e| {
+            // A cut the backend worded as its own failure becomes the
+            // deadline's timeout here, where the override can be attached.
+            let e = crate::deadline::action_error(e);
+            let d = e
+                .diagnosis()
+                .cloned()
+                .unwrap_or_default()
+                .delivery(crate::error::Delivery::NotDelivered);
+            e.diagnose(d)
+        })
+    }
+
     // ── Actions ─────────────────────────────────────────────────────
     //
     // Element actions invoke the platform via the captured provider handle —
@@ -492,61 +515,61 @@ impl Element {
 
     /// Click / invoke this element via the accessibility action layer.
     pub fn press(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.press(&self.data)
     }
 
     /// Set keyboard focus to this element.
     pub fn focus(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.focus(&self.data)
     }
 
     /// Remove keyboard focus from this element.
     pub fn blur(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.blur(&self.data)
     }
 
     /// Toggle a two- or three-state control (checkbox, switch).
     pub fn toggle(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.toggle(&self.data)
     }
 
     /// Select this element (list item, tab, row).
     pub fn select(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.select(&self.data)
     }
 
     /// Expand a disclosure, menu, combo box, or tree item.
     pub fn expand(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.expand(&self.data)
     }
 
     /// Collapse an expanded element.
     pub fn collapse(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.collapse(&self.data)
     }
 
     /// Open this element's context menu or dropdown.
     pub fn show_menu(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.show_menu(&self.data)
     }
 
     /// Increment a numeric control (slider, spinner) by its platform step.
     pub fn increment(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.increment(&self.data)
     }
 
     /// Decrement a numeric control (slider, spinner) by its platform step.
     pub fn decrement(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.decrement(&self.data)
     }
 
@@ -556,14 +579,14 @@ impl Element {
     /// returns [`Error::ActionNotSupported`](crate::error::Error::ActionNotSupported)
     /// otherwise; `Component.ScrollTo` on Linux; `ScrollItemPattern` on Windows.
     pub fn scroll_into_view(&self) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.scroll_into_view(&self.data)
     }
 
     /// Set the text value of this element. Replaces the entire value rather
     /// than inserting at the caret — use [`Element::type_text`] for insertion.
     pub fn set_value(&self, value: &str) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.set_value(&self.data, value)
     }
 
@@ -572,11 +595,12 @@ impl Element {
     /// Returns [`Error::InvalidActionData`] if `value` is NaN or infinite.
     pub fn set_numeric_value(&self, value: f64) -> crate::error::Result<()> {
         if !value.is_finite() {
-            return Err(Error::InvalidActionData {
-                message: format!("set_numeric_value requires a finite value, got {}", value),
-            });
+            return Err(Error::invalid_action_data(format!(
+                "set_numeric_value requires a finite value, got {}",
+                value
+            )));
         }
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.set_numeric_value(&self.data, value)
     }
 
@@ -584,7 +608,7 @@ impl Element {
     ///
     /// Uses the platform accessibility API — never simulates keyboard events.
     pub fn type_text(&self, text: &str) -> crate::error::Result<()> {
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.type_text(&self.data, text)
     }
 
@@ -595,7 +619,7 @@ impl Element {
     /// the text, or splitting a surrogate pair.
     pub fn select_text(&self, start: u32, end: u32) -> crate::error::Result<()> {
         crate::text_api::TextRange::new(start, end)?;
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.set_text_selection(&self.data, start, end)
     }
 
@@ -692,7 +716,7 @@ impl Element {
             // carry; the providers reject them surfaceably (InvalidActionData),
             // before any OS call.
             _ => {
-                self.provider.revalidate(&self.data)?;
+                self.revalidate_for_action()?;
                 self.provider.perform_action(&self.data, action)
             }
         }
@@ -756,14 +780,14 @@ impl Element {
     /// Activate this window: bring it to the foreground and give it focus.
     pub fn activate(&self) -> crate::error::Result<()> {
         self.require_window_like("activate")?;
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.activate(&self.data)
     }
 
     /// Minimize this window.
     pub fn minimize(&self) -> crate::error::Result<()> {
         self.require_window_like("minimize")?;
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.minimize(&self.data)
     }
 
@@ -776,7 +800,7 @@ impl Element {
     /// fullscreen.
     pub fn maximize(&self) -> crate::error::Result<()> {
         self.require_window_like("maximize")?;
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.maximize(&self.data)
     }
 
@@ -789,7 +813,7 @@ impl Element {
     /// (Windows/Linux) report it as unsupported.
     pub fn enter_fullscreen(&self) -> crate::error::Result<()> {
         self.require_window_like("enter_fullscreen")?;
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.enter_fullscreen(&self.data)
     }
 
@@ -797,14 +821,14 @@ impl Element {
     /// fullscreen).
     pub fn restore(&self) -> crate::error::Result<()> {
         self.require_window_like("restore")?;
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.restore(&self.data)
     }
 
     /// Close this window.
     pub fn close(&self) -> crate::error::Result<()> {
         self.require_window_like("close")?;
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.close(&self.data)
     }
 
@@ -812,7 +836,7 @@ impl Element {
     /// (physical pixels on Windows, logical points elsewhere).
     pub fn move_to(&self, x: i32, y: i32) -> crate::error::Result<()> {
         self.require_window_like("move_to")?;
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.move_to(&self.data, x, y)
     }
 
@@ -821,14 +845,12 @@ impl Element {
     /// Returns [`Error::InvalidActionData`] if either dimension is 0.
     pub fn resize_to(&self, width: u32, height: u32) -> crate::error::Result<()> {
         if width == 0 || height == 0 {
-            return Err(Error::InvalidActionData {
-                message: format!(
-                    "resize_to requires positive width and height, got {width}x{height}"
-                ),
-            });
+            return Err(Error::invalid_action_data(format!(
+                "resize_to requires positive width and height, got {width}x{height}"
+            )));
         }
         self.require_window_like("resize_to")?;
-        self.provider.revalidate(&self.data)?;
+        self.revalidate_for_action()?;
         self.provider.resize_to(&self.data, width, height)
     }
 }

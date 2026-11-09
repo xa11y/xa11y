@@ -391,19 +391,25 @@ impl Element {
         })
     }
 
-    /// Subscribe to accessibility events for this element (typically an app).
-    /// `kinds` keeps only those event types (`'announcement'`,
-    /// `'focusChanged'`); a type this platform never sends rejects with
-    /// `ActionNotSupportedError` at once. `buffer` bounds the queue (default
-    /// 4096 events, oldest dropped first).
+    /// Subscribe to accessibility events for this element (typically an app),
+    /// with the same options and result as `App.subscribe`: resolves to an
+    /// EventEmitter `Subscription`. `options.kinds` keeps only those event
+    /// types (`'announcement'`, `'focusChanged'`); a type this platform never
+    /// sends rejects with `ActionNotSupportedError` at once. `options.buffer`
+    /// bounds the queue (default 4096 events, oldest dropped first).
+    /// `options.signal` closes the subscription when aborted.
+    ///
+    /// `index.js` replaces this method on the prototype; the native function
+    /// it wraps takes `(kinds, buffer)` positionally and resolves to the
+    /// internal `_NativeSubscription`.
     #[napi(
-        ts_args_type = "kinds?: Array<EventTypeName> | null, buffer?: number | null",
-        ts_return_type = "Promise<_NativeSubscription>"
+        ts_args_type = "options?: SubscribeOptions | null",
+        ts_return_type = "Promise<Subscription>"
     )]
     pub fn subscribe(
         &self,
         kinds: Option<Vec<String>>,
-        buffer: Option<u32>,
+        buffer: Option<f64>,
     ) -> AsyncTask<SubscribeTask> {
         AsyncTask::new(SubscribeTask {
             data: self.data.clone(),
@@ -414,9 +420,11 @@ impl Element {
 
     /// Read the subtree into a bounded capture: every node read, pre-order,
     /// with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
-    /// the top of the tree is complete. `detail` adds `'text'` and/or
-    /// `'relations'`; `timeout` (ms) resolves with what was read when it runs
-    /// out, with `truncated.byTime`.
+    /// the top of the tree is complete. `detail` adds `'text'`,
+    /// `'formatting'` (text plus its attribute runs, at most `maxRuns` in
+    /// total) and/or `'relations'`. `timeout` (ms) resolves with what was
+    /// read when it runs out, with `truncated.byTime`; calling `cancel()` on
+    /// the `cancel` token does the same, with `truncated.byCancel`.
     #[napi(
         ts_args_type = "options?: CaptureOptions | null",
         ts_return_type = "Promise<Capture>"
@@ -440,13 +448,14 @@ impl Element {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<TreeNode>"
     )]
-    pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<TreeTask> {
-        AsyncTask::new(TreeTask {
+    pub fn tree(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<TreeTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(TreeTask {
             data: self.data.clone(),
             provider: self.provider.clone(),
-            max_depth: max_depth.map(|d| d as usize),
+            max_depth,
             process_scope: false,
-        })
+        }))
     }
 
     /// Render the subtree rooted at this element as an indented string.
@@ -456,13 +465,14 @@ impl Element {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<string>"
     )]
-    pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<DumpTask> {
-        AsyncTask::new(DumpTask {
+    pub fn dump(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<DumpTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(DumpTask {
             data: self.data.clone(),
             provider: self.provider.clone(),
-            max_depth: max_depth.map(|d| d as usize),
+            max_depth,
             process_scope: false,
-        })
+        }))
     }
 
     // ── Text, tables and selection (live reads) ─────────────────────────
@@ -927,7 +937,9 @@ impl Task for ParentTask {
 pub struct SubscribeTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
-    options: xa11y::SubscribeOptions,
+    /// The parsed options, or why they were refused: `compute` rejects with
+    /// that before subscribing.
+    options: xa11y::Result<xa11y::SubscribeOptions>,
 }
 
 impl Task for SubscribeTask {
@@ -935,11 +947,18 @@ impl Task for SubscribeTask {
     type JsValue = NativeSubscription;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        xa11y::subscribe_with(&*self.provider, &self.data, &self.options).map_err(map_err)
+        let options = self.options.clone().map_err(map_err)?;
+        xa11y::subscribe_with(&*self.provider, &self.data, &options).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(NativeSubscription::new(output, self.provider.clone()))
+        // `compute` only ran past `?` on `Ok` options.
+        let options = self.options.clone().unwrap_or_default();
+        Ok(NativeSubscription::with_options(
+            output,
+            self.provider.clone(),
+            &options,
+        ))
     }
 }
 

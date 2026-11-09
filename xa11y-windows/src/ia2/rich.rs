@@ -439,6 +439,20 @@ impl State {
     ) -> Result<Vec<ElementData>> {
         let node = self.node(e)?;
         let c: AccessibleTableCell = node.interface(e, "cell_headers")?;
+        let mut headers = Vec::new();
+        for object in self.header_objects(&c, kind)? {
+            self.check_deadline()?;
+            let header = Node::new(object, 0, node.owner.clone(), 0)?;
+            headers.push(self.header_element(header, kind)?);
+        }
+        Ok(headers)
+    }
+    /// The native header objects a cell reports for `kind`, not yet read.
+    fn header_objects(
+        &self,
+        c: &AccessibleTableCell,
+        kind: HeaderKind,
+    ) -> Result<Vec<IAccessible>> {
         let mut raw = std::ptr::null_mut();
         let mut count = 0;
         unsafe {
@@ -451,25 +465,27 @@ impl State {
             .ok()
             .map_err(native)?;
         }
-        let mut headers = self.object_array(raw, count, &node.owner, 0)?;
-        for header in &mut headers {
-            header.role = Role::TableCell;
-            if let Some(cell) = &mut header.cell {
-                cell.header = Some(kind);
-            } else {
-                header.cell = Some(
-                    CellParts {
-                        row: None,
-                        column: None,
-                        row_span: None,
-                        column_span: None,
-                        header: Some(kind),
-                    }
-                    .into(),
-                );
-            }
+        self.objects(raw, count)
+    }
+    /// Snapshot a header object reported by a cell, marked as a `kind` header.
+    fn header_element(&mut self, node: Node, kind: HeaderKind) -> Result<ElementData> {
+        let mut header = self.snapshot(node)?;
+        header.role = Role::TableCell;
+        if let Some(cell) = &mut header.cell {
+            cell.header = Some(kind);
+        } else {
+            header.cell = Some(
+                CellParts {
+                    row: None,
+                    column: None,
+                    row_span: None,
+                    column_span: None,
+                    header: Some(kind),
+                }
+                .into(),
+            );
         }
-        Ok(headers)
+        Ok(header)
     }
     pub(super) fn selected(&mut self, e: &ElementData) -> Result<Vec<ElementData>> {
         let node = self.node(e)?;
@@ -496,6 +512,15 @@ impl State {
         owner: &Owner,
         parent: u64,
     ) -> Result<Vec<ElementData>> {
+        let mut out = Vec::new();
+        for object in self.objects(raw, count)? {
+            self.check_deadline()?;
+            out.push(self.snapshot(Node::new(object, 0, owner.clone(), parent)?)?);
+        }
+        Ok(out)
+    }
+    /// Take ownership of a CoTaskMem array of IA2 objects, without reading them.
+    fn objects(&self, raw: *mut *mut c_void, count: i32) -> Result<Vec<IAccessible>> {
         if count < 0 {
             unsafe { CoTaskMemFree(Some(raw.cast())) };
             return Err(platform("IA2 returned a negative object array count"));
@@ -540,10 +565,25 @@ impl State {
             // Borrow the array's reference, clone it before the array's Drop.
             let unknown = std::mem::ManuallyDrop::new(unsafe { IUnknown::from_raw(p) });
             let object: IAccessible = unknown.cast().map_err(native)?;
-            out.push(self.snapshot(Node::new(object, 0, owner.clone(), parent)?)?);
+            out.push(object);
         }
         Ok(out)
     }
+    /// Every `kind` header of the table, each once, in column (or row) order.
+    ///
+    /// Headers are per column (or per row), so this reads one cell per
+    /// column (row): the first cell from the top (left) that is not itself a
+    /// `kind` header. A header cell's own header list names only the headers
+    /// above it (Firefox reports none for a `th` in row 0), so the first data
+    /// cell is the one whose list holds the whole column's headers. A cell
+    /// spanning several columns (rows) is read once. Each header is
+    /// snapshotted once, however many cells reference it.
+    ///
+    /// That is `rows + columns` cell lookups for a table with one header row
+    /// and column, instead of reading every cell. A missing cell along the
+    /// walk (a sparse or virtualized table) fails explicitly rather than
+    /// skipping the column, because a skipped column would silently drop its
+    /// headers.
     pub(super) fn table_headers(
         &mut self,
         e: &ElementData,
@@ -561,40 +601,94 @@ impl State {
                 .ok()
                 .map_err(native)?;
         }
-        bounded(rows, 256, "header table rows")?;
-        bounded(columns, 256, "header table columns")?;
-        if i64::from(rows) * i64::from(columns) > 256 {
-            return Err(Error::Unsupported{feature:"IA2 table-wide header discovery is limited to 256 realized cells; use cell header relationships".into()});
-        }
+        let rows = bounded(rows, LIMIT, "header table rows")?;
+        let columns = bounded(columns, LIMIT, "header table columns")?;
+        // `lines` are what headers label; `depth` is the walk along each one.
+        let (lines, depth, line_name, own_role) = match kind {
+            HeaderKind::Column => (columns, rows, "column", 0x19),
+            HeaderKind::Row => (rows, columns, "row", 0x1a),
+        };
         let mut out = Vec::new();
+        let mut cells_read = std::collections::HashSet::new();
         let mut seen = std::collections::HashSet::new();
-        for row in 0..rows {
-            for column in 0..columns {
+        for line in 0..lines {
+            let mut labelled = None;
+            for step in 0..depth {
                 self.check_deadline()?;
-                if let Some(cell) = self.cell_at(e, row as u32, column as u32)? {
-                    for header in self.cell_headers(&cell, kind)? {
-                        let key = (
-                            header
-                                .raw
-                                .get("ia2_unique_id")
-                                .and_then(|v| v.as_i64())
-                                .ok_or_else(|| unsupported(e, "header identity"))?,
-                            header
-                                .raw
-                                .get("ia2_window")
-                                .and_then(|v| v.as_u64())
-                                .ok_or_else(|| unsupported(e, "header window identity"))?,
-                        );
-                        // IA2 header objects must carry identity; do not dedup by name.
-                        if seen.insert(key) {
-                            out.push(header);
-                        }
-                    }
+                let (row, column) = match kind {
+                    HeaderKind::Column => (step, line),
+                    HeaderKind::Row => (line, step),
+                };
+                let object = table_cell(&t, row, column)?.ok_or_else(|| Error::Unsupported {
+                    feature: format!(
+                        "IA2 table-wide {line_name} header discovery: the table reports no cell at row {row}, column {column}; read headers per cell with cell_headers"
+                    ),
+                })?;
+                let role =
+                    integer(&unsafe { object.get_accRole(&VARIANT::from(0)) }.map_err(native)?)?;
+                if role != own_role {
+                    labelled = Some(object);
+                    break;
+                }
+            }
+            // Every cell along this line is itself a header of this kind:
+            // nothing in it is labelled.
+            let Some(object) = labelled else {
+                continue;
+            };
+            let a = query(&object)?.ok_or_else(|| {
+                unsupported(e, "table header discovery on a cell without IAccessible2")
+            })?;
+            let (mut id, mut hwnd) = (0, HWND::default());
+            unsafe {
+                (a.vtable().unique_id)(a.as_raw(), &mut id)
+                    .ok()
+                    .map_err(native)?;
+                (a.vtable().window_handle)(a.as_raw(), &mut hwnd)
+                    .ok()
+                    .map_err(native)?;
+            }
+            // A cell spanning several lines answers for each; read it once.
+            if !cells_read.insert((id, hwnd.0 as usize)) {
+                continue;
+            }
+            let c = capability::<AccessibleTableCell>(&a)?.ok_or_else(|| {
+                unsupported(
+                    e,
+                    "table header discovery on a cell without IAccessibleTableCell",
+                )
+            })?;
+            for header in self.header_objects(&c, kind)? {
+                self.check_deadline()?;
+                let header = Node::new(header, 0, node.owner.clone(), 0)?;
+                // IA2 header objects must carry identity; do not dedup by name.
+                let key = header
+                    .identity
+                    .ok_or_else(|| unsupported(e, "header identity"))?;
+                if seen.insert(key) {
+                    out.push(self.header_element(header, kind)?);
                 }
             }
         }
         Ok(out)
     }
+}
+/// The cell at (`row`, `column`), unread; `None` when the table has none there.
+fn table_cell(t: &AccessibleTable2, row: usize, column: usize) -> Result<Option<IAccessible>> {
+    let (Ok(row), Ok(column)) = (i32::try_from(row), i32::try_from(column)) else {
+        return Err(platform("IA2 table index exceeds i32"));
+    };
+    let mut raw = std::ptr::null_mut();
+    unsafe {
+        (t.vtable().cellAt)(t.as_raw(), row, column, &mut raw)
+            .ok()
+            .map_err(native)?;
+    }
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let object: IAccessible = unsafe { IUnknown::from_raw(raw) }.cast().map_err(native)?;
+    Ok(Some(object))
 }
 fn available(status: windows::core::HRESULT, feature: &str) -> Result<()> {
     status.ok().map_err(native)?;

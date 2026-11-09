@@ -15,8 +15,8 @@
 //!   tree-view column headers have the role but no `TableCell` interface, so
 //!   they carry a header kind and no position.
 //! - Object attributes `posinset` / `setsize` / `level` (1-based, as in ARIA)
-//!   → [`CollectionInfo`], read only for list items, tree items, tabs, radio
-//!   buttons and rows.
+//!   → [`CollectionInfo`], read for every role that can be a set member
+//!   ([`is_collection_role`]).
 //!
 //! AT-SPI has no row-index API for a row object, so [`RowInfo`] is never
 //! populated on Linux; a row's cells carry the row.
@@ -86,23 +86,12 @@ pub(crate) fn offset_unit_for(toolkit: Option<&str>) -> OffsetUnit {
 }
 
 /// Read `bus`'s offset unit from `proxy`, which must address the
-/// application object's `org.a11y.atspi.Application` interface. Shared by
-/// the provider's per-bus cache and the event subscription, which resolves
-/// each application's unit once when it subscribes.
-pub(crate) fn read_offset_unit(proxy: &Proxy<'_>, bus: &str) -> Result<OffsetUnit> {
-    read_offset_unit_unless_gone(proxy, bus)?.ok_or_else(|| Error::Platform {
-        code: -1,
-        message: format!(
-            "reading Application.ToolkitName of {bus} to choose the text offset unit failed: \
-             the application has gone"
-        ),
-    })
-}
-
-/// [`read_offset_unit`], answering `None` when the application has left the
-/// bus. The event subscription reads every sender's unit; an application
-/// that exits between being found and being asked has no events to
-/// interpret, and must not fail the whole subscription.
+/// application object's `org.a11y.atspi.Application` interface, answering
+/// `None` when the application has left the bus. Shared by the provider's
+/// per-bus cache, which turns `None` into the element's stale error, and the
+/// event subscription, which reads every sender's unit: an application that
+/// exits between being found and being asked has no events to interpret,
+/// and must not fail the whole subscription.
 pub(crate) fn read_offset_unit_unless_gone(
     proxy: &Proxy<'_>,
     bus: &str,
@@ -162,7 +151,6 @@ pub(super) fn declared_count(attrs: &HashMap<String, String>, key: &str) -> Opti
         .map(Count::from_signed)
 }
 
-/// Roles whose elements can sit in a set.
 /// Roles whose object attributes can carry document semantics: heading
 /// level, landmark kind, ARIA role and live-region settings. Live regions sit
 /// on generic sections (`group`) and status / alert elements; a bound keeps
@@ -242,10 +230,41 @@ pub(crate) fn semantics_from_attributes(role: Role, attrs: &HashMap<String, Stri
     }
 }
 
+/// Roles whose elements can sit in a set, and so carry `posinset` /
+/// `setsize` / `level`.
+///
+/// IA2 and UIA read the position for every role. AT-SPI cannot do that for
+/// free: the position lives in the object attributes, which a snapshot
+/// reads only for the roles that need them (`GetAttributes` is a round trip
+/// per element, paid across every tree read). So the gate stays, widened to
+/// every role ARIA lets carry `aria-posinset` and that the backend maps
+/// distinctly:
+///
+/// - `ListItem`: list items and listbox options;
+/// - `TreeItem`;
+/// - `Tab`;
+/// - `RadioButton`: radio buttons and radio menu items;
+/// - `TableRow`: table and tree-grid rows;
+/// - `MenuItem`: menu items, tear-off items included;
+/// - `CheckBox`: check menu items (`menuitemcheckbox`), which AT-SPI folds
+///   into the check-box role;
+/// - `Group`: comments, nested by `level`. A group's attributes are already
+///   read for its document semantics, so this costs nothing.
+///
+/// `Heading` is left out on purpose: its `level` is the heading level
+/// ([`semantics_from_attributes`]), not a depth in a set. ARIA `article`
+/// (a feed member) maps to no distinct role here, so it is not covered.
 fn is_collection_role(role: Role) -> bool {
     matches!(
         role,
-        Role::ListItem | Role::TreeItem | Role::Tab | Role::RadioButton | Role::TableRow
+        Role::ListItem
+            | Role::TreeItem
+            | Role::Tab
+            | Role::RadioButton
+            | Role::TableRow
+            | Role::MenuItem
+            | Role::CheckBox
+            | Role::Group
     )
 }
 
@@ -873,7 +892,10 @@ impl<S: TextSource> TextAccess<S> {
         }
     }
 
-    /// The attribute run at UTF-16 `offset`.
+    /// The attribute run at UTF-16 `offset`. An offset on the second half
+    /// of a surrogate pair answers for the pair, as [`Self::range_at`] does,
+    /// for both toolkits: GTK's code-point conversion would otherwise refuse
+    /// it while Qt's UTF-16 offsets pass it through.
     fn run_at(&self, offset: u32) -> Result<TextRun> {
         let past_end = |length: Option<u32>| Error::InvalidTextRange {
             start: offset,
@@ -887,14 +909,28 @@ impl<S: TextSource> TextAccess<S> {
                 if offset >= len {
                     return Err(past_end(Some(len)));
                 }
-                (to_i32(offset, Some(len))?, None)
+                let at = if self.splits_pair(offset, len)? {
+                    offset - 1
+                } else {
+                    offset
+                };
+                (to_i32(at, Some(len))?, None)
             }
             OffsetUnit::CodePoints => {
                 let p = self.prefix_covering(offset.saturating_add(1))?;
                 if let Some(len) = p.length().filter(|&len| offset >= len) {
                     return Err(past_end(Some(len)));
                 }
-                let n = utf16_to_char_offset(&p.text, offset).map_err(|e| p.fix(e))?;
+                // The prefix holds unit `offset`: a whole one has more than
+                // `offset` units (checked above), a partial one at least
+                // `offset + 1`.
+                let low_half = p
+                    .text
+                    .encode_utf16()
+                    .nth(offset as usize)
+                    .is_some_and(|u| (0xDC00..=0xDFFF).contains(&u));
+                let at = if low_half { offset - 1 } else { offset };
+                let n = utf16_to_char_offset(&p.text, at).map_err(|e| p.fix(e))?;
                 (to_i32(n, p.length())?, Some(p))
             }
         };
@@ -1104,6 +1140,14 @@ impl LinuxProvider {
     }
 
     /// The live object behind `element`, refusing one without `iface`.
+    ///
+    /// On GTK 3 only, the object must also still be attached
+    /// (`ensure_attached`): GTK 3 keeps a destroyed widget's accessible
+    /// answering for 15–20 s (#586), so a text or table read on an old
+    /// handle would otherwise return the dead widget's last contents as if
+    /// they were current. GTK 4, Qt and AccessKit drop the object with the
+    /// widget, so their reads fail on their own and skip the extra round
+    /// trips; the toolkit check is one cached read per application.
     fn with_interface(
         &self,
         element: &ElementData,
@@ -1111,6 +1155,9 @@ impl LinuxProvider {
         action: &str,
     ) -> Result<AccessibleRef> {
         let aref = self.get_cached(element.handle)?;
+        if self.gtk_generation(&aref.bus_name)? == GtkGeneration::Gtk3 {
+            self.ensure_attached(&aref)?;
+        }
         let ifaces = self.get_interfaces(&aref)?;
         let has = match iface {
             "org.a11y.atspi.Table" => ifaces.table,
@@ -1278,8 +1325,11 @@ impl LinuxProvider {
 
     // ── Text ────────────────────────────────────────────────────────
 
-    /// The offset unit of `bus`'s toolkit, cached per bus.
-    pub(super) fn offset_unit(&self, bus: &str) -> Result<OffsetUnit> {
+    /// The offset unit of the toolkit behind `element` (found at `aref`),
+    /// cached per bus. An application that has left the bus fails as stale,
+    /// like every other read of a departed element.
+    fn offset_unit(&self, aref: &AccessibleRef, element: &ElementData) -> Result<OffsetUnit> {
+        let bus = aref.bus_name.as_str();
         if let Some(unit) = self
             .gtk4
             .offset_units
@@ -1290,7 +1340,9 @@ impl LinuxProvider {
             return Ok(*unit);
         }
         let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application")?;
-        let unit = read_offset_unit(&proxy, bus)?;
+        let Some(unit) = read_offset_unit_unless_gone(&proxy, bus)? else {
+            return Err(self.gone(aref, xa11y_core::error::stale_subject(element)));
+        };
         let mut units = self
             .gtk4
             .offset_units
@@ -1307,7 +1359,7 @@ impl LinuxProvider {
 
     fn text_access(&self, element: &ElementData) -> Result<TextAccess<Proxy<'_>>> {
         let aref = self.with_interface(element, "org.a11y.atspi.Text", "text")?;
-        let unit = self.offset_unit(&aref.bus_name)?;
+        let unit = self.offset_unit(&aref, element)?;
         let source = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Text")?;
         Ok(TextAccess { source, unit })
     }
@@ -1560,6 +1612,26 @@ mod tests {
             Some(HeaderKind::Row)
         );
         assert_eq!(header_kind_for(56, "table cell"), None);
+    }
+
+    #[test]
+    fn every_set_member_role_reads_its_position_and_headings_do_not() {
+        for role in [
+            Role::ListItem,
+            Role::TreeItem,
+            Role::Tab,
+            Role::RadioButton,
+            Role::TableRow,
+            Role::MenuItem,
+            Role::CheckBox,
+            Role::Group,
+        ] {
+            assert!(is_collection_role(role), "{role:?}");
+        }
+        // A heading's `level` is its heading level, not a set depth.
+        for role in [Role::Heading, Role::Button, Role::StaticText, Role::Window] {
+            assert!(!is_collection_role(role), "{role:?}");
+        }
     }
 
     #[test]
@@ -1829,6 +1901,24 @@ mod tests {
                     gtk.range_at(offset, unit),
                     &format!("range_at({offset}, {unit:?})"),
                 );
+            }
+            // Runs are cut in native units, so the two toolkits' runs
+            // differ; both must answer (or refuse) the same offsets, and
+            // each answer must hold the character at `offset`.
+            let qt_run = qt.run_at(offset).map(|r| r.range);
+            let gtk_run = gtk.run_at(offset).map(|r| r.range);
+            match (&qt_run, &gtk_run) {
+                (Ok(q), Ok(g)) => {
+                    let ch = qt.range_at(offset, TextUnit::Character).unwrap();
+                    for (who, run) in [("UTF-16", q), ("code points", g)] {
+                        assert!(
+                            run.start <= ch.start && ch.start < run.end,
+                            "run_at({offset}) for {who} is {run:?}, missing {ch:?}"
+                        );
+                    }
+                }
+                (Err(_), Err(_)) => {}
+                _ => panic!("run_at({offset}): UTF-16 {qt_run:?} vs code points {gtk_run:?}"),
             }
             for end in offset..=len + 1 {
                 let range = TextRange { start: offset, end };
