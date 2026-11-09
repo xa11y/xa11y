@@ -239,8 +239,8 @@ pub trait Provider: Send + Sync {
     /// `App::enable_web_accessibility` then waits for the web content to
     /// appear.
     ///
-    /// Returns [`Error::AccessibilityNotEnabled`] when the attribute does not
-    /// read back as set. Returns [`Error::Unsupported`], naming
+    /// Returns [`Error::AccessibilityNotEnabled`] when the app neither accepts
+    /// the write nor reads the attribute back as set. Returns [`Error::Unsupported`], naming
     /// what to do instead, on a platform where the switch is not a client
     /// request; on Linux it is a launch-time flag.
     ///

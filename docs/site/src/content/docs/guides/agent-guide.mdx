@@ -206,9 +206,8 @@ call looked for, what it last observed, and near-miss candidates. Read the
 diagnosis before retrying.
 
 Every failure also carries `delivery`, which says whether a retry is safe.
-`not_delivered` means nothing reached the application: the selector matched
-nothing, an argument was rejected, or a wait timed out before acting. Fix the
-cause and call again. `unknown` means the action was dispatched, or may have
+`not_delivered` means nothing reached the application: the call was refused,
+or it gave up waiting, before it acted. Fix the cause and call again. `unknown` means the action was dispatched, or may have
 been, and the outcome is unconfirmed, so a retry may apply it twice. Read the
 state before retrying. On the command line, a failed `action`, `click`,
 `move`, `drag`, `scroll`, `key`, `type` or `enable-web-accessibility` prints

@@ -408,8 +408,8 @@ Text (offsets are UTF-16 code units: an emoji outside the BMP is two):
   find       the --occurrence-th (0-based) exact match of --find, searched
              within --range when given; `found: false` when there is none
   range-at   the --unit (character, word, line, paragraph) at --offset
-  object-at  the embedded control or link at --offset, as `object` (one line
-             in the form find prints), or null when there is none
+  object-at  the embedded control or link at --offset, as `object` (role,
+             name, value, bounds, ...), or null when there is none
   lines     rendered lines of --range, --limit per page (default {page})
   bounds     screen rectangles of --range, one per rendered line
   runs       formatting runs of --range, --limit per page (default {page})
@@ -3566,10 +3566,12 @@ pub(crate) fn json_without_nulls<T: serde::Serialize>(
     Ok(v)
 }
 
-/// How the CLI's `text object-at` reports the element it found: the same
-/// one-line form `find`, `table` and `relations` print, as a JSON string.
+/// How the CLI's `text object-at` reports the element it found. The rest of
+/// a `text` result is JSON, so the element is too: the same capped,
+/// snake_case encoding MCP returns, without the `ref` a one-shot process has
+/// nothing to resolve against.
 pub(crate) fn text_object_cli(element: &Element) -> serde_json::Value {
-    serde_json::Value::String(format_element_oneline(element))
+    crate::mcp::tools::element_data_json(element, false)
 }
 
 /// Run a `text` operation against `text`, producing the result both surfaces
@@ -7450,14 +7452,10 @@ mod tests {
             .expect("resolves")
             .expect("one table");
         let rendered = text_object_cli(&element);
-        assert_eq!(
-            rendered,
-            serde_json::Value::String(format_element_oneline(&element))
-        );
-        assert!(
-            rendered.as_str().expect("a line").starts_with("table "),
-            "{rendered}"
-        );
+        assert_eq!(rendered["role"], "table", "{rendered}");
+        assert_eq!(rendered["name"], "Prices", "{rendered}");
+        assert!(rendered.get("raw").is_none(), "{rendered}");
+        assert!(rendered.get("ref").is_none(), "{rendered}");
     }
 
     #[test]

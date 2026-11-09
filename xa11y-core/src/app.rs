@@ -697,11 +697,13 @@ impl App {
     /// building the tree costs the app memory and CPU for as long as it runs.
     ///
     /// - **macOS**: sets `AXManualAccessibility` (Electron) on the
-    ///   application element and reads it back. The read-back is the proof
-    ///   that the app took the request, since Chromium can answer the set
-    ///   call with an error even when it succeeds. If it does not read back
-    ///   as set, this returns [`Error::AccessibilityNotEnabled`] naming what
-    ///   the set and the read returned; relaunch such an app with
+    ///   application element and reads it back. The request counts as taken
+    ///   when the write succeeds or the value reads back set, because apps
+    ///   give different evidence: Chromium can answer the write with an error
+    ///   and still read back `true`, and Electron accepts the write and reads
+    ///   back `false`. When neither holds, this returns
+    ///   [`Error::AccessibilityNotEnabled`] naming what the write and the read
+    ///   returned; relaunch such an app with
     ///   `--force-renderer-accessibility`. xa11y never sets
     ///   `AXEnhancedUserInterface` (what VoiceOver sets), which changes the
     ///   app's behaviour for every client. The method does not check that

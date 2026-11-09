@@ -668,9 +668,9 @@ fn tool_definition(name: &str) -> Value {
                  macOS only. The request is never made implicitly. Linux and Windows \
                  return an `unsupported` failure saying what to do instead (on Linux, \
                  relaunch the app with `--force-renderer-accessibility`). On macOS it \
-                 sets `AXManualAccessibility` on the application and reads it back; an \
-                 app where it does not read back as set returns `accessibility_not_enabled` \
-                 naming what the set and the read returned (relaunch such an app with \
+                 sets `AXManualAccessibility` on the application; an app that neither \
+                 accepts the write nor reads it back as set returns \
+                 `accessibility_not_enabled` naming what the write and the read returned (relaunch such an app with \
                  `--force-renderer-accessibility`). `AXEnhancedUserInterface` is never \
                  set. An app that keeps the value but has no web content, such as a native \
                  one, ends in a `timeout` instead. The attribute stays set to true \
@@ -3313,7 +3313,7 @@ pub(super) fn note_center(out: &mut Map<String, Value>, policy: &cli::PointerCen
 /// The caller decides once per result from [`cli::pointer_center`] and, when
 /// it is withheld, says why with [`note_center`] — a node whose `center` is
 /// simply missing would read as an element without bounds (issue #573).
-pub(super) fn element_data_json(data: &crate::ElementData, center: bool) -> Value {
+pub(crate) fn element_data_json(data: &crate::ElementData, center: bool) -> Value {
     let mut node = Map::new();
     node.insert("role".into(), json!(data.role.to_snake_case()));
     insert_text(&mut node, "name", data.name.as_deref());

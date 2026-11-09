@@ -336,7 +336,7 @@ characters.
 | `info` | `length`, `caret`, and the selected ranges | none |
 | `read` | The text of the range, at most `--limit` units (default 4096) | `--range` or `--find`, `--limit` |
 | `find` | The `--occurrence`-th match of `--find`, or `found: false` | `--find`, `--occurrence`, `--range` to search within |
-| `object-at` | The embedded control or link at `--offset` as `object`, one line in the form `find` prints, or `null` when there is none. IA2 only | `--offset` |
+| `object-at` | The embedded control or link at `--offset` as `object` (role, name, value, bounds, in the shape MCP returns, without a `ref`), or `null` when there is none. IA2 only | `--offset` |
 | `range-at` | The `--unit` at `--offset`: `character`, `word`, `line`, or `paragraph` | `--offset`, `--unit` |
 | `lines` | The rendered lines of the range, `--limit` per page (default 100) | `--range` or `--find`, `--limit` |
 | `bounds` | One screen rectangle per rendered line of the range | `--range` or `--find` |

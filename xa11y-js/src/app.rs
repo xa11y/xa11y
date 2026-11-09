@@ -213,8 +213,8 @@ impl App {
     /// never makes it implicitly.
     ///
     /// On macOS it sets `AXManualAccessibility` (Electron) on the
-    /// application element and reads it back, rejecting with
-    /// `AccessibilityNotEnabledError` when it does not read back as set;
+    /// application element, rejecting with `AccessibilityNotEnabledError` when
+    /// the app neither accepts the write nor reads it back as set;
     /// relaunch such an app with `--force-renderer-accessibility`. It never
     /// sets `AXEnhancedUserInterface`. It does not check that the app is
     /// Chromium-based: an app that keeps the value counts as having taken

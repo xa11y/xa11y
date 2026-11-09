@@ -2410,12 +2410,12 @@ fn read_switch(el_ptr: AXUIElementRef, attr_name: &str) -> SwitchReadBack {
 
 /// Ask the application `app` to build its web content's accessibility tree.
 ///
-/// [`WEB_ACCESSIBILITY_ATTR`] is set and then read back; reading back `true`
-/// is the success. The set call's return code is recorded but proves nothing
-/// on its own, since Chromium has answered `kAXErrorNotImplemented` to a set
-/// it carried out. The attribute stays set: it is not restored. When it does
-/// not read back as set, the error names what the set and the read returned
-/// and what to do instead.
+/// [`WEB_ACCESSIBILITY_ATTR`] is set and then read back. Either a successful
+/// write or a `true` read-back is the success, because apps prove it
+/// differently: Chromium has answered `kAXErrorNotImplemented` to a set it
+/// carried out, and Electron accepts the set and reads back `false`. The
+/// attribute stays set: it is not restored. When neither holds, the error
+/// names what the write and the read returned and what to do instead.
 fn enable_web_accessibility_for(app: &ElementData) -> Result<()> {
     const ACTION: &str = "enable_web_accessibility";
     if app.role != Role::Application {
@@ -2443,8 +2443,13 @@ fn enable_web_accessibility_for(app: &ElementData) -> Result<()> {
         &attr,
         core_foundation::boolean::CFBoolean::true_value().as_CFTypeRef(),
     );
+    // One request, two pieces of evidence that the app took it, because apps
+    // disagree on which they give: Chromium can answer the write with an
+    // error and still read back `true`, while Electron accepts the write and
+    // reads back `false`. Either one means the request was taken; neither is
+    // a second mechanism.
     let read = read_switch(app_el.as_ptr(), WEB_ACCESSIBILITY_ATTR);
-    if read == SwitchReadBack::Flag(true) {
+    if set.code == 0 || read == SwitchReadBack::Flag(true) {
         return Ok(());
     }
     let name = app.name.clone().unwrap_or_default();
@@ -2454,12 +2459,13 @@ fn enable_web_accessibility_for(app: &ElementData) -> Result<()> {
     })
 }
 
-/// The guidance of the error `enable_web_accessibility` returns when
-/// [`WEB_ACCESSIBILITY_ATTR`] does not read back as set.
+/// The guidance of the error `enable_web_accessibility` returns when the app
+/// neither accepted the [`WEB_ACCESSIBILITY_ATTR`] write nor reads it back as
+/// set.
 fn web_accessibility_refused(set_code: i32, read: &SwitchReadBack) -> String {
     format!(
-        "{WEB_ACCESSIBILITY_ATTR} did not read back as set (set returned AXError \
-         {set_code}, read back {read}). Electron honours it. Relaunch an app that \
+        "the app refused {WEB_ACCESSIBILITY_ATTR} (the write returned AXError \
+         {set_code}, and it reads back {read}). Electron and Chromium take it. Relaunch an app that \
          does not with --force-renderer-accessibility. xa11y does not set \
          AXEnhancedUserInterface instead, because that changes the app's behaviour \
          for every client."
@@ -7832,7 +7838,7 @@ mod tests {
     #[test]
     fn web_accessibility_refusal_names_the_attempt_and_the_remedy() {
         let message = web_accessibility_refused(-25205, &SwitchReadBack::Absent);
-        assert!(message.starts_with("AXManualAccessibility"), "{message}");
+        assert!(message.contains("AXManualAccessibility"), "{message}");
         assert!(message.contains("AXError -25205"), "{message}");
         assert!(message.contains("no such attribute"), "{message}");
         assert!(

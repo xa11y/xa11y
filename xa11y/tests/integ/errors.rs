@@ -206,8 +206,8 @@ mod tests {
     /// macOS the request is made, and exactly two outcomes are accepted, each
     /// for a stated reason:
     ///
-    /// - `AccessibilityNotEnabled`: `AXManualAccessibility` did not read back
-    ///   as set. The error must name the attribute and the relaunch flag.
+    /// - `AccessibilityNotEnabled`: the app neither accepted the
+    ///   `AXManualAccessibility` write nor reads it back as set. The error must name the attribute and the relaunch flag.
     /// - `Timeout`: the app kept the value, so the request counts as taken,
     ///   but a native app has no `web_area`, so the wait ends with the
     ///   diagnosis "no web_area in the app's tree".
@@ -237,7 +237,7 @@ mod tests {
             Error::Unsupported { feature } => {
                 assert!(feature.contains("UI Automation"), "{feature}");
             }
-            // Outcome 1: the switch did not read back as set.
+            // Outcome 1: the app refused the switch.
             #[cfg(target_os = "macos")]
             Error::AccessibilityNotEnabled { instructions, .. } => {
                 assert!(
