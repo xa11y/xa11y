@@ -73,16 +73,17 @@ element is touched. Narrow it with an attribute filter or pick one with
 `:nth(n)`.
 
 To act on an element you have already read, pass its `ref` instead of a
-selector. Every `tree` node, `find` match, `relations` target, `table` element
-and `text` `object-at` result carries one, such as `c3:17`, and `action`,
+selector. Every `tree` node, `find` match, `windows` window, `relations`
+target, `table` element and `text` `object-at` result carries one, such as `c3:17`, and `action`,
 `text`, `table` and `relations` accept it. A ref names exactly that element and
 acts at once, without the wait. Buttons that share the name "Save" keep
 different refs. When the element is gone or replaced, the call fails with
 `element_stale` and a `stale_reason` instead of finding a similar one. The
 server keeps the refs of its 8 most recent results that returned elements; an
 older ref fails with `ref_expired`. An index past the end of a result the
-server still holds was never issued, and fails with `invalid_arguments`. Elements in
-`windows` results and event targets carry no ref.
+server still holds was never issued, and fails with `invalid_arguments`. Event
+targets from `events_poll` carry no ref: each is a snapshot from when the event
+fired, so find the element again to act on it.
 
 `action` auto-waits. It polls until the selector matches one element that is
 visible and enabled, then acts on that element. The window verbs and
@@ -119,8 +120,8 @@ selections), `read`, `find`, `range-at`, `object-at`, `lines`, `bounds` or
 `object`, with a `ref`, or `null` when there is none. Offsets
 are UTF-16 code units, so an emoji outside the Basic Multilingual Plane counts
 as two. Every range in a result carries its `start`, `end` and `text`. Copy
-those numbers into `select-text` or the next `text` call instead of counting
-characters yourself. A range can also be named by its text: `find` with an
+those numbers into `select-text` (as its `start` and `end`, the same
+spelling) or the next `text` call instead of counting characters yourself. A range can also be named by its text: `find` with an
 optional 0-based `occurrence` selects the match, so `bounds` of
 `find: "Total"` returns that word's rectangle.
 
@@ -146,8 +147,8 @@ page gave it), `url` (a link's target) and `live_region` (`politeness`,
 
 Every result is bounded and reports what it dropped.
 
-- `tree` stops at `max_depth` (default 12) and at a 2,000-node cap, read
-  breadth-first so the top of the tree survives a cut. Its `truncated` field
+- `tree` stops at `max_depth` (default 12) and at `max_nodes` (default and
+  maximum 2,000), read breadth-first so the top of the tree survives a cut. Its `truncated` field
   says which limit cut the result. `detail: ["text"]` adds each element's
   text (`text.content`, within a shared byte budget, so document text no
   action needs is still read), and `detail: ["relations"]` adds `relations`

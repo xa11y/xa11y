@@ -155,6 +155,28 @@ A node whose children were cut ends with a line such as `… 12 more (cut by
 A subtree whose children could not be read shows `<error: …>` in their place
 and the rest of the tree still prints.
 
+`--detail` reads more per element and prints it under the element's line,
+before its children. It takes a comma-separated list of `text`, `formatting`,
+and `relations`, the names the MCP `tree` tool takes as `detail`:
+
+```bash
+xa11y tree --app TextEdit --detail text,relations
+```
+
+```
+text_field "Email" [enabled visible editable]
+  text (15 units): "ada@example.com"
+  labelled_by → static_text "Email address"
+```
+
+`text` adds each element's full text, its length in UTF-16 code units, and
+whether a shared 64 KiB budget cut it. `formatting` adds `text` plus one
+`run [START,END): {attributes}` line per formatting run. `relations` adds one
+`KIND → role "name"` line per target, marked `(outside the tree)` when the
+target was not captured. A read that fails prints `<text error: …>` (or
+`formatting` / `relations`) in its place, and a budget that cut the tree is
+named in the summary line.
+
 The same output is available in-code via `Element.dump()` (and `Element.tree()` for a structured snapshot) in every language binding. See [Find the right selector](/guides/debug-selectors/#read-the-tree-from-code-instead) for examples.
 
 ### `xa11y find`
@@ -219,7 +241,14 @@ Actions that need a value use `--value`:
 xa11y action set-value "text_field[name='Search']" --app Safari --value "hello"
 xa11y action set-numeric-value "slider[name='Volume']" --app Music --value 88
 xa11y action type-text "text_field[name='Message']" --app Slack --value "ship it"
-xa11y action select-text "text_field" --app TextEdit --value "0,5"
+```
+
+`select-text` takes its range as `--range START,END`, the spelling `xa11y
+text` uses, so a range copied from `text` output fits as is. `--value
+START,END` is accepted too, but not together with `--range`:
+
+```bash
+xa11y action select-text "text_field" --app TextEdit --range 0,5
 ```
 
 Window actions use `--at` and `--size` instead:
@@ -268,7 +297,7 @@ separate exit-fullscreen action — on macOS the only absolute exit is the same
 | `set-value` | Set text value (requires `--value`) |
 | `set-numeric-value` | Set numeric value, for sliders and spin buttons (requires `--value N`) |
 | `type-text` | Type text as keystrokes (requires `--value`) |
-| `select-text` | Select a text range (requires `--value START,END`, in UTF-16 code units) |
+| `select-text` | Select a text range (requires `--range START,END` or `--value START,END`, in UTF-16 code units) |
 | `activate` | Bring the window to the foreground and focus it |
 | `minimize` | Minimize the window (leaves fullscreen first on macOS) |
 | `maximize` | Maximize the window (Windows `WindowVisualState_Maximized`; unsupported on macOS) |
@@ -575,9 +604,9 @@ gives it selectors to resolve.
 | `shell` | none |
 | `windows` | `app`, `pid`, `backend`, `limit` |
 | `enable_web_accessibility` | `app`, `pid`, `backend` |
-| `tree` | `app`, `pid`, `shell`, `backend`, `max_depth`, `detail` |
+| `tree` | `app`, `pid`, `shell`, `backend`, `max_depth`, `max_nodes`, `detail` |
 | `find` | `selector`, `app`, `pid`, `shell`, `backend`, `limit`, `stable` |
-| `action` | `action`, `selector` or `ref`, `app`, `pid`, `shell`, `backend`, `value`, `at`, `size` |
+| `action` | `action`, `selector` or `ref`, `app`, `pid`, `shell`, `backend`, `value`, `start`, `end`, `at`, `size` |
 | `text` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `backend`, `start`, `end`, `find`, `occurrence`, `offset`, `unit`, `limit` |
 | `table` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `backend`, `row`, `column`, `limit` |
 | `relations` | `selector` or `ref`, `app`, `pid`, `shell`, `backend`, `kinds`, `limit` |
@@ -594,22 +623,23 @@ gives it selectors to resolve.
 
 `text` and `table` take the operations of [`xa11y text`](#xa11y-text) and
 [`xa11y table`](#xa11y-table) as `op`. `text` spells `--range` as `start` and
-`end`.
+`end`, and so does `action` for `select-text`. `tree` spells `--max-nodes` as
+`max_nodes` and `--detail` as `detail`, an array.
 
 `action` accepts the same verbs as [`xa11y action`](#xa11y-action). `key`
 accepts the same key names as [`xa11y key`](#input-simulation). Selectors are
 the same syntax the library takes; see [Selectors](/reference/selectors/).
 
-Every `tree` node, `find` match, `relations` target, `table` element, and
-`text` `object-at` result carries a `ref` such as `c3:17`. `action`, `text`,
+Every `tree` node, `find` match, `windows` window, `relations` target,
+`table` element, and `text` `object-at` result carries a `ref` such as `c3:17`. `action`, `text`,
 `table` and `relations` take one in place of `selector` (and then no `app`,
 `pid`, `shell` or `backend`), and act on exactly that element. A ref is never
 re-resolved by selector: an element that was removed or replaced fails with
 `element_stale` and a `stale_reason`. The server keeps the refs of its 8 most
 recent results that returned elements, and an older ref fails with
 `ref_expired`. An index past the end of a result the server still holds was
-never issued, and fails with `invalid_arguments`. `windows` results and event
-targets carry no ref. The command line has no refs, because each invocation is
+never issued, and fails with `invalid_arguments`. Event targets carry no ref:
+each is a snapshot from when the event fired. The command line has no refs, because each invocation is
 a new process.
 
 `shell` takes a kind string, is mutually exclusive with `app`, and combines
@@ -698,7 +728,8 @@ reason. With `stable: true`, `find` first
 waits for its one match to stop moving, the same as `find --stable`.
 
 Results are bounded, because each one lands in a model's context window.
-`tree` walks 12 levels by default and never returns more than 2000 nodes;
+`tree` walks 12 levels by default and returns at most `max_nodes` nodes
+(default 2000, which is also the largest value it accepts);
 `find` returns 50 matches by default and never more than 500. `text` reads
 4096 UTF-16 code units by default and never more than 65536, and caps the text
 on each listed range at 256 units. All of them report whether they truncated.

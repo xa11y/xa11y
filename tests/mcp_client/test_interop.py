@@ -413,6 +413,15 @@ def test_the_windows_tool_round_trips_through_a_real_client(run_client):
     assert all(w["role"] for w in structured["windows"]), (
         "a listed window carries at least its role"
     )
+    assert all(w["ref"] for w in structured["windows"]), (
+        "a listed window carries a ref, as `find` matches do"
+    )
+
+
+def test_the_windows_tool_says_its_windows_carry_refs(run_client):
+    description = _tool(run_client, "windows").description
+    assert "carries a `ref`" in description, description
+    assert "without a `ref`" not in description, description
 
 
 def test_the_windows_tool_takes_the_app_and_pid_arguments(run_client):
@@ -503,6 +512,71 @@ def test_a_table_argument_mistake_is_a_fixable_error(run_client):
     assert result.is_error is True
     assert result.structured_content["kind"] == "invalid_arguments"
     assert "--" not in result.structured_content["message"]
+
+
+def test_select_text_takes_the_text_tools_start_and_end(run_client):
+    """`text` reports `start` / `end`, so `action` takes the same spelling.
+
+    A validating client accepts the integer form and the older `value` form,
+    and refuses a negative offset before sending it.
+    """
+    action = _tool(run_client, "action")
+    props = action.input_schema["properties"]
+    for key in ("start", "end"):
+        assert props[key]["type"] == "integer", key
+        assert props[key]["minimum"] == 0, key
+    jsonschema.validate(
+        {"action": "select-text", "selector": "text_field", "start": 0, "end": 5},
+        action.input_schema,
+    )
+    jsonschema.validate(
+        {"action": "select-text", "selector": "text_field", "value": "0,5"},
+        action.input_schema,
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {"action": "select-text", "selector": "text_field", "start": -1, "end": 5},
+            action.input_schema,
+        )
+
+
+@pytest.mark.parametrize(
+    "extra, needle",
+    [
+        ({"start": 0}, "together"),
+        ({"start": 0, "end": 5, "value": "0,5"}, "not both"),
+        ({"start": 5, "end": 0}, "must not exceed"),
+    ],
+)
+def test_a_select_text_range_mistake_is_a_fixable_error(run_client, extra, needle):
+    """Checked before the target resolves, so no desktop is needed."""
+    result = run_client(
+        lambda c: c.call_tool(
+            "action",
+            {"action": "select-text", "selector": "text_field", "app": "X", **extra},
+        )
+    )
+    assert result.is_error is True
+    structured = result.structured_content
+    assert structured["kind"] == "invalid_arguments"
+    assert needle in structured["message"], structured["message"]
+    assert "--" not in structured["message"], "there are no flags on this surface"
+
+
+def test_the_tree_node_cap_is_bounded_in_the_schema_and_the_handler(run_client):
+    schema = _tool(run_client, "tree").input_schema
+    assert schema["properties"]["max_nodes"]["minimum"] == 1
+    assert schema["properties"]["max_nodes"]["maximum"] == 2000
+    jsonschema.validate({"pid": 1, "max_nodes": 50}, schema)
+    for bad in (0, 2001):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({"pid": 1, "max_nodes": bad}, schema)
+        result = run_client(
+            lambda c, bad=bad: c.call_tool("tree", {"app": "X", "max_nodes": bad})
+        )
+        assert result.is_error is True
+        assert result.structured_content["kind"] == "invalid_arguments"
+        assert "between 1 and 2000" in result.structured_content["message"]
 
 
 def test_a_tree_detail_mistake_is_a_fixable_error(run_client):

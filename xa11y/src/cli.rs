@@ -336,8 +336,12 @@ Accessibility tree:
   xa11y shell                               List OS shell surfaces: KIND PID NAME
   xa11y windows [--app NAME | --pid PID]    List top-level windows
   xa11y tree   [TARGET] [--max-nodes N] [--max-depth N]
+                   [--detail text|formatting|relations,...]
                                             Print the accessibility tree, at
-                                            most N nodes (default 2000)
+                                            most N nodes (default 2000).
+                                            --detail adds each element's text,
+                                            formatting runs (implies text)
+                                            or relations under its line
   xa11y find   SELECTOR [TARGET] [-o pretty|bounds|center] [--stable]
                                             Find elements matching a selector.
                                             --stable waits (up to the default
@@ -346,7 +350,7 @@ Accessibility tree:
                                             for at least 750 ms; the selector must
                                             then match exactly one element
   xa11y action ACTION SELECTOR [TARGET] [--value V]
-                                            [--at X,Y] [--size W,H]
+                   [--range START,END] [--at X,Y] [--size W,H]
                                             Perform an action on an element
   xa11y text   OP SELECTOR [TARGET] [--range START,END]
                    [--find TEXT [--occurrence N]] [--offset N [--unit U]]
@@ -470,7 +474,8 @@ Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
   scroll-into-view, increment, decrement,
   set-value (requires --value), type-text (requires --value),
   set-numeric-value (requires --value),
-  select-text (requires --value START,END, in UTF-16 code units),
+  select-text (requires --range START,END, in UTF-16 code units;
+    --value START,END is accepted too, but not both),
   minimize, maximize, enter-fullscreen, restore, close, activate,
   move-to (requires --at X,Y), resize-to (requires --size W,H)
 
@@ -611,6 +616,10 @@ pub(crate) struct Opts {
     pub max_nodes: Option<usize>,
     /// `tree --max-depth N`: the depth limit (default none).
     pub max_depth: Option<usize>,
+    /// `tree --detail K,K`: the extra reads per node, one entry per
+    /// occurrence of the flag (each a comma-separated list), parsed by
+    /// [`parse_tree_detail`].
+    pub detail: Vec<String>,
     // `text` / `table`
     /// `--range START,END`: a text range in UTF-16 code units.
     pub range: Option<String>,
@@ -708,6 +717,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--kinds",
     "--max-nodes",
     "--max-depth",
+    "--detail",
     "--row",
     "--column",
     "--stable",
@@ -762,7 +772,7 @@ const ENABLE_WEB_FLAGS: CommandFlags = CommandFlags {
 };
 const TREE_FLAGS: CommandFlags = CommandFlags {
     command: "tree",
-    flags: target_flags!("--max-nodes", "--max-depth"),
+    flags: target_flags!("--max-nodes", "--max-depth", "--detail"),
     max_positional: Some(0),
     literal_positionals: false,
 };
@@ -774,7 +784,7 @@ const FIND_FLAGS: CommandFlags = CommandFlags {
 };
 const ACTION_FLAGS: CommandFlags = CommandFlags {
     command: "action",
-    flags: target_flags!("--value", "--at", "--size"),
+    flags: target_flags!("--value", "--range", "--at", "--size"),
     max_positional: Some(2),
     literal_positionals: false,
 };
@@ -1083,6 +1093,13 @@ fn parse_opts_checked(
                     "--max-depth",
                     "a 0-based depth",
                 )?);
+            }
+            // Repeatable, like `--annotate`: a second occurrence adds to the
+            // first rather than silently replacing it.
+            "--detail" => {
+                i += 1;
+                opts.detail
+                    .push(flag_value(args, i, "--detail")?.to_string());
             }
             "--row" => {
                 i += 1;
@@ -2111,6 +2128,60 @@ fn cmd_enable_web_accessibility(args: &[String]) -> CliResult<()> {
     Ok(())
 }
 
+/// What `tree` reads per node besides structure: `xa11y tree --detail` and
+/// the MCP `tree` tool's `detail`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TreeDetail {
+    /// Each element's text (`text`, and implied by `formatting`).
+    pub text: bool,
+    /// Each element's formatting runs (`formatting`).
+    pub formatting: bool,
+    /// Each element's relations (`relations`).
+    pub relations: bool,
+}
+
+impl TreeDetail {
+    /// `options` with these reads switched on.
+    pub(crate) fn apply(self, options: CaptureOptions) -> CaptureOptions {
+        options
+            .text(self.text)
+            .formatting(self.formatting)
+            .relations(self.relations)
+    }
+}
+
+/// Every `detail` name `tree` accepts, on both surfaces.
+pub(crate) const TREE_DETAILS: &[&str] = &["text", "formatting", "relations"];
+
+/// Parse `detail` names into a [`TreeDetail`]. `name` spells the argument as
+/// the calling surface does (`--detail`, or MCP's `"detail"`). An unknown
+/// name is a usage error, never ignored: a typo'd `relation` silently reading
+/// no relations would look like an element that has none.
+pub(crate) fn parse_tree_detail<'a>(
+    items: impl IntoIterator<Item = &'a str>,
+    name: &str,
+) -> CliResult<TreeDetail> {
+    let mut detail = TreeDetail::default();
+    for item in items {
+        match item {
+            "text" => detail.text = true,
+            // Runs are offsets into the text, which is meaningless without it.
+            "formatting" => {
+                detail.text = true;
+                detail.formatting = true;
+            }
+            "relations" => detail.relations = true,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown {name} {other:?}; expected one of {}",
+                    TREE_DETAILS.join(", ")
+                )))
+            }
+        }
+    }
+    Ok(detail)
+}
+
 fn cmd_tree(args: &[String]) -> CliResult<()> {
     let (opts, _) = parse_command_opts(&TREE_FLAGS, args)?;
     let max_nodes = opts
@@ -2121,13 +2192,21 @@ fn cmd_tree(args: &[String]) -> CliResult<()> {
             "--max-nodes must be at least 1: the root is a node".into(),
         ));
     }
+    // `--detail text,relations`: each occurrence is a comma-separated list.
+    let detail = parse_tree_detail(
+        opts.detail
+            .iter()
+            .flat_map(|list| list.split(','))
+            .map(str::trim),
+        "--detail",
+    )?;
     let target = resolve_target(&opts)?;
-    let mut options = CaptureOptions::new().max_nodes(max_nodes);
+    let mut options = detail.apply(CaptureOptions::new().max_nodes(max_nodes));
     if let Some(depth) = opts.max_depth {
         options = options.max_depth(depth);
     }
     let cap = target.capture(&options)?;
-    for line in format_capture(&cap) {
+    for line in format_capture(&cap)? {
         println!("{line}");
     }
     Ok(())
@@ -2137,8 +2216,18 @@ fn cmd_tree(args: &[String]) -> CliResult<()> {
 /// with box-drawing connectors. A node whose children were cut ends with a
 /// `… N more` line naming the limit, and a capture cut by a limit ends with a
 /// summary line, so a shortened tree never reads as a complete one.
-pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
-    fn walk(cap: &Capture, index: usize, prefix: &str, is_last: bool, out: &mut Vec<String>) {
+///
+/// What `--detail` read sits under its element's line, before its children,
+/// each line led by the reading's name (`text`, `run`, a relation kind) so
+/// it cannot be mistaken for a child.
+pub(crate) fn format_capture(cap: &Capture) -> CliResult<Vec<String>> {
+    fn walk(
+        cap: &Capture,
+        index: usize,
+        prefix: &str,
+        is_last: bool,
+        out: &mut Vec<String>,
+    ) -> CliResult<()> {
         let node = &cap.nodes[index];
         let is_root = index == 0;
         let connector = match (is_root, is_last) {
@@ -2167,9 +2256,19 @@ pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
         let not_read =
             node.children_truncated && node.children_count.is_none() && errors.is_empty();
         let tail = errors.len() + usize::from(missing > 0 || not_read);
+        // The branch line keeps running past the detail lines when anything
+        // hangs below them.
+        let bar = if node.children.is_empty() && tail == 0 {
+            "  "
+        } else {
+            "│ "
+        };
+        for line in detail_lines(cap, node)? {
+            out.push(format!("{child_prefix}{bar}{line}"));
+        }
         for (i, &child) in node.children.iter().enumerate() {
             let last = i + 1 == node.children.len() && tail == 0;
-            walk(cap, child, &child_prefix, last, out);
+            walk(cap, child, &child_prefix, last, out)?;
         }
         let mut left = tail;
         let mut tail_line = |text: String, out: &mut Vec<String>| {
@@ -2194,10 +2293,11 @@ pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
         } else if not_read {
             tail_line("… children not read (out of time)".into(), out);
         }
+        Ok(())
     }
 
     let mut out = Vec::new();
-    walk(cap, 0, "", true, &mut out);
+    walk(cap, 0, "", true, &mut out)?;
     let t = cap.truncated;
     if t.any() {
         let mut why = Vec::new();
@@ -2210,8 +2310,23 @@ pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
         if t.by_depth {
             why.push("the depth limit (--max-depth)".to_string());
         }
+        if t.by_text {
+            why.push(format!(
+                "the text limit of {} bytes (--detail text)",
+                cap.options.max_text_bytes
+            ));
+        }
+        if t.by_formatting {
+            why.push(format!(
+                "the run limit of {} (--detail formatting)",
+                cap.options.max_runs
+            ));
+        }
         if t.by_time {
             why.push("the time budget".to_string());
+        }
+        if t.by_cancel {
+            why.push("cancellation".to_string());
         }
         out.push(format!(
             "(truncated: {} nodes shown, cut by {})",
@@ -2219,7 +2334,74 @@ pub(crate) fn format_capture(cap: &Capture) -> Vec<String> {
             why.join(" and ")
         ));
     }
-    out
+    Ok(out)
+}
+
+/// The `--detail` readings of one captured node, one line each: its text,
+/// its formatting runs, its relations, and any of those reads that failed.
+/// Empty when no detail was asked for.
+fn detail_lines(cap: &Capture, node: &xa11y_core::CapturedNode) -> CliResult<Vec<String>> {
+    let mut lines = Vec::new();
+    for err in &node.errors {
+        let what = match err.step {
+            CaptureStep::Text => "text",
+            CaptureStep::Formatting => "formatting",
+            CaptureStep::Relations => "relations",
+            // Children and cycles are reported in the child list; identity
+            // only feeds cycle detection and relation resolution, whose
+            // failures are reported there.
+            _ => continue,
+        };
+        lines.push(format!("<{what} error: {}>", err.error));
+    }
+    if let Some(text) = &node.text {
+        // Debug-quoted, so a newline in the text cannot start a line that
+        // reads as another element.
+        lines.push(format!(
+            "text ({} units{}): {:?}",
+            text.length,
+            if text.truncated {
+                ", cut by the text limit"
+            } else {
+                ""
+            },
+            text.content
+        ));
+        if let Some(runs) = &text.runs {
+            for run in runs {
+                lines.push(format!(
+                    "run [{},{}): {}",
+                    run.range.start,
+                    run.range.end,
+                    json_without_nulls("text attributes", &run.attributes)?
+                ));
+            }
+            if text.runs_truncated {
+                lines.push("… more runs (cut by the run limit)".to_string());
+            }
+        }
+    }
+    for (kind, targets) in &node.relations {
+        for target in targets {
+            let described = match target {
+                xa11y_core::RelationTarget::Node(i) => describe_brief(&cap.nodes[*i].element),
+                xa11y_core::RelationTarget::Outside(el) => {
+                    format!("{} (outside the tree)", describe_brief(el))
+                }
+            };
+            lines.push(format!("{} → {described}", kind.to_snake_case()));
+        }
+    }
+    Ok(lines)
+}
+
+/// `role "name"`, the part of an element's line that tells a relation target
+/// apart; the target's full line is in the tree when it was captured.
+fn describe_brief(el: &ElementData) -> String {
+    match &el.name {
+        Some(name) => format!("{} \"{name}\"", el.role.to_snake_case()),
+        None => el.role.to_snake_case().to_string(),
+    }
 }
 
 fn cmd_find(args: &[String]) -> CliResult<()> {
@@ -2526,7 +2708,7 @@ fn cmd_action(args: &[String]) -> CliResult<()> {
     if positional.len() < 2 {
         return Err(CliError::Usage(
             "usage: xa11y action ACTION SELECTOR [--app NAME | --pid PID | --shell KIND] \
-             [--value V] [--at X,Y] [--size W,H]"
+             [--value V] [--range START,END] [--at X,Y] [--size W,H]"
                 .into(),
         ));
     }
@@ -2539,11 +2721,18 @@ fn cmd_action(args: &[String]) -> CliResult<()> {
     // even when the target itself would also be unresolvable — and must not
     // spend an app-resolution / accessibility round-trip first (parse
     // arguments before the first OS call).
+    let range = opts
+        .range
+        .as_deref()
+        .map(|raw| parse_range_flag(raw, "--range"))
+        .transpose()?;
     let action_args = parse_action_args(
         action_name,
         value.as_deref(),
+        range,
         opts.at.as_deref(),
         opts.size.as_deref(),
+        &CLI_ACTION_ARG_NAMES,
     )?;
 
     let target = resolve_target(&opts)?;
@@ -2586,12 +2775,34 @@ pub(crate) const ACTION_NAMES: &[&str] = &[
 
 /// Actions that require a `--value` (MCP: `value`) argument.
 pub(crate) const ACTIONS_REQUIRING_VALUE: &[&str] =
-    &["set-value", "set-numeric-value", "type-text", "select-text"];
+    &["set-value", "set-numeric-value", "type-text"];
+
+/// Actions that require a text range: `--range START,END` (MCP: `start` and
+/// `end`), or the same range as `--value START,END` (MCP: `value`).
+pub(crate) const ACTIONS_REQUIRING_RANGE: &[&str] = &["select-text"];
 
 /// Actions that require a geometry argument: `--at X,Y` (MCP: `at`) for
 /// `move-to`, `--size W,H` (MCP: `size`) for `resize-to`.
 pub(crate) const ACTIONS_REQUIRING_AT: &[&str] = &["move-to"];
 pub(crate) const ACTIONS_REQUIRING_SIZE: &[&str] = &["resize-to"];
+
+/// How a surface spells the action arguments, for usage errors.
+pub(crate) struct ActionArgNames {
+    /// The value argument (`--value`, MCP `"value"`).
+    pub value: &'static str,
+    /// The `select-text` range (`--range`, MCP `"start"`/`"end"`).
+    pub range: &'static str,
+    /// How a caller writes a range in that argument, for the message that
+    /// says one is missing (`--range START,END`, MCP `"start" and "end"`).
+    pub range_form: &'static str,
+}
+
+/// The CLI's flag spellings.
+pub(crate) const CLI_ACTION_ARG_NAMES: ActionArgNames = ActionArgNames {
+    value: "--value",
+    range: "--range",
+    range_form: "--range START,END",
+};
 
 /// Parsed action payload, built up front by [`parse_action_args`] so the
 /// callers can validate it before resolving the target.
@@ -2619,12 +2830,26 @@ pub(crate) struct ActionArgs {
 /// round-trip first. Verbs without a payload ignore `value` / `at` / `size`,
 /// exactly as dispatch ignores them (a stray `--at` on `press` is still not
 /// an error).
+///
+/// `select-text` takes its range either as `range` (CLI `--range START,END`,
+/// MCP integer `start` / `end`, the spelling the `text` command uses) or as
+/// the older `value` string `START,END`. Giving both is refused rather than
+/// one silently winning, and `range` on any other verb is refused: the
+/// argument is new and has no other meaning.
 pub(crate) fn parse_action_args(
     action: &str,
     value: Option<&str>,
+    range: Option<TextRange>,
     at: Option<&str>,
     size: Option<&str>,
+    names: &ActionArgNames,
 ) -> CliResult<ActionArgs> {
+    if range.is_some() && action != "select-text" {
+        return Err(CliError::Usage(format!(
+            "{} applies only to select-text, not {action}",
+            names.range
+        )));
+    }
     let need_value = |verb: &str| -> CliResult<&str> {
         value.ok_or_else(|| CliError::Usage(format!("{verb} requires a value")))
     };
@@ -2637,7 +2862,36 @@ pub(crate) fn parse_action_args(
             // cannot ever succeed.
             args.numeric = Some(parse_numeric_value(need_value(action)?)?);
         }
-        "select-text" => args.range = Some(parse_text_range(need_value(action)?)?),
+        "select-text" => {
+            args.range = Some(match (range, value) {
+                (Some(_), Some(_)) => {
+                    return Err(CliError::Usage(format!(
+                        "select-text takes its range as {} or as {}, not both",
+                        names.range, names.value
+                    )))
+                }
+                (Some(r), None) => {
+                    // Refused here for the same reason `parse_text_range`
+                    // refuses it: the provider's check would only run after
+                    // the auto-wait.
+                    if r.start > r.end {
+                        return Err(CliError::Usage(format!(
+                            "select-text {} start must not exceed end, got {}..{}",
+                            names.range, r.start, r.end
+                        )));
+                    }
+                    (r.start, r.end)
+                }
+                (None, Some(raw)) => parse_text_range(raw)?,
+                (None, None) => {
+                    return Err(CliError::Usage(format!(
+                        "select-text requires a range: {} (or {} as START,END), \
+                         in UTF-16 code units",
+                        names.range_form, names.value
+                    )))
+                }
+            });
+        }
         "move-to" => {
             let raw = at.ok_or_else(|| CliError::Usage(format!("{action} requires --at X,Y")))?;
             let pt = parse_point_arg(raw, "--at")?;
@@ -4877,8 +5131,15 @@ mod tests {
         // `X,Y` cannot burn the timeout or touch the platform (tenet 4's
         // "parse arguments before the first OS call").
         let provider = xa11y_core::mock::build_provider();
-        let err = parse_action_args("move-to", None, Some("10,not-a-number"), None)
-            .expect_err("malformed --at must be refused");
+        let err = parse_action_args(
+            "move-to",
+            None,
+            None,
+            Some("10,not-a-number"),
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect_err("malformed --at must be refused");
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
         assert!(
             provider.actions().is_empty(),
@@ -4892,11 +5153,25 @@ mod tests {
         let provider = xa11y_core::mock::build_provider();
         let app = mock_app(&provider);
         let locator = app.locator("window");
-        let move_args = parse_action_args("move-to", None, Some("10,20"), None)
-            .expect("a valid move-to must parse");
+        let move_args = parse_action_args(
+            "move-to",
+            None,
+            None,
+            Some("10,20"),
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("a valid move-to must parse");
         perform_action(&locator, "move-to", &move_args).expect("a valid move-to must succeed");
-        let resize_args = parse_action_args("resize-to", None, None, Some("800,600"))
-            .expect("a valid resize-to must parse");
+        let resize_args = parse_action_args(
+            "resize-to",
+            None,
+            None,
+            None,
+            Some("800,600"),
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("a valid resize-to must parse");
         perform_action(&locator, "resize-to", &resize_args)
             .expect("a valid resize-to must succeed");
         let actions = provider.actions();
@@ -5826,6 +6101,9 @@ mod tests {
             assert!(ACTION_NAMES.contains(verb), "{verb} is not an action");
         }
         for verb in ACTIONS_REQUIRING_SIZE {
+            assert!(ACTION_NAMES.contains(verb), "{verb} is not an action");
+        }
+        for verb in ACTIONS_REQUIRING_RANGE {
             assert!(ACTION_NAMES.contains(verb), "{verb} is not an action");
         }
     }
@@ -6807,7 +7085,8 @@ mod tests {
     fn the_tree_printer_marks_every_cut() {
         let provider = xa11y_core::mock::build_provider();
         let target = Target::App(mock_app(&provider));
-        let full = format_capture(&target.capture(&CaptureOptions::new()).expect("capture"));
+        let full = format_capture(&target.capture(&CaptureOptions::new()).expect("capture"))
+            .expect("formats");
         assert!(full
             .iter()
             .all(|l| !l.contains("more") && !l.starts_with("(truncated")));
@@ -6818,7 +7097,8 @@ mod tests {
             &target
                 .capture(&CaptureOptions::new().max_nodes(3))
                 .expect("capture"),
-        );
+        )
+        .expect("formats");
         let last = cut.last().expect("lines");
         assert!(
             last.starts_with("(truncated: 3 nodes shown, cut by the node limit of 3"),
@@ -6833,12 +7113,198 @@ mod tests {
             &target
                 .capture(&CaptureOptions::new().max_depth(1))
                 .expect("capture"),
-        );
+        )
+        .expect("formats");
         assert!(
             shallow
                 .iter()
                 .any(|l| l.contains("more (cut by --max-depth)")),
             "{shallow:?}"
+        );
+    }
+
+    #[test]
+    fn tree_detail_parses_like_the_mcp_detail_and_refuses_unknown_names() {
+        let (opts, _) = parse_command_opts(
+            &TREE_FLAGS,
+            &strs(&["--detail", "text,relations", "--detail", "formatting"]),
+        )
+        .expect("flags parse");
+        assert_eq!(opts.detail, ["text,relations", "formatting"]);
+        assert_eq!(
+            parse_tree_detail(["formatting"], "--detail").expect("valid"),
+            TreeDetail {
+                text: true,
+                formatting: true,
+                relations: false
+            },
+            "formatting implies text"
+        );
+        for bad in ["styles", "text,", ""] {
+            let err = cmd_tree(&strs(&["--detail", bad, "--pid", "1"])).expect_err(bad);
+            assert!(matches!(err, CliError::Usage(_)), "{bad}: {err}");
+            assert!(err.to_string().contains("--detail"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_tree_printer_shows_detail_under_its_element() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let target = Target::App(mock_app(&provider));
+        let options = TreeDetail {
+            text: true,
+            formatting: true,
+            relations: false,
+        }
+        .apply(CaptureOptions::new());
+        let lines = format_capture(&target.capture(&options).expect("capture")).expect("formats");
+        let notes = lines
+            .iter()
+            .position(|l| l.contains("text_area \"Notes\""))
+            .unwrap_or_else(|| panic!("no Notes line: {lines:?}"));
+        let text = &lines[notes + 1];
+        assert!(
+            text.ends_with(r#"text (26 units): "Hello 😀 world\nsecond line""#),
+            "the text is one escaped line under its element: {text}"
+        );
+        assert!(lines[notes + 2].contains("run [0,"), "{lines:?}");
+        assert!(
+            lines[notes + 2].contains("\"font_weight\":700"),
+            "{lines:?}"
+        );
+
+        let provider = xa11y_core::mock::build_document_provider();
+        let target = Target::App(mock_app(&provider));
+        let options = TreeDetail {
+            text: false,
+            formatting: false,
+            relations: true,
+        }
+        .apply(CaptureOptions::new());
+        let lines = format_capture(&target.capture(&options).expect("capture")).expect("formats");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.ends_with(r#"labelled_by → static_text "Email address""#)),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_tree_summary_names_a_text_budget_cut() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let target = Target::App(mock_app(&provider));
+        let options = TreeDetail {
+            text: true,
+            formatting: false,
+            relations: false,
+        }
+        .apply(CaptureOptions::new().max_text_bytes(4));
+        let cap = target.capture(&options).expect("capture");
+        assert!(cap.truncated.by_text, "a 4-byte budget cuts the notes");
+        let lines = format_capture(&cap).expect("formats");
+        let last = lines.last().expect("lines");
+        assert!(
+            last.contains("the text limit of 4 bytes (--detail text)"),
+            "{last}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("cut by the text limit):")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn select_text_takes_range_or_value_but_not_both() {
+        let r = |start, end| Some(TextRange { start, end });
+        let ok = parse_action_args(
+            "select-text",
+            None,
+            r(1, 4),
+            None,
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("--range alone");
+        assert_eq!(ok.range, Some((1, 4)));
+        let ok = parse_action_args(
+            "select-text",
+            Some("1,4"),
+            None,
+            None,
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("--value alone");
+        assert_eq!(ok.range, Some((1, 4)));
+        for (value, range, needle) in [
+            (Some("1,4"), r(1, 4), "not both"),
+            (None, r(4, 1), "must not exceed"),
+            (None, None, "requires a range: --range START,END"),
+        ] {
+            let err = parse_action_args(
+                "select-text",
+                value,
+                range,
+                None,
+                None,
+                &CLI_ACTION_ARG_NAMES,
+            )
+            .expect_err(needle);
+            assert!(matches!(err, CliError::Usage(_)), "{err}");
+            assert!(err.to_string().contains(needle), "{err}");
+        }
+        let err = parse_action_args("press", None, r(0, 1), None, None, &CLI_ACTION_ARG_NAMES)
+            .expect_err("range on another verb");
+        assert!(
+            err.to_string()
+                .contains("--range applies only to select-text"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn cli_select_text_range_is_refused_before_the_target_is_resolved() {
+        // `--app` names nothing; a range mistake must still win as exit 2.
+        for args in [
+            &["--range", "0,2", "--value", "0,2"][..],
+            &["--range", "x"][..],
+            &[][..],
+        ] {
+            let mut argv = strs(&["select-text", "text_field", "--app", "NoSuchAppAnywhere"]);
+            argv.extend(strs(args));
+            let err = cmd_action(&argv).expect_err("refused");
+            assert!(matches!(err, CliError::Usage(_)), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn cli_select_text_range_reaches_the_provider() {
+        let provider = xa11y_core::mock::build_table_provider();
+        let app = mock_app(&provider);
+        let args = parse_action_args(
+            "select-text",
+            None,
+            Some(TextRange { start: 0, end: 5 }),
+            None,
+            None,
+            &CLI_ACTION_ARG_NAMES,
+        )
+        .expect("parses");
+        perform_action(
+            &app.locator(r#"text_area[name="Notes"]"#),
+            "select-text",
+            &args,
+        )
+        .expect("select-text by --range");
+        assert!(
+            provider
+                .actions()
+                .iter()
+                .any(|(_, name, data)| name == "set_text_selection"
+                    && data.as_deref() == Some("0..5")),
+            "{:?}",
+            provider.actions()
         );
     }
 
@@ -6963,7 +7429,7 @@ mod tests {
         for op in TEXT_OPS.iter().chain(TABLE_OPS) {
             assert!(help.contains(op), "--help omits {op}");
         }
-        assert!(help.contains("select-text (requires --value START,END, in UTF-16 code units)"));
+        assert!(help.contains("select-text (requires --range START,END, in UTF-16 code units"));
     }
 
     const ALL_COMMAND_FLAGS: [&CommandFlags; 17] = [

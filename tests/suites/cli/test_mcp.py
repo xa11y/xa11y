@@ -463,6 +463,39 @@ def test_select_text_offsets_are_described_as_utf16_units(mcp):
     assert "character offsets" not in value["description"]
 
 
+def test_select_text_takes_start_and_end_like_the_text_tool(mcp):
+    """The `text` tool reports `start` / `end`; `action` takes the same."""
+    props = _tools_by_name(mcp)["action"]["inputSchema"]["properties"]
+    for key in ("start", "end"):
+        assert props[key]["type"] == "integer", props[key]
+        assert props[key]["minimum"] == 0, props[key]
+        assert "UTF-16 code unit" in props[key]["description"], props[key]
+
+
+@pytest.mark.parametrize(
+    "arguments, needle",
+    [
+        ({"action": "select-text", "start": 1}, "together"),
+        ({"action": "select-text", "end": 1}, "together"),
+        ({"action": "select-text", "start": 0, "end": 2, "value": "0,2"}, "not both"),
+        ({"action": "select-text", "start": 5, "end": 2}, "must not exceed"),
+        ({"action": "select-text"}, "requires a range"),
+        ({"action": "press", "start": 0, "end": 2}, "applies only to select-text"),
+        ({"action": "select-text", "start": -1, "end": 2}, "between 0 and"),
+    ],
+)
+def test_select_text_range_mistakes_are_refused_before_any_lookup(
+    mcp, arguments, needle
+):
+    result = mcp.call_tool(
+        "action", {"selector": "text_field", "app": "no-such-app", **arguments}
+    )["result"]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "invalid_arguments", structured
+    assert needle in structured["message"], structured["message"]
+
+
 @pytest.mark.parametrize(
     "arguments, needle",
     [
@@ -515,6 +548,25 @@ RELATION_KINDS = [
 def test_the_tree_tool_offers_its_detail(mcp):
     props = _tools_by_name(mcp)["tree"]["inputSchema"]["properties"]
     assert props["detail"]["items"]["enum"] == ["text", "formatting", "relations"]
+
+
+def test_the_tree_tool_offers_a_bounded_node_cap(mcp):
+    props = _tools_by_name(mcp)["tree"]["inputSchema"]["properties"]
+    assert props["max_nodes"]["minimum"] == 1
+    assert props["max_nodes"]["maximum"] == 2000
+
+
+@pytest.mark.parametrize("max_nodes", [0, 2001, -1])
+def test_a_tree_node_cap_outside_its_bounds_is_refused_before_any_lookup(
+    mcp, max_nodes
+):
+    result = mcp.call_tool("tree", {"app": "no-such-app", "max_nodes": max_nodes})[
+        "result"
+    ]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "invalid_arguments", structured
+    assert "between 1 and 2000" in structured["message"], structured["message"]
 
 
 @pytest.mark.parametrize("detail", [["styles"], "text", [1]])
@@ -827,6 +879,11 @@ def test_windows_lists_the_test_apps_windows(mcp, app_pid, app_name):
     # unnamed egui window), so it must not be required.
     for w in windows:
         assert w["role"], "a listed window always carries a role"
+        assert w["ref"], "a listed window carries a ref, as `find` matches do"
+
+    # The ref names that window: `relations` resolves it without a selector.
+    by_ref = mcp.call_tool("relations", {"ref": windows[0]["ref"]})["result"]
+    assert by_ref["isError"] is False, by_ref["content"]
 
     # The unfiltered listing must contain the same window set; names are
     # matched when present, since the pid filter is not carried in the
@@ -1340,6 +1397,20 @@ def test_tree_is_depth_limited_and_reports_truncation(mcp, app_pid):
     assert root["role"], "every node carries a role"
     for child in root.get("children", []):
         assert "children" not in child, "max_depth=1 stops after direct children"
+
+
+def test_tree_max_nodes_cuts_the_tree_and_reports_its_own_limit(mcp, app_pid):
+    result = mcp.call_tool("tree", {"pid": app_pid, "max_nodes": 3})["result"]
+    assert result["isError"] is False, result["content"]
+    structured = result["structuredContent"]
+    assert structured["truncated"]["node_limit"] == 3, structured["truncated"]
+
+    def count(node):
+        return 1 + sum(count(c) for c in node.get("children", []))
+
+    assert count(structured["tree"]) <= 3
+    if structured["truncated"]["by_node_limit"]:
+        assert '"subtree_truncated": true' in json.dumps(structured["tree"])
 
 
 def test_tree_defaults_to_a_bounded_depth(mcp, app_pid):
@@ -2071,6 +2142,55 @@ def test_usage_errors_exit_two_from_every_launcher(entry_point):
     result = _run(entry_point, "mcp", "--not-a-flag")
     assert result.returncode == 2, result.stderr
     assert "usage error:" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "args, needle",
+    [
+        (["--range", "0,2", "--value", "0,2"], "not both"),
+        (["--range", "5,2"], "must not exceed"),
+        (["--range", "x"], "--range"),
+        ([], "requires a range"),
+    ],
+)
+def test_select_text_range_mistakes_exit_two_before_any_lookup(
+    entry_point, args, needle
+):
+    """`--range` mirrors MCP's `start` / `end`, validated before the app is."""
+    result = _run(
+        entry_point,
+        "action",
+        "select-text",
+        "text_field",
+        "--app",
+        "NoSuchApplicationHere",
+        *args,
+    )
+    assert result.returncode == 2, result.stderr
+    assert needle in result.stderr, result.stderr
+
+
+def test_range_on_another_action_is_a_usage_error(entry_point):
+    result = _run(
+        entry_point,
+        "action",
+        "press",
+        "button",
+        "--app",
+        "NoSuchApplicationHere",
+        "--range",
+        "0,2",
+    )
+    assert result.returncode == 2, result.stderr
+    assert "applies only to select-text" in result.stderr, result.stderr
+
+
+def test_an_unknown_tree_detail_exits_two_before_any_lookup(entry_point):
+    result = _run(
+        entry_point, "tree", "--app", "NoSuchApplicationHere", "--detail", "text,styles"
+    )
+    assert result.returncode == 2, result.stderr
+    assert "styles" in result.stderr and "relations" in result.stderr, result.stderr
 
 
 def test_usage_errors_are_not_double_prefixed(entry_point):

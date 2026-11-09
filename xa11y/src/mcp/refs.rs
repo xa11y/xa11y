@@ -1,7 +1,9 @@
 //! Element refs for the MCP tools (#481).
 //!
 //! MCP is the one surface where a reference must outlive a call: a model
-//! reads a tree, then acts on a node it saw. A `ref` (`c3:17`, node 17 of
+//! reads a tree, then acts on a node it saw. Every element a result returns
+//! carries one, except event targets: an `events_poll` target is a snapshot
+//! from when the event fired, not a node to act on. A `ref` (`c3:17`, node 17 of
 //! capture 3) names exactly that [`Element`], so `action`, `text`, `table`
 //! and `relations` reach that node or fail with `element_stale`. A ref is never
 //! re-resolved by name or selector.
@@ -24,7 +26,7 @@ pub(crate) const MAX_CAPTURES: usize = 8;
 
 /// The results that issue refs, as error messages name them.
 pub(crate) const ISSUERS: &str =
-    "`tree`, `find`, `relations`, `table` and `text` `object-at` results";
+    "`tree`, `find`, `windows`, `relations`, `table` and `text` `object-at` results";
 
 /// The refs of the most recent captures.
 #[derive(Default)]
@@ -213,7 +215,7 @@ mod tests {
         }
         .to_string();
         for msg in [malformed, expired] {
-            for tool in ["tree", "find", "relations", "table", "object-at"] {
+            for tool in ["tree", "find", "windows", "relations", "table", "object-at"] {
                 assert!(msg.contains(tool), "{tool} unnamed in {msg}");
             }
         }
