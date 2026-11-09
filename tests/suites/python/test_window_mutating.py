@@ -34,7 +34,12 @@ import pytest
 
 import xa11y
 
-pytestmark = pytest.mark.window_mutating
+pytestmark = [pytest.mark.window_mutating]
+if sys.platform == "win32":
+    # #670: a blocked native call must leave a per-test traceback, not only
+    # the harness's 900-second suite timeout. Windows has no SIGALRM; the
+    # thread watchdog prints stacks and terminates the stuck test process.
+    pytestmark.append(pytest.mark.timeout(60, method="thread"))
 
 # The marker derives the app identity from XA11Y_TEST_APP at collection time
 # (the ``app_name`` fixture resolves too late for a module-level skipif). Qt
@@ -478,8 +483,9 @@ def test_minimize_and_restore(app: xa11y.App) -> None:
     sys.platform != "win32" or APP not in ("winforms", "wpf", "uwp"),
     reason="minimized-window visibility is asserted on the Microsoft framework cells",
 )
+@pytest.mark.parametrize("_cycle", range(8) if APP == "uwp" else [0])
 def test_controls_of_a_minimized_window_are_not_visible(
-    app: xa11y.App, app_config: dict
+    app: xa11y.App, app_config: dict, _cycle: int
 ) -> None:
     """A button in a minimized window reports ``visible == False``.
 
@@ -501,10 +507,13 @@ def test_controls_of_a_minimized_window_are_not_visible(
     button = app.locator(f'button[name="{app_config["ok_button_name"]}"]')
     assert button.element().visible is True, "precondition: OK is visible before minimizing"
     try:
+        print(f"minimized visibility cycle {_cycle}: minimize", flush=True)
         win.minimize()
+        print(f"minimized visibility cycle {_cycle}: enumerate window", flush=True)
         minimized = _settled_window(
             app, "minimize", lambda w: w.minimized is True, "minimize must report minimized"
         )
+        print(f"minimized visibility cycle {_cycle}: enumerate controls", flush=True)
         still_listed = button.elements()
         assert all(e.visible is False for e in still_listed), (
             "a button in a minimized window must not report visible; got "
@@ -516,6 +525,7 @@ def test_controls_of_a_minimized_window_are_not_visible(
             "a button in a minimized window must say why it is hidden; got "
             f"{[(e.name, e.hidden_reason) for e in still_listed]}"
         )
+        print(f"minimized visibility cycle {_cycle}: restore", flush=True)
         minimized.restore()
         _settled_window(
             app, "minimize", lambda w: w.minimized is False, "restore must report restored"
@@ -1568,6 +1578,19 @@ def test_uwp_suspended_frame_keeps_app_identity(app, tmp_path):
             return marker.exists()
 
         _wait_until(suspended, 30.0, "native package state PES_SUSPENDED")
+        # #670: exercise the transition itself, before waiting for Windows to
+        # detach the CoreWindow. The package cannot answer accessibility calls
+        # here. A genuinely absent subtree or a diagnosed native timeout is
+        # valid; an unbounded COM wait is not.
+        print("suspended UWP: querying controls before CoreWindow detachment", flush=True)
+        started = time.monotonic()
+        try:
+            controls = app.locator('button[name="OK"]').elements()
+        except xa11y.TimeoutError as exc:
+            assert exc.condition or exc.pending, "native timeout must identify the pending read"
+        else:
+            assert all(not control.visible for control in controls)
+        assert time.monotonic() - started < 25, "suspended UWP control read exceeded native bound"
         # Assert the fixture exercises AUMID attribution rather than passing
         # via the normal CoreWindow-child lookup.
         _wait_until(

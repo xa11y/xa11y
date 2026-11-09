@@ -28,7 +28,7 @@
 
 'use strict';
 
-const { test } = require('node:test');
+const { test: nodeTest } = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
@@ -39,6 +39,12 @@ const {
   TimeoutError,
   sleep,
 } = require('./helpers.js');
+
+const { withNativeWatchdog } = require('../../harness/js_native_watchdog.cjs');
+const test = (name, operation) => nodeTest(name, (context) =>
+  process.platform === 'win32'
+    ? withNativeWatchdog(name, () => operation(context))
+    : operation(context));
 
 const WINDOW_STATE_TIMEOUT_MS = appEnv === 'cocoa' ? 15_000 : 5_000;
 
