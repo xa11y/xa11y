@@ -923,10 +923,12 @@ impl Locator {
     /// says which selector and condition it gave up on as well as which call
     /// was pending. Every other error passes through unchanged.
     ///
-    /// The candidate search a "never matched" timeout normally carries is
-    /// skipped here: it reads the same application whose read just hung, so
-    /// it would hang for the diagnosis budget and then report that failure
-    /// instead of candidates.
+    /// A "never matched" timeout still carries its candidates and scope
+    /// snapshot (tenet 6), collected under the short
+    /// [`CUT_DIAGNOSIS_BUDGET`](crate::deadline::CUT_DIAGNOSIS_BUDGET) rather
+    /// than the full diagnosis budget: the read that was cut may mean the
+    /// application is hung, and the wait must still end near its timeout. A
+    /// snapshot read that runs out of time is recorded in the snapshot.
     fn read_failed(
         &self,
         err: Error,
@@ -946,6 +948,9 @@ impl Locator {
         } = &mut timeout
         {
             d.pending = pending;
+            if last.is_none() && !ever_matched {
+                crate::deadline::for_cut_diagnosis(|| self.fill_miss_context(d));
+            }
         }
         timeout
     }
@@ -1568,8 +1573,8 @@ impl Locator {
                 Err(e) => {
                     // A read the deadline cut ends the wait on the previous
                     // poll's observation, which still says whether the
-                    // bounds were moving. Without one, `read_failed` skips
-                    // the candidate search the cut application would stall.
+                    // bounds were moving. Without one, `read_failed` says
+                    // the selector never matched.
                     if let (Some(_), Some(pending)) = (&previous, crate::deadline::pending_of(&e)) {
                         let elapsed = start.elapsed();
                         let mut err = self.diagnose_unstable(

@@ -301,6 +301,17 @@ pub(crate) fn pause(start: std::time::Instant, timeout: Duration, interval: Dura
 /// failing call is therefore its timeout plus this.
 pub(crate) const DIAGNOSIS_BUDGET: Duration = Duration::from_secs(2);
 
+/// How long a wait whose read the deadline cut may spend on its miss
+/// context. The cut read may mean the application is hung, so this is kept
+/// short enough that such a wait still ends near its own timeout.
+pub(crate) const CUT_DIAGNOSIS_BUDGET: Duration = Duration::from_millis(250);
+
+/// Run `f`, a cut wait's miss-context collection, under a fresh
+/// [`CUT_DIAGNOSIS_BUDGET`] deadline that replaces the current one.
+pub(crate) fn for_cut_diagnosis<R>(f: impl FnOnce() -> R) -> R {
+    Deadline::after(CUT_DIAGNOSIS_BUDGET).scope_instead(f)
+}
+
 /// Run `f`, the collection of a failure's diagnosis, under a fresh
 /// [`DIAGNOSIS_BUDGET`] deadline that replaces the current one.
 pub(crate) fn for_diagnosis<R>(f: impl FnOnce() -> R) -> R {
@@ -635,6 +646,9 @@ mod wait_tests {
         let pending = d.pending.as_deref().expect("names the read in flight");
         assert!(pending.contains(" on "), "{pending}");
         assert!(err.to_string().contains("still pending: "), "{err}");
+        // A never-matched timeout keeps its scope snapshot (tenet 6), even
+        // when the snapshot's own reads hang and can only report that.
+        assert!(d.scope.is_some(), "{d:?}");
     }
 
     #[test]
