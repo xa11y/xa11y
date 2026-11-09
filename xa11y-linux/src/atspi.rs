@@ -4231,9 +4231,21 @@ pub(crate) fn role_from_atspi(role_num: u32, role_name: &str) -> Role {
     if role_num == ATSPI_ROLE_UNKNOWN {
         return Role::Unknown;
     }
+    // Number 0 with no name is what a failed role read defaults to. When the
+    // caller's deadline cut that read short, there is no answer to map: the
+    // cut is recorded and core discards the snapshot as the deadline's
+    // expiry, so naming it unmapped would only trip `strict-roles` (#531).
+    if role_num == 0 && role_name.is_empty() && deadline_cut() {
+        return Role::Unknown;
+    }
     xa11y_core::unknown_role(&format!(
         "AT-SPI role number {role_num}, role name {role_name:?}"
     ))
+}
+
+/// Whether this thread's deadline has passed and cut a call short.
+fn deadline_cut() -> bool {
+    xa11y_core::Deadline::current().is_some_and(|d| d.is_expired() && d.cut_short().is_some())
 }
 
 /// Map AT-SPI2 role name to xa11y Role.

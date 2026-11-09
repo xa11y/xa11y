@@ -1566,6 +1566,27 @@ impl Locator {
                 Ok(data) => Some(data),
                 Err(Error::SelectorNotMatched { .. }) => None,
                 Err(e) => {
+                    // A read the deadline cut ends the wait on the previous
+                    // poll's observation, which still says whether the
+                    // bounds were moving. Without one, `read_failed` skips
+                    // the candidate search the cut application would stall.
+                    if let (Some(_), Some(pending)) = (&previous, crate::deadline::pending_of(&e)) {
+                        let elapsed = start.elapsed();
+                        let mut err = self.diagnose_unstable(
+                            elapsed,
+                            previous.as_ref(),
+                            ever_matched,
+                            stability.last_change,
+                            stability.unchanged_for(elapsed),
+                        );
+                        if let Error::Timeout {
+                            diagnosis: Some(d), ..
+                        } = &mut err
+                        {
+                            d.pending = pending;
+                        }
+                        return Err(err);
+                    }
                     return Err(self.read_failed(
                         e,
                         start.elapsed(),
@@ -1573,7 +1594,7 @@ impl Locator {
                         previous.as_ref(),
                         ever_matched,
                         None,
-                    ))
+                    ));
                 }
             };
             if matched.is_some() {
@@ -2948,7 +2969,12 @@ mod tests {
     fn a_stale_handle_during_auto_scroll_is_retried_on_the_next_poll() {
         let (provider, loc) =
             ScrollingProvider::locator(ScrollMode::StaleOnce, HiddenReason::ScrolledOut);
-        loc.press().expect("the second poll's fresh handle scrolls");
+        // Three polls (stale, scroll, observe) must fit, and a scroll's
+        // re-check is no longer granted past the deadline (#531), so
+        // SHORT_WAIT is too tight for a slow runner.
+        loc.with_timeout(Duration::from_secs(2))
+            .press()
+            .expect("the second poll's fresh handle scrolls");
         assert_eq!(provider.calls(), 2);
         assert!(acted(&provider, "press"));
     }
