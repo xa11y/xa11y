@@ -319,13 +319,38 @@ function wrap(fn) {
 
 // ── Patch native classes ────────────────────────────────────────────────────
 
+/**
+ * Turn each `CaptureError.error` of a resolved capture from the native
+ * encoding (`map_err`'s reason: tag, message, structured payload) into the
+ * typed error a rejected call would carry, so a failed read keeps its
+ * diagnosis (`delivery`, `pending`, `reason`, ...) as fields.
+ */
+function typeCaptureErrors(capture) {
+  if (!capture || !Array.isArray(capture.nodes)) return capture;
+  for (const node of capture.nodes) {
+    for (const failure of node.errors ?? []) {
+      if (typeof failure.error === 'string') {
+        failure.error = toTypedError(new Error(failure.error));
+      }
+    }
+  }
+  return capture;
+}
+
 function patchPrototypeMethods(cls) {
   if (!cls || !cls.prototype) return;
   for (const key of Object.getOwnPropertyNames(cls.prototype)) {
     if (key === 'constructor') continue;
     const desc = Object.getOwnPropertyDescriptor(cls.prototype, key);
     if (!desc || !desc.configurable || typeof desc.value !== 'function') continue;
-    Object.defineProperty(cls.prototype, key, { ...desc, value: wrap(desc.value) });
+    let value = wrap(desc.value);
+    if (key === 'capture') {
+      const typed = value;
+      value = function capture(...args) {
+        return typed.apply(this, args).then(typeCaptureErrors);
+      };
+    }
+    Object.defineProperty(cls.prototype, key, { ...desc, value });
   }
 }
 
@@ -950,6 +975,7 @@ const {
   _makeDisconnectedSubscription,
   _makeTestTextEventSubscription,
   _makeTestFloodSubscription,
+  _makeTestCaptureFailureApp,
   _makeTestStaleElements,
   _makeTestDocumentLocator,
 } = native;
@@ -1002,6 +1028,7 @@ module.exports = {
   _makeDisconnectedSubscription,
   _makeTestTextEventSubscription,
   _makeTestFloodSubscription,
+  _makeTestCaptureFailureApp,
   _makeTestStaleElements,
   _makeTestDocumentLocator,
   _makeTestShellSurfaces,

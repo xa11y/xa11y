@@ -89,6 +89,32 @@ pub fn make_test_app(split: Option<bool>, events: Option<bool>) -> napi::Result<
     Ok(App::from_core(app))
 }
 
+/// A mock `App` whose `Navigation` node's children read fails with a timeout
+/// that names the pending call, so a capture records one `CaptureError`.
+/// Used only from the JS unit tests — not part of the public API.
+#[napi(js_name = "_makeTestCaptureFailureApp")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_capture_failure_app() -> napi::Result<App> {
+    let mock = xa11y::mock::build_provider();
+    mock.fail_children(
+        "Navigation",
+        xa11y::Error::timeout(std::time::Duration::from_millis(250)).diagnose(
+            xa11y::Diagnosis::new()
+                .condition("children read")
+                .pending("GetChildren on group \"Navigation\""),
+        ),
+    );
+    let provider = mock as Arc<dyn xa11y::Provider>;
+    let app = xa11y::App::find_with(provider, std::time::Duration::ZERO, |d| {
+        d.name.as_deref() == Some("TestApp")
+    })
+    .map_err(crate::map_err)?;
+    Ok(App::from_core(app))
+}
+
 /// Test handle that pairs a mock `Locator` with read-access to the mock's
 /// action log. Lets JS unit tests assert that an action method dispatched
 /// to the expected provider call. Not part of the public API.

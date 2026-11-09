@@ -9,7 +9,10 @@ const {
   CancelToken,
   Element,
   InvalidActionDataError,
+  TimeoutError,
+  XA11yError,
   _makeTestApp,
+  _makeTestCaptureFailureApp,
   _makeTestDocumentLocator,
   _makeTestTableLocator,
 } = require('../../index.js');
@@ -146,4 +149,22 @@ test('a cancelled token stops the walk', async () => {
   assert.equal(cap.truncated.byTime, false);
   assert.equal(cap.nodes.length, 1);
   assert.equal(cap.stats.childrenReads, 0);
+});
+
+test('a failed read keeps its typed error and diagnosis', async () => {
+  const cap = await _makeTestCaptureFailureApp().capture();
+  const failed = cap.nodes.filter((n) => n.errors.length > 0);
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].element.name, 'Navigation');
+  const [failure] = failed[0].errors;
+  assert.equal(failure.step, 'children');
+  assert.equal(failure.code, 'XA11Y_TIMEOUT');
+  assert.ok(failure.error instanceof TimeoutError);
+  assert.ok(failure.error instanceof XA11yError);
+  assert.equal(failure.error.pending, 'GetChildren on group "Navigation"');
+  assert.equal(failure.error.condition, 'children read');
+  assert.equal(failure.error.elapsedMs, 250);
+  // A bare timeout makes no claim about delivery; core reports 'unknown'.
+  assert.equal(failure.error.delivery, 'unknown');
+  assert.ok(!failure.error.message.includes('\u001f'));
 });

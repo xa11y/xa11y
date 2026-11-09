@@ -212,8 +212,8 @@ pub struct CapturedNode {
     pub relations: Vec<CapturedRelation>,
 }
 
-/// A read of one node that failed.
-#[napi(object)]
+/// A read of one node that failed. The capture continued past it.
+#[napi(object, object_from_js = false)]
 #[derive(Clone)]
 pub struct CaptureError {
     /// `'children'`, `'identity'`, `'text'`, `'formatting'`, `'relations'`
@@ -223,6 +223,14 @@ pub struct CaptureError {
     pub code: String,
     /// The error message.
     pub message: String,
+    /// The error the read raised, as the typed `XA11yError` subclass a
+    /// rejected call would carry, with its structured fields (`delivery`,
+    /// `pending`, `selector`, `reason`, ...). Same as Python's
+    /// `CaptureError.error`.
+    // Crosses as `map_err`'s encoded reason; `index.js` turns it into the
+    // typed error before the capture reaches the caller.
+    #[napi(ts_type = "XA11yError")]
+    pub error: String,
 }
 
 /// An element's text, as far as the capture's text budget reached.
@@ -259,12 +267,21 @@ pub(crate) fn epoch_ms(t: std::time::SystemTime) -> f64 {
     }
 }
 
-/// The `XA11Y_*` code `map_err` gives an error: the tag before its message.
-fn error_code(e: &xa11y::Error) -> String {
+/// One failed read, as JS sees it: `code` is the `XA11Y_*` tag `map_err`
+/// gives the error, and `error` its whole encoded reason (tag, message and
+/// structured payload), which `index.js` turns into the typed error.
+fn capture_error(step: &str, e: &xa11y::Error) -> CaptureError {
     let reason = map_err(e.clone()).reason;
-    reason
+    let code = reason
         .split_once(':')
-        .map_or(reason.clone(), |(code, _)| code.to_string())
+        .map_or(reason.as_str(), |(code, _)| code)
+        .to_string();
+    CaptureError {
+        step: step.to_string(),
+        code,
+        message: e.to_string(),
+        error: reason,
+    }
 }
 
 fn index(i: usize) -> u32 {
@@ -286,11 +303,7 @@ impl From<xa11y::Capture> for Capture {
                 errors: node
                     .errors
                     .iter()
-                    .map(|e| CaptureError {
-                        step: e.step.to_snake_case().to_string(),
-                        code: error_code(&e.error),
-                        message: e.error.to_string(),
-                    })
+                    .map(|e| capture_error(e.step.to_snake_case(), &e.error))
                     .collect(),
                 text: node.text.as_ref().map(|t| CapturedText {
                     content: t.content.clone(),
