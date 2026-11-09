@@ -376,7 +376,10 @@ jobs:
       # Install the package set AND bring up Xvfb + D-Bus + AT-SPI, plus a
       # window manager for egui (its AccessKit bridge only publishes its
       # tree once the window is focused) and for gtk (GTK 4's X11 bounds
-      # and the EWMH window verbs are only exercised under one, issue #487). The daemons persist into the later
+      # and the EWMH window verbs are only exercised under one, issue #487).
+      # Qt also needs a window manager for the positive foreground tests:
+      # without one no frame becomes ACTIVE and foreground lookup polls until
+      # its deadline cuts a final GetState read. The daemons persist into the later
       # harness step, and the action exports XA11Y_A11Y_READY so launch.py
       # skips starting a second copy. Package list:
       # xa11y/setup-a11y repo (apt-packages.txt).
@@ -386,7 +389,7 @@ jobs:
         with:
           package-groups: base gtk electron
           apt-cache-version: "3"
-          setup-window-manager: ${{ matrix.app == 'egui' || matrix.app == 'gtk' }}
+          setup-window-manager: ${{ matrix.app == 'egui' || matrix.app == 'gtk' || matrix.app == 'qt' }}
 
       # ── Build Rust workspace (all workspace test-app binaries) ─────
       - name: Build Rust workspace

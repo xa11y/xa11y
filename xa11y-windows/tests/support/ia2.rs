@@ -7,7 +7,7 @@
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 use windows::core::{IUnknown, Interface, BSTR};
-use windows::Win32::Foundation::{CloseHandle, E_NOINTERFACE, FILETIME, HWND};
+use windows::Win32::Foundation::{CloseHandle, E_FAIL, E_NOINTERFACE, FILETIME, HWND};
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, IDispatch, IServiceProvider, COINIT_APARTMENTTHREADED,
 };
@@ -92,13 +92,29 @@ struct Node {
 impl Node {
     fn role(&self) -> ProbeResult<i32> {
         integer(
-            &unsafe { self.object.get_accRole(&self.child.into()) }
-                .map_err(|e| format!("get_accRole(child={}): {e}", self.child))?,
+            &unsafe { self.object.get_accRole(&self.child.into()) }.map_err(|e| {
+                windows::core::Error::new(
+                    e.code(),
+                    format!(
+                        "get_accRole(object={:p}, child={}): {e}",
+                        self.object.as_raw(),
+                        self.child
+                    ),
+                )
+            })?,
         )
     }
     fn name(&self) -> ProbeResult<String> {
-        let value = unsafe { self.object.get_accName(&self.child.into()) }
-            .map_err(|e| format!("get_accName(child={}): {e}", self.child))?;
+        let value = unsafe { self.object.get_accName(&self.child.into()) }.map_err(|e| {
+            windows::core::Error::new(
+                e.code(),
+                format!(
+                    "get_accName(object={:p}, child={}): {e}",
+                    self.object.as_raw(),
+                    self.child
+                ),
+            )
+        })?;
         if value.len() > 8192 {
             return Err("fixture node name exceeded 8192 UTF-16 units".into());
         }
@@ -106,8 +122,16 @@ impl Node {
     }
     fn state(&self) -> ProbeResult<i32> {
         integer(
-            &unsafe { self.object.get_accState(&self.child.into()) }
-                .map_err(|e| format!("get_accState(child={}): {e}", self.child))?,
+            &unsafe { self.object.get_accState(&self.child.into()) }.map_err(|e| {
+                windows::core::Error::new(
+                    e.code(),
+                    format!(
+                        "get_accState(object={:p}, child={}): {e}",
+                        self.object.as_raw(),
+                        self.child
+                    ),
+                )
+            })?,
         )
     }
 }
@@ -245,6 +269,31 @@ fn identity(ia2: &Accessible2) -> ProbeResult<(i32, HWND)> {
     Ok((id, hwnd))
 }
 
+fn read_during_publication<T>(
+    deadline: Instant,
+    mut read: impl FnMut() -> ProbeResult<T>,
+) -> ProbeResult<T> {
+    let mut attempts = 0;
+    loop {
+        match read() {
+            Err(error)
+                if error
+                    .downcast_ref::<windows::core::Error>()
+                    .is_some_and(|native| native.code() == E_FAIL)
+                    && Instant::now() < deadline =>
+            {
+                attempts += 1;
+                eprintln!("IA2 tab publication: discarded invalidated read {attempts}: {error}; recapturing from the retained browser root");
+                std::thread::sleep(
+                    Duration::from_millis(50)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => return result,
+        }
+    }
+}
+
 pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<serde_json::Value> {
     eprintln!("IA2 identity phase: acquire root pid={pid}, HWND={hwnd:?}, active={active:?}");
     check_window(hwnd, pid)?;
@@ -284,21 +333,29 @@ pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<
     let start = Instant::now();
     let (document, examined) = loop {
         check_window(hwnd, pid)?;
-        let fresh = capture(&root)?;
-        let mut documents = Vec::new();
-        let mut inactive_names = Vec::new();
-        for node in &fresh {
-            // MSAA visible/offscreen are provider facts, not physical hit testing.
-            if node.role()? == 0x0f && node.state()? & (0x8000 | 0x10000) == 0 {
-                let name = node.name()?;
-                if name.contains(inactive) {
-                    inactive_names.push(name.chars().take(256).collect::<String>());
+        // #669: Chrome invalidates old MSAA objects while publishing a tab
+        // switch. Retry only E_FAIL from this read-only publication snapshot,
+        // within the existing five-second deadline, with every retry logged.
+        // The tab's native action above is dispatched exactly once.
+        let (fresh, mut documents, inactive_names) =
+            read_during_publication(start + Duration::from_secs(5), || {
+                let fresh = capture(&root)?;
+                let mut documents = Vec::new();
+                let mut inactive_names = Vec::new();
+                for node in &fresh {
+                    // MSAA visible/offscreen are provider facts, not physical hit testing.
+                    if node.role()? == 0x0f && node.state()? & (0x8000 | 0x10000) == 0 {
+                        let name = node.name()?;
+                        if name.contains(inactive) {
+                            inactive_names.push(name.chars().take(256).collect::<String>());
+                        }
+                        if name.contains(active) {
+                            documents.push(node.clone());
+                        }
+                    }
                 }
-                if name.contains(active) {
-                    documents.push(node.clone());
-                }
-            }
-        }
+                Ok((fresh, documents, inactive_names))
+            })?;
         if documents.len() == 1 && inactive_names.is_empty() {
             break (documents.remove(0), fresh.len());
         }
@@ -351,7 +408,7 @@ pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<
             }
             return Err(format!("expected one active document {active:?} and zero visible inactive documents; active count {}, inactive count {}, inactive names {:?}, elapsed {:?}; observed {:?}", documents.len(), inactive_names.len(), &inactive_names[..inactive_names.len().min(8)], start.elapsed(), observed).into());
         }
-        // Only the declared publication condition is polled. Native failures propagate.
+        // Only the declared publication condition is polled. Other native failures propagate.
         std::thread::sleep(Duration::from_millis(50));
     };
     if document.child != 0 {
@@ -443,6 +500,7 @@ mod tests {
         drops: Arc<AtomicUsize>,
         queries: Arc<AtomicUsize>,
         denied: bool,
+        role_failures: AtomicUsize,
     }
     impl Drop for NativeObject {
         fn drop(&mut self) {
@@ -468,6 +526,13 @@ mod tests {
     }
     impl IAccessible_Impl for NativeObject_Impl {
         fn get_accRole(&self, _child: &VARIANT) -> windows::core::Result<VARIANT> {
+            if self
+                .role_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(E_FAIL.into());
+            }
             Ok(VARIANT::from(0x0f))
         }
         fn get_accName(&self, child: &VARIANT) -> windows::core::Result<BSTR> {
@@ -524,8 +589,59 @@ mod tests {
             drops: drops.clone(),
             queries: queries.clone(),
             denied,
+            role_failures: AtomicUsize::new(0),
         }
         .into()
+    }
+
+    #[test]
+    fn tab_publication_recaptures_after_a_native_role_read_is_invalidated() {
+        let _apartment = Apartment::new().expect("native COM fixture apartment");
+        let drops = Arc::new(AtomicUsize::new(0));
+        let queries = Arc::new(AtomicUsize::new(0));
+        let document: IAccessible = NativeObject {
+            drops: drops.clone(),
+            queries: queries.clone(),
+            denied: false,
+            role_failures: AtomicUsize::new(1),
+        }
+        .into();
+        let mut attempts = 0;
+        let nodes = read_during_publication(Instant::now() + Duration::from_secs(1), || {
+            attempts += 1;
+            capture(&document)
+        })
+        .expect("fresh snapshot after the old role read was invalidated");
+        assert_eq!(attempts, 2);
+        assert_eq!(nodes.len(), 1);
+        drop(nodes);
+        drop(document);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn tab_publication_preserves_other_errors_and_an_expired_budget() {
+        for code in [E_ACCESSDENIED, E_FAIL] {
+            let mut attempts = 0;
+            let deadline = if code == E_FAIL {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(1)
+            };
+            let result: ProbeResult<()> = read_during_publication(deadline, || {
+                attempts += 1;
+                Err(windows::core::Error::new(code, "native publication read").into())
+            });
+            assert_eq!(attempts, 1);
+            assert_eq!(
+                result
+                    .expect_err("terminal native error")
+                    .downcast_ref::<windows::core::Error>()
+                    .expect("preserved HRESULT")
+                    .code(),
+                code
+            );
+        }
     }
 
     #[test]
