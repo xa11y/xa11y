@@ -526,7 +526,9 @@ fn walk(
     options: &CaptureOptions,
 ) -> Result<Capture> {
     let started = SystemTime::now();
-    let deadline = options.timeout.map(|t| Instant::now() + t);
+    // A timeout too large for an `Instant` is no deadline, as in
+    // `Deadline::after`.
+    let deadline = options.timeout.and_then(|t| Instant::now().checked_add(t));
     let cancel = options.cancel.clone();
     let stop = move || -> Option<Stop> {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
@@ -757,7 +759,15 @@ fn read_text(text: &crate::text_api::Text, max_bytes: usize) -> Result<CapturedT
     let mut content = if units == 0 {
         String::new()
     } else {
-        text.read(TextRange::new(0, units)?)?
+        match text.read(TextRange::new(0, units)?) {
+            // A cut short of the end can split a surrogate pair, which the
+            // backend refuses; one unit shorter cannot split it (as in
+            // `find_in_chunks`). A refusal of the whole text is real.
+            Err(Error::InvalidTextRange { .. }) if units < length => {
+                text.read(TextRange::new(0, units - 1)?)?
+            }
+            other => other?,
+        }
     };
     let mut cut = content.len().min(max_bytes);
     while !content.is_char_boundary(cut) {
@@ -1154,6 +1164,33 @@ mod tests {
         assert!(cut.truncated.by_text);
         assert!(short.content.len() <= 8, "{:?}", short.content);
         assert!(short.content.starts_with("Hello"));
+    }
+
+    #[test]
+    fn an_unrepresentable_timeout_is_no_deadline() {
+        // `Instant::now() + Duration::MAX` overflows; the walk must not panic.
+        let cap = app(build_provider())
+            .capture(&CaptureOptions::new().timeout(Duration::MAX))
+            .expect("capture");
+        assert!(!cap.truncated.any(), "{:?}", cap.truncated);
+    }
+
+    #[test]
+    fn a_text_budget_that_splits_a_surrogate_pair_reads_one_unit_less() {
+        // "Hello 😀 …": a 7-byte budget reads 7 units, ending inside the
+        // emoji's surrogate pair, which the backend refuses.
+        let cap = table_app()
+            .capture(&CaptureOptions::new().text(true).max_text_bytes(7))
+            .expect("capture");
+        let notes = cap
+            .nodes
+            .iter()
+            .find(|n| n.name.as_deref() == Some("Notes"))
+            .expect("Notes");
+        assert!(notes.errors.is_empty(), "{:?}", notes.errors);
+        let text = notes.text.as_ref().expect("Notes keeps its text");
+        assert_eq!(text.content, "Hello ");
+        assert!(text.truncated);
     }
     fn table_app() -> App {
         let provider: Arc<dyn Provider> = crate::mock::build_table_provider();
