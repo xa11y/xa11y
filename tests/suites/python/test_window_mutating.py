@@ -483,9 +483,11 @@ def test_minimize_and_restore(app: xa11y.App) -> None:
     sys.platform != "win32" or APP not in ("winforms", "wpf", "uwp"),
     reason="minimized-window visibility is asserted on the Microsoft framework cells",
 )
-@pytest.mark.parametrize("_cycle", range(8) if APP == "uwp" else [0])
+@pytest.mark.parametrize(
+    "minimized_dwell", [0, 0.1, 0.25, 0.5, 1, 2, 5, 8] if APP == "uwp" else [0]
+)
 def test_controls_of_a_minimized_window_are_not_visible(
-    app: xa11y.App, app_config: dict, _cycle: int
+    app: xa11y.App, app_config: dict, minimized_dwell: float
 ) -> None:
     """A button in a minimized window reports ``visible == False``.
 
@@ -507,13 +509,16 @@ def test_controls_of_a_minimized_window_are_not_visible(
     button = app.locator(f'button[name="{app_config["ok_button_name"]}"]')
     assert button.element().visible is True, "precondition: OK is visible before minimizing"
     try:
-        print(f"minimized visibility cycle {_cycle}: minimize", flush=True)
+        print(f"minimized visibility dwell {minimized_dwell}s: minimize", flush=True)
         win.minimize()
-        print(f"minimized visibility cycle {_cycle}: enumerate window", flush=True)
+        print(f"minimized visibility dwell {minimized_dwell}s: enumerate window", flush=True)
         minimized = _settled_window(
             app, "minimize", lambda w: w.minimized is True, "minimize must report minimized"
         )
-        print(f"minimized visibility cycle {_cycle}: enumerate controls", flush=True)
+        # Immediate reads alone miss automatic UWP suspension and CoreWindow
+        # detachment. Cover both the transition and a window left minimized.
+        time.sleep(minimized_dwell)
+        print(f"minimized visibility dwell {minimized_dwell}s: enumerate controls", flush=True)
         still_listed = button.elements()
         assert all(e.visible is False for e in still_listed), (
             "a button in a minimized window must not report visible; got "
@@ -525,7 +530,7 @@ def test_controls_of_a_minimized_window_are_not_visible(
             "a button in a minimized window must say why it is hidden; got "
             f"{[(e.name, e.hidden_reason) for e in still_listed]}"
         )
-        print(f"minimized visibility cycle {_cycle}: restore", flush=True)
+        print(f"minimized visibility dwell {minimized_dwell}s: restore", flush=True)
         minimized.restore()
         _settled_window(
             app, "minimize", lambda w: w.minimized is False, "restore must report restored"
