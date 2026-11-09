@@ -121,7 +121,11 @@ export interface SubscribeOptions {
    * at once rather than never arriving.
    */
   kinds?: EventTypeName[];
-  /** Most events to buffer; the oldest are dropped first. Default 4096. */
+  /**
+   * Most events to buffer; the oldest are dropped first. Default 4096. A
+   * whole number of at least 1: anything else rejects with
+   * `InvalidActionDataError`.
+   */
   buffer?: number;
 }
 

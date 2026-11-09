@@ -10,27 +10,28 @@ use napi::bindgen_prelude::Either;
 
 use crate::element::Element;
 use crate::map_err;
+use crate::types::{checked_count, checked_millis};
 
 /// Options for `capture()`.
 #[napi(object, object_to_js = false)]
 #[derive(Clone, Default)]
 pub struct CaptureOptions {
     /// Deepest level read; the root is depth 0. Omit for no depth limit.
-    pub max_depth: Option<u32>,
+    pub max_depth: Option<f64>,
     /// Most nodes in the capture, the root included. Default 2000.
-    pub max_nodes: Option<u32>,
+    pub max_nodes: Option<f64>,
     /// Most bytes of text, in total, that `'text'` detail reads. Default
     /// 65536.
-    pub max_text_bytes: Option<u32>,
+    pub max_text_bytes: Option<f64>,
     /// Extra reads per node: `'text'`, `'formatting'` (text plus its
     /// attribute runs) and/or `'relations'`.
     pub detail: Option<Vec<String>>,
     /// Time budget in milliseconds: when it runs out, the capture resolves
     /// with what was read and `truncated.byTime`.
-    pub timeout: Option<u32>,
+    pub timeout: Option<f64>,
     /// Most attribute runs, in total, that `'formatting'` detail reads.
     /// Default 4096.
-    pub max_runs: Option<u32>,
+    pub max_runs: Option<f64>,
     /// A token whose `cancel()` stops the walk between nodes; the capture
     /// resolves with what was read and `truncated.byCancel`.
     #[napi(ts_type = "CancelToken")]
@@ -82,20 +83,22 @@ impl CancelToken {
     }
 }
 
-/// Build core options. Runs before any platform call.
+/// Build core options. Runs before any platform call, so a bad number
+/// (negative, fractional, `NaN`) throws before the walk starts.
 pub(crate) fn parse_options(
     options: Option<CaptureOptions>,
 ) -> napi::Result<xa11y::CaptureOptions> {
     let o = options.unwrap_or_default();
     let mut out = xa11y::CaptureOptions::new();
+    let count = |value: f64, what: &str| checked_count(value, what).map_err(map_err);
     if let Some(depth) = o.max_depth {
-        out = out.max_depth(depth as usize);
+        out = out.max_depth(count(depth, "maxDepth")?);
     }
     if let Some(nodes) = o.max_nodes {
-        out = out.max_nodes(nodes as usize);
+        out = out.max_nodes(count(nodes, "maxNodes")?);
     }
     if let Some(bytes) = o.max_text_bytes {
-        out = out.max_text_bytes(bytes as usize);
+        out = out.max_text_bytes(count(bytes, "maxTextBytes")?);
     }
     for name in o.detail.unwrap_or_default() {
         out = match name.as_str() {
@@ -112,10 +115,10 @@ pub(crate) fn parse_options(
         };
     }
     if let Some(ms) = o.timeout {
-        out = out.timeout(std::time::Duration::from_millis(u64::from(ms)));
+        out = out.timeout(checked_millis(ms, "timeout").map_err(map_err)?);
     }
     if let Some(runs) = o.max_runs {
-        out = out.max_runs(runs as usize);
+        out = out.max_runs(count(runs, "maxRuns")?);
     }
     if let Some(token) = o.cancel {
         out = out.cancel(token.inner);

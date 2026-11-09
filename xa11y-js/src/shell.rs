@@ -95,7 +95,7 @@ pub struct ShellSurfaceLookupOptions {
     /// variable. Pass `0` for a single attempt with no waiting. Only "no such
     /// surface yet" triggers a retry; an enumeration failure, and an ambiguous
     /// shell, fail fast.
-    pub timeout: Option<u32>,
+    pub timeout: Option<f64>,
 }
 
 #[napi]
@@ -270,7 +270,7 @@ impl Task for ListShellSurfacesTask {
 
 pub struct ByKindTask {
     kind: xa11y::ShellSurfaceKind,
-    timeout_ms: Option<u32>,
+    timeout_ms: Option<f64>,
 }
 
 impl Task for ByKindTask {

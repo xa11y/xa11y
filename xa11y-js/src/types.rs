@@ -314,6 +314,43 @@ pub fn checked_offset(value: f64, what: &str) -> napi::Result<u32> {
     }
 }
 
+/// Validate a JS-supplied count or size option (`maxNodes`, `buffer`, ...)
+/// as a whole number in `0..=4294967295`.
+///
+/// Same hazard as [`checked_offset`]: napi's `u32` conversion applies
+/// `ToUint32`, so `-1` would arrive as `4294967295` (an unbounded limit) and
+/// `NaN` as `0`. Returned as a core error so callers can either throw it now
+/// or carry it into a task that rejects before its first OS call.
+pub fn checked_count(value: f64, what: &str) -> xa11y::Result<usize> {
+    if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= f64::from(u32::MAX) {
+        Ok(value as usize)
+    } else {
+        Err(xa11y::Error::InvalidActionData {
+            message: format!("{what} must be a whole number in 0..=4294967295, got {value}"),
+        })
+    }
+}
+
+/// The largest whole number of milliseconds a duration option accepts:
+/// `Number.MAX_SAFE_INTEGER`, past which a JS number no longer holds every
+/// integer.
+const MAX_SAFE_MS: f64 = 9_007_199_254_740_991.0;
+
+/// Validate a JS-supplied duration in milliseconds (`timeout`): a finite,
+/// non-negative whole number. `-1` and `NaN` are refused rather than wrapped
+/// by `ToUint32` into ~50 days or no wait at all.
+pub fn checked_millis(value: f64, what: &str) -> xa11y::Result<std::time::Duration> {
+    if value.is_finite() && value.fract() == 0.0 && (0.0..=MAX_SAFE_MS).contains(&value) {
+        Ok(std::time::Duration::from_millis(value as u64))
+    } else {
+        Err(xa11y::Error::InvalidActionData {
+            message: format!(
+                "{what} must be a whole number of milliseconds in 0..=9007199254740991, got {value}"
+            ),
+        })
+    }
+}
+
 /// Parse `selectText`'s polymorphic arguments: `(start, end)` or one range
 /// object. Shared by `Element.selectText` and `Locator.selectText`.
 pub fn parse_select_range(

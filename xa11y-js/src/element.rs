@@ -403,7 +403,7 @@ impl Element {
     pub fn subscribe(
         &self,
         kinds: Option<Vec<String>>,
-        buffer: Option<u32>,
+        buffer: Option<f64>,
     ) -> AsyncTask<SubscribeTask> {
         AsyncTask::new(SubscribeTask {
             data: self.data.clone(),
@@ -927,7 +927,9 @@ impl Task for ParentTask {
 pub struct SubscribeTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
-    options: xa11y::SubscribeOptions,
+    /// The parsed options, or why they were refused: `compute` rejects with
+    /// that before subscribing.
+    options: xa11y::Result<xa11y::SubscribeOptions>,
 }
 
 impl Task for SubscribeTask {
@@ -935,11 +937,18 @@ impl Task for SubscribeTask {
     type JsValue = NativeSubscription;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        xa11y::subscribe_with(&*self.provider, &self.data, &self.options).map_err(map_err)
+        let options = self.options.clone().map_err(map_err)?;
+        xa11y::subscribe_with(&*self.provider, &self.data, &options).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(NativeSubscription::new(output, self.provider.clone()))
+        // `compute` only ran past `?` on `Ok` options.
+        let options = self.options.clone().unwrap_or_default();
+        Ok(NativeSubscription::with_options(
+            output,
+            self.provider.clone(),
+            &options,
+        ))
     }
 }
 

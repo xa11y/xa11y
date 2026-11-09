@@ -45,7 +45,7 @@ pub struct AppLookupOptions {
     /// `XA11Y_DEFAULT_TIMEOUT` environment variable. Pass `0` for a single
     /// attempt with no waiting. Only "not found" errors trigger a retry;
     /// other errors fail fast.
-    pub timeout: Option<u32>,
+    pub timeout: Option<f64>,
 }
 
 /// Options for `App.enableWebAccessibility`.
@@ -56,7 +56,7 @@ pub struct WebAccessibilityOptions {
     /// applies: 5000ms (5 seconds) unless overridden via
     /// `setDefaultTimeout()` or the `XA11Y_DEFAULT_TIMEOUT` environment
     /// variable. Pass `0` to check once.
-    pub timeout: Option<u32>,
+    pub timeout: Option<f64>,
 }
 
 #[napi]
@@ -258,7 +258,7 @@ impl App {
     pub fn subscribe(
         &self,
         kinds: Option<Vec<String>>,
-        buffer: Option<u32>,
+        buffer: Option<f64>,
     ) -> AsyncTask<AppSubscribeTask> {
         AsyncTask::new(AppSubscribeTask {
             data: self.data.clone(),
@@ -334,9 +334,12 @@ impl App {
 /// falls back to the process-wide default (`setDefaultTimeout()` /
 /// `XA11Y_DEFAULT_TIMEOUT`, else 5 seconds) — matching the auto-wait
 /// timeout used elsewhere in the API (e.g. `Locator.waitAttached`).
-pub(crate) fn effective_timeout_ms(timeout_ms: Option<u32>) -> napi::Result<Duration> {
+///
+/// Called first in each task's `compute`, so a negative, fractional or `NaN`
+/// timeout rejects with `InvalidActionDataError` before any platform call.
+pub(crate) fn effective_timeout_ms(timeout_ms: Option<f64>) -> napi::Result<Duration> {
     match timeout_ms {
-        Some(ms) => Ok(Duration::from_millis(ms.into())),
+        Some(ms) => crate::types::checked_millis(ms, "timeout").map_err(map_err),
         None => xa11y::default_timeout().map_err(map_err),
     }
 }
@@ -344,7 +347,7 @@ pub(crate) fn effective_timeout_ms(timeout_ms: Option<u32>) -> napi::Result<Dura
 pub struct FindByNameTask {
     backend: Option<String>,
     name: String,
-    timeout_ms: Option<u32>,
+    timeout_ms: Option<f64>,
 }
 
 impl Task for FindByNameTask {
@@ -368,7 +371,7 @@ impl Task for FindByNameTask {
 pub struct FindByPidTask {
     backend: Option<String>,
     pid: u32,
-    timeout_ms: Option<u32>,
+    timeout_ms: Option<f64>,
 }
 
 impl Task for FindByPidTask {
@@ -391,7 +394,7 @@ impl Task for FindByPidTask {
 
 pub struct ForegroundTask {
     backend: Option<String>,
-    timeout_ms: Option<u32>,
+    timeout_ms: Option<f64>,
 }
 
 impl Task for ForegroundTask {
@@ -483,7 +486,9 @@ impl Task for AppWindowsTask {
 pub struct AppSubscribeTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
-    options: xa11y::SubscribeOptions,
+    /// The parsed options, or why they were refused: `compute` rejects with
+    /// that before subscribing.
+    options: xa11y::Result<xa11y::SubscribeOptions>,
 }
 
 impl Task for AppSubscribeTask {
@@ -491,20 +496,27 @@ impl Task for AppSubscribeTask {
     type JsValue = NativeSubscription;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        let options = self.options.clone().map_err(map_err)?;
         xa11y::App::from_data(self.provider.clone(), self.data.clone())
-            .subscribe_with(&self.options)
+            .subscribe_with(&options)
             .map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(NativeSubscription::new(output, self.provider.clone()))
+        // `compute` only ran past `?` on `Ok` options.
+        let options = self.options.clone().unwrap_or_default();
+        Ok(NativeSubscription::with_options(
+            output,
+            self.provider.clone(),
+            &options,
+        ))
     }
 }
 
 pub struct EnableWebAccessibilityTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
-    timeout_ms: Option<u32>,
+    timeout_ms: Option<f64>,
 }
 
 impl Task for EnableWebAccessibilityTask {

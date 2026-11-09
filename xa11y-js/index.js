@@ -949,6 +949,7 @@ const {
   _makeTestActionProbe,
   _makeDisconnectedSubscription,
   _makeTestTextEventSubscription,
+  _makeTestFloodSubscription,
   _makeTestStaleElements,
   _makeTestDocumentLocator,
 } = native;
@@ -1000,6 +1001,7 @@ module.exports = {
   _makeTestActionProbe,
   _makeDisconnectedSubscription,
   _makeTestTextEventSubscription,
+  _makeTestFloodSubscription,
   _makeTestStaleElements,
   _makeTestDocumentLocator,
   _makeTestShellSurfaces,
