@@ -1385,10 +1385,18 @@ impl X11WindowBackend {
         .copied() else {
             return Ok(None);
         };
-        let title = property_bytes(conn, window, self.atoms.net_wm_name, self.atoms.utf8_string)
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .filter(|title| !title.is_empty());
+        // Callers hold the server grab, so the window cannot vanish between
+        // the pid read above and this one: a failure here is a real one and
+        // is returned, never read as "untitled". An absent property is an
+        // empty value, not an error.
+        let title = String::from_utf8(property_bytes(
+            conn,
+            window,
+            self.atoms.net_wm_name,
+            self.atoms.utf8_string,
+        )?)
+        .ok()
+        .filter(|title| !title.is_empty());
         Ok(Some(X11Candidate {
             window,
             pid,
@@ -1401,7 +1409,10 @@ impl X11WindowBackend {
         let Some(mut candidate) = self.identity(conn, window)? else {
             return Ok(None);
         };
-        candidate.bounds = self.window_bounds(conn, window).ok();
+        // Under the server grab, as for `identity`: a geometry read that
+        // fails is returned rather than leaving the candidate without bounds,
+        // which would quietly change how `choose_candidate` ranks it.
+        candidate.bounds = Some(self.window_bounds(conn, window)?);
         Ok(Some(candidate))
     }
 
