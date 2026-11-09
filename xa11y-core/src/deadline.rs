@@ -533,6 +533,8 @@ mod wait_tests {
         degrade: AtomicBool,
         /// When set, reads answer and only actions hang.
         actions_only: AtomicBool,
+        /// When set (with `hung`), the pre-action liveness check hangs.
+        revalidate_hangs: AtomicBool,
     }
 
     impl HungProvider {
@@ -586,6 +588,12 @@ mod wait_tests {
         fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
             self.inner.get_parent(element)
         }
+        fn revalidate(&self, element: &ElementData) -> Result<()> {
+            if self.revalidate_hangs.load(Ordering::SeqCst) {
+                self.native("revalidate on the target")?;
+            }
+            self.inner.revalidate(element)
+        }
         fn focused_app(&self) -> Result<ElementData> {
             self.inner.focused_app()
         }
@@ -614,6 +622,7 @@ mod wait_tests {
             as_platform: AtomicBool::new(false),
             degrade: AtomicBool::new(false),
             actions_only: AtomicBool::new(false),
+            revalidate_hangs: AtomicBool::new(false),
         })
     }
 
@@ -704,6 +713,31 @@ mod wait_tests {
             .as_deref()
             .is_some_and(|o| o.starts_with("the platform reported: ")
                 && o.contains("press on the target failed")));
+    }
+
+    #[test]
+    fn a_cut_liveness_check_is_a_timeout_that_dispatched_nothing() {
+        for as_platform in [false, true] {
+            let p = provider(false);
+            let loc = Locator::new(p.clone(), None, r#"button[name="Back"]"#).with_timeout(BUDGET);
+            loc.element().expect("resolves");
+            // Only the check before the press hangs.
+            p.hung.store(true, Ordering::SeqCst);
+            p.as_platform.store(as_platform, Ordering::SeqCst);
+            p.actions_only.store(true, Ordering::SeqCst);
+            p.revalidate_hangs.store(true, Ordering::SeqCst);
+            let err = loc.press().expect_err("the check hangs");
+            assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+            assert_eq!(err.delivery(), crate::Delivery::NotDelivered, "{err:?}");
+            assert_eq!(
+                err.diagnosis().and_then(|d| d.pending.as_deref()),
+                Some("revalidate on the target")
+            );
+            assert!(
+                !p.inner.actions().iter().any(|a| a.1 == "press"),
+                "nothing was dispatched"
+            );
+        }
     }
 
     #[test]
