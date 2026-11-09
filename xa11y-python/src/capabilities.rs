@@ -79,6 +79,11 @@ pub(crate) struct Capabilities {
 
 #[pymethods]
 impl Capabilities {
+    /// The accessibility source described.
+    #[getter]
+    fn backend(&self) -> &'static str {
+        self.inner.backend
+    }
     /// Every feature name the table knows, in table order.
     #[staticmethod]
     fn names() -> Vec<&'static str> {
@@ -209,15 +214,17 @@ impl CapabilityIter {
 /// ``platform`` (``"linux"``, ``"macos"``, ``"windows"``) to describe another
 /// one, and ``os_version`` to narrow it to an OS release.
 #[pyfunction]
-#[pyo3(signature = (platform=None, os_version=None))]
+#[pyo3(signature = (platform=None, os_version=None, *, backend=None))]
 pub(crate) fn capabilities(
     platform: Option<&str>,
     os_version: Option<&str>,
+    backend: Option<&str>,
 ) -> PyResult<Capabilities> {
     let platform = platform
         .map(xa11y::Platform::parse)
         .transpose()
         .map_err(to_py_err)?;
-    let inner = xa11y::capabilities_with(platform, os_version).map_err(to_py_err)?;
+    let inner =
+        xa11y::capabilities_for_backend(platform, os_version, backend).map_err(to_py_err)?;
     Ok(Capabilities { inner })
 }

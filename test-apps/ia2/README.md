@@ -1,11 +1,10 @@
 # Private IA2 conformance fixture
 
-This is stage one of [#483](https://github.com/xa11y/xa11y/issues/483), not a
-public accessibility provider. UIA remains the default. The probe never falls
-back to UIA or sends keyboard/pointer input. The owned fixture orchestration
-uses a fresh browser profile; it never selects an existing user's browser.
+This fixture covers the explicit Windows MSAA/IAccessible2 provider for
+[#483](https://github.com/xa11y/xa11y/issues/483). UIA remains the default.
+The tests use a fresh owned browser profile, never an existing user's browser.
 The native executable also accepts an explicit HWND for manual diagnostics.
-No rich-document support or Firefox compatibility is claimed.
+Firefox and other toolkit compatibility are unverified.
 
 The Windows CI job builds `xa11y-windows/examples/ia2_probe.rs` and runs its
 ignored `owned_browser_ia2_identity` test. Python requires `pywin32` for the
@@ -54,7 +53,9 @@ For each tab, the separate native probe:
 5. Resolves the negative ID through Chromium's signed `get_accChild` mechanism
    and checks that it denotes the same object, rather than a positive ordinal.
 
-The walk fails beyond 2048 nodes, depth 32, or a name of 8192 UTF-16 units.
+The identity walk stops at document objects and fails beyond 2048 nodes,
+depth 32, or a name of 8192 UTF-16 units. Document descendants can be detached
+during a tab switch; identity discovery never needs to traverse them.
 It reports only bounded fixture identity, not a reusable document tree.
 The Python owner kills each probe subprocess after 30 seconds, including a
 hung COM call. This is process containment for this test: it does **not** prove
@@ -67,8 +68,17 @@ IUnknown lifetime, invalid child counts and signed child-ID separation.
 The private ABI follows the complete MSAA/IDispatch/IUnknown prefix and pinned
 [official IDL](https://github.com/LinuxA11y/IAccessible2/tree/c9ae003d9c85eb707716928de97e055f5b77189c/api).
 
-Still required by #483: shared semantics/relations, text ranges and offset
-units, formatting and embedded objects, tables, actionable capture lifetimes,
-explicit backend selection across bindings/CLI/MCP, provider timeout policy,
-removed/hung/inaccessible fixtures, and tested browser/version capability
-documentation. This fixture is evidence for discovery and identity only.
+The rich probe covers shared heading/landmark/live-region attributes,
+relations, link URLs, identity equality, bounded capture and hypertext embedded
+objects alongside text ranges, caret/selection, formatting and tables. Its
+Python/JS/CLI/MCP consumers select IA2 explicitly while the process default
+stays UIA. Chrome 156.0.8078.80 on Windows passes locally; CI records its own
+version in the fixture output. Only Chrome has real evidence. Text2, Firefox,
+other toolkits remain unverified. The rich fixture also pauses only its
+proved browser owner with `DebugActiveProcess`, asserts a native request
+returns at the five-second bound and refuses further requests, then detaches
+the debugger before closing its Job Object. COM queue and ownership tests
+remain hermetic and do not establish browser parity.
+
+IA2 events and native window operations are intentionally unsupported. The
+source-specific generated capability table documents every shared feature.

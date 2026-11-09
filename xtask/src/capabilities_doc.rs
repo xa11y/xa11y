@@ -57,14 +57,19 @@ fn answer(c: &Capability) -> String {
 
 /// The generated block, markers included.
 pub fn render() -> Result<String, String> {
-    let tables: Vec<Capabilities> = Platform::ALL
+    let mut tables: Vec<Capabilities> = Platform::ALL
         .iter()
         .map(|p| Capabilities::for_platform(*p, None).map_err(|e| e.to_string()))
         .collect::<Result<_, _>>()?;
+    tables.push(
+        Capabilities::for_backend(Platform::Windows, None, "ia2").map_err(|e| e.to_string())?,
+    );
     let mut out = String::new();
     out.push_str(BEGIN);
-    out.push_str("\n\n| Feature | What it is | Linux (AT-SPI) | macOS | Windows (UIA) |\n");
-    out.push_str("| --- | --- | --- | --- | --- |\n");
+    out.push_str(
+        "\n\n| Feature | What it is | Linux (AT-SPI) | macOS | Windows (UIA) | Windows (IA2) |\n",
+    );
+    out.push_str("| --- | --- | --- | --- | --- | --- |\n");
     let first = &tables[0];
     for (i, feature) in first.entries().iter().enumerate() {
         out.push_str(&format!(

@@ -71,3 +71,15 @@ test('an OS version is recorded', () => {
   const caps = capabilities({ platform: 'windows', osVersion: '10.0.19045' });
   assert.equal(caps.osVersion, '10.0.19045');
 });
+
+
+test('explicit IA2 describes its own capabilities', () => {
+  const caps = capabilities({ platform: 'windows', backend: 'ia2' });
+  assert.equal(caps.backend, 'ia2');
+  assert.equal(caps.support('text:object_at'), 'supported');
+  assert.equal(caps.support('event:focus_changed'), 'unsupported');
+  assert.equal(caps.support('relation:controlled_by'), 'supported');
+  for (const platform of ['linux', 'macos']) {
+    assert.throws(() => capabilities({ platform, backend: 'ia2' }), /backend.*ia2/);
+  }
+});

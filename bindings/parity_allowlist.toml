@@ -468,6 +468,7 @@ reason = "Both bindings surface the annotation legend on their Screenshot class 
 rust_only = [
     { method = "Element::identity", reason = "Identity crosses as Element.__eq__ / __hash__ (and same_as); the NodeIdentity value is opaque and not a binding class." },
     { method = "Capabilities::current", reason = "Folded into the module function capabilities(platform=None, os_version=None): with no arguments it is current(). One name per operation (AGENTS.md: options fold into the primary verb)." },
+    { method = "Capabilities::for_backend", reason = "Folded into capabilities backend option on both bindings." },
     { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities(platform, os_version): passing a platform or version is for_platform(). One name per operation." },
     { method = "Text::find_with", reason = "FindOptions folds into find()'s keyword-only occurrence / within parameters (AGENTS.md: options structs fold into the primary verb)." },
     # App: explicit-provider plumbing. The binding uses the global singleton
@@ -566,6 +567,7 @@ python_only = [
 rust_only = [
     { method = "Element::identity", reason = "Identity crosses as Element.sameAs; the NodeIdentity value is opaque and not a binding class." },
     { method = "Capabilities::current", reason = "Folded into the module function capabilities(options?): with no options it is current(). One name per operation (AGENTS.md: options fold into the primary verb)." },
+    { method = "Capabilities::for_backend", reason = "Folded into capabilities backend option on both bindings." },
     { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities({ platform, osVersion }). One name per operation." },
     { method = "Text::find_with", reason = "FindOptions folds into find()'s options object ({ occurrence, within }) (AGENTS.md: options structs fold into the primary verb)." },
     { method = "App::by_name_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },

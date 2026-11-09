@@ -517,6 +517,14 @@ impl Text {
             .map_err(to_py_err)?;
         Ok(found.map(TextRange::from))
     }
+    /// Live embedded object or link at a UTF-16 offset; None for plain text.
+    fn object_at(&self, py: Python<'_>, offset: u32) -> PyResult<Option<Py<Element>>> {
+        let t = self.inner.clone();
+        let object = py.detach(move || t.object_at(offset)).map_err(to_py_err)?;
+        object
+            .map(|e| make_py_element(py, e.data(), e.provider().clone()))
+            .transpose()
+    }
     /// The ``unit`` (``"character"``, ``"word"``, ``"line"``,
     /// ``"paragraph"``) containing ``offset``. ``"line"`` is the rendered line.
     fn range_at(&self, py: Python<'_>, offset: u32, unit: &str) -> PyResult<TextRange> {

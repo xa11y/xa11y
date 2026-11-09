@@ -311,7 +311,9 @@ mod tests {
             assert_eq!(entry.tag, format!("{letter}{}", entry.index));
         }
 
-        // Numbering is per group and 1-based, with no gaps.
+        // Indices preserve the selector's match positions. Off-screen or
+        // otherwise undrawable matches are in `omitted`, so drawn tags can
+        // have gaps (for example A4 is still button:nth(4), never A1).
         for group in [1_usize, 2] {
             let indices: Vec<usize> = annotated
                 .legend
@@ -319,11 +321,23 @@ mod tests {
                 .filter(|e| e.group == group)
                 .map(|e| e.index)
                 .collect();
-            assert_eq!(
-                indices,
-                (1..=indices.len()).collect::<Vec<_>>(),
-                "group {group} numbering"
+            assert!(indices.iter().all(|i| *i > 0), "group {group} is 1-based");
+            assert!(
+                indices.windows(2).all(|w| w[0] < w[1]),
+                "group {group} stays in match order"
             );
+            for entry in annotated.legend.iter().filter(|e| e.group == group) {
+                let matched = app
+                    .locator(&entry.selector)
+                    .element()
+                    .expect("drawn selector resolves");
+                assert_eq!(
+                    matched.name, entry.name,
+                    "{} preserves its original match",
+                    entry.tag
+                );
+                assert_eq!(matched.role.to_snake_case(), entry.role);
+            }
         }
     }
 

@@ -75,17 +75,24 @@ struct Node {
 }
 impl Node {
     fn role(&self) -> ProbeResult<i32> {
-        integer(&unsafe { self.object.get_accRole(&self.child.into())? })
+        integer(
+            &unsafe { self.object.get_accRole(&self.child.into()) }
+                .map_err(|e| format!("get_accRole(child={}): {e}", self.child))?,
+        )
     }
     fn name(&self) -> ProbeResult<String> {
-        let value = unsafe { self.object.get_accName(&self.child.into())? };
+        let value = unsafe { self.object.get_accName(&self.child.into()) }
+            .map_err(|e| format!("get_accName(child={}): {e}", self.child))?;
         if value.len() > 8192 {
             return Err("fixture node name exceeded 8192 UTF-16 units".into());
         }
         Ok(value.to_string())
     }
     fn state(&self) -> ProbeResult<i32> {
-        integer(&unsafe { self.object.get_accState(&self.child.into())? })
+        integer(
+            &unsafe { self.object.get_accState(&self.child.into()) }
+                .map_err(|e| format!("get_accState(child={}): {e}", self.child))?,
+        )
     }
 }
 
@@ -136,8 +143,16 @@ fn capture(root: &IAccessible) -> ProbeResult<Vec<Node>> {
         if nodes.len() >= 2048 || depth > 32 {
             return Err("fixture walk exceeded 2048 nodes / depth 32".into());
         }
-        if node.child == 0 {
-            let count = usize::try_from(unsafe { node.object.accChildCount()? })?;
+        // Identity conformance needs the browser chrome and document objects,
+        // never document descendants. Switching tabs invalidates descendants
+        // of the old document while Chrome publishes the new tree. Traversing
+        // those unrelated objects raced their removal and produced E_FAIL on
+        // main. Stop at the document boundary; the rich probe covers content.
+        if node.child == 0 && node.role()? != 0x0f {
+            let count = usize::try_from(
+                unsafe { node.object.accChildCount() }
+                    .map_err(|e| format!("accChildCount at depth {depth}: {e}"))?,
+            )?;
             if count > 2048 - nodes.len() - pending.len() - 1 {
                 return Err(format!("unbounded remote child count {count}").into());
             }
@@ -412,6 +427,9 @@ mod tests {
         }
     }
     impl IAccessible_Impl for NativeObject_Impl {
+        fn get_accRole(&self, _child: &VARIANT) -> windows::core::Result<VARIANT> {
+            Ok(VARIANT::from(0x0f))
+        }
         fn get_accName(&self, child: &VARIANT) -> windows::core::Result<BSTR> {
             // Goes through the real SDK-generated COM trampoline. The [in]
             // by-value VARIANT is borrowed, and the returned BSTR is a copy.
@@ -423,7 +441,7 @@ mod tests {
             fn get_accChild(child:&VARIANT) -> IDispatch;
             fn get_accValue(child:&VARIANT) -> BSTR;
             fn get_accDescription(child:&VARIANT) -> BSTR;
-            fn get_accRole(child:&VARIANT) -> VARIANT;
+
             fn get_accState(child:&VARIANT) -> VARIANT;
             fn get_accHelp(child:&VARIANT) -> BSTR;
             fn get_accHelpTopic(file:*mut BSTR, child:&VARIANT) -> i32;
@@ -468,6 +486,21 @@ mod tests {
             denied,
         }
         .into()
+    }
+
+    #[test]
+    fn identity_capture_does_not_read_document_descendants() {
+        let _apartment = Apartment::new().unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let queries = Arc::new(AtomicUsize::new(0));
+        // Its accChildCount deliberately fails: the identity probe must not
+        // depend on content publication or touch descendants of an old tab.
+        let document = object(&drops, &queries, false);
+        let nodes = capture(&document).expect("document identity needs no child read");
+        assert_eq!(nodes.len(), 1);
+        drop(nodes);
+        drop(document);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Explicit MSAA/IA2 source. UIA is never consulted by this provider.
 pub(super) mod abi;
 mod rich;
+mod semantics;
 use abi::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,6 +129,33 @@ fn generation(pid: u32) -> Result<u64> {
     }
     Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
 }
+fn process_name(pid: u32) -> Result<String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
+    let handle =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.map_err(native)?;
+    let mut buf = vec![0u16; 32768];
+    let mut size = buf.len() as u32;
+    let read = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
+    };
+    let close = unsafe { CloseHandle(handle) };
+    read.map_err(native)?;
+    close.map_err(native)?;
+    let path = String::from_utf16(&buf[..size as usize])
+        .map_err(|e| platform(format!("process image path: {e}")))?;
+    std::path::Path::new(&path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| platform("IA2 application process image has no UTF-8 file stem"))
+}
+
 impl Owner {
     fn validate(&self) -> Result<()> {
         let hwnd = HWND(self.hwnd as _);
@@ -426,11 +454,17 @@ impl State {
         if e.raw.get("accessibility_backend").and_then(|v| v.as_str()) != Some("ia2") {
             return Err(stale());
         }
-        let (time, entry) = self.entries.get(&e.handle).ok_or_else(stale)?;
+        let evicted = || {
+            Error::stale(
+                xa11y_core::StaleReason::Evicted,
+                format!("IA2 handle {} is no longer retained", e.handle),
+            )
+        };
+        let (time, entry) = self.entries.get(&e.handle).ok_or_else(evicted)?;
         if time.elapsed() > RETENTION {
             self.entries.remove(&e.handle);
             self.order.retain(|id| *id != e.handle);
-            return Err(stale());
+            return Err(evicted());
         }
         let entry = entry.clone();
         match &entry {
@@ -504,7 +538,11 @@ impl State {
         owner.validate()?;
         let mut title = [0u16; 1024];
         let n = unsafe { GetWindowTextW(HWND(owner.hwnd as _), &mut title) };
-        let name = String::from_utf16_lossy(&title[..n.max(0) as usize]);
+        let name = if app {
+            process_name(owner.pid)?
+        } else {
+            String::from_utf16_lossy(&title[..n.max(0) as usize])
+        };
         let role = if app { Role::Application } else { Role::Window };
         let entry = if app {
             Entry::App(owner.clone())
@@ -581,6 +619,42 @@ impl State {
             raw.insert("ia2_text2".into(), text2.into());
         }
         let (table, cell) = rich::metadata(&node, role_id)?;
+        let attrs = semantics::object_attributes(&node)?;
+        let mut ia2_role = role_id;
+        let mut ia2_states = 0;
+        if let Some(a) = &node.ia2 {
+            unsafe {
+                (a.vtable().role)(a.as_raw(), &mut ia2_role)
+                    .ok()
+                    .map_err(native)?;
+                (a.vtable().states)(a.as_raw(), &mut ia2_states)
+                    .ok()
+                    .map_err(native)?;
+            }
+        }
+        let link_url = if role == Role::Link {
+            if let Some(a) = &node.ia2 {
+                if let Some(link) = capability::<AccessibleHyperlink>(a)? {
+                    let mut target = VARIANT::default();
+                    unsafe {
+                        (link.vtable().anchorTarget)(link.as_raw(), 0, &mut target)
+                            .ok()
+                            .map_err(native)?;
+                    }
+                    if target.vt() == windows::Win32::System::Variant::VT_BSTR {
+                        bstr(BSTR::try_from(&target))?
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut actions = Vec::new();
         if node.identity.is_some() {
             if action.is_some() {
@@ -595,7 +669,7 @@ impl State {
         }
         let owner = node.owner.clone();
         let handle = self.retain(Entry::Node(node));
-        Ok(data(
+        let mut result = data(
             Snapshot {
                 role,
                 name,
@@ -610,7 +684,16 @@ impl State {
             states,
             &owner,
             handle,
-        ))
+        );
+        semantics::apply(&mut result, &attrs, ia2_role)?;
+        result.link_url = link_url;
+        result.states.required = ia2_states & 0x800 != 0;
+        result.states.modal = ia2_states & 0x100 != 0;
+        // IA2 editable means a caret/text interface, even on read-only fields.
+        // The shared flag promises writes, so preserve MSAA's READONLY bit.
+        result.states.editable |= ia2_states & 0x8 != 0 && states & 0x40 == 0;
+        result.raw.insert("ia2_states".into(), ia2_states.into());
+        Ok(result)
     }
 
     fn children(&mut self, e: Option<ElementData>) -> Result<Vec<ElementData>> {
@@ -997,6 +1080,56 @@ impl Ia2Provider {
 const PENDING: &str = "an MSAA/IA2 request on the IA2 worker thread";
 
 impl Provider for Ia2Provider {
+    fn capabilities(&self) -> Result<xa11y_core::Capabilities> {
+        xa11y_core::Capabilities::for_backend(xa11y_core::Platform::Windows, None, "ia2")
+    }
+    fn identity(&self, e: &ElementData) -> Result<xa11y_core::NodeIdentity> {
+        let e = e.clone();
+        self.call_for("identity", e.clone(), move |s| {
+            let (owner, key) = match s.get(&e)? {
+                Entry::App(owner) => (owner, "application".to_string()),
+                Entry::Window(node) => (node.owner.clone(), format!("window:{}", node.owner.hwnd)),
+                Entry::Node(node) => {
+                    let (id, hwnd) = node
+                        .identity
+                        .ok_or_else(|| unsupported(&e, "identity on a simple MSAA child"))?;
+                    let owner = node.event_owner.clone().ok_or_else(stale)?;
+                    (owner, format!("{hwnd}:{id}"))
+                }
+            };
+            Ok(xa11y_core::NodeIdentity::from_key(
+                "ia2",
+                format!("{}:{}", owner.pid, owner.generation),
+                key,
+            ))
+        })
+    }
+    fn revalidate(&self, e: &ElementData) -> Result<()> {
+        let e = e.clone();
+        self.call_for("revalidate", e.clone(), move |s| {
+            match s.get(&e)? {
+                Entry::Node(node) => {
+                    node.ensure_attached()?;
+                    let current = s.snapshot(node)?;
+                    if current.role != e.role {
+                        return Err(stale());
+                    }
+                }
+                Entry::Window(node) => node.ensure_attached()?,
+                Entry::App(_) => {}
+            }
+            Ok(())
+        })
+    }
+    fn relations(
+        &self,
+        e: &ElementData,
+        kinds: &[xa11y_core::RelationKind],
+    ) -> Result<Vec<(xa11y_core::RelationKind, Vec<ElementData>)>> {
+        let e = e.clone();
+        let kinds = kinds.to_vec();
+        self.call_for("relations", e.clone(), move |s| s.relations(&e, &kinds))
+    }
     fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
         let e = e.cloned();
         self.call(move |s| s.children(e))
@@ -1169,6 +1302,50 @@ impl Provider for Ia2Provider {
     fn text_read(&self, e: &ElementData, r: TextRange) -> Result<String> {
         let e = e.clone();
         self.call_for("text_read", e.clone(), move |s| s.text_read(&e, r))
+    }
+    fn text_object_at(&self, e: &ElementData, offset: u32) -> Result<Option<ElementData>> {
+        let e = e.clone();
+        self.call_for("text_object_at", e.clone(), move |s| {
+            let node = s.node(&e)?;
+            let h: AccessibleHypertext = node.interface(&e, "text_object_at")?;
+            let mut index = -1;
+            unsafe {
+                (h.vtable().hyperlinkIndex)(
+                    h.as_raw(),
+                    i32::try_from(offset).map_err(|_| platform("IA2 text offset exceeds LONG"))?,
+                    &mut index,
+                )
+                .ok()
+                .map_err(native)?;
+            }
+            if index == -1 {
+                return Ok(None);
+            }
+            let mut count = 0;
+            unsafe {
+                (h.vtable().nHyperlinks)(h.as_raw(), &mut count)
+                    .ok()
+                    .map_err(native)?;
+            }
+            if index < 0 || index >= count {
+                return Err(platform("IA2 returned an invalid hyperlink index"));
+            }
+            let mut raw = std::ptr::null_mut();
+            let hr = unsafe { (h.vtable().hyperlink)(h.as_raw(), index, &mut raw) };
+            let link = if raw.is_null() {
+                None
+            } else {
+                Some(unsafe { AccessibleHyperlink::from_raw(raw) })
+            };
+            hr.ok().map_err(native)?;
+            let object = link
+                .ok_or_else(|| platform("IA2 returned a null hyperlink"))?
+                .cast()
+                .map_err(native)?;
+            Ok(Some(
+                s.snapshot(Node::new(object, 0, node.owner, e.handle)?)?,
+            ))
+        })
     }
     fn text_range_at(&self, e: &ElementData, offset: u32, unit: TextUnit) -> Result<TextRange> {
         let e = e.clone();

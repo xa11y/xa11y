@@ -7,6 +7,7 @@ Windows-only pywin32 test dependency; the product does not depend on it.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import shutil
@@ -71,6 +72,29 @@ class BrowserJob:
         except BaseException:
             self.job.Close()
             raise
+
+    @contextmanager
+    def paused_owner(self, hwnd, pid):
+        """Pause only this Job Object's proved browser owner for the stall test."""
+        import ctypes
+        from ctypes import wintypes
+
+        self.verify_event_window(hwnd, pid, hwnd)
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        for name in ("DebugActiveProcess", "DebugActiveProcessStop"):
+            method = getattr(kernel, name)
+            method.argtypes = [wintypes.DWORD]
+            method.restype = wintypes.BOOL
+        if not kernel.DebugActiveProcess(pid):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            # Windows suspends the debuggee's threads until debug events are
+            # continued. Do not continue them: this is a real nonresponding
+            # accessibility server, confined to the fixture's owned process.
+            yield
+        finally:
+            if not kernel.DebugActiveProcessStop(pid):
+                raise ctypes.WinError(ctypes.get_last_error())
 
     def start(self, command):
         process, thread, _pid, _tid = self.processes.CreateProcess(
@@ -255,6 +279,7 @@ def run_fixture(
     *,
     backend=BrowserJob,
     run=subprocess.run,
+    exercise_timeout=False,
 ):
     directory = Path(tempfile.mkdtemp(prefix="xa11y-ia2-"))
     original_directory = directory.resolve()
@@ -319,6 +344,16 @@ def run_fixture(
             report = _validate_report(json.loads(result.stdout), pid, active, inactive)
             job.verify_event_window(report["window_handle"], report["event_pid"], hwnd)
             reports.append(report)
+        timeout_report = None
+        if exercise_timeout:
+            with job.paused_owner(hwnd, pid):
+                stalled = run([str(probe), "--hung", str(pid)], capture_output=True,
+                              text=True, encoding="utf-8", timeout=12, check=False)
+                if stalled.returncode != 0:
+                    raise AssertionError(f"Hung IA2 probe failed: {stalled.stderr[:8000]}")
+                timeout_report = json.loads(stalled.stdout)
+                if timeout_report.get("worker_disabled") is not True:
+                    raise AssertionError(f"Hung probe did not prove worker disabled: {timeout_report}")
         return {
             "browser": str(executable),
             "configuration": list(BROWSER_FLAGS),
@@ -326,6 +361,7 @@ def run_fixture(
             "pid": pid,
             "hwnd": hwnd,
             "reports": reports,
+            "hung_provider": timeout_report,
         }
     except BaseException:
         # Read only this fixture's state/log while the owned job is still alive.
@@ -360,12 +396,14 @@ def run_fixture(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--probe", required=True, type=Path)
+    parser.add_argument("--exercise-timeout", action="store_true")
     args = parser.parse_args()
     print(
         json.dumps(
             run_fixture(
                 args.probe.resolve(),
                 browser_executable(),
+                exercise_timeout=args.exercise_timeout,
             )
         ),
         flush=True,

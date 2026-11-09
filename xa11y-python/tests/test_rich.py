@@ -202,3 +202,11 @@ def test_text_range_value_semantics():
     assert r == xa11y.TextRange(2, 5)
     assert hash(r) == hash(xa11y.TextRange(2, 5))
     assert xa11y.TextRange(3, 3).is_empty()
+
+
+def test_embedded_object_mapping_is_explicitly_unsupported_on_mock():
+    text = _native._make_test_table_locator("text_area").text()
+    with pytest.raises(xa11y.ActionNotSupportedError):
+        text.object_at(0)
+    with pytest.raises(xa11y.InvalidTextRangeError):
+        text.object_at(text.length())

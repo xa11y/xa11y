@@ -57,6 +57,46 @@ windows::core::imp::define_interface!(
 windows::core::imp::interface_hierarchy!(Accessible2, IUnknown, IDispatch, IAccessible);
 
 #[repr(C)]
+pub struct AccessibleRelationVtable {
+    pub base: IUnknown_Vtbl,
+    pub relationType: StringOut,
+    pub localizedRelationType: StringOut,
+    pub nTargets: LongOut,
+    pub target: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HRESULT,
+    pub targets: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void, *mut i32) -> HRESULT,
+}
+windows::core::imp::define_interface!(
+    AccessibleRelation,
+    AccessibleRelationVtable,
+    0x7cdf86ee_c3da_496a_bda4_281b336e1fdc
+);
+windows::core::imp::interface_hierarchy!(AccessibleRelation, IUnknown);
+
+#[repr(C)]
+pub struct AccessibleHyperlinkVtable {
+    pub base: AccessibleActionVtable,
+    pub anchor: unsafe extern "system" fn(
+        *mut c_void,
+        i32,
+        *mut windows::Win32::System::Variant::VARIANT,
+    ) -> HRESULT,
+    pub anchorTarget: unsafe extern "system" fn(
+        *mut c_void,
+        i32,
+        *mut windows::Win32::System::Variant::VARIANT,
+    ) -> HRESULT,
+    pub startIndex: LongOut,
+    pub endIndex: LongOut,
+    pub valid: unsafe extern "system" fn(*mut c_void, *mut u8) -> HRESULT,
+}
+windows::core::imp::define_interface!(
+    AccessibleHyperlink,
+    AccessibleHyperlinkVtable,
+    0x01c20f2b_3dd2_400f_949f_ad00bdab1d41
+);
+windows::core::imp::interface_hierarchy!(AccessibleHyperlink, IUnknown, AccessibleAction);
+
+#[repr(C)]
 pub struct TextSegment {
     pub text: BSTR,
     pub start: i32,
@@ -113,6 +153,20 @@ windows::core::imp::define_interface!(
     0x24fd2ffb3aad4a088335a3ad89c0fb4b
 );
 windows::core::imp::interface_hierarchy!(AccessibleText, IUnknown);
+
+#[repr(C)]
+pub struct AccessibleHypertextVtable {
+    pub base: AccessibleTextVtable,
+    pub nHyperlinks: LongOut,
+    pub hyperlink: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HRESULT,
+    pub hyperlinkIndex: unsafe extern "system" fn(*mut c_void, i32, *mut i32) -> HRESULT,
+}
+windows::core::imp::define_interface!(
+    AccessibleHypertext,
+    AccessibleHypertextVtable,
+    0x6b4f8bbf_f1f2_418a_b35e_a195bc4103b9
+);
+windows::core::imp::interface_hierarchy!(AccessibleHypertext, IUnknown, AccessibleText);
 
 #[repr(C)]
 pub struct AccessibleText2Vtable {

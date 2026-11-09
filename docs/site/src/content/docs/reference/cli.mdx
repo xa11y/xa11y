@@ -282,6 +282,11 @@ separate exit-fullscreen action — on macOS the only absolute exit is the same
 
 Read an element's text by range and print the result as JSON.
 
+Application operations accept `--backend native|uia|ia2`. The explicit source
+overrides `XA11Y_ACCESSIBILITY_SOURCE` for that attachment. IA2 requires
+Windows; the [platform matrix](/reference/platform-details/#capabilities)
+records its capabilities.
+
 ```bash
 xa11y text info "text_area[name='Notes']" --app TextEdit
 xa11y text read "text_area[name='Notes']" --app TextEdit --range 0,200
@@ -299,6 +304,7 @@ characters.
 | `info` | `length`, `caret`, and the selected ranges | none |
 | `read` | The text of the range, at most `--limit` units (default 4096) | `--range` or `--find`, `--limit` |
 | `find` | The `--occurrence`-th match of `--find`, or `found: false` | `--find`, `--occurrence`, `--range` to search within |
+| `object-at` | The embedded control or link at `--offset`, as a snapshot. IA2 only | `--offset` |
 | `range-at` | The `--unit` at `--offset`: `character`, `word`, `line`, or `paragraph` | `--offset`, `--unit` |
 | `lines` | The rendered lines of the range, `--limit` per page (default 100) | `--range` or `--find`, `--limit` |
 | `bounds` | One screen rectangle per rendered line of the range | `--range` or `--find` |

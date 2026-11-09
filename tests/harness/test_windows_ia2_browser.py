@@ -375,3 +375,20 @@ def test_owned_cleanup_retries_a_descendant_that_disappears(monkeypatch, tmp_pat
     fixture._remove_owned_directory(directory, directory.resolve())
     assert calls == [directory, directory]
     assert not directory.exists()
+
+
+def test_paused_browser_detaches_after_probe_failure(monkeypatch):
+    import ctypes
+
+    calls = []
+    kernel = SimpleNamespace(
+        DebugActiveProcess=lambda pid: calls.append(("pause", pid)) or True,
+        DebugActiveProcessStop=lambda pid: calls.append(("detach", pid)) or True,
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **kw: kernel, raising=False)
+    job = fixture.BrowserJob.__new__(fixture.BrowserJob)
+    job.verify_event_window = lambda hwnd, pid, top: calls.append(("verify", pid))
+    with pytest.raises(RuntimeError, match="probe failed"):
+        with job.paused_owner(100, 42):
+            raise RuntimeError("probe failed")
+    assert calls == [("verify", 42), ("pause", 42), ("detach", 42)]

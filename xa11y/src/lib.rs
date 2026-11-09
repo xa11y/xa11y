@@ -110,10 +110,9 @@ pub use xa11y_core::{CancelHandle, EventReceiver, Provider, RecvStatus, Selector
 /// a static table without connecting to any app. See [`capabilities_with`]
 /// to describe another platform or OS version.
 ///
-/// The table describes each platform's default accessibility source. With
-/// `XA11Y_ACCESSIBILITY_SOURCE=ia2` selected on Windows this fails with
-/// [`Error::Unsupported`] rather than answer for UIA, whose capabilities
-/// differ (IA2 delivers no events, for one).
+/// The table follows `XA11Y_ACCESSIBILITY_SOURCE` for the running platform.
+/// Use [`capabilities_for_backend`] to describe an explicit source without
+/// changing the default. IA2 has its own mapping, including unsupported events.
 pub fn capabilities() -> Result<Capabilities> {
     capabilities_with(None, None)
 }
@@ -129,32 +128,36 @@ pub fn capabilities_with(
     platform: Option<Platform>,
     os_version: Option<&str>,
 ) -> Result<Capabilities> {
-    match platform {
-        Some(p) => Capabilities::for_platform(p, os_version),
-        None => {
-            let source =
-                parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"))?;
-            if source == "ia2" {
-                return Err(Error::Unsupported {
-                    feature: "capabilities for XA11Y_ACCESSIBILITY_SOURCE=ia2: the table \
-                              describes the default UIA source; the IA2 source's mapping is \
-                              listed on the platform-details reference page"
-                        .to_string(),
-                });
-            }
-            match os_version {
-                None => Capabilities::current(),
-                Some(v) => {
-                    let current = Platform::current().ok_or_else(|| Error::Unsupported {
-                        feature: "capabilities on this operating system: xa11y has no backend \
-                                  for it"
-                            .to_string(),
-                    })?;
-                    Capabilities::for_platform(current, Some(v))
-                }
-            }
+    capabilities_for_backend(platform, os_version, None)
+}
+
+/// Describe an explicit backend, or the environment-selected default when
+/// `backend` and `platform` are both omitted. Does not attach to an app.
+pub fn capabilities_for_backend(
+    platform: Option<Platform>,
+    os_version: Option<&str>,
+    backend: Option<&str>,
+) -> Result<Capabilities> {
+    let current = match platform {
+        Some(p) => Capabilities::for_platform(p, os_version)?,
+        None => match os_version {
+            Some(v) => Capabilities::for_platform(
+                Platform::current().ok_or_else(|| Error::Unsupported {
+                    feature: "capabilities on this operating system".into(),
+                })?,
+                Some(v),
+            )?,
+            None => Capabilities::current()?,
+        },
+    };
+    let source = match backend {
+        Some(b) => parse_accessibility_source(Some(b.into()))?,
+        None if platform.is_none() => {
+            parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"))?
         }
-    }
+        None => "native".into(),
+    };
+    Capabilities::for_backend(current.platform, current.os_version.as_deref(), &source)
 }
 
 /// Shared in-memory mock Provider — re-exported from `xa11y-core` when the
@@ -812,6 +815,19 @@ mod accessibility_source_tests {
 
 fn create_provider_boxed() -> Result<Box<dyn Provider>> {
     let source = parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"))?;
+    create_provider_for_backend(&source)
+}
+
+/// Construct an independent provider for `native`, `uia`, or `ia2`.
+/// An explicit backend overrides the environment default. UIA and IA2 are
+/// Windows-only; unsupported selections fail before attaching to any app.
+/// Use with `App::by_pid_with` or `App::by_name_with`.
+pub fn provider_for_backend(backend: &str) -> Result<Arc<dyn Provider>> {
+    let source = parse_accessibility_source(Some(backend.into()))?;
+    create_provider_for_backend(&source).map(Arc::from)
+}
+
+fn create_provider_for_backend(source: &str) -> Result<Box<dyn Provider>> {
     #[cfg(not(target_os = "windows"))]
     if source != "native" {
         return Err(Error::Unsupported {
@@ -828,7 +844,7 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
     }
     #[cfg(target_os = "windows")]
     {
-        match source.as_str() {
+        match source {
             "native" | "uia" => Ok(Box::new(xa11y_windows::WindowsProvider::new()?)),
             "ia2" => Ok(Box::new(xa11y_windows::Ia2Provider::new()?)),
             _ => Err(Error::InvalidActionData {

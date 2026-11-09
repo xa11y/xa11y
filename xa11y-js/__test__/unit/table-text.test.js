@@ -308,3 +308,10 @@ test('Locator.text() re-resolves on every read', async () => {
   await assert.rejects(text.length(), XA11yError);
   assert.equal(await _makeTestTableLocator().descendant('text_area').text().length(), 26);
 });
+
+
+test('embedded object mapping distinguishes unsupported and invalid offsets', async () => {
+  const text = await _makeTestTableLocator().descendant('text_area').text();
+  await assert.rejects(text.objectAt(0), /text_object_at/);
+  await assert.rejects(text.objectAt(await text.length()), InvalidTextRangeError);
+});
