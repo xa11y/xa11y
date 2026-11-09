@@ -195,22 +195,35 @@ and reports which limit cut it. It is on `Element`, `App`, `Locator` and
 | --- | --- | --- |
 | `max_depth` | none | Deepest level read; the root is depth 0 |
 | `max_nodes` | 2000 | Most nodes, the root included |
-| `detail` | none | `text` reads each element's text, `relations` its relations |
+| `detail` | none | `text` reads each element's text, `formatting` its text and attribute runs, `relations` its relations |
 | `max_text_bytes` | 65536 | Total text budget for `text` detail |
+| `max_runs` | 4096 | Total attribute-run budget for `formatting` detail |
 | `timeout` | none | Seconds in Python, milliseconds in JavaScript |
+| `cancel` | none | A `CancelToken`; calling its `cancel()` stops the walk |
 
 The tree is read breadth-first and listed in pre-order, so when `max_nodes`
 cuts, the top of the tree is complete. Each node carries its `index`,
 `parent`, `depth`, the `element` itself, its `children` as indices,
 `children_count` (its real number of children) and `children_truncated`.
-`truncated` on the capture has `by_depth`, `by_nodes`, `by_text` and
-`by_time`, each set only when that limit left something out.
+`truncated` on the capture has `by_depth`, `by_nodes`, `by_text`,
+`by_formatting`, `by_time` and `by_cancel`, each set only when that limit
+left something out. With `formatting` detail, a node's `text` also carries
+`runs`, each a `range` and its `attributes`, and `runs_truncated`.
+
+`backend` names the platform API that read the nodes (`atspi`, `ax`, `uia`,
+`ia2`, or `mock` in tests). `stats` counts the platform reads by kind:
+`children_reads`, `identity_reads`, `text_reads`, `formatting_reads`,
+`relation_reads` and `text_bytes`. A capture without `detail` makes only
+children and identity reads, so its cost grows with the node count alone.
 
 Each node is read once, at some moment while the capture runs, so the result
 is not an atomic snapshot of the app. Nodes that disappear mid-read are
 dropped and counted in `vanished`, and any other failed read is kept in that
 node's `errors` while the walk carries on. When the time budget runs out, the
-call still returns, with what it read and `truncated.by_time` set.
+call still returns, with what it read and `truncated.by_time` set. A
+cancelled token does the same with `truncated.by_cancel`. The walk checks it
+between nodes, so `cancel()` can come from another thread in Python or from
+any callback in JavaScript.
 
 A node's `element` names exactly that node, so an action on it reaches it or
 raises `ElementStaleError`. With `relations` detail, a target inside the

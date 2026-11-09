@@ -81,6 +81,7 @@ The `flag` carried by `StateChanged`:
 | `app_name` | string | Name of the application that produced the event |
 | `app_pid` | integer | Process ID of that application |
 | `timestamp` | monotonic instant | Time of receipt. Rust only. |
+| `time` | wall-clock time | Time of receipt: `SystemTime` in Rust, seconds since the epoch in Python, milliseconds since the epoch in JavaScript (the unit `Date` takes). Events of one process keep their order. |
 | `text_change` (Rust, Python) / `textChange` (JavaScript) | [text change](#text-change), optional | For `TextChanged`: what was inserted or deleted. `None` / `null` for every other event type and when the platform reports no delta. |
 | `announcement` | [announcement](#announcement), optional | For `Announcement`, its origin and any text the platform sent. `None` / `null` for every other event type. |
 | `sequence` | integer | Position in this subscription's stream, from 0. A gap means the buffer dropped events (see [Buffering](#buffering)). |
