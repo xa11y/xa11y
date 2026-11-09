@@ -76,10 +76,15 @@ fn integer(v: &VARIANT) -> Result<i32> {
     }
     Ok(unsafe { v.Anonymous.Anonymous.Anonymous.lVal })
 }
+/// MSAA's "this property is not provided": `DISP_E_MEMBERNOTFOUND` or
+/// `E_NOTIMPL`. Any other failure is a real error.
+fn absent(e: &windows::core::Error) -> bool {
+    matches!(e.code().0, -2147352573 | -2147467263)
+}
 fn bstr(v: windows::core::Result<BSTR>) -> Result<Option<String>> {
     let v = match v {
         Ok(v) => v,
-        Err(e) if matches!(e.code().0, -2147352573 | -2147467263) => return Ok(None),
+        Err(e) if absent(&e) => return Ok(None),
         Err(e) => return Err(native(e)),
     };
     if v.len() > 65536 {
@@ -113,20 +118,31 @@ struct Owner {
     generation: u64,
 }
 fn generation(pid: u32) -> Result<u64> {
-    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, STILL_ACTIVE};
+    use windows::Win32::System::Threading::GetExitCodeProcess;
+    // PROCESS_QUERY_LIMITED_INFORMATION covers both GetProcessTimes and
+    // GetExitCodeProcess.
     let h =
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.map_err(native)?;
     let mut creation = FILETIME::default();
     let mut exit = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
-    let result = unsafe { GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user) };
+    let times = unsafe { GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user) };
+    let mut code = 0u32;
+    let status = unsafe { GetExitCodeProcess(h, &mut code) };
     let close = unsafe { CloseHandle(h) };
-    result.map_err(native)?;
+    times.map_err(native)?;
+    status.map_err(native)?;
     close.map_err(native)?;
-    if exit.dwLowDateTime != 0 || exit.dwHighDateTime != 0 {
+    // GetProcessTimes' exit time is undefined while the process runs, so
+    // liveness comes from the exit code. A process that exited with code 259
+    // (STILL_ACTIVE) reads as running; the creation time below still changes
+    // if its pid is reused, so that ambiguity cannot alias a new process.
+    if code != STILL_ACTIVE.0 as u32 {
         return Err(stale());
     }
+    // The creation time is the generation key: it distinguishes a reused pid.
     Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
 }
 fn process_name(pid: u32) -> Result<String> {
@@ -599,7 +615,11 @@ impl State {
         let description = bstr(unsafe { node.object.get_accDescription(&child) })?;
         let action = bstr(unsafe { node.object.get_accDefaultAction(&child) })?;
         let dpi = crate::dpi::DpiScope::enter()?;
-        let bounds = crate::coords::msaa_bounds(&dpi, &node.object, &child).map_err(native)?;
+        let bounds = match crate::coords::msaa_bounds(&dpi, &node.object, &child) {
+            Ok(b) => Some(b),
+            Err(e) if absent(&e) => None,
+            Err(e) => return Err(native(e)),
+        };
         let mut raw = HashMap::new();
         raw.insert("msaa_role".into(), role_id.into());
         if let Some((id, hwnd)) = node.identity {
@@ -675,7 +695,7 @@ impl State {
                 name,
                 value,
                 description,
-                bounds: Some(bounds),
+                bounds,
                 raw,
                 table,
                 cell,
