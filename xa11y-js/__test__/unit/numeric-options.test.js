@@ -16,6 +16,11 @@ const {
   ShellSurface,
   _makeTestApp,
   _makeTestFloodSubscription,
+  _makeTestInput,
+  _makeTestLocator,
+  _makeTestShellSurfaces,
+  screenshot,
+  setDefaultTimeout,
 } = require('../../index.js');
 
 const BAD = [-1, Number.NaN, 1.5, Number.POSITIVE_INFINITY];
@@ -91,4 +96,81 @@ test('a queue that keeps up drops nothing', async () => {
   native.close();
   assert.equal(events.length, 10);
   assert.equal(native.dropped, 0);
+});
+
+/** Assert `call` throws or rejects with InvalidActionDataError naming `what`. */
+async function refuses(call, what, label) {
+  await assert.rejects(
+    async () => call(),
+    (err) => err instanceof InvalidActionDataError && err.message.includes(what),
+    label,
+  );
+}
+
+test('tree and dump refuse a bad maxDepth on every receiver', async () => {
+  const app = _makeTestApp();
+  const receivers = {
+    App: app,
+    Element: app.asElement(),
+    Locator: _makeTestLocator(),
+    ShellSurface: _makeTestShellSurfaces()[0],
+  };
+  for (const [name, receiver] of Object.entries(receivers)) {
+    for (const method of ['tree', 'dump']) {
+      for (const value of BAD) {
+        await refuses(() => receiver[method](value), 'maxDepth', `${name}.${method}(${value})`);
+      }
+    }
+  }
+  assert.equal((await app.tree(0)).children.length, 0);
+});
+
+test('Locator.nth and App.byPid refuse non-whole numbers', async () => {
+  for (const value of BAD) {
+    await refuses(() => _makeTestLocator().nth(value), 'n', `nth(${value})`);
+    await refuses(() => App.byPid(value, { timeout: 0 }), 'pid', `byPid(${value})`);
+  }
+});
+
+test('input options and points refuse coerced numbers', async () => {
+  const input = _makeTestInput();
+  for (const value of BAD) {
+    await refuses(() => input.click([10, 10], { count: value }), 'count', `count ${value}`);
+    await refuses(
+      () => input.drag([10, 10], [20, 20], { duration: value }),
+      'duration',
+      `duration ${value}`,
+    );
+  }
+  for (const value of [Number.NaN, 1.5, 2 ** 31, Number.NEGATIVE_INFINITY]) {
+    await refuses(() => input.click([value, 10]), 'target x', `target ${value}`);
+    await refuses(() => input.moveTo([10, value]), 'target y', `target ${value}`);
+    await refuses(
+      () => input.click([10, 10], { anchor: [value, 0] }),
+      'anchor dx',
+      `anchor ${value}`,
+    );
+    await refuses(() => input.scroll([10, 10], value, 0), 'dx', `dx ${value}`);
+    await refuses(() => input.scroll([10, 10], 0, value), 'dy', `dy ${value}`);
+  }
+});
+
+test('a screenshot region refuses coerced numbers before capturing', async () => {
+  const ok = { x: 0, y: 0, width: 10, height: 10 };
+  for (const [field, value] of [
+    ['x', Number.NaN],
+    ['y', 1.5],
+    ['width', -1],
+    ['height', Number.POSITIVE_INFINITY],
+  ]) {
+    await refuses(
+      () => screenshot({ region: { ...ok, [field]: value } }),
+      `region.${field}`,
+      `${field}: ${value}`,
+    );
+  }
+});
+
+test('setDefaultTimeout refuses a value too large for a duration', () => {
+  assert.throws(() => setDefaultTimeout(1e30));
 });

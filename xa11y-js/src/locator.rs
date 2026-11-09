@@ -55,7 +55,8 @@ impl Locator {
 
     /// Return a new Locator that selects the *n*-th match (1-based).
     #[napi]
-    pub fn nth(&self, n: u32) -> napi::Result<Self> {
+    pub fn nth(&self, n: f64) -> napi::Result<Self> {
+        let n = crate::types::checked_offset(n, "n")?;
         // Reject n == 0 at the binding boundary instead of forwarding to
         // `Locator::nth`, which asserts and panics (crashes Node).
         if n == 0 {
@@ -131,11 +132,12 @@ impl Locator {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<TreeNode>"
     )]
-    pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<LocatorTreeTask> {
-        AsyncTask::new(LocatorTreeTask {
+    pub fn tree(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<LocatorTreeTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(LocatorTreeTask {
             inner: self.inner.clone(),
-            max_depth: max_depth.map(|d| d as usize),
-        })
+            max_depth,
+        }))
     }
 
     /// Read the subtree into a bounded capture: every node read, pre-order,
@@ -170,11 +172,12 @@ impl Locator {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<string>"
     )]
-    pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<LocatorDumpTask> {
-        AsyncTask::new(LocatorDumpTask {
+    pub fn dump(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<LocatorDumpTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(LocatorDumpTask {
             inner: self.inner.clone(),
-            max_depth: max_depth.map(|d| d as usize),
-        })
+            max_depth,
+        }))
     }
 
     // ── Actions (each auto-waits, then performs the action) ────────────

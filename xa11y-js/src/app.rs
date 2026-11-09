@@ -85,7 +85,7 @@ impl App {
     ///
     /// See {@link App.byName} for the `options.timeout` behaviour.
     #[napi(ts_return_type = "Promise<App>")]
-    pub fn by_pid(pid: u32, options: Option<AppLookupOptions>) -> AsyncTask<FindByPidTask> {
+    pub fn by_pid(pid: f64, options: Option<AppLookupOptions>) -> AsyncTask<FindByPidTask> {
         AsyncTask::new(FindByPidTask {
             pid,
             timeout_ms: options.as_ref().and_then(|o| o.timeout),
@@ -302,12 +302,13 @@ impl App {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<TreeNode>"
     )]
-    pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<TreeTask> {
-        AsyncTask::new(TreeTask::new_for_app(
+    pub fn tree(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<TreeTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(TreeTask::new_for_app(
             self.data.clone(),
             self.provider.clone(),
-            max_depth.map(|d| d as usize),
-        ))
+            max_depth,
+        )))
     }
 
     /// Render this application's accessibility tree as an indented string.
@@ -321,12 +322,13 @@ impl App {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<string>"
     )]
-    pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<DumpTask> {
-        AsyncTask::new(DumpTask::new_for_app(
+    pub fn dump(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<DumpTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(DumpTask::new_for_app(
             self.data.clone(),
             self.provider.clone(),
-            max_depth.map(|d| d as usize),
-        ))
+            max_depth,
+        )))
     }
 }
 
@@ -372,7 +374,8 @@ impl Task for FindByNameTask {
 
 pub struct FindByPidTask {
     backend: Option<String>,
-    pid: u32,
+    /// The raw JS number; checked first in `compute`.
+    pid: f64,
     timeout_ms: Option<f64>,
 }
 
@@ -381,12 +384,13 @@ impl Task for FindByPidTask {
     type JsValue = App;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        let pid = crate::types::checked_offset(self.pid, "pid")?;
         let timeout = effective_timeout_ms(self.timeout_ms)?;
         let provider = match self.backend.as_deref() {
             Some(b) => xa11y::provider_for_backend(b).map_err(map_err)?,
             None => crate::provider()?,
         };
-        xa11y::App::by_pid_with(provider, self.pid, timeout).map_err(map_err)
+        xa11y::App::by_pid_with(provider, pid, timeout).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {

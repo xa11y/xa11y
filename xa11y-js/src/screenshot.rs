@@ -14,7 +14,16 @@ use napi::bindgen_prelude::{AsyncTask, Buffer, ClassInstance, Env, Task};
 use crate::element::Element;
 use crate::locator::Locator;
 use crate::map_err;
-use crate::types::Rect;
+use crate::types::{checked_offset, Rect};
+
+/// A desktop or image point from raw JS numbers, each a whole number in the
+/// `i32` range (napi's own `i32` conversion would wrap or truncate).
+fn checked_point(x: f64, y: f64) -> napi::Result<xa11y::Point> {
+    Ok(xa11y::Point::new(
+        crate::checked_window_coord(x, "x")?,
+        crate::checked_window_coord(y, "y")?,
+    ))
+}
 
 /// One drawn annotation box: the tag in the image, and the element it came
 /// from.
@@ -141,20 +150,20 @@ impl Screenshot {
 
     /// Convert a desktop point to an image pixel, returned as `[x, y]`.
     #[napi]
-    pub fn desktop_to_image(&self, x: i32, y: i32) -> napi::Result<Vec<i32>> {
+    pub fn desktop_to_image(&self, x: f64, y: f64) -> napi::Result<Vec<i32>> {
         let point = self
             .inner
-            .desktop_to_image(xa11y::Point::new(x, y))
+            .desktop_to_image(checked_point(x, y)?)
             .map_err(map_err)?;
         Ok(vec![point.x, point.y])
     }
 
     /// Convert an image pixel to a desktop point, returned as `[x, y]`.
     #[napi]
-    pub fn image_to_desktop(&self, x: i32, y: i32) -> napi::Result<Vec<i32>> {
+    pub fn image_to_desktop(&self, x: f64, y: f64) -> napi::Result<Vec<i32>> {
         let point = self
             .inner
-            .image_to_desktop(xa11y::Point::new(x, y))
+            .image_to_desktop(checked_point(x, y)?)
             .map_err(map_err)?;
         Ok(vec![point.x, point.y])
     }
@@ -162,17 +171,8 @@ impl Screenshot {
     /// Convert a desktop rectangle to one image rectangle per display piece.
     #[napi]
     pub fn desktop_rect_to_image(&self, rect: Rect) -> napi::Result<Vec<Rect>> {
-        let width = u32::try_from(rect.width)
-            .map_err(|_| napi::Error::from_reason("rect.width must be non-negative"))?;
-        let height = u32::try_from(rect.height)
-            .map_err(|_| napi::Error::from_reason("rect.height must be non-negative"))?;
         self.inner
-            .desktop_rect_to_image(xa11y::Rect {
-                x: rect.x,
-                y: rect.y,
-                width,
-                height,
-            })
+            .desktop_rect_to_image(rect.to_core("rect")?)
             .map(|rects| rects.into_iter().map(Into::into).collect())
             .map_err(map_err)
     }
@@ -180,24 +180,17 @@ impl Screenshot {
     /// Crop by image pixels and preserve coordinate mapping metadata.
     #[napi]
     pub fn crop(&self, rect: Rect) -> napi::Result<Screenshot> {
-        let width = u32::try_from(rect.width)
-            .map_err(|_| napi::Error::from_reason("rect.width must be non-negative"))?;
-        let height = u32::try_from(rect.height)
-            .map_err(|_| napi::Error::from_reason("rect.height must be non-negative"))?;
         self.inner
-            .crop(xa11y::Rect {
-                x: rect.x,
-                y: rect.y,
-                width,
-                height,
-            })
+            .crop(rect.to_core("rect")?)
             .map(Screenshot::new)
             .map_err(map_err)
     }
 
     /// Resize image pixels and scale coordinate mapping metadata with them.
     #[napi]
-    pub fn resize(&self, width: u32, height: u32) -> napi::Result<Screenshot> {
+    pub fn resize(&self, width: f64, height: f64) -> napi::Result<Screenshot> {
+        let width = checked_offset(width, "width")?;
+        let height = checked_offset(height, "height")?;
         self.inner
             .resize(width, height)
             .map(Screenshot::new)
@@ -318,15 +311,10 @@ pub fn screenshot_full() -> AsyncTask<CaptureTask> {
     dead_code,
     reason = "Exported via napi-derive; clippy on the Rust-only build can't see the JS-side caller"
 )]
-pub fn screenshot_region(rect: crate::types::Rect) -> AsyncTask<CaptureTask> {
-    AsyncTask::new(CaptureTask {
-        op: CaptureOp::Region(xa11y::Rect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width.max(0) as u32,
-            height: rect.height.max(0) as u32,
-        }),
-    })
+pub fn screenshot_region(rect: crate::types::Rect) -> napi::Result<AsyncTask<CaptureTask>> {
+    Ok(AsyncTask::new(CaptureTask {
+        op: CaptureOp::Region(rect.to_core("region")?),
+    }))
 }
 
 /// Capture the pixels under an element's current bounds. The target
@@ -407,12 +395,7 @@ pub fn screenshot_annotated(
                 .bounds
                 .ok_or_else(|| map_err(xa11y::Error::NoElementBounds))?,
         ),
-        None => region.map(|r| xa11y::Rect {
-            x: r.x,
-            y: r.y,
-            width: r.width.max(0) as u32,
-            height: r.height.max(0) as u32,
-        }),
+        None => region.map(|r| r.to_core("region")).transpose()?,
     };
 
     Ok(AsyncTask::new(AnnotateTask {

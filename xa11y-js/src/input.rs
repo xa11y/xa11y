@@ -22,7 +22,7 @@ use crate::map_err;
 
 /// A target for a pointer operation: an `[x, y]` tuple in desktop
 /// coordinates, or an `Element` (anchored inside its bounds).
-type Target<'a> = Either<Vec<i32>, &'a Element>;
+type Target<'a> = Either<Vec<f64>, &'a Element>;
 
 #[derive(Clone, Copy)]
 struct ParsedPointerTarget {
@@ -50,14 +50,14 @@ pub struct ClickOptions {
     /// `'left'` (default), `'right'`, or `'middle'`.
     pub button: Option<String>,
     /// Number of consecutive clicks. Default `1`; `2` is a double-click.
-    pub count: Option<u32>,
+    pub count: Option<f64>,
     /// Keys held down for the duration of the click, e.g. `['Shift']`.
     pub held: Option<Vec<String>>,
     /// Where inside an `Element`'s bounds to click: one of `'center'`
     /// (default), `'top_left'`, `'top_right'`, `'bottom_left'`,
     /// `'bottom_right'`, or an `[dx, dy]` pixel offset from the top-left
     /// corner. Ignored when the target is a raw `[x, y]` tuple.
-    pub anchor: Option<Either<String, Vec<i32>>>,
+    pub anchor: Option<Either<String, Vec<f64>>>,
 }
 
 /// Options for `InputSim.drag()` — core's `DragOptions`.
@@ -71,7 +71,7 @@ pub struct DragOptions {
     /// Time spent moving the pointer from start to end, in **milliseconds**
     /// (the unit every other JS timing option uses). Default `150`. On macOS
     /// the drag also holds 200 ms after press and 500 ms before release.
-    pub duration: Option<u32>,
+    pub duration: Option<f64>,
 }
 
 /// Synthesises OS-level pointer and keyboard events.
@@ -114,7 +114,7 @@ pub(crate) fn test_input(delay_ms: u32) -> InputSim {
 }
 
 /// Parse a JS target into an `xa11y::Point`. Accepts either an `[x, y]`
-/// tuple (as `Vec<i32>` of length 2) or an `Element` (uses its bounds centre).
+/// tuple (as `Vec<f64>` of length 2) or an `Element` (uses its bounds centre).
 fn parse_target(sim: &xa11y::InputSim, target: Target<'_>) -> napi::Result<ParsedPointerTarget> {
     parse_target_anchored(sim, target, xa11y::Anchor::Center)
 }
@@ -142,7 +142,10 @@ fn parse_target_anchored(
                 )));
             }
             Ok(ParsedPointerTarget {
-                point: xa11y::Point::new(tup[0], tup[1]),
+                point: xa11y::Point::new(
+                    crate::checked_window_coord(tup[0], "target x")?,
+                    crate::checked_window_coord(tup[1], "target y")?,
+                ),
                 bounds: None,
                 anchor: xa11y::Anchor::Center,
             })
@@ -192,7 +195,7 @@ fn parse_keys(keys: Option<Vec<String>>) -> napi::Result<Vec<xa11y::Key>> {
 /// The strings are identical in the Python binding — like key names and mouse
 /// buttons, input-layer string values are shared across bindings rather than
 /// spelled per-language.
-fn parse_anchor(anchor: Option<Either<String, Vec<i32>>>) -> napi::Result<xa11y::Anchor> {
+fn parse_anchor(anchor: Option<Either<String, Vec<f64>>>) -> napi::Result<xa11y::Anchor> {
     match anchor {
         None => Ok(xa11y::Anchor::Center),
         Some(Either::A(name)) => match name.as_str() {
@@ -215,8 +218,8 @@ fn parse_anchor(anchor: Option<Either<String, Vec<i32>>>) -> napi::Result<xa11y:
                 )));
             }
             Ok(xa11y::Anchor::Offset {
-                dx: offset[0],
-                dy: offset[1],
+                dx: crate::checked_window_coord(offset[0], "anchor dx")?,
+                dy: crate::checked_window_coord(offset[1], "anchor dy")?,
             })
         }
     }
@@ -283,14 +286,18 @@ impl InputSim {
     #[napi(ts_return_type = "Promise<void>")]
     pub fn click(
         &self,
-        target: Either<Vec<i32>, &Element>,
+        target: Either<Vec<f64>, &Element>,
         options: Option<ClickOptions>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
         let options = options.unwrap_or_default();
         let pt = parse_target_anchored(&self.inner, target, parse_anchor(options.anchor)?)?;
         let opts = xa11y::ClickOptions::new()
             .button(parse_button(options.button)?)
-            .count(options.count.unwrap_or(1))
+            .count(
+                options
+                    .count
+                    .map_or(Ok(1), |c| crate::types::checked_offset(c, "count"))?,
+            )
             .held(parse_keys(options.held)?);
         Ok(AsyncTask::new(MouseTask {
             inner: self.inner.clone(),
@@ -302,7 +309,7 @@ impl InputSim {
     #[napi(ts_return_type = "Promise<void>")]
     pub fn double_click(
         &self,
-        target: Either<Vec<i32>, &Element>,
+        target: Either<Vec<f64>, &Element>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
         let pt = parse_target(&self.inner, target)?;
         Ok(AsyncTask::new(MouseTask {
@@ -315,7 +322,7 @@ impl InputSim {
     #[napi(ts_return_type = "Promise<void>")]
     pub fn right_click(
         &self,
-        target: Either<Vec<i32>, &Element>,
+        target: Either<Vec<f64>, &Element>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
         let pt = parse_target(&self.inner, target)?;
         Ok(AsyncTask::new(MouseTask {
@@ -328,7 +335,7 @@ impl InputSim {
     #[napi(ts_return_type = "Promise<void>")]
     pub fn move_to(
         &self,
-        target: Either<Vec<i32>, &Element>,
+        target: Either<Vec<f64>, &Element>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
         let pt = parse_target(&self.inner, target)?;
         Ok(AsyncTask::new(MouseTask {
@@ -369,8 +376,8 @@ impl InputSim {
     #[napi(ts_return_type = "Promise<void>")]
     pub fn drag(
         &self,
-        start: Either<Vec<i32>, &Element>,
-        end: Either<Vec<i32>, &Element>,
+        start: Either<Vec<f64>, &Element>,
+        end: Either<Vec<f64>, &Element>,
         options: Option<DragOptions>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
         let from = parse_target(&self.inner, start)?;
@@ -379,9 +386,10 @@ impl InputSim {
         let opts = xa11y::DragOptions::new()
             .button(parse_button(options.button)?)
             .held(parse_keys(options.held)?)
-            .duration(Duration::from_millis(
-                options.duration.unwrap_or(150).into(),
-            ));
+            .duration(match options.duration {
+                Some(ms) => crate::types::checked_millis(ms, "duration").map_err(map_err)?,
+                None => Duration::from_millis(150),
+            });
         Ok(AsyncTask::new(MouseTask {
             inner: self.inner.clone(),
             op: MouseOp::Drag(from, to, opts),
@@ -393,14 +401,16 @@ impl InputSim {
     #[napi(ts_return_type = "Promise<void>")]
     pub fn scroll(
         &self,
-        target: Either<Vec<i32>, &Element>,
-        dx: Option<i32>,
-        dy: Option<i32>,
+        target: Either<Vec<f64>, &Element>,
+        dx: Option<f64>,
+        dy: Option<f64>,
     ) -> napi::Result<AsyncTask<MouseTask>> {
         let pt = parse_target(&self.inner, target)?;
+        let dx = dx.map_or(Ok(0), |v| crate::checked_window_coord(v, "dx"))?;
+        let dy = dy.map_or(Ok(0), |v| crate::checked_window_coord(v, "dy"))?;
         Ok(AsyncTask::new(MouseTask {
             inner: self.inner.clone(),
-            op: MouseOp::Scroll(pt, dx.unwrap_or(0), dy.unwrap_or(0)),
+            op: MouseOp::Scroll(pt, dx, dy),
         }))
     }
 

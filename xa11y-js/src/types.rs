@@ -37,23 +37,41 @@ impl From<xa11y::TreeNode> for TreeNode {
 #[derive(Clone)]
 pub struct Rect {
     /// Left edge, in screen coordinates.
-    pub x: i32,
+    pub x: f64,
     /// Top edge, in screen coordinates.
-    pub y: i32,
+    pub y: f64,
     /// Width in screen-coordinate units.
-    pub width: i32,
+    pub width: f64,
     /// Height in screen-coordinate units.
-    pub height: i32,
+    pub height: f64,
 }
 
+// The fields are `f64` rather than `i32` / `u32` because a `Rect` is also an
+// argument (`screenshot({ region })`, `Screenshot.crop`, ...), and napi's
+// integer conversions coerce silently: `NaN` becomes 0, `1.5` becomes 1 and
+// a negative width wraps. `to_core` checks the raw numbers instead.
 impl From<xa11y::Rect> for Rect {
     fn from(r: xa11y::Rect) -> Self {
         Self {
-            x: r.x,
-            y: r.y,
-            width: r.width as i32,
-            height: r.height as i32,
+            x: f64::from(r.x),
+            y: f64::from(r.y),
+            width: f64::from(r.width),
+            height: f64::from(r.height),
         }
+    }
+}
+
+impl Rect {
+    /// The core rect, refusing a non-finite, fractional or out-of-range
+    /// coordinate and a negative size with `InvalidActionDataError`.
+    /// `what` names the argument in the message (`"region"`, `"rect"`).
+    pub fn to_core(&self, what: &str) -> napi::Result<xa11y::Rect> {
+        Ok(xa11y::Rect {
+            x: crate::checked_window_coord(self.x, &format!("{what}.x"))?,
+            y: crate::checked_window_coord(self.y, &format!("{what}.y"))?,
+            width: checked_offset(self.width, &format!("{what}.width"))?,
+            height: checked_offset(self.height, &format!("{what}.height"))?,
+        })
     }
 }
 
@@ -312,6 +330,14 @@ pub fn checked_offset(value: f64, what: &str) -> napi::Result<u32> {
             message: format!("{what} must be a whole number in 0..=4294967295, got {value}"),
         }))
     }
+}
+
+/// Validate an optional `maxDepth` argument (`tree()` / `dump()`): a whole
+/// number in `0..=4294967295`, so `-1` cannot become an unbounded depth.
+pub fn checked_depth(value: Option<f64>) -> napi::Result<Option<usize>> {
+    value
+        .map(|d| checked_count(d, "maxDepth").map_err(crate::map_err))
+        .transpose()
 }
 
 /// Validate a JS-supplied count or size option (`maxNodes`, `buffer`, ...)

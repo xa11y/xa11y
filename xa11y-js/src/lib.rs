@@ -44,14 +44,18 @@ fn provider() -> napi::Result<Arc<dyn xa11y::Provider>> {
 pub(crate) fn effective_timeout_secs(
     timeout_seconds: Option<f64>,
 ) -> napi::Result<std::time::Duration> {
+    // `try_from_secs_f64` rather than `from_secs_f64`: the latter panics on
+    // a finite value too large for a `Duration` (`1e30`), which would abort
+    // Node. Negative and non-finite values fail the same way.
     match timeout_seconds {
-        Some(secs) if secs.is_finite() && secs >= 0.0 => {
-            Ok(std::time::Duration::from_secs_f64(secs))
-        }
-        Some(secs) => Err(napi::Error::new(
-            napi::Status::InvalidArg,
-            format!("timeoutSeconds must be a non-negative, finite number of seconds, got {secs}"),
-        )),
+        Some(secs) => std::time::Duration::try_from_secs_f64(secs).map_err(|_| {
+            napi::Error::new(
+                napi::Status::InvalidArg,
+                format!(
+                    "timeoutSeconds must be a non-negative, finite number of seconds, got {secs}"
+                ),
+            )
+        }),
         None => xa11y::default_timeout().map_err(map_err),
     }
 }
@@ -109,13 +113,15 @@ pub(crate) fn checked_window_dimension(value: f64, what: &str) -> napi::Result<u
 /// or non-finite values.
 #[napi(js_name = "setDefaultTimeout")]
 pub fn set_default_timeout(seconds: f64) -> napi::Result<()> {
-    if !(seconds.is_finite() && seconds >= 0.0) {
-        return Err(napi::Error::new(
+    // `try_from_secs_f64` also refuses a finite value too large for a
+    // `Duration`, where `from_secs_f64` would panic.
+    let timeout = std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
+        napi::Error::new(
             napi::Status::InvalidArg,
             format!("seconds must be a non-negative, finite number, got {seconds}"),
-        ));
-    }
-    xa11y::set_default_timeout(std::time::Duration::from_secs_f64(seconds));
+        )
+    })?;
+    xa11y::set_default_timeout(timeout);
     Ok(())
 }
 

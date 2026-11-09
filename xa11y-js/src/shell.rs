@@ -224,12 +224,13 @@ impl ShellSurface {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<TreeNode>"
     )]
-    pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<TreeTask> {
-        AsyncTask::new(TreeTask::new(
+    pub fn tree(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<TreeTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(TreeTask::new(
             self.data.clone(),
             self.provider.clone(),
-            max_depth.map(|d| d as usize),
-        ))
+            max_depth,
+        )))
     }
 
     /// Render this surface's accessibility tree as an indented string.
@@ -243,12 +244,13 @@ impl ShellSurface {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<string>"
     )]
-    pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<DumpTask> {
-        AsyncTask::new(DumpTask::new(
+    pub fn dump(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<DumpTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(DumpTask::new(
             self.data.clone(),
             self.provider.clone(),
-            max_depth.map(|d| d as usize),
-        ))
+            max_depth,
+        )))
     }
 }
 

@@ -442,13 +442,14 @@ impl Element {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<TreeNode>"
     )]
-    pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<TreeTask> {
-        AsyncTask::new(TreeTask {
+    pub fn tree(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<TreeTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(TreeTask {
             data: self.data.clone(),
             provider: self.provider.clone(),
-            max_depth: max_depth.map(|d| d as usize),
+            max_depth,
             process_scope: false,
-        })
+        }))
     }
 
     /// Render the subtree rooted at this element as an indented string.
@@ -458,13 +459,14 @@ impl Element {
         ts_args_type = "maxDepth?: number | null",
         ts_return_type = "Promise<string>"
     )]
-    pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<DumpTask> {
-        AsyncTask::new(DumpTask {
+    pub fn dump(&self, max_depth: Option<f64>) -> napi::Result<AsyncTask<DumpTask>> {
+        let max_depth = crate::types::checked_depth(max_depth)?;
+        Ok(AsyncTask::new(DumpTask {
             data: self.data.clone(),
             provider: self.provider.clone(),
-            max_depth: max_depth.map(|d| d as usize),
+            max_depth,
             process_scope: false,
-        })
+        }))
     }
 
     // ── Text, tables and selection (live reads) ─────────────────────────
