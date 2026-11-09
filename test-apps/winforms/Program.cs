@@ -19,6 +19,10 @@
 //     out of it keep `IsOffscreen = false`, and the provider clips them to
 //     the panel's viewport (issue #502). A ListBox cannot show this: WinForms
 //     and WPF both report scrolled-out list items offscreen themselves.
+//   * An "Announce" button that raises a UIA Notification event
+//     (AccessibleObject.RaiseAutomationNotification) with the text "Saved".
+//     AccessKit's Windows adapter never raises one, so this is the fixture
+//     for announcement text on Windows (issue #480).
 //   * The WinForms UIA provider surface generally: control types come from
 //     each AccessibleObject's Role via AccessibleRoleControlTypeMap, and the
 //     top-level Form's type comes from the HWND host provider.
@@ -107,6 +111,7 @@ internal sealed class TestForm : Form
         page.Controls.Add(BuildDynamic());
         page.Controls.Add(BuildScrollPanel());
         page.Controls.Add(BuildLongPane());
+        page.Controls.Add(BuildAnnouncements());
         // Last, after a group that ends in a button: WinForms names an
         // unnamed control after the Label just before it in tab order, so a
         // group placed after one ending in a Label ("Panel Filler", "Legacy
@@ -301,6 +306,28 @@ internal sealed class TestForm : Form
             submit,
             addItem,
             removeItem);
+    }
+
+    private static GroupBox BuildAnnouncements()
+    {
+        var announce = MakeButton("Announce");
+        // Raised on the button's own accessible object, so the event's sender
+        // is the button: an app-scoped subscription's per-window
+        // notification handler receives it. ImportantMostRecent is pinned by
+        // the suite as the event's `platform_priority` (and `assertive`).
+        announce.Click += (_, _) =>
+        {
+            bool raised = announce.AccessibilityObject.RaiseAutomationNotification(
+                System.Windows.Forms.Automation.AutomationNotificationKind.ActionCompleted,
+                System.Windows.Forms.Automation.AutomationNotificationProcessing.ImportantMostRecent,
+                "Saved");
+            // False when the OS is too old for UIA notifications or no
+            // client listens; the suite then times out waiting, which is the
+            // failure it should report. Shown for a human reproducing it.
+            announce.Text = raised ? "Announce" : "Announce (not raised)";
+        };
+
+        return MakeGroup("Announcements", new Size(300, 80), FlowDirection.LeftToRight, announce);
     }
 
     private static GroupBox BuildLegacy()

@@ -542,7 +542,7 @@ const ROWS: &[Row] = &[
         description: "An announcement request carries the text to announce (`announcement.text`).",
         linux: yes_by("the `any_data` of Object:Announcement"),
         macos: yes_by("`AXAnnouncementKey` in the notification's `userInfo`"),
-        windows: no("the text arrives only through `AddNotificationEventHandler`, which is not registered yet"),
+        windows: yes_by("the `displayString` of a UIA Notification, read through `IUIAutomation5::AddNotificationEventHandler`").since("10.0.16299"),
     },
     Row {
         name: "event:announcement:live_region",

@@ -16,6 +16,10 @@
 
 mod splice;
 
+// The kind → UIA registration table. Pure, so its tests run off Windows.
+#[cfg(any(target_os = "windows", test))]
+mod event_plan;
+
 #[cfg(target_os = "windows")]
 mod coords;
 #[cfg(target_os = "windows")]
