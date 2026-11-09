@@ -72,6 +72,7 @@ class SelectorNotMatchedError extends XA11yError {
     /** @type {string | null} */ this.lastObserved = null;
     /** @type {string | null} */ this.hiddenReason = null;
     /** @type {string | null} */ this.autoScroll = null;
+    /** @type {string | null} */ this.pending = null;
     /** @type {import('./index').PointerTargetDiagnosis | null} */ this.pointerTarget = null;
     /** @type {string[]} */ this.candidates = [];
     /** @type {string | null} */ this.scope = null;
@@ -115,6 +116,7 @@ class TimeoutError extends XA11yError {
     /** @type {string | null} */ this.lastObserved = null;
     /** @type {string | null} */ this.hiddenReason = null;
     /** @type {string | null} */ this.autoScroll = null;
+    /** @type {string | null} */ this.pending = null;
     /** @type {import('./index').PointerTargetDiagnosis | null} */ this.pointerTarget = null;
     /** @type {string[]} */ this.candidates = [];
     /** @type {string | null} */ this.scope = null;
@@ -234,6 +236,7 @@ function toTypedError(err) {
     typed.lastObserved = diagnosis.lastObserved ?? null;
     typed.hiddenReason = diagnosis.hiddenReason ?? null;
     typed.autoScroll = diagnosis.autoScroll ?? null;
+    typed.pending = diagnosis.pending ?? null;
     typed.pointerTarget = diagnosis.pointerTarget ?? null;
     typed.candidates = Array.isArray(diagnosis.candidates) ? diagnosis.candidates : [];
     typed.scope = diagnosis.scope ?? null;
@@ -264,6 +267,7 @@ function diagnosedError(ErrorClass, summary, diagnosis) {
     lastObserved = null,
     hiddenReason = null,
     autoScroll = null,
+    pending = null,
     candidates = [],
     scope = null,
     elapsedMs = null,
@@ -274,6 +278,7 @@ function diagnosedError(ErrorClass, summary, diagnosis) {
   if (lastObserved) message += `; last observed: ${lastObserved}`;
   if (hiddenReason) message += `; hidden because: ${hiddenReason}`;
   if (autoScroll) message += `; auto-scroll: ${autoScroll}`;
+  if (pending) message += `; still pending: ${pending}`;
   if (candidates.length > 0) message += `; candidates: ${candidates.join(', ')}`;
   if (scope) message += `\nsearch scope (bounded):\n${scope}`;
 
@@ -283,6 +288,7 @@ function diagnosedError(ErrorClass, summary, diagnosis) {
   err.lastObserved = lastObserved;
   err.hiddenReason = hiddenReason;
   err.autoScroll = autoScroll;
+  err.pending = pending;
   err.candidates = candidates;
   err.scope = scope;
   err.elapsedMs = elapsedMs;

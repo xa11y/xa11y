@@ -121,6 +121,10 @@ class SelectorNotMatchedError(XA11yError):
     """What an auto-waiting action's scroll attempt came to. Set by timeouts;
     always ``None`` for this class (present for attribute parity with
     :class:`TimeoutError`)."""
+    pending: str | None
+    """The platform call a timeout cut short. Set by timeouts; always
+    ``None`` for this class (present for attribute parity with
+    :class:`TimeoutError`)."""
     candidates: list[str]
     """Bounded near-miss candidates, e.g. same-role elements with different
     names, or the running applications for app lookups."""
@@ -195,6 +199,12 @@ class TimeoutError(XA11yError):
     ``revealed`` alongside ``hidden_reason`` scrolled out means the element
     came into view and later scrolled back out. ``None`` when the wait never
     tried to scroll."""
+    pending: str | None
+    """The platform call that was still running when the deadline passed,
+    e.g. ``'GetChildren on button "OK"'``. A timeout is a hard upper bound
+    that includes the reads it makes, so a hung application ends the wait on
+    time and this names the call it hung in. ``None`` when every read
+    returned and the wait simply ran out."""
     candidates: list[str]
     """Bounded near-miss candidates (same role, different attributes).
     Collected only when the selector never matched during the wait."""

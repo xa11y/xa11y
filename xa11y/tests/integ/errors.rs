@@ -94,7 +94,14 @@ mod tests {
                     .expect("wait timeout must carry a diagnosis");
                 assert_eq!(d.condition.as_deref(), Some("attached"));
                 assert_eq!(d.selector.as_deref(), Some(NO_MATCH));
-                assert_eq!(d.last_observed.as_deref(), Some("selector never matched"));
+                // A prefix, not equality: the miss context is read on a short
+                // budget after the deadline, and a check it cuts short is
+                // reported after this text (tenet 1) rather than dropped.
+                let observed = d.last_observed.as_deref().unwrap_or_default();
+                assert!(
+                    observed.starts_with("selector never matched"),
+                    "unexpected last_observed: {observed:?}"
+                );
                 assert!(
                     d.scope.is_some(),
                     "a never-matched wait should include a bounded scope snapshot"

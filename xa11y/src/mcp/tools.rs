@@ -900,7 +900,9 @@ fn tool_definition(name: &str) -> Value {
                      (accepted, yet the next check still found it not visible) or `revealed` \
                      (the next check found it visible and something else, such as being \
                      disabled, kept the wait going). No `auto_scroll` means no scroll was \
-                     tried. Do not wrap \
+                     tried. The timeout includes the reads the wait makes: when the \
+                     application stops answering, the call still ends on time and the \
+                     diagnosis has `pending`, naming the platform call it hung in. Do not wrap \
                      this tool in a retry loop; the wait is the retry loop.\n\n\
                      Every failure of every tool carries `delivery`, which says whether a \
                      retry is safe. `not_delivered` means the action never reached the application (no \
@@ -3473,6 +3475,7 @@ fn diagnosis_json(d: &crate::Diagnosis) -> Value {
         "auto_scroll",
         d.auto_scroll.map(|o| Value::from(o.to_snake_case())),
     );
+    insert_some(&mut out, "pending", d.pending.as_deref().map(Value::from));
     if !d.candidates.is_empty() {
         out.insert(
             "candidates".into(),

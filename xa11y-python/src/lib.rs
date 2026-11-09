@@ -61,7 +61,8 @@ where
 
 /// Attach the structured diagnosis fields (tenet 6) as attributes on an
 /// exception instance, so harnesses can read `e.selector`, `e.condition`,
-/// `e.last_observed`, `e.hidden_reason`, `e.auto_scroll`, `e.candidates`, `e.scope` (and
+/// `e.last_observed`, `e.hidden_reason`, `e.auto_scroll`, `e.pending`, `e.candidates`,
+/// `e.scope` (and
 /// `e.elapsed` on timeouts) instead of parsing the message. Every attribute is always set
 /// (`None` / `[]` when absent) so consumers don't need `hasattr` guards.
 fn attach_diagnosis_attrs(
@@ -91,6 +92,7 @@ fn attach_diagnosis_attrs(
             "auto_scroll",
             diagnosis.and_then(|d| d.auto_scroll.map(|o| o.to_snake_case())),
         );
+        let _ = value.setattr("pending", diagnosis.and_then(|d| d.pending.clone()));
         let _ = value.setattr(
             "candidates",
             diagnosis.map(|d| d.candidates.clone()).unwrap_or_default(),

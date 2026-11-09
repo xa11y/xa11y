@@ -315,6 +315,126 @@ mod grant_instruction_tests {
     }
 }
 
+// ── Deadline-bounded AX messages (#531) ─────────────────────────────────────
+//
+// Every AX message waits up to the process-wide messaging timeout
+// ([`AX_MESSAGING_TIMEOUT_SECS`]), so a read made late in a 1 s wait could
+// still block for 2 s. [`ax_bounded`] lowers the timeout on the element the
+// message goes to, to the time left on the caller's open
+// [`Deadline`](xa11y_core::Deadline), for that one message, then releases it.
+// With no deadline open, or one further away than the element's own bound,
+// the message is sent exactly as before.
+//
+// `AXUIElementSetMessagingTimeout` is per element object, so two threads
+// messaging the *same* element at once can release each other's bound. The
+// cost of that race is a message bounded by the process-wide timeout instead
+// of the deadline, which is the behaviour before #531, never a wrong answer.
+
+thread_local! {
+    /// The element whose messaging timeout a shell-surface probe has bounded
+    /// on this thread, and that bound in seconds (see [`ShellProbeBound`]).
+    /// [`ax_bounded`] releases an element back to this bound rather than to
+    /// the global one, so a deadline does not undo the probe's tighter
+    /// bound.
+    static PROBE_BOUND: std::cell::Cell<Option<(usize, f32)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The messaging timeout `element` has when no deadline lowers it.
+fn element_bound(element: AXUIElementRef) -> f32 {
+    match PROBE_BOUND.with(|b| b.get()) {
+        Some((probed, secs)) if probed == element as usize => secs,
+        _ => AX_MESSAGING_TIMEOUT_SECS,
+    }
+}
+
+/// An AX message as a deadline diagnosis names it: what was asked and the
+/// application it was asked of. The pid comes from the element itself, with
+/// no IPC to the application that did not answer.
+fn describe_ax_call(element: AXUIElementRef, call: &str) -> String {
+    let mut pid = 0;
+    if !element.is_null()
+        && unsafe { safe_ax_get_pid(element, &mut pid) } == AX_ERROR_SUCCESS
+        && pid > 0
+    {
+        format!("{call} on an element of the application with pid {pid}")
+    } else {
+        format!("{call} on an element of an unknown application")
+    }
+}
+
+/// Send one AX message to `element`, bounded by the caller's deadline.
+///
+/// `call` names the message for the diagnosis and is built only when the
+/// deadline cuts it. When the deadline has already passed the message is not
+/// sent and the result is `kAXErrorCannotComplete`, the code an expired
+/// messaging timeout returns, so every call site's existing handling still
+/// applies. A cut message is also reported to the deadline, which is how
+/// core names it as pending whatever error the call site builds from it.
+fn ax_bounded(
+    element: AXUIElementRef,
+    call: impl Fn() -> String,
+    send: impl FnOnce() -> i32,
+) -> i32 {
+    let bound = element_bound(element);
+    let timeout = match xa11y_core::call_timeout(Duration::from_secs_f32(bound), || {
+        describe_ax_call(element, &call())
+    }) {
+        Ok(t) => t,
+        // The deadline passed before the message was sent, and recorded it.
+        Err(_) => return AX_ERROR_CANNOT_COMPLETE,
+    };
+    if !timeout.is_deadline() {
+        return send();
+    }
+    // `call_timeout` never hands back a zero duration, which AX would read
+    // as "use the global value".
+    let set = unsafe { safe_ax_set_messaging_timeout(element, timeout.duration.as_secs_f32()) };
+    if set != AX_ERROR_SUCCESS {
+        // An element whose cost cannot be bounded is not one this message
+        // can be sent to inside the caller's deadline. The code is what AX
+        // returned for the element, so the call site reports it as such.
+        return set;
+    }
+    let code = send();
+    // Release the element to the bound it had: `0` means "use the global
+    // value". The result does not matter: a failure leaves the element on
+    // the tighter bound, which is a faster failure and never a wrong answer.
+    let release = if bound == AX_MESSAGING_TIMEOUT_SECS {
+        0.0
+    } else {
+        bound
+    };
+    let _err = unsafe { safe_ax_set_messaging_timeout(element, release) };
+    if code == AX_ERROR_CANNOT_COMPLETE {
+        if let Some(d) = &timeout.deadline {
+            if d.is_expired() {
+                // Recording the cut is the point of this call; the error it
+                // returns is built again by core with the wait's own context.
+                let _ = timeout.expired(describe_ax_call(element, &call()));
+            }
+        }
+    }
+    code
+}
+
+/// The name of an attribute passed as a `CFStringRef`, for a diagnosis.
+fn attribute_name(attribute: CFStringRef) -> String {
+    if attribute.is_null() {
+        return "an attribute".to_string();
+    }
+    // The attribute names this crate sends are CFStrings it created, so the
+    // get-rule retain cannot meet a misbehaving foreign object.
+    unsafe { CFString::wrap_under_get_rule(attribute as _) }.to_string()
+}
+
+/// Wrap a rayon closure so each item runs under the caller's deadline:
+/// the deadline is thread-local, and rayon runs items on its own threads.
+fn carry_deadline<T, R>(f: impl Fn(T) -> R + Sync + Send) -> impl Fn(T) -> R + Sync + Send {
+    let deadline = xa11y_core::Deadline::current();
+    move |item| xa11y_core::Deadline::scope_opt(deadline.clone(), || f(item))
+}
+
 // ── FFI Wrappers (instrumented in test builds) ──────────────────────────────
 
 #[inline(always)]
@@ -325,7 +445,11 @@ fn ffi_copy_attribute_value(
 ) -> i32 {
     #[cfg(test)]
     ax_counters::COPY_ATTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { safe_ax_copy_attribute_value(element, attribute, value) }
+    ax_bounded(
+        element,
+        || format!("reading {}", attribute_name(attribute)),
+        || unsafe { safe_ax_copy_attribute_value(element, attribute, value) },
+    )
 }
 
 #[inline(always)]
@@ -336,14 +460,22 @@ fn ffi_copy_multiple_attribute_values(
 ) -> i32 {
     #[cfg(test)]
     ax_counters::COPY_MULTI_ATTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { safe_ax_copy_multiple_attribute_values(element, attributes, values) }
+    ax_bounded(
+        element,
+        || "reading an element's attributes".to_string(),
+        || unsafe { safe_ax_copy_multiple_attribute_values(element, attributes, values) },
+    )
 }
 
 #[inline(always)]
 fn ffi_copy_action_names(element: AXUIElementRef, names: *mut CFArrayRef) -> i32 {
     #[cfg(test)]
     ax_counters::COPY_ACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { safe_ax_copy_action_names(element, names) }
+    ax_bounded(
+        element,
+        || "reading an element's actions".to_string(),
+        || unsafe { safe_ax_copy_action_names(element, names) },
+    )
 }
 
 // ── Attribute Helpers ─────────────────────────────────────────────────────────
@@ -1770,14 +1902,30 @@ impl PartialEq<i32> for AxCall {
 }
 
 fn do_perform_action(element: AXUIElementRef, action: &CFString) -> AxCall {
-    AxCall::timed(|| unsafe {
-        safe_ax_perform_action(element, action.as_concrete_TypeRef() as CFTypeRef)
+    AxCall::timed(|| {
+        ax_bounded(
+            element,
+            || format!("performing {action}"),
+            || unsafe {
+                safe_ax_perform_action(element, action.as_concrete_TypeRef() as CFTypeRef)
+            },
+        )
     })
 }
 
 fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFTypeRef) -> AxCall {
-    AxCall::timed(|| unsafe {
-        safe_ax_set_attribute_value(element, attribute.as_concrete_TypeRef() as CFTypeRef, value)
+    AxCall::timed(|| {
+        ax_bounded(
+            element,
+            || format!("setting {attribute}"),
+            || unsafe {
+                safe_ax_set_attribute_value(
+                    element,
+                    attribute.as_concrete_TypeRef() as CFTypeRef,
+                    value,
+                )
+            },
+        )
     })
 }
 
@@ -1839,8 +1987,8 @@ fn action_error(
 ///
 /// Without it every message waits for the system default (about six
 /// seconds), and a walk over a busy or hung app pays that per attribute
-/// read. Set once, process-wide, by [`set_global_messaging_timeout`]. Issue
-/// #531 tracks deriving it from the caller's remaining deadline instead.
+/// read. Set once, process-wide, by [`set_global_messaging_timeout`]. A
+/// caller's deadline nearer than this lowers it per message (`ax_bounded`).
 const AX_MESSAGING_TIMEOUT_SECS: f32 = 2.0;
 
 /// Apply [`AX_MESSAGING_TIMEOUT_SECS`] to every AX message from this process.
@@ -1931,7 +2079,16 @@ fn cannot_complete_error(
     };
     Error::Platform {
         code: AX_ERROR_CANNOT_COMPLETE as i64,
-        message: cannot_complete_message(what, &app, elapsed, context),
+        message: cannot_complete_message(
+            what,
+            &app,
+            elapsed,
+            context,
+            // An expired caller's deadline is what bounded this call
+            // (`ax_bounded`), so the global timeout's arithmetic does not
+            // apply to it.
+            xa11y_core::Deadline::current().is_some_and(|d| d.is_expired()),
+        ),
     }
 }
 
@@ -1942,9 +2099,15 @@ fn cannot_complete_message(
     app: &str,
     elapsed: Duration,
     context: CannotCompleteContext,
+    deadline_cut: bool,
 ) -> String {
     let ms = elapsed.as_millis();
-    let mut message = if hit_messaging_timeout(elapsed) {
+    let mut message = if deadline_cut {
+        format!(
+            "{what}: {app} did not respond before the caller's deadline \
+             (kAXErrorCannotComplete after {ms} ms); it may be busy or hung"
+        )
+    } else if hit_messaging_timeout(elapsed) {
         format!(
             "{what}: {app} did not respond within the {AX_MESSAGING_TIMEOUT_SECS}s accessibility \
              messaging timeout (kAXErrorCannotComplete after {ms} ms); it may be busy or hung"
@@ -2003,13 +2166,17 @@ fn perform_ax_action(
 fn is_attr_settable(el_ptr: AXUIElementRef, attr_name: &str) -> Result<bool> {
     let attr = CFString::new(attr_name);
     let mut settable = false;
-    let err = unsafe {
-        safe_ax_is_attribute_settable(
-            el_ptr,
-            attr.as_concrete_TypeRef() as CFTypeRef,
-            &mut settable,
-        )
-    };
+    let err = ax_bounded(
+        el_ptr,
+        || format!("asking whether {attr_name} is settable"),
+        || unsafe {
+            safe_ax_is_attribute_settable(
+                el_ptr,
+                attr.as_concrete_TypeRef() as CFTypeRef,
+                &mut settable,
+            )
+        },
+    );
     match err {
         AX_ERROR_SUCCESS => Ok(settable),
         // "Is this attribute settable?" answered as "the attribute is not
@@ -3789,10 +3956,15 @@ pub struct MacOSProvider {
 /// that matters.
 struct ShellProbeBound<'a> {
     element: &'a AXElement,
+    /// The probe bound this one replaced in [`PROBE_BOUND`], restored on
+    /// drop so a probe nested on the same thread by rayon's work stealing
+    /// unwinds in order.
+    outer: Option<(usize, f32)>,
 }
 
 impl Drop for ShellProbeBound<'_> {
     fn drop(&mut self) {
+        PROBE_BOUND.with(|b| b.set(self.outer));
         MacOSProvider::unbound_shell_probe(self.element);
     }
 }
@@ -4444,7 +4616,9 @@ impl MacOSProvider {
             .collect();
         let built: Vec<Result<ElementData>> = filtered
             .par_iter()
-            .map(|child| self.build_element_data(child, parent.pid))
+            .map(carry_deadline(|child: &&AXElement| {
+                self.build_element_data(child, parent.pid)
+            }))
             .collect();
         let mut results: Vec<ElementData> = Vec::with_capacity(built.len());
         for data in built {
@@ -4510,7 +4684,7 @@ impl MacOSProvider {
         // Process children in parallel: check each clause + recurse.
         let per_child_results: Vec<Vec<(usize, AXElement)>> = children
             .par_iter()
-            .map(|child| {
+            .map(carry_deadline(|child: &AXElement| {
                 let mut child_results: Vec<(usize, AXElement)> = Vec::new();
 
                 // Fetch role+subrole once — used for filter, match, and recursion.
@@ -4550,7 +4724,7 @@ impl MacOSProvider {
                 child_results.extend(sub);
 
                 child_results
-            })
+            }))
             .collect();
 
         // Merge results, respecting limit.
@@ -4631,7 +4805,15 @@ impl MacOSProvider {
     ///
     /// [`bound_shell_probe`]: Self::bound_shell_probe
     fn shell_probe_bound(element: &AXElement) -> Option<ShellProbeBound<'_>> {
-        Self::bound_shell_probe(element).then(|| ShellProbeBound { element })
+        Self::bound_shell_probe(element).then(|| ShellProbeBound {
+            element,
+            outer: PROBE_BOUND.with(|b| {
+                b.replace(Some((
+                    element.as_ptr() as usize,
+                    Self::SHELL_PROBE_TIMEOUT_SECS,
+                )))
+            }),
+        })
     }
 
     /// The frontmost application's `AXMenuBar`, tagged `MenuBar`.
@@ -4742,7 +4924,7 @@ impl MacOSProvider {
     fn status_item_surfaces(&self, apps: &[(i32, String)]) -> Vec<(ShellSurfaceKind, ElementData)> {
         let mut surfaces: Vec<(ShellSurfaceKind, ElementData)> = apps
             .par_iter()
-            .filter_map(|(pid, app_name)| {
+            .filter_map(carry_deadline(|(pid, app_name): &(i32, String)| {
                 let app_element =
                     AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
                 if app_element.is_null() {
@@ -4790,7 +4972,7 @@ impl MacOSProvider {
                     // rather than mistaken for an app with nothing to show.
                     ElementProbe::Absent | ElementProbe::Unanswered(_) => None,
                 }
-            })
+            }))
             .collect();
         // Deterministic order: the fan-out is parallel, so the pid sort is
         // what makes repeated listings comparable.
@@ -7322,6 +7504,51 @@ mod tests {
             action_error(std::ptr::null(), call(-1, 0), "press", Role::Button, "x"),
             Error::Platform { code: -1, ref message } if message == "x"
         ));
+    }
+
+    #[test]
+    fn a_message_after_the_deadline_is_not_sent_and_is_recorded() {
+        let deadline = xa11y_core::Deadline::after(Duration::ZERO);
+        let probe = deadline.clone();
+        let mut sent = false;
+        let code = deadline.scope(|| {
+            ax_bounded(
+                std::ptr::null(),
+                || "reading AXRole".to_string(),
+                || {
+                    sent = true;
+                    AX_ERROR_SUCCESS
+                },
+            )
+        });
+        assert_eq!(code, AX_ERROR_CANNOT_COMPLETE);
+        assert!(!sent, "a message past the deadline must not be sent");
+        assert_eq!(
+            probe.cut_short(),
+            Some("reading AXRole on an element of an unknown application")
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_deadline_is_sent_unchanged() {
+        let code = ax_bounded(std::ptr::null(), || unreachable!(), || -7);
+        assert_eq!(code, -7);
+    }
+
+    #[test]
+    fn a_deadline_cut_is_not_called_a_refusal() {
+        let message = cannot_complete_message(
+            "press: AXPress failed",
+            "the application with pid 1",
+            Duration::from_millis(300),
+            CannotCompleteContext::Action,
+            true,
+        );
+        assert!(
+            message.contains("before the caller's deadline"),
+            "{message}"
+        );
+        assert!(!message.contains("not a timeout"), "{message}");
     }
 
     #[test]

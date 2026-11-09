@@ -510,6 +510,21 @@ pub(crate) fn capture_from(
     options: &CaptureOptions,
 ) -> Result<Capture> {
     options.validate()?;
+    // The time budget bounds the reads too (issue #531): one cut short by it
+    // is recorded as that node's failure, with the read named as pending,
+    // and the walk then stops on time like any other.
+    match options.timeout {
+        Some(t) => crate::deadline::within(t, || walk(root, root_children, options)),
+        None => walk(root, root_children, options),
+    }
+}
+
+/// The body of [`capture_from`], run inside the capture's deadline.
+fn walk(
+    root: Element,
+    root_children: impl FnOnce() -> Result<Vec<Element>>,
+    options: &CaptureOptions,
+) -> Result<Capture> {
     let started = SystemTime::now();
     let deadline = options.timeout.map(|t| Instant::now() + t);
     let cancel = options.cancel.clone();
@@ -548,6 +563,9 @@ pub(crate) fn capture_from(
             Some(read_root) => read_root(),
             None => raw[i].element.children(),
         };
+        // A read the time budget cut short is this node's failure, even
+        // when the backend returned what it had (issue #531).
+        let read = crate::deadline::distrust(read);
         let kids = match read {
             Ok(kids) => kids,
             // The node went away between being listed and being read.

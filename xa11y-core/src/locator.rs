@@ -867,6 +867,20 @@ impl Locator {
         ever_matched: bool,
         auto_scroll: Option<&AutoScroll>,
     ) -> Error {
+        self.diagnose_wait(elapsed, condition, last, ever_matched, auto_scroll, true)
+    }
+
+    /// [`Self::diagnose_timeout`], with the miss context (a search of the
+    /// scope for candidates) collected only when `miss_context` is set.
+    fn diagnose_wait(
+        &self,
+        elapsed: Duration,
+        condition: String,
+        last: Option<&ElementData>,
+        ever_matched: bool,
+        auto_scroll: Option<&AutoScroll>,
+        miss_context: bool,
+    ) -> Error {
         let mut d = Diagnosis {
             condition: Some(condition),
             selector: Some(self.selector.clone()),
@@ -893,10 +907,52 @@ impl Locator {
             }
             None => {
                 d.last_observed = Some("selector never matched".to_string());
-                self.fill_miss_context(&mut d);
+                if miss_context {
+                    crate::deadline::for_diagnosis(|| self.fill_miss_context(&mut d));
+                }
             }
         }
         Error::timeout(elapsed).diagnose(d)
+    }
+
+    /// The error a wait returns when a provider read fails.
+    ///
+    /// A read cut short by the wait's own deadline becomes the wait's
+    /// timeout, diagnosed from the last poll that completed and naming the
+    /// read that was still in flight ([`Diagnosis::pending`]), so the error
+    /// says which selector and condition it gave up on as well as which call
+    /// was pending. Every other error passes through unchanged.
+    ///
+    /// A "never matched" timeout still carries its candidates and scope
+    /// snapshot (tenet 6), collected under the short
+    /// [`CUT_DIAGNOSIS_BUDGET`](crate::deadline::CUT_DIAGNOSIS_BUDGET) rather
+    /// than the full diagnosis budget: the read that was cut may mean the
+    /// application is hung, and the wait must still end near its timeout. A
+    /// snapshot read that runs out of time is recorded in the snapshot.
+    fn read_failed(
+        &self,
+        err: Error,
+        elapsed: Duration,
+        condition: impl FnOnce() -> String,
+        last: Option<&ElementData>,
+        ever_matched: bool,
+        auto_scroll: Option<&AutoScroll>,
+    ) -> Error {
+        let Some(pending) = crate::deadline::pending_of(&err) else {
+            return err;
+        };
+        let mut timeout =
+            self.diagnose_wait(elapsed, condition(), last, ever_matched, auto_scroll, false);
+        if let Error::Timeout {
+            diagnosis: Some(d), ..
+        } = &mut timeout
+        {
+            d.pending = pending;
+            if last.is_none() && !ever_matched {
+                crate::deadline::for_cut_diagnosis(|| self.fill_miss_context(d));
+            }
+        }
+        timeout
     }
 
     // ── Queries (each re-queries the provider) ─────────────────────
@@ -1094,15 +1150,42 @@ impl Locator {
     ) -> Result<ControlFlow<B, Element>> {
         let gate = Actionability::for_action(action)?;
         let timeout = self.effective_timeout()?;
+        crate::deadline::within(timeout, || {
+            self.auto_wait_loop(action, gate, timeout, &mut resolve)
+        })
+    }
+
+    /// The body of [`Self::auto_wait_with`], run inside its deadline.
+    fn auto_wait_loop<B>(
+        &self,
+        action: &str,
+        gate: Actionability,
+        timeout: Duration,
+        resolve: &mut impl FnMut() -> Result<ControlFlow<B, Option<ElementData>>>,
+    ) -> Result<ControlFlow<B, Element>> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
         let mut ever_matched = false;
         let mut auto_scroll = AutoScroll::default();
+        let condition = || format!("{action} target actionable ({})", gate.label());
+        // The previous poll's observation, for a timeout that lands inside
+        // a read and so has none of its own.
+        let mut previous: Option<ElementData> = None;
 
         loop {
-            let resolved = match resolve()? {
-                ControlFlow::Continue(resolved) => resolved,
-                ControlFlow::Break(b) => return Ok(ControlFlow::Break(b)),
+            let resolved = match crate::deadline::distrust(resolve()) {
+                Ok(ControlFlow::Continue(resolved)) => resolved,
+                Ok(ControlFlow::Break(b)) => return Ok(ControlFlow::Break(b)),
+                Err(e) => {
+                    return Err(self.read_failed(
+                        e,
+                        start.elapsed(),
+                        condition,
+                        previous.as_ref(),
+                        ever_matched,
+                        Some(&auto_scroll),
+                    ))
+                }
             };
 
             // This poll's observation, for the timeout diagnosis.
@@ -1120,30 +1203,60 @@ impl Locator {
                     // next poll re-reads the element and re-checks the gate.
                     ever_matched = true;
                     auto_scroll.observe(&data);
-                    scrolled = auto_scroll.attempt(gate, &data, self.provider.as_ref())?;
+                    scrolled = match crate::deadline::distrust(auto_scroll.attempt(
+                        gate,
+                        &data,
+                        self.provider.as_ref(),
+                    )) {
+                        Ok(scrolled) => scrolled,
+                        Err(e) => {
+                            return Err(self.read_failed(
+                                e,
+                                start.elapsed(),
+                                condition,
+                                Some(&data),
+                                ever_matched,
+                                Some(&auto_scroll),
+                            ))
+                        }
+                    };
                     Some(data)
                 }
                 None => None,
             };
 
-            // A scroll the platform just accepted is always followed by one
-            // more poll, even past the deadline: otherwise a scroll on the last
-            // poll would time out on the observation taken before it, which
-            // says nothing about whether it worked. This extends the wait by
-            // at most one poll per accepted call, and `Duration::ZERO` still
-            // means one attempt at the action.
+            // With `Duration::ZERO` a scroll the platform just accepted is
+            // followed by one more poll: otherwise the single attempt would
+            // time out on the observation taken before the scroll, which says
+            // nothing about whether it worked. A non-zero timeout is a hard
+            // deadline (issue #531), so there the scroll gets its re-check
+            // only if time is left, and the diagnosis's `auto_scroll` says
+            // that a scroll was made.
             let elapsed = start.elapsed();
-            if elapsed >= timeout && !scrolled {
+            if scrolled && timeout.is_zero() {
+                std::thread::sleep(poll_interval);
+            } else if elapsed >= timeout || !crate::deadline::pause(start, timeout, poll_interval) {
                 return Err(self.diagnose_timeout(
-                    elapsed,
-                    format!("{action} target actionable ({})", gate.label()),
+                    start.elapsed(),
+                    condition(),
                     observed.as_ref(),
                     ever_matched,
                     Some(&auto_scroll),
                 ));
             }
-            std::thread::sleep(poll_interval);
+            previous = observed;
         }
+    }
+
+    /// Auto-wait for `action`, then perform it with `perform`, all under one
+    /// deadline of the locator's timeout: a hung application cannot stretch
+    /// the action past it, in the wait or in the platform call (issue #531).
+    fn act(&self, action: &str, perform: impl FnOnce(&Element) -> Result<()>) -> Result<()> {
+        let timeout = self.effective_timeout()?;
+        crate::deadline::within(timeout, || {
+            let target = self.auto_wait(action)?;
+            perform(&target).map_err(crate::deadline::action_error)
+        })
     }
 
     // ── Actions ────────────────────────────────────────────────────
@@ -1157,52 +1270,52 @@ impl Locator {
 
     /// Click / invoke the matched element.
     pub fn press(&self) -> Result<()> {
-        self.auto_wait("press")?.press()
+        self.act("press", |e| e.press())
     }
 
     /// Set keyboard focus on the matched element.
     pub fn focus(&self) -> Result<()> {
-        self.auto_wait("focus")?.focus()
+        self.act("focus", |e| e.focus())
     }
 
     /// Remove keyboard focus from the matched element.
     pub fn blur(&self) -> Result<()> {
-        self.auto_wait("blur")?.blur()
+        self.act("blur", |e| e.blur())
     }
 
     /// Toggle the matched element (checkbox, switch).
     pub fn toggle(&self) -> Result<()> {
-        self.auto_wait("toggle")?.toggle()
+        self.act("toggle", |e| e.toggle())
     }
 
     /// Select the matched element (list item, etc.).
     pub fn select(&self) -> Result<()> {
-        self.auto_wait("select")?.select()
+        self.act("select", |e| e.select())
     }
 
     /// Expand the matched element.
     pub fn expand(&self) -> Result<()> {
-        self.auto_wait("expand")?.expand()
+        self.act("expand", |e| e.expand())
     }
 
     /// Collapse the matched element.
     pub fn collapse(&self) -> Result<()> {
-        self.auto_wait("collapse")?.collapse()
+        self.act("collapse", |e| e.collapse())
     }
 
     /// Show the context menu for the matched element.
     pub fn show_menu(&self) -> Result<()> {
-        self.auto_wait("show_menu")?.show_menu()
+        self.act("show_menu", |e| e.show_menu())
     }
 
     /// Increment the matched element (slider, spinner).
     pub fn increment(&self) -> Result<()> {
-        self.auto_wait("increment")?.increment()
+        self.act("increment", |e| e.increment())
     }
 
     /// Decrement the matched element (slider, spinner).
     pub fn decrement(&self) -> Result<()> {
-        self.auto_wait("decrement")?.decrement()
+        self.act("decrement", |e| e.decrement())
     }
 
     /// Scroll the matched element into view.
@@ -1213,12 +1326,12 @@ impl Locator {
     /// visibility would be circular and would time out on the elements that
     /// most need scrolling (issue #350).
     pub fn scroll_into_view(&self) -> Result<()> {
-        self.auto_wait("scroll_into_view")?.scroll_into_view()
+        self.act("scroll_into_view", |e| e.scroll_into_view())
     }
 
     /// Set the text value of the matched element.
     pub fn set_value(&self, value: &str) -> Result<()> {
-        self.auto_wait("set_value")?.set_value(value)
+        self.act("set_value", |e| e.set_value(value))
     }
 
     /// Set the numeric value of the matched element (slider, spinner).
@@ -1230,19 +1343,18 @@ impl Locator {
                 message: format!("set_numeric_value requires a finite value, got {}", value),
             });
         }
-        self.auto_wait("set_numeric_value")?
-            .set_numeric_value(value)
+        self.act("set_numeric_value", |e| e.set_numeric_value(value))
     }
 
     /// Type text at the current cursor position on the matched element.
     pub fn type_text(&self, text: &str) -> Result<()> {
-        self.auto_wait("type_text")?.type_text(text)
+        self.act("type_text", |e| e.type_text(text))
     }
 
     /// Select a text range within the matched element.
     pub fn select_text(&self, start: u32, end: u32) -> Result<()> {
         crate::text_api::TextRange::new(start, end)?;
-        self.auto_wait("select_text")?.select_text(start, end)
+        self.act("select_text", |e| e.select_text(start, end))
     }
 
     /// Perform an action by name (with auto-wait).
@@ -1268,7 +1380,7 @@ impl Locator {
             "close" => return self.close(),
             _ => {}
         }
-        self.auto_wait("perform_action")?.perform_action(action)
+        self.act("perform_action", |e| e.perform_action(action))
     }
 
     // ── Window management ─────────────────────────────────────────
@@ -1284,12 +1396,12 @@ impl Locator {
     /// Activate the matched window: bring it to the foreground and give it
     /// focus.
     pub fn activate(&self) -> Result<()> {
-        self.auto_wait("activate")?.activate()
+        self.act("activate", |e| e.activate())
     }
 
     /// Minimize the matched window.
     pub fn minimize(&self) -> Result<()> {
-        self.auto_wait("minimize")?.minimize()
+        self.act("minimize", |e| e.minimize())
     }
 
     /// Maximize the matched window.
@@ -1297,7 +1409,7 @@ impl Locator {
     /// Distinct from [`Self::enter_fullscreen`]: this drives the platform's
     /// maximized state, not native fullscreen.
     pub fn maximize(&self) -> Result<()> {
-        self.auto_wait("maximize")?.maximize()
+        self.act("maximize", |e| e.maximize())
     }
 
     /// Put the matched window in native fullscreen.
@@ -1305,7 +1417,7 @@ impl Locator {
     /// Distinct from [`Self::maximize`]: fullscreen is the platform's native
     /// fullscreen state (macOS `AXFullScreen`); [`Self::restore`] leaves it.
     pub fn enter_fullscreen(&self) -> Result<()> {
-        self.auto_wait("enter_fullscreen")?.enter_fullscreen()
+        self.act("enter_fullscreen", |e| e.enter_fullscreen())
     }
 
     /// Restore the matched window to its normal state (from minimized,
@@ -1317,17 +1429,17 @@ impl Locator {
     /// leaving fullscreen is the same absolute state write this performs, not
     /// a distinct operation.
     pub fn restore(&self) -> Result<()> {
-        self.auto_wait("restore")?.restore()
+        self.act("restore", |e| e.restore())
     }
 
     /// Close the matched window.
     pub fn close(&self) -> Result<()> {
-        self.auto_wait("close")?.close()
+        self.act("close", |e| e.close())
     }
 
     /// Move the matched window to the given **logical** screen coordinates.
     pub fn move_to(&self, x: i32, y: i32) -> Result<()> {
-        self.auto_wait("move_to")?.move_to(x, y)
+        self.act("move_to", |e| e.move_to(x, y))
     }
 
     /// Resize the matched window to the given **logical** dimensions.
@@ -1342,7 +1454,7 @@ impl Locator {
                 ),
             });
         }
-        self.auto_wait("resize_to")?.resize_to(width, height)
+        self.act("resize_to", |e| e.resize_to(width, height))
     }
 
     // ── Wait operations ─────────────────────────────────────────────
@@ -1444,15 +1556,51 @@ impl Locator {
     /// last two differing rectangles and the observed unchanged duration,
     /// a match that is not visible, absent bounds, or no match.
     pub fn wait_stable(&self, timeout: Duration) -> Result<Element> {
+        crate::deadline::within(timeout, || self.wait_stable_loop(timeout))
+    }
+
+    /// The body of [`Self::wait_stable`], run inside its deadline.
+    fn wait_stable_loop(&self, timeout: Duration) -> Result<Element> {
         let start = std::time::Instant::now();
         let mut ever_matched = false;
         let mut stability = StableBounds::default();
+        let mut previous: Option<ElementData> = None;
 
         loop {
-            let matched = match self.resolve_data() {
+            let matched = match crate::deadline::distrust(self.resolve_data()) {
                 Ok(data) => Some(data),
                 Err(Error::SelectorNotMatched { .. }) => None,
-                Err(e) => return Err(e),
+                Err(e) => {
+                    // A read the deadline cut ends the wait on the previous
+                    // poll's observation, which still says whether the
+                    // bounds were moving. Without one, `read_failed` says
+                    // the selector never matched.
+                    if let (Some(_), Some(pending)) = (&previous, crate::deadline::pending_of(&e)) {
+                        let elapsed = start.elapsed();
+                        let mut err = self.diagnose_unstable(
+                            elapsed,
+                            previous.as_ref(),
+                            ever_matched,
+                            stability.last_change,
+                            stability.unchanged_for(elapsed),
+                        );
+                        if let Error::Timeout {
+                            diagnosis: Some(d), ..
+                        } = &mut err
+                        {
+                            d.pending = pending;
+                        }
+                        return Err(err);
+                    }
+                    return Err(self.read_failed(
+                        e,
+                        start.elapsed(),
+                        || STABLE_CONDITION.to_string(),
+                        previous.as_ref(),
+                        ever_matched,
+                        None,
+                    ));
+                }
             };
             if matched.is_some() {
                 ever_matched = true;
@@ -1465,16 +1613,18 @@ impl Locator {
             }
             // Preserve the other wait methods' convention: evaluate the
             // observation before checking the overall timeout.
-            if elapsed >= timeout {
+            if elapsed >= timeout || !crate::deadline::pause(start, timeout, WAIT_POLL_INTERVAL) {
+                // "Unchanged for" runs to the last observation, not to now:
+                // nothing was observed in the pause that ended the wait.
                 return Err(self.diagnose_unstable(
-                    elapsed,
+                    start.elapsed(),
                     matched.as_ref(),
                     ever_matched,
                     stability.last_change,
                     stability.unchanged_for(elapsed),
                 ));
             }
-            std::thread::sleep(WAIT_POLL_INTERVAL);
+            previous = matched;
         }
     }
 
@@ -1537,15 +1687,35 @@ impl Locator {
         timeout: Duration,
         condition: &str,
     ) -> Result<Option<Element>> {
+        crate::deadline::within(timeout, || self.poll_loop(&predicate, timeout, condition))
+    }
+
+    /// The body of [`Self::poll_until`], run inside its deadline.
+    fn poll_loop(
+        &self,
+        predicate: &impl Fn(Option<&ElementData>) -> bool,
+        timeout: Duration,
+        condition: &str,
+    ) -> Result<Option<Element>> {
         let start = std::time::Instant::now();
         let mut ever_matched = false;
+        let mut previous: Option<ElementData> = None;
 
         loop {
             // This poll's observation, for the timeout diagnosis.
-            let matched = match self.resolve_data() {
+            let matched = match crate::deadline::distrust(self.resolve_data()) {
                 Ok(data) => Some(data),
                 Err(Error::SelectorNotMatched { .. }) => None,
-                Err(e) => return Err(e),
+                Err(e) => {
+                    return Err(self.read_failed(
+                        e,
+                        start.elapsed(),
+                        || condition.to_string(),
+                        previous.as_ref(),
+                        ever_matched,
+                        None,
+                    ))
+                }
             };
             if matched.is_some() {
                 ever_matched = true;
@@ -1555,17 +1725,18 @@ impl Locator {
                 return Ok(matched.map(|data| Element::new(data, Arc::clone(&self.provider))));
             }
 
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
+            if start.elapsed() >= timeout
+                || !crate::deadline::pause(start, timeout, WAIT_POLL_INTERVAL)
+            {
                 return Err(self.diagnose_timeout(
-                    elapsed,
+                    start.elapsed(),
                     condition.to_string(),
                     matched.as_ref(),
                     ever_matched,
                     None,
                 ));
             }
-            std::thread::sleep(WAIT_POLL_INTERVAL);
+            previous = matched;
         }
     }
 }
@@ -2329,7 +2500,10 @@ mod tests {
     // wrapping the call in manual tree dumps.
 
     /// Short wait that exceeds at least one 100 ms poll tick.
-    const SHORT_WAIT: Duration = Duration::from_millis(250);
+    /// Long enough for a scroll and the poll that observes it on a loaded
+    /// runner: no poll runs past the deadline (#531), and one poll of the
+    /// mock tree has been seen to take ~100 ms on macOS CI.
+    const SHORT_WAIT: Duration = Duration::from_secs(1);
 
     #[test]
     fn wait_visible_timeout_diagnosis_never_matched() {
@@ -3065,7 +3239,7 @@ mod wait_stable_tests {
         let frames = (0..200).map(|i| (Some(rect(i * 10)), true)).collect();
         let (_p, loc) = animated(frames);
         let err = loc
-            .wait_stable(Duration::from_millis(350))
+            .wait_stable(Duration::from_secs(1))
             .expect_err("never settles");
         let obs = observed(&err);
         assert!(obs.starts_with("bounds still changing: {x="), "{obs}");
@@ -3112,18 +3286,21 @@ mod wait_stable_tests {
 
     #[test]
     fn a_timeout_after_a_hidden_poll_reports_the_restarted_window() {
-        // Poll 1 sees it hidden; poll 2 (after the 50 ms timeout) sees it
-        // visible. Earlier hidden time cannot count as unchanged bounds.
-        let (_p, loc) = animated(vec![(Some(rect(110)), false), (Some(rect(110)), true)]);
-        let err = loc
-            .wait_stable(Duration::from_millis(50))
-            .expect_err("a hidden poll resets the comparison");
-        let observed = observed(&err);
+        // Driven on the window itself, not through wall-clock polls: no poll
+        // runs past the deadline (#531), so how many polls fit a short wait
+        // depends on the runner's load. The diagnosis wording for a 0 ms
+        // window is covered by `a_zero_timeout_explains_...`.
+        let mut stability = StableBounds::default();
+        let at = Duration::from_millis;
+        assert!(!stability.observe(Some(rect(110)), at(0)));
+        // Hidden: earlier visible time cannot count as unchanged bounds.
+        assert!(!stability.observe(None, at(400)));
         assert!(
-            observed.contains("observed unchanged for 0 ms"),
-            "{observed}"
+            !stability.observe(Some(rect(110)), at(900)),
+            "900 ms since the first sighting, but the hidden poll restarted the window"
         );
-        assert!(observed.contains("at least 750 ms"), "{observed}");
+        assert_eq!(stability.unchanged_for(at(900)), Some(Duration::ZERO));
+        assert!(stability.observe(Some(rect(110)), at(1650)));
     }
 
     #[test]
@@ -3172,9 +3349,11 @@ mod wait_stable_tests {
 
     #[test]
     fn plateau_timeout_keeps_the_last_change_and_current_window() {
+        // 600 ms: room for the second poll, and still short of the 750 ms
+        // the settled rect(40) would need to count as stable.
         let (_p, loc) = animated(vec![(Some(rect(0)), true), (Some(rect(40)), true)]);
         let err = loc
-            .wait_stable(Duration::from_millis(350))
+            .wait_stable(Duration::from_millis(600))
             .expect_err("too short");
         let observation = observed(&err);
         assert!(

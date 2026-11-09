@@ -4140,8 +4140,22 @@ impl WindowsProvider {
 // coords.rs. The methods bound to `_dpi` touch no coordinates, and their
 // scope is a defensive habit, not a requirement: it keeps a coordinate call
 // added to one of them later from needing a scope threaded in first.
+/// Refuse to start a UIA operation once the caller's deadline has passed
+/// (#531), naming it as the pending call.
+///
+/// UIA has no per-call timeout: its connection and transaction timeouts
+/// belong to the shared `IUIAutomation` object, so lowering them for one
+/// caller would cut every other thread's calls short too. What a deadline
+/// can bound here is when an operation *starts*; one already in flight is
+/// bounded by [`UIA_CONNECTION_TIMEOUT_MS`] and
+/// [`UIA_TRANSACTION_TIMEOUT_MS`], as before.
+fn uia_gate(operation: &str) -> Result<()> {
+    xa11y_core::call_timeout(std::time::Duration::MAX, || format!("UIA {operation}")).map(|_| ())
+}
+
 impl Provider for WindowsProvider {
     fn identity(&self, element: &ElementData) -> Result<xa11y_core::NodeIdentity> {
+        uia_gate("identity")?;
         if let Some(app) = self.synthetic_app_identity_checked(element.handle)? {
             return Ok(xa11y_core::NodeIdentity::from_key(
                 "uia",
@@ -4181,6 +4195,7 @@ impl Provider for WindowsProvider {
     }
 
     fn revalidate(&self, element: &ElementData) -> Result<()> {
+        uia_gate("revalidate")?;
         if let Some(app) = self.synthetic_app_identity_checked(element.handle)? {
             return validate_synthetic_app_identity(
                 element.handle,
@@ -4229,6 +4244,7 @@ impl Provider for WindowsProvider {
     }
 
     fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        uia_gate("app_windows")?;
         let dpi = &crate::dpi::DpiScope::enter()?;
         if let Some(identity) = self.synthetic_app_identity_checked(app.handle)? {
             return self.synthetic_app_windows(dpi, app, identity, false);
@@ -4237,6 +4253,7 @@ impl Provider for WindowsProvider {
     }
 
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        uia_gate("get_children")?;
         let dpi = &crate::dpi::DpiScope::enter()?;
         match element {
             None => {
@@ -4308,6 +4325,7 @@ impl Provider for WindowsProvider {
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        uia_gate("get_parent")?;
         let dpi = &crate::dpi::DpiScope::enter()?;
         // A synthesized Application node is top-level by construction — no
         // element has the process as a child. The walk needs a live element
@@ -4385,6 +4403,7 @@ impl Provider for WindowsProvider {
     // Chromium builds its UIA tree on its own once a UI Automation client
     // connects, so there is no switch to set.
     fn enable_web_accessibility(&self, _app: &ElementData) -> Result<()> {
+        uia_gate("enable_web_accessibility")?;
         Err(Error::Unsupported {
             feature: "enable_web_accessibility on Windows: Chromium and Electron build \
                 their web accessibility tree on their own when a UI Automation client \
@@ -4438,6 +4457,7 @@ impl Provider for WindowsProvider {
     /// surface it was probing and lists the surfaces classified before the
     /// scan aborted.
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        uia_gate("list_shell_surfaces")?;
         let dpi = &crate::dpi::DpiScope::enter()?;
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         let found = self.raw_children_with_cache(dpi, &root)?;
@@ -4574,6 +4594,7 @@ impl Provider for WindowsProvider {
     /// reports. This is the canonical app discovery primitive (replaces the
     /// old `find_elements(None, "application"/"window", …, depth=0)` idiom).
     fn list_apps(&self) -> Result<Vec<ElementData>> {
+        uia_gate("list_apps")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         self.get_children(None)
     }
@@ -4582,6 +4603,7 @@ impl Provider for WindowsProvider {
     /// because they belong to no running process (issue #497). The same
     /// enumeration as `list_apps`, so the two sets match.
     fn unlisted_apps(&self) -> Result<Vec<String>> {
+        uia_gate("unlisted_apps")?;
         let dpi = &crate::dpi::DpiScope::enter()?;
         Ok(self.desktop_app_windows(dpi)?.1)
     }
@@ -4599,6 +4621,7 @@ impl Provider for WindowsProvider {
     /// missing-entry shape: the process's windows, not its first window,
     /// are what the pid means).
     fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
+        uia_gate("app_by_pid")?;
         // A hung window of this pid would stall the UIA search below for the
         // transaction timeout; fail fast naming it instead (issue #507).
         let hung: Vec<HungWindow> = hung_top_level_windows()?
@@ -4749,6 +4772,7 @@ impl Provider for WindowsProvider {
     /// error and propagates; a foreground window with no resolvable pid is an
     /// honest `Platform` error, not "no foreground app" (tenet 1).
     fn focused_app(&self) -> Result<ElementData> {
+        uia_gate("focused_app")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd.0.is_null() {
@@ -4817,6 +4841,7 @@ impl Provider for WindowsProvider {
         max_depth: u32,
         limit: Option<usize>,
     ) -> Result<Vec<ElementData>> {
+        uia_gate("narrow_multi_segment")?;
         xa11y_core::selector::validate_tail_segments(segments)?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         // Dedup below is by handle; the canonical walk makes that a dedup by
@@ -4883,6 +4908,7 @@ impl Provider for WindowsProvider {
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
+        uia_gate("find_elements_group")?;
         // The AST's fields are public, so a hand-built group can break the
         // invariants the walk below indexes on (`clause.segments[0]`, Root
         // only first, 1-based `:nth`). Reject it before traversal.
@@ -5133,6 +5159,7 @@ impl Provider for WindowsProvider {
 
     #[allow(non_upper_case_globals)]
     fn press(&self, element: &ElementData) -> Result<()> {
+        uia_gate("press")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         // `press` dispatches to the element's primary-activation UIA pattern:
         // Invoke (buttons, menu items, links), Toggle (checkboxes, switches),
@@ -5274,6 +5301,7 @@ impl Provider for WindowsProvider {
     }
 
     fn focus(&self, element: &ElementData) -> Result<()> {
+        uia_gate("focus")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         unsafe { uia_element.SetFocus() }.map_err(|e| Error::Platform {
@@ -5284,6 +5312,7 @@ impl Provider for WindowsProvider {
     }
 
     fn blur(&self, _element: &ElementData) -> Result<()> {
+        uia_gate("blur")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         // Focus the desktop root to blur the current element
         let root = unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
@@ -5298,6 +5327,7 @@ impl Provider for WindowsProvider {
     }
 
     fn toggle(&self, element: &ElementData) -> Result<()> {
+        uia_gate("toggle")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Some(pattern) = current_pattern::<IUIAutomationTogglePattern>(
@@ -5324,6 +5354,7 @@ impl Provider for WindowsProvider {
     }
 
     fn select(&self, element: &ElementData) -> Result<()> {
+        uia_gate("select")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Some(pattern) = current_pattern::<IUIAutomationSelectionItemPattern>(
@@ -5350,6 +5381,7 @@ impl Provider for WindowsProvider {
     }
 
     fn expand(&self, element: &ElementData) -> Result<()> {
+        uia_gate("expand")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Some(pattern) = current_pattern::<IUIAutomationExpandCollapsePattern>(
@@ -5370,6 +5402,7 @@ impl Provider for WindowsProvider {
     }
 
     fn collapse(&self, element: &ElementData) -> Result<()> {
+        uia_gate("collapse")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Some(pattern) = current_pattern::<IUIAutomationExpandCollapsePattern>(
@@ -5390,6 +5423,7 @@ impl Provider for WindowsProvider {
     }
 
     fn show_menu(&self, element: &ElementData) -> Result<()> {
+        uia_gate("show_menu")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         // No direct UIA equivalent; try context menu via legacy.
         //
@@ -5409,6 +5443,7 @@ impl Provider for WindowsProvider {
     }
 
     fn increment(&self, element: &ElementData) -> Result<()> {
+        uia_gate("increment")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Some(pattern) = current_pattern::<IUIAutomationRangeValuePattern>(
@@ -5442,6 +5477,7 @@ impl Provider for WindowsProvider {
     }
 
     fn decrement(&self, element: &ElementData) -> Result<()> {
+        uia_gate("decrement")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Some(pattern) = current_pattern::<IUIAutomationRangeValuePattern>(
@@ -5475,6 +5511,7 @@ impl Provider for WindowsProvider {
     }
 
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
+        uia_gate("scroll_into_view")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         // Only a genuinely absent ScrollItemPattern is "not supported"; any
@@ -5498,6 +5535,7 @@ impl Provider for WindowsProvider {
     // input simulation is involved (tenet 2).
 
     fn activate(&self, element: &ElementData) -> Result<()> {
+        uia_gate("activate")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "activate", element.role)?;
@@ -5561,6 +5599,7 @@ impl Provider for WindowsProvider {
     }
 
     fn minimize(&self, element: &ElementData) -> Result<()> {
+        uia_gate("minimize")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "minimize", element.role)?;
@@ -5591,6 +5630,7 @@ impl Provider for WindowsProvider {
     }
 
     fn maximize(&self, element: &ElementData) -> Result<()> {
+        uia_gate("maximize")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "maximize", element.role)?;
@@ -5619,6 +5659,7 @@ impl Provider for WindowsProvider {
     }
 
     fn enter_fullscreen(&self, element: &ElementData) -> Result<()> {
+        uia_gate("enter_fullscreen")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         // Same target contract as the sibling verbs: a non-window target is
@@ -5641,6 +5682,7 @@ impl Provider for WindowsProvider {
     }
 
     fn restore(&self, element: &ElementData) -> Result<()> {
+        uia_gate("restore")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "restore", element.role)?;
@@ -5676,6 +5718,7 @@ impl Provider for WindowsProvider {
     }
 
     fn close(&self, element: &ElementData) -> Result<()> {
+        uia_gate("close")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "close", element.role)?;
@@ -5690,6 +5733,7 @@ impl Provider for WindowsProvider {
     }
 
     fn move_to(&self, element: &ElementData, x: i32, y: i32) -> Result<()> {
+        uia_gate("move_to")?;
         let dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "move_to", element.role)?;
@@ -5720,6 +5764,7 @@ impl Provider for WindowsProvider {
     }
 
     fn resize_to(&self, element: &ElementData, width: u32, height: u32) -> Result<()> {
+        uia_gate("resize_to")?;
         let dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "resize_to", element.role)?;
@@ -5749,6 +5794,7 @@ impl Provider for WindowsProvider {
     }
 
     fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
+        uia_gate("set_value")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Some(pattern) = current_pattern::<IUIAutomationValuePattern>(
@@ -5765,6 +5811,7 @@ impl Provider for WindowsProvider {
     }
 
     fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
+        uia_gate("set_numeric_value")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         let pattern = current_pattern::<IUIAutomationRangeValuePattern>(
@@ -5784,6 +5831,7 @@ impl Provider for WindowsProvider {
     }
 
     fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
+        uia_gate("type_text")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         // Insert text via ValuePattern (accessibility API, not input simulation).
@@ -5818,6 +5866,7 @@ impl Provider for WindowsProvider {
     }
 
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
+        uia_gate("set_text_selection")?;
         // Name the action the caller asked for, not the text read under it.
         let doc = self.document(element).map_err(|e| match e {
             Error::ActionNotSupported { role, .. } => Error::ActionNotSupported {
@@ -5831,6 +5880,7 @@ impl Provider for WindowsProvider {
     }
 
     fn table_cell_at(&self, e: &ElementData, row: u32, column: u32) -> Result<Option<ElementData>> {
+        uia_gate("table_cell_at")?;
         let dpi = crate::dpi::DpiScope::enter()?;
         let p: IUIAutomationGridPattern = self.rich_pattern(e, UIA_GridPatternId, "cell_at")?;
         let rows = uia_call(|| unsafe { p.CurrentRowCount() })?;
@@ -5862,6 +5912,7 @@ impl Provider for WindowsProvider {
         e: &ElementData,
         kinds: &[xa11y_core::RelationKind],
     ) -> Result<Vec<(xa11y_core::RelationKind, Vec<ElementData>)>> {
+        uia_gate("relations")?;
         use xa11y_core::RelationKind as K;
         // Refuse an unsupported kind before any COM call, naming it.
         for kind in kinds {
@@ -5926,6 +5977,7 @@ impl Provider for WindowsProvider {
         e: &ElementData,
         kind: xa11y_core::table::HeaderKind,
     ) -> Result<Vec<ElementData>> {
+        uia_gate("table_headers")?;
         let dpi = crate::dpi::DpiScope::enter()?;
         let p: IUIAutomationTablePattern =
             self.rich_pattern(e, UIA_TablePatternId, "table_headers")?;
@@ -5945,6 +5997,7 @@ impl Provider for WindowsProvider {
         e: &ElementData,
         kind: xa11y_core::table::HeaderKind,
     ) -> Result<Vec<ElementData>> {
+        uia_gate("cell_headers")?;
         let dpi = crate::dpi::DpiScope::enter()?;
         let p: IUIAutomationTableItemPattern =
             self.rich_pattern(e, UIA_TableItemPatternId, "cell_headers")?;
@@ -5960,6 +6013,7 @@ impl Provider for WindowsProvider {
     }
 
     fn selected_items(&self, e: &ElementData) -> Result<Vec<ElementData>> {
+        uia_gate("selected_items")?;
         let dpi = crate::dpi::DpiScope::enter()?;
         let p: IUIAutomationSelectionPattern =
             self.rich_pattern(e, UIA_SelectionPatternId, "selected_items")?;
@@ -5967,12 +6021,14 @@ impl Provider for WindowsProvider {
     }
 
     fn text_length(&self, e: &ElementData) -> Result<u32> {
+        uia_gate("text_length")?;
         Ok(xa11y_core::text_api::utf16_len(&rich::contents(
             &self.document(e)?,
         )?))
     }
 
     fn text_caret(&self, e: &ElementData) -> Result<Option<u32>> {
+        uia_gate("text_caret")?;
         let el = self.get_cached(e.handle)?;
         // TextPattern2 reports whether its caret is active, including the
         // active endpoint of a backwards selection.
@@ -6017,6 +6073,7 @@ impl Provider for WindowsProvider {
     }
 
     fn text_selections(&self, e: &ElementData) -> Result<Vec<xa11y_core::text_api::TextRange>> {
+        uia_gate("text_selections")?;
         let p: IUIAutomationTextPattern = self.rich_pattern(e, UIA_TextPatternId, "text")?;
         let doc = uia_call(|| unsafe { p.DocumentRange() })?;
         let array = uia_call(|| unsafe { p.GetSelection() })?;
@@ -6032,6 +6089,7 @@ impl Provider for WindowsProvider {
     }
 
     fn text_read(&self, e: &ElementData, r: xa11y_core::text_api::TextRange) -> Result<String> {
+        uia_gate("text_read")?;
         // UIA has no numeric offsets. Read only the prefix needed to
         // validate and slice the request, including a surrogate guard unit.
         // Scalar boundaries inside CRLF/graphemes remain readable even when
@@ -6068,6 +6126,7 @@ impl Provider for WindowsProvider {
         needle: &str,
         options: xa11y_core::text_api::FindOptions,
     ) -> Result<Option<xa11y_core::text_api::TextRange>> {
+        uia_gate("text_find")?;
         // Numeric UIA reads need prefixes. Share one fresh observation for
         // the entire search rather than re-reading it once per chunk. Use
         // core's exact matcher, not UIA's provider-dependent FindText rules.
@@ -6084,6 +6143,7 @@ impl Provider for WindowsProvider {
         offset: u32,
         unit: xa11y_core::text_api::TextUnit,
     ) -> Result<xa11y_core::text_api::TextRange> {
+        uia_gate("text_range_at")?;
         use xa11y_core::text_api::{slice_utf16, utf16_len, TextRange, TextUnit};
         let doc = self.document(e)?;
         let text = rich::contents(&doc)?;
@@ -6165,6 +6225,7 @@ impl Provider for WindowsProvider {
         e: &ElementData,
         r: xa11y_core::text_api::TextRange,
     ) -> Result<Option<xa11y_core::Rect>> {
+        uia_gate("text_range_bounds")?;
         let dpi = crate::dpi::DpiScope::enter()?;
         let range = rich::range(&self.document(e)?, r)?;
         crate::coords::text_range_bounds(&dpi, &range)
@@ -6175,6 +6236,7 @@ impl Provider for WindowsProvider {
         e: &ElementData,
         offset: u32,
     ) -> Result<xa11y_core::text_api::TextRun> {
+        uia_gate("text_attributes_at")?;
         let doc = self.document(e)?;
         let sample = rich::format_sample(&doc, offset)?;
         let range = uia_call(|| unsafe { sample.Clone() })?;
@@ -6189,6 +6251,7 @@ impl Provider for WindowsProvider {
     }
 
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
+        uia_gate("perform_action")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         match action {
             "press" => self.press(element),
@@ -6228,6 +6291,7 @@ impl Provider for WindowsProvider {
     }
 
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
+        uia_gate("subscribe")?;
         self.subscribe_kinds(element, None)
     }
 
@@ -6238,6 +6302,7 @@ impl Provider for WindowsProvider {
         element: &ElementData,
         kinds: Option<&[&str]>,
     ) -> Result<Subscription> {
+        uia_gate("subscribe_kinds")?;
         let plan = crate::event_plan::HandlerPlan::for_kinds(kinds);
         let dpi = &crate::dpi::DpiScope::enter()?;
         // A synthesized Application node resolves its pid from the identity

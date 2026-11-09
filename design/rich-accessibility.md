@@ -928,9 +928,27 @@ caps.get("event:menu_open")   # InvalidActionDataError: unknown capability "even
 
 ### #531 Deadline
 
-#531 is decided and ready. Capture (section 3) is its main consumer for
-partial results; land #531 before or with #482 so `timeout=` on `capture`
-is a real bound on nested provider reads.
+Implemented. Core opens a thread-local `Deadline` for every wait and
+auto-waiting action, and backends ask `call_timeout` for the time left
+before each native call:
+
+- **Linux.** Each D-Bus call races a timer set to the time left; the
+  connection's 5 s method timeout stays as the outer bound.
+- **macOS.** `AXUIElementSetMessagingTimeout` is lowered on the element for
+  one message, then released to the bound it had (the global 2 s, or a shell
+  probe's 0.25 s).
+- **Windows IA2.** The caller stops waiting at its deadline and the worker
+  stops at its next native operation. Only the 5 s stall detector disables
+  the worker.
+- **Windows UIA.** UIA's timeouts belong to the shared `IUIAutomation`, so
+  lowering them per call would cut other threads short. No provider call
+  starts after the deadline; one in flight keeps UIA's own bounds.
+
+A cut call is recorded on the deadline (shared across the threads a walk
+fans out to), and the timeout names it in `Diagnosis.pending`. A read that
+returned after a cut is not trusted as an observation, and an action whose
+call was cut is a `Timeout` with unknown delivery. Partial results stay
+out of scope.
 
 ### #483 IA2
 

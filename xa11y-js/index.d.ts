@@ -699,6 +699,8 @@ export class SelectorNotMatchedError extends XA11yError {
   hiddenReason: HiddenReasonName | null;
   /** Always `null` for this class (parity with {@link TimeoutError}). */
   autoScroll: AutoScrollOutcomeName | null;
+  /** Always `null` for this class (parity with {@link TimeoutError}). */
+  pending: string | null;
   /** Geometry of an off-display pointer target, otherwise `null`. */
   pointerTarget: PointerTargetDiagnosis | null;
   /** Bounded near-miss candidates (e.g. same-role elements). */
@@ -772,6 +774,13 @@ export class TimeoutError extends XA11yError {
    * when the wait never tried to scroll.
    */
   autoScroll: AutoScrollOutcomeName | null;
+  /**
+   * The platform call still running when the deadline passed, such as
+   * `'GetChildren on button "OK"'`. The timeout bounds the reads it makes,
+   * so a hung application ends the wait on time and this names the call it
+   * hung in. `null` when every read returned and the wait ran out.
+   */
+  pending: string | null;
   pointerTarget: PointerTargetDiagnosis | null;
   /** Bounded near-miss candidates; collected only when the selector never matched. */
   candidates: string[];

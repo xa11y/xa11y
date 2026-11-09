@@ -36,6 +36,7 @@ class FakeTimeout(xa11y.TimeoutError):
     last_observed = "selector never matched"
     hidden_reason = None
     auto_scroll = None
+    pending = None
     candidates: ClassVar[list] = ['window "Untitled"', 'button "Export"']
     scope = "window\n  button"
 
@@ -167,6 +168,16 @@ def test_render_diagnosis_says_how_an_auto_scroll_ended():
 
     assert "auto_scroll: refused" in render_diagnosis(RefusedTimeout("Timeout after 5.0s"))
     assert "auto_scroll" not in render_diagnosis(FakeTimeout("Timeout after 5.0s"))
+
+
+def test_render_diagnosis_names_the_call_a_timeout_cut_short():
+    class HungTimeout(FakeTimeout):
+        pending = 'GetChildren on button "OK"'
+
+    assert 'pending: GetChildren on button "OK"' in render_diagnosis(
+        HungTimeout("Timeout after 5.0s")
+    )
+    assert "pending" not in render_diagnosis(FakeTimeout("Timeout after 5.0s"))
 
 
 def test_render_diagnosis_ignores_foreign_exceptions():

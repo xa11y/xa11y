@@ -60,6 +60,7 @@ fn diagnosis_json(
         "lastObserved": diagnosis.and_then(|d| d.last_observed.as_deref()),
         "hiddenReason": diagnosis.and_then(|d| d.hidden_reason.map(|r| r.to_snake_case())),
         "autoScroll": diagnosis.and_then(|d| d.auto_scroll.map(|o| o.to_snake_case())),
+        "pending": diagnosis.and_then(|d| d.pending.as_deref()),
         "pointerTarget": diagnosis.and_then(|d| d.pointer_target.as_ref()).map(|target| {
             serde_json::json!({
                 "point": target.point,

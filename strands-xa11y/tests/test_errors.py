@@ -99,6 +99,13 @@ def test_auto_scroll_says_whether_scrolling_was_already_tried():
     assert "auto scroll" not in describe(fake_xa11y.TimeoutError("timed out"))
 
 
+def test_pending_names_the_call_a_timeout_cut_short():
+    """A model told the app stopped answering should not retry the same read."""
+    message = describe(fake_xa11y.TimeoutError("timed out", pending='GetChildren on button "OK"'))
+    assert 'pending: GetChildren on button "OK"' in message
+    assert "pending" not in describe(fake_xa11y.TimeoutError("timed out"))
+
+
 @pytest.mark.parametrize(
     ("error", "expected"),
     [

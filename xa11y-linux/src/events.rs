@@ -661,7 +661,7 @@ fn application_offset_unit(conn: &Connection, bus: &str) -> Result<Option<Offset
             code: -1,
             message: format!("Application proxy for {bus}: {e}"),
         })?;
-    read_offset_unit_unless_gone(&proxy, bus)
+    read_offset_unit_unless_gone(&proxy.into(), bus)
 }
 
 /// The [`TextChange`] an `Object:TextChanged` signal reports, or `None` for
@@ -1472,7 +1472,12 @@ fn build_event_snapshot(
     )
 }
 
-fn make_proxy<'a>(conn: &'a Connection, bus: &str, path: &str, iface: &str) -> Option<Proxy<'a>> {
+fn make_proxy<'a>(
+    conn: &'a Connection,
+    bus: &str,
+    path: &str,
+    iface: &str,
+) -> Option<crate::atspi::BoundedProxy<'a>> {
     zbus::blocking::proxy::Builder::<Proxy>::new(conn)
         .destination(bus.to_owned())
         .ok()?
@@ -1483,6 +1488,7 @@ fn make_proxy<'a>(conn: &'a Connection, bus: &str, path: &str, iface: &str) -> O
         .cache_properties(zbus::proxy::CacheProperties::No)
         .build()
         .ok()
+        .map(Into::into)
 }
 
 /// The actions `aref`'s Action interface reports, with each one's

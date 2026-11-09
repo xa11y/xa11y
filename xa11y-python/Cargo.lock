@@ -1536,11 +1536,14 @@ dependencies = [
 name = "xa11y-linux"
 version = "0.15.4"
 dependencies = [
+ "async-io",
  "evdev",
+ "futures-lite",
  "log",
  "nix 0.31.3",
  "png",
  "rayon",
+ "serde",
  "serde_json",
  "wayland-client",
  "wayland-protocols",
