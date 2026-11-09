@@ -643,6 +643,15 @@ APP_CONFIGS: dict[str, dict] = {
         # test_legacy_default_action_press skips.
         "legacy_press_name": "Legacy Tile",
         "legacy_press_status_prefix": "Legacy activations: ",
+        # A button whose click raises a UIA Notification event
+        # (RaiseAutomationNotification, ActionCompleted / ImportantMostRecent,
+        # "Saved"). AccessKit never raises one, so only this app can show
+        # announcement text on Windows; other configs omit the key and the
+        # announcement-request tests in test_event_kinds.py skip.
+        "announce_button_name": "Announce",
+        "announce_text": "Saved",
+        "announce_platform_priority": "ImportantMostRecent",
+        "announce_politeness": "assertive",
         "window_name_contains": "xa11y-winforms-test-app",
         # A panel longer than its viewport (issue #502): its first button is in
         # view and its last is scrolled out, while UIA still reports the last

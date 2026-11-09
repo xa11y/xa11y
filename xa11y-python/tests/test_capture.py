@@ -95,11 +95,52 @@ def test_a_spent_time_budget_returns_a_partial_capture():
     assert cap.root().children_count is None
 
 
+def test_formatting_detail_reads_runs_over_the_text():
+    from xa11y._native import _make_test_table_locator
+
+    notes = _make_test_table_locator('text_area[name="Notes"]')
+    cap = notes.capture(detail={"formatting"})
+    text = cap.root().text
+    assert text.content == "Hello 😀 world\nsecond line"
+    assert text.runs and not text.runs_truncated
+    assert isinstance(text.runs[0], xa11y.TextRun)
+    assert text.runs[0].range.start == 0
+    assert text.runs[-1].range.end == text.length
+    assert cap.stats.formatting_reads == len(text.runs)
+    cut = notes.capture(detail={"formatting"}, max_runs=1)
+    assert cut.truncated.by_formatting
+    assert cut.root().text.runs_truncated and len(cut.root().text.runs) == 1
+    assert notes.capture(detail={"text"}).root().text.runs is None
+
+
+def test_stats_and_backend_describe_the_reads():
+    cap = _app().capture()
+    assert cap.backend == "mock"
+    assert isinstance(cap.stats, xa11y.CaptureStats)
+    assert cap.stats.children_reads == len(cap)
+    assert cap.stats.identity_reads == len(cap)
+    assert cap.stats.text_reads == 0
+    assert cap.stats.formatting_reads == 0
+    assert cap.stats.relation_reads == 0
+
+
+def test_a_cancelled_token_stops_the_walk():
+    token = xa11y.CancelToken()
+    assert not token.is_cancelled()
+    token.cancel()
+    assert token.is_cancelled()
+    cap = _app().capture(cancel=token)
+    assert cap.truncated.by_cancel and not cap.truncated.by_time
+    assert len(cap) == 1
+    assert cap.stats.children_reads == 0
+
+
 @pytest.mark.parametrize(
     "kwargs, exc",
     [
         ({"max_nodes": 0}, xa11y.InvalidActionDataError),
-        ({"detail": {"formatting"}}, ValueError),
+        ({"detail": {"styles"}}, ValueError),
+        ({"max_runs": -1}, OverflowError),
         ({"detail": "text"}, ValueError),
         ({"timeout": -1}, ValueError),
         ({"timeout": float("nan")}, ValueError),

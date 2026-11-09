@@ -928,6 +928,7 @@ function screenshot(options) {
 // not a plain identifier. Keep every value a local name, or `import {
 // screenshot } from '@crowecawcaw/xa11y'` fails with a SyntaxError.
 const {
+  CancelToken,
   Capabilities,
   Element,
   Event,
@@ -955,6 +956,7 @@ const _makeTestAmbiguousShellSurfaceByKind = wrap(native._makeTestAmbiguousShell
 
 module.exports = {
   App,
+  CancelToken,
   Capabilities,
   Element,
   Event,

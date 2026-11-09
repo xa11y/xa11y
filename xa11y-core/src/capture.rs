@@ -31,20 +31,85 @@
 //! trees have) is detected by [`NodeIdentity`] where the platform reports
 //! one, and cut with an error on its parent. A node listed under two parents
 //! is not a cycle and is captured under each.
+//!
+//! # Cancellation
+//!
+//! [`CaptureOptions::cancel`] takes a [`CancelToken`]; cancelling it from
+//! another thread stops the walk at the next node, and the capture returns
+//! what it read with `truncated.by_cancel`, like a time budget running out.
+//!
+//! # Provenance and cost
+//!
+//! [`Capture::backend`] names the source that read the tree (`"atspi"`,
+//! `"ax"`, `"uia"`, ...), so two captures from different sources are never
+//! mistaken for one another. [`Capture::stats`] counts the reads the walk
+//! made, by kind, so the cost of a detail level can be measured rather than
+//! assumed: a structure-only capture makes no text, formatting or relation
+//! reads at all.
+//!
+//! Each backend already batches the reads behind one children call: UIA
+//! fetches every child's properties in one `FindAllBuildCache` request, AX in
+//! one `AXUIElementCopyMultipleAttributeValues` call per child, and AT-SPI
+//! builds the children in parallel. A capture is therefore one children read
+//! per node read, plus one read per node and detail requested.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::element::Element;
 use crate::error::{Error, Result};
 use crate::identity::NodeIdentity;
 use crate::semantics::RelationKind;
+use crate::text_api::{TextRange, TextRun};
 
 /// The node limit every capture surface uses unless told otherwise.
 pub const DEFAULT_MAX_NODES: usize = 2000;
 
 /// The total text budget of a capture with text detail: 64 KiB.
 pub const DEFAULT_MAX_TEXT_BYTES: usize = 64 * 1024;
+
+/// The total formatting-run budget of a capture with formatting detail.
+pub const DEFAULT_MAX_RUNS: usize = 4096;
+
+/// Stops a capture from another thread. Clones share one flag.
+///
+/// ```
+/// let token = xa11y_core::CancelToken::new();
+/// let other = token.clone();
+/// other.cancel();
+/// assert!(token.is_cancelled());
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    /// A token that is not cancelled.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cancel every capture holding this token (or a clone of it). A capture
+    /// already finished is unaffected; one not yet started stops at once.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether [`cancel`](Self::cancel) was called.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl PartialEq for CancelToken {
+    /// Tokens are equal when they share a flag.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for CancelToken {}
 
 /// What a capture reads and how far. Build with [`CaptureOptions::new`] and
 /// the chained setters.
@@ -63,8 +128,16 @@ pub struct CaptureOptions {
     /// Read each node's relations, resolved to nodes of the capture where
     /// the target is inside it.
     pub relations: bool,
+    /// Read the formatting runs of the text each node's text detail read.
+    /// Turns text detail on: runs are ranges in that text.
+    pub formatting: bool,
+    /// Most formatting runs, in total, that [`formatting`](Self::formatting)
+    /// detail reads.
+    pub max_runs: usize,
     /// Stop reading after this long and return what was read.
     pub timeout: Option<Duration>,
+    /// Stop reading when this token is cancelled and return what was read.
+    pub cancel: Option<CancelToken>,
 }
 
 impl Default for CaptureOptions {
@@ -75,7 +148,10 @@ impl Default for CaptureOptions {
             max_text_bytes: DEFAULT_MAX_TEXT_BYTES,
             text: false,
             relations: false,
+            formatting: false,
+            max_runs: DEFAULT_MAX_RUNS,
             timeout: None,
+            cancel: None,
         }
     }
 }
@@ -117,9 +193,27 @@ impl CaptureOptions {
         self
     }
 
+    /// Read formatting runs (and so text).
+    pub fn formatting(mut self, on: bool) -> Self {
+        self.formatting = on;
+        self
+    }
+
+    /// Set the total formatting-run budget.
+    pub fn max_runs(mut self, runs: usize) -> Self {
+        self.max_runs = runs;
+        self
+    }
+
     /// Set the time budget.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Stop when `token` is cancelled.
+    pub fn cancel(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
         self
     }
 
@@ -146,13 +240,42 @@ pub struct Truncation {
     pub by_text: bool,
     /// The time budget ran out before the walk finished.
     pub by_time: bool,
+    /// Formatting runs past `max_runs` were left out.
+    pub by_formatting: bool,
+    /// The capture's [`CancelToken`] was cancelled before the walk finished.
+    pub by_cancel: bool,
 }
 
 impl Truncation {
     /// Whether any limit dropped something.
     pub fn any(&self) -> bool {
-        self.by_depth || self.by_nodes || self.by_text || self.by_time
+        self.by_depth
+            || self.by_nodes
+            || self.by_text
+            || self.by_time
+            || self.by_formatting
+            || self.by_cancel
     }
+}
+
+/// The reads a capture made, by kind. A read is one call into the backend
+/// for one node; how many platform round trips it costs depends on the
+/// backend (see the [module docs](self)).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CaptureStats {
+    /// Children reads: one per node whose children were read.
+    pub children_reads: usize,
+    /// Identity reads, for cycle detection and relation resolution.
+    pub identity_reads: usize,
+    /// Text reads (the length, then the content), with text detail.
+    pub text_reads: usize,
+    /// Formatting-run reads, with formatting detail: one per run.
+    pub formatting_reads: usize,
+    /// Relation reads, with relations detail: one per node.
+    pub relation_reads: usize,
+    /// Bytes of text in the capture, as UTF-8.
+    pub text_bytes: usize,
 }
 
 /// Which read of a node failed.
@@ -168,19 +291,23 @@ pub enum CaptureStep {
     Text,
     /// Reading the node's relations.
     Relations,
+    /// Reading the formatting runs of the node's text.
+    Formatting,
     /// A child was a node already in the capture (a cycle in the platform
     /// tree), and was left out.
     Cycle,
 }
 
 impl CaptureStep {
-    /// `"children"`, `"identity"`, `"text"`, `"relations"` or `"cycle"`.
+    /// `"children"`, `"identity"`, `"text"`, `"relations"`, `"formatting"`
+    /// or `"cycle"`.
     pub fn to_snake_case(self) -> &'static str {
         match self {
             Self::Children => "children",
             Self::Identity => "identity",
             Self::Text => "text",
             Self::Relations => "relations",
+            Self::Formatting => "formatting",
             Self::Cycle => "cycle",
         }
     }
@@ -203,7 +330,7 @@ pub struct CaptureError {
 }
 
 /// An element's text, as far as the capture's text budget reached.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct CapturedText {
     /// The text read, from offset 0.
@@ -212,6 +339,13 @@ pub struct CapturedText {
     pub length: u32,
     /// Whether `content` stops short of `length`.
     pub truncated: bool,
+    /// With formatting detail, the formatting runs covering `content`, in
+    /// order, each clipped to it. `None` when they were not read (no
+    /// formatting detail, a failed read, or a budget ran out first).
+    pub runs: Option<Vec<TextRun>>,
+    /// Whether `runs` stops short of the end of `content`: the run budget
+    /// ran out.
+    pub runs_truncated: bool,
 }
 
 /// The target of a captured relation.
@@ -282,6 +416,12 @@ pub struct Capture {
     pub finished: SystemTime,
     /// The options it ran with.
     pub options: CaptureOptions,
+    /// The source that read the tree, from the root's
+    /// [`NodeIdentity::backend`]: `"atspi"`, `"ax"`, `"uia"`, `"ia2"`.
+    /// `None` when the root reported no identity.
+    pub backend: Option<&'static str>,
+    /// The reads the walk made.
+    pub stats: CaptureStats,
 }
 
 impl Capture {
@@ -345,6 +485,22 @@ impl Raw {
     }
 }
 
+/// Why a walk stopped early.
+#[derive(Clone, Copy)]
+enum Stop {
+    Time,
+    Cancel,
+}
+
+impl Stop {
+    fn mark(self, truncated: &mut Truncation) {
+        match self {
+            Stop::Time => truncated.by_time = true,
+            Stop::Cancel => truncated.by_cancel = true,
+        }
+    }
+}
+
 /// Capture the subtree under `root`, whose children `root_children` reads
 /// (an `App` root's children are its windows across every registration, not
 /// its element's children).
@@ -356,28 +512,38 @@ pub(crate) fn capture_from(
     options.validate()?;
     let started = SystemTime::now();
     let deadline = options.timeout.map(|t| Instant::now() + t);
-    let out_of_time = || deadline.is_some_and(|d| Instant::now() >= d);
+    let cancel = options.cancel.clone();
+    let stop = move || -> Option<Stop> {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            Some(Stop::Cancel)
+        } else if deadline.is_some_and(|d| Instant::now() >= d) {
+            Some(Stop::Time)
+        } else {
+            None
+        }
+    };
     let mut truncated = Truncation::default();
+    let mut stats = CaptureStats::default();
     let mut vanished = 0usize;
 
-    let mut raw = vec![Raw::new(root, None, 0)];
     // Cycle detection needs identities; a platform without them (the IA2
     // source) walks without it.
     let mut identities = true;
-    let root = raw.pop().expect("the root was just pushed");
-    let (_, root) = note_identity(&raw, root, &mut identities);
-    raw.push(root);
+    let (_, root) = note_identity(&[], Raw::new(root, None, 0), &mut identities, &mut stats);
+    let backend = root.identity.as_ref().map(NodeIdentity::backend);
+    let mut raw = vec![root];
 
     let mut root_children = Some(root_children);
     let mut queue = VecDeque::from([0usize]);
     while let Some(i) = queue.pop_front() {
-        if out_of_time() {
-            truncated.by_time = true;
+        if let Some(why) = stop() {
+            why.mark(&mut truncated);
             for j in std::iter::once(i).chain(queue.drain(..)) {
                 raw[j].children_truncated = true;
             }
             break;
         }
+        stats.children_reads += 1;
         let read = match root_children.take() {
             Some(read_root) => read_root(),
             None => raw[i].element.children(),
@@ -412,7 +578,12 @@ pub(crate) fn capture_from(
                 truncated.by_nodes = true;
                 break;
             }
-            let (fresh, node) = note_identity(&raw, Raw::new(kid, Some(i), depth), &mut identities);
+            let (fresh, node) = note_identity(
+                &raw,
+                Raw::new(kid, Some(i), depth),
+                &mut identities,
+                &mut stats,
+            );
             if !fresh {
                 let subject = crate::error::stale_subject(&node.element);
                 raw[i].fail(
@@ -435,16 +606,15 @@ pub(crate) fn capture_from(
         }
     }
 
-    if options.text {
-        read_texts(
-            &mut raw,
-            options.max_text_bytes,
-            &mut truncated,
-            &out_of_time,
-        );
+    if options.text || options.formatting {
+        let budget = TextBudget {
+            bytes: options.max_text_bytes,
+            runs: options.formatting.then_some(options.max_runs),
+        };
+        read_texts(&mut raw, budget, &mut truncated, &mut stats, &stop);
     }
     if options.relations {
-        read_relations(&mut raw, &mut truncated, &out_of_time);
+        read_relations(&mut raw, &mut truncated, &mut stats, &stop);
     }
 
     let nodes = into_pre_order(raw);
@@ -455,16 +625,24 @@ pub(crate) fn capture_from(
         started,
         finished: SystemTime::now(),
         options: options.clone(),
+        backend,
+        stats,
     })
 }
 
 /// Record `node`'s identity, and whether it is new on its path: `false`
 /// when it is one of its own ancestors (a cycle). A node reachable under two
 /// parents is not a cycle, and is captured under each.
-fn note_identity(raw: &[Raw], mut node: Raw, identities: &mut bool) -> (bool, Raw) {
+fn note_identity(
+    raw: &[Raw],
+    mut node: Raw,
+    identities: &mut bool,
+    stats: &mut CaptureStats,
+) -> (bool, Raw) {
     if !*identities {
         return (true, node);
     }
+    stats.identity_reads += 1;
     match node.element.identity() {
         Ok(id) => {
             let mut ancestor = node.parent;
@@ -484,16 +662,24 @@ fn note_identity(raw: &[Raw], mut node: Raw, identities: &mut bool) -> (bool, Ra
     (true, node)
 }
 
+/// What text detail may still read: bytes of text, and formatting runs
+/// when formatting detail is on.
+#[derive(Clone, Copy)]
+struct TextBudget {
+    bytes: usize,
+    runs: Option<usize>,
+}
+
 fn read_texts(
     raw: &mut [Raw],
-    max_bytes: usize,
+    mut left: TextBudget,
     truncated: &mut Truncation,
-    out_of_time: &impl Fn() -> bool,
+    stats: &mut CaptureStats,
+    stop: &impl Fn() -> Option<Stop>,
 ) {
-    let mut left = max_bytes;
     for node in raw.iter_mut().filter(|n| !n.vanished) {
-        if out_of_time() {
-            truncated.by_time = true;
+        if let Some(why) = stop() {
+            why.mark(truncated);
             return;
         }
         let text = match node.element.text() {
@@ -505,16 +691,33 @@ fn read_texts(
                 continue;
             }
         };
-        match read_text(&text, left) {
-            Ok(captured) => {
-                left -= captured.content.len();
-                if captured.truncated {
-                    truncated.by_text = true;
-                }
-                node.text = Some(captured);
+        stats.text_reads += 1;
+        let mut captured = match read_text(&text, left.bytes) {
+            Ok(captured) => captured,
+            Err(e) => {
+                node.fail(CaptureStep::Text, e);
+                continue;
             }
-            Err(e) => node.fail(CaptureStep::Text, e),
+        };
+        left.bytes -= captured.content.len();
+        stats.text_bytes += captured.content.len();
+        if captured.truncated {
+            truncated.by_text = true;
         }
+        if let Some(runs_left) = left.runs.as_mut() {
+            match read_runs(&text, &captured.content, *runs_left, stats) {
+                Ok((runs, cut)) => {
+                    *runs_left -= runs.len();
+                    if cut {
+                        truncated.by_formatting = true;
+                    }
+                    captured.runs = Some(runs);
+                    captured.runs_truncated = cut;
+                }
+                Err(e) => node.fail(CaptureStep::Formatting, e),
+            }
+        }
+        node.text = Some(captured);
     }
 }
 
@@ -526,6 +729,8 @@ fn read_text(text: &crate::text_api::Text, max_bytes: usize) -> Result<CapturedT
             content: String::new(),
             length,
             truncated: false,
+            runs: None,
+            runs_truncated: false,
         });
     }
     // A UTF-16 unit is at least one byte of UTF-8, so this many units can
@@ -534,7 +739,7 @@ fn read_text(text: &crate::text_api::Text, max_bytes: usize) -> Result<CapturedT
     let mut content = if units == 0 {
         String::new()
     } else {
-        text.read(crate::text_api::TextRange::new(0, units)?)?
+        text.read(TextRange::new(0, units)?)?
     };
     let mut cut = content.len().min(max_bytes);
     while !content.is_char_boundary(cut) {
@@ -546,15 +751,43 @@ fn read_text(text: &crate::text_api::Text, max_bytes: usize) -> Result<CapturedT
         truncated: (read_units as u64) < u64::from(length),
         content,
         length,
+        runs: None,
+        runs_truncated: false,
     })
 }
 
-fn read_relations(raw: &mut [Raw], truncated: &mut Truncation, out_of_time: &impl Fn() -> bool) {
+/// The formatting runs over `content` (the text read from offset 0), at
+/// most `max` of them, and whether `max` cut them short.
+fn read_runs(
+    text: &crate::text_api::Text,
+    content: &str,
+    max: usize,
+    stats: &mut CaptureStats,
+) -> Result<(Vec<TextRun>, bool)> {
+    let units = u32::try_from(content.encode_utf16().count()).unwrap_or(u32::MAX);
+    if units == 0 {
+        return Ok((Vec::new(), false));
+    }
+    if max == 0 {
+        return Ok((Vec::new(), true));
+    }
+    let page = text.runs(TextRange::new(0, units)?, max)?;
+    stats.formatting_reads += page.runs.len();
+    Ok((page.runs, page.truncated))
+}
+
+fn read_relations(
+    raw: &mut [Raw],
+    truncated: &mut Truncation,
+    stats: &mut CaptureStats,
+    stop: &impl Fn() -> Option<Stop>,
+) {
     for node in raw.iter_mut().filter(|n| !n.vanished) {
-        if out_of_time() {
-            truncated.by_time = true;
+        if let Some(why) = stop() {
+            why.mark(truncated);
             return;
         }
+        stats.relation_reads += 1;
         match node.element.relations(&[]) {
             Ok(found) => node.relations = found,
             Err(e) => node.fail(CaptureStep::Relations, e),
@@ -903,5 +1136,125 @@ mod tests {
         assert!(cut.truncated.by_text);
         assert!(short.content.len() <= 8, "{:?}", short.content);
         assert!(short.content.starts_with("Hello"));
+    }
+    fn table_app() -> App {
+        let provider: Arc<dyn Provider> = crate::mock::build_table_provider();
+        App::list_with(provider)
+            .expect("list")
+            .into_iter()
+            .next()
+            .expect("one app")
+    }
+
+    #[test]
+    fn formatting_detail_reads_runs_over_the_captured_text() {
+        let app = table_app();
+        let notes = |cap: &Capture| {
+            cap.nodes
+                .iter()
+                .find(|n| n.name.as_deref() == Some("Notes"))
+                .and_then(|n| n.text.clone())
+                .expect("Notes has text")
+        };
+        // Formatting turns text on: runs are ranges in it.
+        let cap = app
+            .capture(&CaptureOptions::new().formatting(true))
+            .expect("capture");
+        let text = notes(&cap);
+        let runs = text.runs.expect("formatting detail reads runs");
+        assert!(!text.runs_truncated);
+        assert!(!cap.truncated.by_formatting);
+        // The mock gives one run per word, alternating bold and regular.
+        assert_eq!(
+            runs[0].range,
+            TextRange::new(0, 6).expect("range"),
+            "\"Hello \""
+        );
+        assert_eq!(runs[0].attributes.font_weight, Some(700));
+        assert_eq!(runs.last().map(|r| r.range.end), Some(text.length));
+        for pair in runs.windows(2) {
+            assert_eq!(pair[0].range.end, pair[1].range.start, "{runs:?}");
+        }
+        let all_runs: usize = cap
+            .nodes
+            .iter()
+            .filter_map(|n| n.text.as_ref()?.runs.as_ref())
+            .map(Vec::len)
+            .sum();
+        assert_eq!(cap.stats.formatting_reads, all_runs);
+
+        // Text detail alone reads no runs.
+        let plain = app
+            .capture(&CaptureOptions::new().text(true))
+            .expect("capture");
+        assert_eq!(notes(&plain).runs, None);
+        assert_eq!(plain.stats.formatting_reads, 0);
+
+        // The run budget cuts, and says so.
+        let cut = app
+            .capture(&CaptureOptions::new().formatting(true).max_runs(2))
+            .expect("capture");
+        let short = notes(&cut);
+        assert_eq!(short.runs.as_ref().map(Vec::len), Some(2));
+        assert!(short.runs_truncated);
+        assert!(cut.truncated.by_formatting);
+        assert!(cut.truncated.any());
+    }
+
+    #[test]
+    fn stats_count_only_the_reads_a_detail_level_asks_for() {
+        let app = table_app();
+        let plain = app.capture(&CaptureOptions::new()).expect("capture");
+        assert!(!plain.truncated.any());
+        // Structure only: one children read per node, one identity read per
+        // node, and nothing else.
+        assert_eq!(plain.stats.children_reads, plain.nodes.len());
+        assert_eq!(plain.stats.identity_reads, plain.nodes.len());
+        assert_eq!(plain.stats.text_reads, 0);
+        assert_eq!(plain.stats.formatting_reads, 0);
+        assert_eq!(plain.stats.relation_reads, 0);
+        assert_eq!(plain.stats.text_bytes, 0);
+        assert_eq!(plain.backend, Some("mock"));
+
+        let rich = app
+            .capture(&CaptureOptions::new().text(true).relations(true))
+            .expect("capture");
+        assert_eq!(rich.stats.children_reads, plain.stats.children_reads);
+        assert_eq!(rich.stats.relation_reads, rich.nodes.len());
+        let with_text = rich.nodes.iter().filter(|n| n.text.is_some()).count();
+        assert!(with_text > 0);
+        assert_eq!(rich.stats.text_reads, with_text);
+        let bytes: usize = rich
+            .nodes
+            .iter()
+            .filter_map(|n| n.text.as_ref())
+            .map(|t| t.content.len())
+            .sum();
+        assert_eq!(rich.stats.text_bytes, bytes);
+    }
+
+    #[test]
+    fn a_cancelled_token_stops_the_walk_and_says_so() {
+        let app = table_app();
+        let token = CancelToken::new();
+        assert!(!token.is_cancelled());
+        let options = CaptureOptions::new().text(true).cancel(token.clone());
+        let full = app.capture(&options).expect("capture");
+        assert!(!full.truncated.by_cancel);
+        assert!(full.nodes.len() > 1);
+
+        token.cancel();
+        let cap = app
+            .capture(&options)
+            .expect("a cancelled capture still returns");
+        assert_eq!(cap.nodes.len(), 1, "only the root, read before the walk");
+        assert!(cap.root().children_truncated);
+        assert!(cap.truncated.by_cancel);
+        assert!(!cap.truncated.by_time);
+        assert_eq!(cap.stats.children_reads, 0);
+        assert_eq!(cap.stats.text_reads, 0, "text detail stops too");
+        // Clones share the flag; a fresh token does not.
+        assert_eq!(options.cancel, Some(token.clone()));
+        assert_ne!(Some(CancelToken::new()), options.cancel);
     }
 }

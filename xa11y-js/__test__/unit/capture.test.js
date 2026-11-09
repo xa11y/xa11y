@@ -6,6 +6,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  CancelToken,
   Element,
   InvalidActionDataError,
   _makeTestApp,
@@ -21,6 +22,8 @@ test('a capture is pre-order with indices that agree', async () => {
     byNodes: false,
     byText: false,
     byTime: false,
+    byFormatting: false,
+    byCancel: false,
   });
   assert.equal(cap.vanished, 0);
   assert.ok(cap.started <= cap.finished);
@@ -86,6 +89,7 @@ test('text detail reads within the budget', async () => {
     content: 'Hello 😀 world\nsecond line',
     length: 26,
     truncated: false,
+    runsTruncated: false,
   });
   const cut = await notes.capture({ detail: ['text'], maxTextBytes: 8 });
   assert.equal(cut.truncated.byText, true);
@@ -101,5 +105,45 @@ test('a spent time budget resolves with a partial capture', async () => {
 
 test('bad options are refused', async () => {
   await assert.rejects(_makeTestApp().capture({ maxNodes: 0 }), InvalidActionDataError);
-  assert.throws(() => _makeTestApp().capture({ detail: ['formatting'] }), InvalidActionDataError);
+  assert.throws(() => _makeTestApp().capture({ detail: ['styles'] }), InvalidActionDataError);
+});
+
+test('formatting detail reads runs over the text', async () => {
+  const notes = _makeTestTableLocator().descendant('text_area[name="Notes"]');
+  const cap = await notes.capture({ detail: ['formatting'] });
+  const text = cap.nodes[0].text;
+  assert.equal(text.content, 'Hello 😀 world\nsecond line');
+  assert.ok(text.runs.length > 0);
+  assert.equal(text.runsTruncated, false);
+  assert.equal(text.runs[0].range.start, 0);
+  assert.equal(text.runs.at(-1).range.end, text.length);
+  assert.equal(cap.stats.formattingReads, text.runs.length);
+  const cut = await notes.capture({ detail: ['formatting'], maxRuns: 1 });
+  assert.equal(cut.truncated.byFormatting, true);
+  assert.equal(cut.nodes[0].text.runsTruncated, true);
+  assert.equal(cut.nodes[0].text.runs.length, 1);
+  const plain = await notes.capture({ detail: ['text'] });
+  assert.equal(plain.nodes[0].text.runs ?? null, null);
+});
+
+test('stats and backend describe the reads', async () => {
+  const cap = await _makeTestApp().capture();
+  assert.equal(cap.backend, 'mock');
+  assert.equal(cap.stats.childrenReads, cap.nodes.length);
+  assert.equal(cap.stats.identityReads, cap.nodes.length);
+  assert.equal(cap.stats.textReads, 0);
+  assert.equal(cap.stats.formattingReads, 0);
+  assert.equal(cap.stats.relationReads, 0);
+});
+
+test('a cancelled token stops the walk', async () => {
+  const token = new CancelToken();
+  assert.equal(token.isCancelled(), false);
+  token.cancel();
+  assert.equal(token.isCancelled(), true);
+  const cap = await _makeTestApp().capture({ cancel: token });
+  assert.equal(cap.truncated.byCancel, true);
+  assert.equal(cap.truncated.byTime, false);
+  assert.equal(cap.nodes.length, 1);
+  assert.equal(cap.stats.childrenReads, 0);
 });

@@ -433,6 +433,23 @@ impl Event {
             sequence: 0,
         }
     }
+
+    /// When the event was received, as wall-clock time: `timestamp` placed on
+    /// the system clock. Every event of a process is placed against the same
+    /// reference, so the order of two events' times is the order they were
+    /// received in, and one event's time is the same on every call. A later
+    /// change to the system clock does not move it.
+    pub fn time(&self) -> std::time::SystemTime {
+        static ANCHOR: std::sync::OnceLock<(std::time::Instant, std::time::SystemTime)> =
+            std::sync::OnceLock::new();
+        let (instant, system) =
+            *ANCHOR.get_or_init(|| (std::time::Instant::now(), std::time::SystemTime::now()));
+        if self.timestamp >= instant {
+            system + (self.timestamp - instant)
+        } else {
+            system - (instant - self.timestamp)
+        }
+    }
 }
 
 /// Desired element state for wait_for operations.

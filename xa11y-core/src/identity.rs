@@ -88,6 +88,13 @@ impl NodeIdentity {
         }
     }
 
+    /// The source that issued this identity: `"atspi"`, `"ax"`, `"uia"`,
+    /// `"ia2"`, or `"mock"` in tests. Identities from different sources
+    /// never compare equal.
+    pub fn backend(&self) -> &'static str {
+        self.backend
+    }
+
     /// A hash consistent with `==`, for binding `__hash__` implementations.
     pub fn hash_u64(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();

@@ -1005,6 +1005,7 @@ pub fn check(root: &Path) -> bool {
         &root.join("xa11y-python/src/lib.rs"),
         &root.join("xa11y-python/src/rich.rs"),
         &root.join("xa11y-python/src/capabilities.rs"),
+        &root.join("xa11y-python/src/capture.rs"),
     ]) {
         Ok(p) => p,
         Err(e) => {
@@ -1023,6 +1024,7 @@ pub fn check(root: &Path) -> bool {
         "xa11y-js/src/types.rs",
         "xa11y-js/src/text.rs",
         "xa11y-js/src/capabilities.rs",
+        "xa11y-js/src/capture.rs",
     ]
     .iter()
     .map(|p| root.join(p))

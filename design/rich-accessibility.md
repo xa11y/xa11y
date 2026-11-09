@@ -681,9 +681,11 @@ Nothing that works today breaks. The three UIA events keep arriving as
 
 The one mechanical change is reading the text: Notification moves from the
 generic automation handler to `AddNotificationEventHandler`, which needs
-`IUIAutomation5` (Windows 10 1709+). On older systems a request still arrives,
-without text, and the capability table records the version
-(`event:announcement:text`, `since 10.0.16299`).
+`IUIAutomation5` (Windows 10 1709+). The capability table records the version
+(`event:announcement:text`, `since 10.0.16299`). Older systems receive no
+request at all: keeping Notification on the generic handler there would be a
+silent fallback, so asking for `announcement` by name fails as unsupported and
+an all-kinds subscription goes without requests.
 
 #### 4b. Event metadata
 
@@ -762,10 +764,10 @@ Built as designed, with these specifics and gaps:
   to `AXObserverCreateWithInfoCallback` for `AXAnnouncementKey` /
   `AXPriorityKey` and registers `AXLiveRegionChanged`. Windows reports the
   origin and politeness of its three events.
-- **Not done:** Windows notification text. It needs
-  `AddNotificationEventHandler` (IUIAutomation5) wired through per-window
-  registration, reconciliation and cleanup; `capabilities()` says so in
-  `event:announcement:text`.
+- Windows notification text: `AddNotificationEventHandler` (IUIAutomation5)
+  is wired through per-window registration, reconciliation and cleanup, and
+  `Provider::subscribe_kinds` lets the Windows backend register only the
+  handlers the requested kinds need.
 - 4d: `event_channel()` in core, a bounded ring (4,096, drop-oldest) that
   numbers events as they are queued, with `Subscription::dropped`. Every
   backend sends through it. `EventReceiver::new` over a plain channel

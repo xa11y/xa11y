@@ -603,3 +603,42 @@ fn text_on_a_button_is_refused() {
         other => panic!("text() on a button: {other:?}"),
     }
 }
+
+// ── Capture ─────────────────────────────────────────────────────────
+
+#[test]
+#[ignore]
+fn capture_formatting_detail_reads_the_same_runs_as_text_runs() {
+    let app = fixture();
+    let view = rich_text(&app);
+    let direct = view.text().expect("text").runs(r(0, 72), 50).expect("runs");
+
+    let cap = view
+        .capture(&CaptureOptions::new().max_depth(0).formatting(true))
+        .expect("capture");
+    assert_eq!(cap.backend, Some("atspi"));
+    assert!(!cap.truncated.any(), "{:?}", cap.truncated);
+    let text = cap.nodes[0].text.as_ref().expect("the view has text");
+    assert_eq!(text.content, TEXT);
+    let runs = text.runs.as_ref().expect("formatting detail reads runs");
+    assert!(!text.runs_truncated);
+    let got: Vec<TextRange> = runs.iter().map(|run| run.range).collect();
+    let want: Vec<TextRange> = direct.runs.iter().map(|run| run.range).collect();
+    assert_eq!(got, want);
+    assert_eq!(runs[1].attributes.font_weight, Some(700), "bold");
+    assert_eq!(cap.stats.formatting_reads, runs.len());
+    assert_eq!(cap.stats.text_reads, 1);
+
+    let cut = view
+        .capture(
+            &CaptureOptions::new()
+                .max_depth(0)
+                .formatting(true)
+                .max_runs(2),
+        )
+        .expect("capture");
+    assert!(cut.truncated.by_formatting);
+    let text = cut.nodes[0].text.as_ref().expect("text");
+    assert!(text.runs_truncated);
+    assert_eq!(text.runs.as_ref().map(Vec::len), Some(2));
+}

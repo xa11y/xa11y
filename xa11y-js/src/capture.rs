@@ -12,7 +12,7 @@ use crate::element::Element;
 use crate::map_err;
 
 /// Options for `capture()`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Clone, Default)]
 pub struct CaptureOptions {
     /// Deepest level read; the root is depth 0. Omit for no depth limit.
@@ -22,11 +22,64 @@ pub struct CaptureOptions {
     /// Most bytes of text, in total, that `'text'` detail reads. Default
     /// 65536.
     pub max_text_bytes: Option<u32>,
-    /// Extra reads per node: `'text'` and/or `'relations'`.
+    /// Extra reads per node: `'text'`, `'formatting'` (text plus its
+    /// attribute runs) and/or `'relations'`.
     pub detail: Option<Vec<String>>,
     /// Time budget in milliseconds: when it runs out, the capture resolves
     /// with what was read and `truncated.byTime`.
     pub timeout: Option<u32>,
+    /// Most attribute runs, in total, that `'formatting'` detail reads.
+    /// Default 4096.
+    pub max_runs: Option<u32>,
+    /// A token whose `cancel()` stops the walk between nodes; the capture
+    /// resolves with what was read and `truncated.byCancel`.
+    #[napi(ts_type = "CancelToken")]
+    pub cancel: Option<CancelToken>,
+}
+
+/// Stops a capture that is in progress. Pass it as `capture({ cancel })`
+/// and call `cancel()` from anywhere: the walk checks it between nodes.
+#[napi]
+#[derive(Clone, Default)]
+pub struct CancelToken {
+    inner: xa11y::CancelToken,
+}
+
+// A token arrives inside the options object, which napi converts by value.
+// The JS object is the class instance; this clones the shared flag out of it,
+// so `cancel()` on the JS side still reaches the walk.
+impl napi::bindgen_prelude::FromNapiValue for CancelToken {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        value: napi::sys::napi_value,
+    ) -> napi::Result<Self> {
+        // SAFETY: forwarded unchanged from napi's own by-value conversion.
+        let token: &CancelToken = unsafe {
+            <CancelToken as napi::bindgen_prelude::FromNapiRef>::from_napi_ref(env, value)?
+        };
+        Ok(token.clone())
+    }
+}
+
+#[napi]
+impl CancelToken {
+    /// A token that has not been cancelled.
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask every capture holding this token to stop. Idempotent.
+    #[napi]
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+
+    /// Whether `cancel()` has been called.
+    #[napi]
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
+    }
 }
 
 /// Build core options. Runs before any platform call.
@@ -47,11 +100,12 @@ pub(crate) fn parse_options(
     for name in o.detail.unwrap_or_default() {
         out = match name.as_str() {
             "text" => out.text(true),
+            "formatting" => out.formatting(true),
             "relations" => out.relations(true),
             other => {
                 return Err(map_err(xa11y::Error::InvalidActionData {
                     message: format!(
-                        "unknown capture detail {other:?}; expected 'text' or 'relations'"
+                        "unknown capture detail {other:?}; expected 'text', 'formatting' or 'relations'"
                     ),
                 }))
             }
@@ -59,6 +113,12 @@ pub(crate) fn parse_options(
     }
     if let Some(ms) = o.timeout {
         out = out.timeout(std::time::Duration::from_millis(u64::from(ms)));
+    }
+    if let Some(runs) = o.max_runs {
+        out = out.max_runs(runs as usize);
+    }
+    if let Some(token) = o.cancel {
+        out = out.cancel(token.inner);
     }
     Ok(out)
 }
@@ -77,6 +137,30 @@ pub struct Capture {
     pub started: f64,
     /// When the walk ended, in milliseconds since the epoch.
     pub finished: f64,
+    /// Which platform API read the nodes: `'atspi'`, `'ax'`, `'uia'`, `'ia2'`
+    /// or `'mock'`.
+    pub backend: Option<String>,
+    /// How many platform reads the capture made, by kind.
+    pub stats: CaptureStats,
+}
+
+/// How many platform reads a capture made, by kind. A structure-only
+/// capture makes only children and identity reads.
+#[napi(object, object_from_js = false)]
+#[derive(Clone)]
+pub struct CaptureStats {
+    /// Child-list reads, one per node whose children were read.
+    pub children_reads: u32,
+    /// Identity reads, one per node.
+    pub identity_reads: u32,
+    /// Text reads (`'text'` detail).
+    pub text_reads: u32,
+    /// Attribute runs read (`'formatting'` detail).
+    pub formatting_reads: u32,
+    /// Relation reads (`'relations'` detail).
+    pub relation_reads: u32,
+    /// Bytes of text read.
+    pub text_bytes: u32,
 }
 
 /// Which limits dropped something.
@@ -91,6 +175,10 @@ pub struct Truncation {
     pub by_text: bool,
     /// The time budget ran out before the walk finished.
     pub by_time: bool,
+    /// Attribute runs past `maxRuns` were left out.
+    pub by_formatting: bool,
+    /// The `cancel` token was cancelled before the walk finished.
+    pub by_cancel: bool,
 }
 
 /// One node of a capture.
@@ -125,7 +213,8 @@ pub struct CapturedNode {
 #[napi(object)]
 #[derive(Clone)]
 pub struct CaptureError {
-    /// `'children'`, `'identity'`, `'text'`, `'relations'` or `'cycle'`.
+    /// `'children'`, `'identity'`, `'text'`, `'formatting'`, `'relations'`
+    /// or `'cycle'`.
     pub step: String,
     /// The error code the call would have rejected with (`'XA11Y_PLATFORM'`).
     pub code: String,
@@ -143,6 +232,10 @@ pub struct CapturedText {
     pub length: u32,
     /// Whether `content` stops short of `length`.
     pub truncated: bool,
+    /// With `'formatting'` detail: the attribute runs over `content`.
+    pub runs: Option<Vec<crate::types::TextRun>>,
+    /// Whether runs past `maxRuns` were left out of `runs`.
+    pub runs_truncated: bool,
 }
 
 /// One relation kind of a captured node.
@@ -156,7 +249,7 @@ pub struct CapturedRelation {
     pub targets: Vec<Either<u32, Element>>,
 }
 
-fn epoch_ms(t: std::time::SystemTime) -> f64 {
+pub(crate) fn epoch_ms(t: std::time::SystemTime) -> f64 {
     match t.duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs_f64() * 1000.0,
         Err(e) => -e.duration().as_secs_f64() * 1000.0,
@@ -200,6 +293,11 @@ impl From<xa11y::Capture> for Capture {
                     content: t.content.clone(),
                     length: t.length,
                     truncated: t.truncated,
+                    runs: t
+                        .runs
+                        .clone()
+                        .map(|runs| runs.into_iter().map(Into::into).collect()),
+                    runs_truncated: t.runs_truncated,
                 }),
                 relations: node
                     .relations
@@ -227,10 +325,21 @@ impl From<xa11y::Capture> for Capture {
                 by_nodes: cap.truncated.by_nodes,
                 by_text: cap.truncated.by_text,
                 by_time: cap.truncated.by_time,
+                by_formatting: cap.truncated.by_formatting,
+                by_cancel: cap.truncated.by_cancel,
             },
             vanished: index(cap.vanished),
             started: epoch_ms(cap.started),
             finished: epoch_ms(cap.finished),
+            backend: cap.backend.map(str::to_string),
+            stats: CaptureStats {
+                children_reads: index(cap.stats.children_reads),
+                identity_reads: index(cap.stats.identity_reads),
+                text_reads: index(cap.stats.text_reads),
+                formatting_reads: index(cap.stats.formatting_reads),
+                relation_reads: index(cap.stats.relation_reads),
+                text_bytes: index(cap.stats.text_bytes),
+            },
         }
     }
 }

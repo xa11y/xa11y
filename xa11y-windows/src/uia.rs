@@ -6228,6 +6228,17 @@ impl Provider for WindowsProvider {
     }
 
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
+        self.subscribe_kinds(element, None)
+    }
+
+    /// Registers only the UIA handlers the requested kinds need (see
+    /// `event_plan::HandlerPlan`); core filters delivery to those kinds.
+    fn subscribe_kinds(
+        &self,
+        element: &ElementData,
+        kinds: Option<&[&str]>,
+    ) -> Result<Subscription> {
+        let plan = crate::event_plan::HandlerPlan::for_kinds(kinds);
         let dpi = &crate::dpi::DpiScope::enter()?;
         // A synthesized Application node resolves its pid from the identity
         // map; a plain element carries its pid directly. Either way, the
@@ -6256,7 +6267,7 @@ impl Provider for WindowsProvider {
             })?,
         };
         let app_name = element.name.clone().unwrap_or_default();
-        self.subscribe_impl(dpi, pid, app_name, saved_app)
+        self.subscribe_impl(dpi, pid, app_name, saved_app, &plan)
     }
 }
 
@@ -7065,8 +7076,48 @@ struct RegisteredWindow {
     /// pointer `Add*` was given.
     element: ComSend<IUIAutomationElement>,
     hwnd: usize,
-    /// The subset of `AUTOMATION_EVENT_IDS` successfully registered.
+    /// What was added to this window, so removal removes exactly that.
+    added: AddedHandlers,
+}
+
+/// The per-window registrations one window actually received. Built up as
+/// `register_window_handlers` goes, so a partial failure removes only what
+/// was added.
+#[derive(Default)]
+struct AddedHandlers {
     automation_ids: Vec<UIA_EVENT_ID>,
+    property: bool,
+    structure: bool,
+    notification: bool,
+}
+
+/// The handlers a subscription attaches to each of its top-level windows,
+/// and which event and property IDs it registers them for: the
+/// [`HandlerPlan`](crate::event_plan::HandlerPlan) in UIA terms. A handler
+/// the plan does not need is `None` and is never registered.
+struct PerWindowHandlers {
+    automation: IUIAutomationEventHandler,
+    /// Empty when no requested kind needs an automation event.
+    automation_ids: Vec<UIA_EVENT_ID>,
+    /// The handler and its property IDs; `None` when no property is watched.
+    property: Option<(
+        IUIAutomationPropertyChangedEventHandler,
+        Vec<UIA_PROPERTY_ID>,
+    )>,
+    structure: Option<IUIAutomationStructureChangedEventHandler>,
+    /// `AddNotificationEventHandler` lives on `IUIAutomation5`, so the cast
+    /// interface travels with the handler.
+    notification: Option<(IUIAutomation5, IUIAutomationNotificationEventHandler)>,
+}
+
+impl PerWindowHandlers {
+    /// Whether `WindowVisualState` is watched, which is the only reader of
+    /// the per-window visual-state baseline.
+    fn watches_visual_state(&self) -> bool {
+        self.property
+            .as_ref()
+            .is_some_and(|(_, ids)| ids.contains(&UIA_WindowWindowVisualStatePropertyId))
+    }
 }
 
 /// Live state of one app subscription, shared between `subscribe_impl`, the
@@ -7078,9 +7129,7 @@ struct RegisteredWindow {
 /// threads is sound.
 struct SubscriptionState {
     automation: ComSend<IUIAutomation>,
-    automation_handler: ComSend<IUIAutomationEventHandler>,
-    property_handler: ComSend<IUIAutomationPropertyChangedEventHandler>,
-    structure_handler: ComSend<IUIAutomationStructureChangedEventHandler>,
+    handlers: ComSend<PerWindowHandlers>,
     /// Per-window registrations, keyed by HWND — the open/close watch diffs
     /// against this set and the cancel closure drains it.
     registered: Mutex<HashMap<usize, RegisteredWindow>>,
@@ -7219,8 +7268,9 @@ fn frame_event_runtime_ids(
     Ok(ids)
 }
 
-/// Register the automation / property-changed / structure-changed handlers on
-/// one top-level window and seed its `WindowVisualState` baseline.
+/// Register the subscription's per-window handlers (automation,
+/// property-changed, structure-changed, notification — whichever its plan
+/// needs) on one top-level window and seed its `WindowVisualState` baseline.
 ///
 /// The caller stores the returned record in the subscription's per-window map.
 /// A partial failure removes what was registered and returns the error (tenet
@@ -7229,24 +7279,23 @@ fn frame_event_runtime_ids(
 /// `WindowVisualState` event arriving mid-registration has a prior value to
 /// delta against; a re-read after the handlers are attached then closes the
 /// seed→attach gap, where a transition's event would otherwise be raised to
-/// nobody and leave the baseline stale (see the reconciliation below).
+/// nobody and leave the baseline stale (see the reconciliation below). A
+/// subscription that does not watch `WindowVisualState` seeds nothing.
+///
+/// A window gets a record even when the plan registers no per-window handler
+/// (a focus-only subscription): the record carries the window's frame
+/// identity, which the focus handler's PID filter needs for UWP apps.
 ///
 /// The handle is passed in rather than re-read here: the caller already read
 /// it (enumerating the window set), and a second read that fails after the
 /// first succeeded would abort a registration over a transient property read.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "The arguments are the exact per-window registration closure: one automation handle, the target window + its handle, the cache request, the event context a post-attach baseline reconciliation emits through, and the three UIA handler interfaces the registration wires. Grouping them behind a struct would move the coupling the caller already names explicitly."
-)]
 fn register_window_handlers(
     autom: &IUIAutomation,
     window: &IUIAutomationElement,
     hwnd: usize,
     cache_request: &crate::coords::BoundsCacheRequest,
     ctx: &EventContext,
-    automation_handler: &IUIAutomationEventHandler,
-    property: &IUIAutomationPropertyChangedEventHandler,
-    structure: &IUIAutomationStructureChangedEventHandler,
+    handlers: &PerWindowHandlers,
     visual_states: &Mutex<HashMap<usize, i32>>,
 ) -> Result<RegisteredWindow> {
     let dpi = &crate::dpi::DpiScope::enter()?;
@@ -7269,7 +7318,7 @@ fn register_window_handlers(
     // consume the first real minimize/maximize transition and miss the event
     // while the subscription reports success (tenet 1). Same classification
     // the window verbs apply via `pattern_acquisition_error`.
-    let pattern = if hwnd != 0 {
+    let pattern = if hwnd != 0 && handlers.watches_visual_state() {
         match unsafe {
             window.GetCurrentPatternAs::<IUIAutomationWindowPattern>(UIA_WindowPatternId)
         } {
@@ -7310,76 +7359,80 @@ fn register_window_handlers(
         None => None,
     };
 
-    let mut automation_ids: Vec<UIA_EVENT_ID> = Vec::new();
-    for eid in AUTOMATION_EVENT_IDS {
+    // Undo a partial registration: remove exactly what `added` records.
+    let fail = |added: &AddedHandlers, err: Error| {
+        remove_handlers_of(autom, window, handlers, added);
+        remove_visual_state(visual_states, hwnd);
+        err
+    };
+    let mut added = AddedHandlers::default();
+    for eid in &handlers.automation_ids {
         if let Err(e) = unsafe {
             autom.AddAutomationEventHandler(
                 *eid,
                 window,
                 TreeScope_Subtree,
                 cache,
-                automation_handler,
+                &handlers.automation,
             )
         } {
-            let err = Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("AddAutomationEventHandler({:?}) failed: {e}", eid),
-            };
-            remove_handlers_of(
-                autom,
-                window,
-                &automation_ids,
-                automation_handler,
-                property,
-                structure,
-            );
-            remove_visual_state(visual_states, hwnd);
-            return Err(err);
+            return Err(fail(
+                &added,
+                Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("AddAutomationEventHandler({:?}) failed: {e}", eid),
+                },
+            ));
         }
-        automation_ids.push(*eid);
+        added.automation_ids.push(*eid);
     }
-    if let Err(e) = unsafe {
-        autom.AddPropertyChangedEventHandlerNativeArray(
-            window,
-            TreeScope_Subtree,
-            cache,
-            property,
-            PROPERTY_CHANGE_IDS,
-        )
-    } {
-        let err = Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("AddPropertyChangedEventHandlerNativeArray failed: {e}"),
-        };
-        remove_handlers_of(
-            autom,
-            window,
-            &automation_ids,
-            automation_handler,
-            property,
-            structure,
-        );
-        remove_visual_state(visual_states, hwnd);
-        return Err(err);
+    if let Some((property, ids)) = &handlers.property {
+        if let Err(e) = unsafe {
+            autom.AddPropertyChangedEventHandlerNativeArray(
+                window,
+                TreeScope_Subtree,
+                cache,
+                property,
+                ids,
+            )
+        } {
+            return Err(fail(
+                &added,
+                Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("AddPropertyChangedEventHandlerNativeArray failed: {e}"),
+                },
+            ));
+        }
+        added.property = true;
     }
-    if let Err(e) = unsafe {
-        autom.AddStructureChangedEventHandler(window, TreeScope_Subtree, cache, structure)
-    } {
-        let err = Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("AddStructureChangedEventHandler failed: {e}"),
-        };
-        let _ = unsafe { autom.RemovePropertyChangedEventHandler(window, property) };
-        remove_handlers_of(
-            autom,
-            window,
-            &automation_ids,
-            automation_handler,
-            property,
-            structure,
-        );
-        remove_visual_state(visual_states, hwnd);
-        return Err(err);
+    if let Some(structure) = &handlers.structure {
+        if let Err(e) = unsafe {
+            autom.AddStructureChangedEventHandler(window, TreeScope_Subtree, cache, structure)
+        } {
+            return Err(fail(
+                &added,
+                Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("AddStructureChangedEventHandler failed: {e}"),
+                },
+            ));
+        }
+        added.structure = true;
+    }
+    if let Some((autom5, notification)) = &handlers.notification {
+        if let Err(e) = unsafe {
+            autom5.AddNotificationEventHandler(window, TreeScope_Subtree, cache, notification)
+        } {
+            return Err(fail(
+                &added,
+                Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("AddNotificationEventHandler failed: {e}"),
+                },
+            ));
+        }
+        added.notification = true;
     }
 
     // Publish identity before the post-attach state read: callbacks arriving
@@ -7429,26 +7482,21 @@ fn register_window_handlers(
                 // The handlers are attached but the gap could not be closed:
                 // a half-reconciled window would silently drop transitions,
                 // so undo the registration and surface the failure (tenet 1).
-                remove_handlers_of(
-                    autom,
-                    window,
-                    &automation_ids,
-                    automation_handler,
-                    property,
-                    structure,
+                let err = fail(
+                    &added,
+                    Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!(
+                            "CurrentWindowVisualState failed while reconciling the baseline of \
+                             window {hwnd:#x} after attaching handlers: {e}"
+                        ),
+                    },
                 );
-                remove_visual_state(visual_states, hwnd);
                 ctx.frame_runtime_ids
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&hwnd);
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!(
-                        "CurrentWindowVisualState failed while reconciling the baseline of \
-                         window {hwnd:#x} after attaching handlers: {e}"
-                    ),
-                });
+                return Err(err);
             }
         }
     }
@@ -7456,7 +7504,7 @@ fn register_window_handlers(
     Ok(RegisteredWindow {
         element: ComSend::new(window.clone()),
         hwnd,
-        automation_ids,
+        added,
     })
 }
 
@@ -7467,23 +7515,29 @@ fn remove_visual_state(visual_states: &Mutex<HashMap<usize, i32>>, hwnd: usize) 
         .remove(&hwnd);
 }
 
-/// Remove a window's previously registered handlers. Removal errors are
-/// ignored: a window that closed during subscription (or was never fully
-/// registered) answers `Remove*` with an error there is nothing to do about,
-/// and the callers treat removal as best-effort teardown.
+/// Remove a window's previously registered handlers — exactly those `added`
+/// records. Removal errors are ignored: a window that closed during
+/// subscription (or was never fully registered) answers `Remove*` with an
+/// error there is nothing to do about, and the callers treat removal as
+/// best-effort teardown.
 fn remove_handlers_of(
     autom: &IUIAutomation,
     window: &IUIAutomationElement,
-    automation_ids: &[UIA_EVENT_ID],
-    automation_handler: &IUIAutomationEventHandler,
-    property: &IUIAutomationPropertyChangedEventHandler,
-    structure: &IUIAutomationStructureChangedEventHandler,
+    handlers: &PerWindowHandlers,
+    added: &AddedHandlers,
 ) {
-    for eid in automation_ids {
-        let _ = unsafe { autom.RemoveAutomationEventHandler(*eid, window, automation_handler) };
+    for eid in &added.automation_ids {
+        let _ = unsafe { autom.RemoveAutomationEventHandler(*eid, window, &handlers.automation) };
     }
-    let _ = unsafe { autom.RemovePropertyChangedEventHandler(window, property) };
-    let _ = unsafe { autom.RemoveStructureChangedEventHandler(window, structure) };
+    if let (true, Some((property, _))) = (added.property, &handlers.property) {
+        let _ = unsafe { autom.RemovePropertyChangedEventHandler(window, property) };
+    }
+    if let (true, Some(structure)) = (added.structure, &handlers.structure) {
+        let _ = unsafe { autom.RemoveStructureChangedEventHandler(window, structure) };
+    }
+    if let (true, Some((autom5, notification))) = (added.notification, &handlers.notification) {
+        let _ = unsafe { autom5.RemoveNotificationEventHandler(window, notification) };
+    }
 }
 
 /// Reconcile per-window registrations with the pid's current top-level
@@ -7554,14 +7608,7 @@ fn sync_registrations(
             m.remove(&hwnd)
         };
         if let Some(reg) = reg {
-            remove_handlers_of(
-                autom,
-                reg.element.get(),
-                &reg.automation_ids,
-                state.automation_handler.get(),
-                state.property_handler.get(),
-                state.structure_handler.get(),
-            );
+            remove_handlers_of(autom, reg.element.get(), state.handlers.get(), &reg.added);
         }
         let mut states = state
             .visual_states
@@ -7580,9 +7627,7 @@ fn sync_registrations(
             hwnd,
             cache_request,
             ctx,
-            state.automation_handler.get(),
-            state.property_handler.get(),
-            state.structure_handler.get(),
+            state.handlers.get(),
             &state.visual_states,
         )?;
         let mut m = state.registered.lock().unwrap_or_else(|e| e.into_inner());
@@ -7592,7 +7637,8 @@ fn sync_registrations(
 }
 
 /// Best-effort removal of every registration of a subscription: the desktop
-/// watch, the focus handler, and every per-window record. Used on the
+/// watch, the focus handler (`None` when the plan registered none), and every
+/// per-window record. Used on the
 /// subscribe-time error path and on cancel; removal errors are ignored for
 /// the same reason as in [`remove_handlers_of`] (a dead window or an
 /// already-removed handler has nothing to remove).
@@ -7600,7 +7646,7 @@ fn cleanup_registrations(
     autom: &IUIAutomation,
     root: &IUIAutomationElement,
     watch: &IUIAutomationEventHandler,
-    focus: &IUIAutomationFocusChangedEventHandler,
+    focus: Option<&IUIAutomationFocusChangedEventHandler>,
     state: &SubscriptionState,
 ) {
     // Stop reconciles from registering anything further and drain the
@@ -7616,19 +7662,14 @@ fn cleanup_registrations(
         let mut m = state.registered.lock().unwrap_or_else(|e| e.into_inner());
         m.drain().map(|(_, r)| r).collect()
     };
-    let _ = unsafe { autom.RemoveFocusChangedEventHandler(focus) };
+    if let Some(focus) = focus {
+        let _ = unsafe { autom.RemoveFocusChangedEventHandler(focus) };
+    }
     for eid in WATCH_EVENT_IDS {
         let _ = unsafe { autom.RemoveAutomationEventHandler(*eid, root, watch) };
     }
     for reg in regs {
-        remove_handlers_of(
-            autom,
-            reg.element.get(),
-            &reg.automation_ids,
-            state.automation_handler.get(),
-            state.property_handler.get(),
-            state.structure_handler.get(),
-        );
+        remove_handlers_of(autom, reg.element.get(), state.handlers.get(), &reg.added);
     }
     state
         .visual_states
@@ -7938,9 +7979,7 @@ impl IUIAutomationEventHandler_Impl for AutomationHandler_Impl {
             UIA_SelectionItem_ElementSelectedEventId
             | UIA_SelectionItem_ElementAddedToSelectionEventId
             | UIA_SelectionItem_ElementRemovedFromSelectionEventId => EventKind::SelectionChanged,
-            UIA_NotificationEventId | UIA_LiveRegionChangedEventId | UIA_SystemAlertEventId => {
-                EventKind::Announcement
-            }
+            UIA_LiveRegionChangedEventId | UIA_SystemAlertEventId => EventKind::Announcement,
             _ => return Ok(()),
         };
         let target = self.ctx.snapshot_or_log(el, &self.cache);
@@ -7950,9 +7989,10 @@ impl IUIAutomationEventHandler_Impl for AutomationHandler_Impl {
     }
 }
 
-/// The payload of a UIA announcement-like event. A Notification's text and
-/// kind arrive only through `AddNotificationEventHandler`, which this
-/// backend does not register yet, so a request carries no text here.
+/// The payload of a UIA live-region or system-alert event, neither of which
+/// carries text: read the target. A Notification (an explicit request) is
+/// not an automation event here; [`NotificationHandler`] receives it with its
+/// text through `AddNotificationEventHandler`.
 #[allow(non_upper_case_globals)] // UIA constants use CamelCase in the windows crate
 fn uia_announcement(
     eventid: UIA_EVENT_ID,
@@ -7960,7 +8000,6 @@ fn uia_announcement(
 ) -> Option<xa11y_core::AnnouncementInfo> {
     use xa11y_core::{AnnouncementOrigin, AnnouncementParts, Politeness};
     let (origin, politeness) = match eventid {
-        UIA_NotificationEventId => (AnnouncementOrigin::Request, None),
         // The region's own `LiveSetting` says how urgently.
         UIA_LiveRegionChangedEventId => (
             AnnouncementOrigin::LiveRegion,
@@ -7981,6 +8020,46 @@ fn uia_announcement(
         }
         .into(),
     )
+}
+
+/// Receives UIA `Notification` events (`UiaRaiseNotificationEvent`, WinForms
+/// `RaiseAutomationNotification`, XAML `RaiseNotificationEvent`) with their
+/// arguments, which the generic automation-event handler never sees: the
+/// display string becomes `announcement.text`, the processing value its
+/// politeness and `platform_priority`, and the activity ID `activity_id`.
+/// `NotificationKind` (item added, action completed, ...) has no field in
+/// `AnnouncementInfo` and is dropped.
+#[implement(IUIAutomationNotificationEventHandler)]
+struct NotificationHandler {
+    ctx: Arc<EventContext>,
+    cache: crate::coords::BoundsCacheRequest,
+}
+
+impl IUIAutomationNotificationEventHandler_Impl for NotificationHandler_Impl {
+    fn HandleNotificationEvent(
+        &self,
+        sender: windows::core::Ref<IUIAutomationElement>,
+        _notificationkind: NotificationKind,
+        notificationprocessing: NotificationProcessing,
+        displaystring: &windows::core::BSTR,
+        activityid: &windows::core::BSTR,
+    ) -> windows::core::Result<()> {
+        let Some(el) = sender.as_ref() else {
+            return Ok(());
+        };
+        if !self.ctx.matches_pid(el) {
+            return Ok(());
+        }
+        let target = self.ctx.snapshot_or_log(el, &self.cache);
+        let announcement = crate::event_plan::notification_announcement(
+            notificationprocessing.0,
+            displaystring.to_string(),
+            activityid.to_string(),
+        );
+        self.ctx
+            .emit_with(EventKind::Announcement, target, Some(announcement));
+        Ok(())
+    }
 }
 
 /// Same native IID and ABI as IUIAutomationPropertyChangedEventHandler.
@@ -8316,27 +8395,31 @@ impl IUIAutomationEventHandler_Impl for WatchHandler_Impl {
 }
 
 // Event IDs registered through `AddAutomationEventHandler` on *each* top-level
-// window's subtree. Kept as a shared constant so registration and removal
-// iterate the same list. `WindowOpened` / `WindowClosed` are deliberately NOT
-// here: a per-window subtree registration would deliver a window's open/close
-// twice (once from its own subtree scope, once from the desktop root's
-// Subtree scope) — the open/close watch owns those two event IDs.
-const AUTOMATION_EVENT_IDS: &[UIA_EVENT_ID] = &[
-    UIA_Text_TextSelectionChangedEventId,
-    UIA_MenuOpenedEventId,
-    UIA_MenuClosedEventId,
-    UIA_Text_TextChangedEventId,
-    UIA_SelectionItem_ElementSelectedEventId,
-    UIA_SelectionItem_ElementAddedToSelectionEventId,
-    UIA_SelectionItem_ElementRemovedFromSelectionEventId,
-    UIA_NotificationEventId,
-    UIA_LiveRegionChangedEventId,
-    // `UIA_SystemAlertEventId` is the design-doc-listed Announcement source
-    // for pre-Windows-10 alert messages and some legacy providers that
-    // don't raise NotificationEvent. Dispatched to EventKind::Announcement
-    // in `AutomationHandler::HandleAutomationEvent`.
-    UIA_SystemAlertEventId,
-];
+// window's subtree, for the kinds a subscription asked for (see
+// `event_plan::HandlerPlan`). `WindowOpened` / `WindowClosed` are deliberately
+// NOT here: a per-window subtree registration would deliver a window's
+// open/close twice (once from its own subtree scope, once from the desktop
+// root's Subtree scope) — the open/close watch owns those two event IDs.
+// `Notification` is not here either: `NotificationHandler` receives it with
+// its text, and registering it here too would deliver each request twice.
+fn automation_event_id(event: crate::event_plan::AutomationEvent) -> UIA_EVENT_ID {
+    use crate::event_plan::AutomationEvent as E;
+    match event {
+        E::TextSelectionChanged => UIA_Text_TextSelectionChangedEventId,
+        E::MenuOpened => UIA_MenuOpenedEventId,
+        E::MenuClosed => UIA_MenuClosedEventId,
+        E::TextChanged => UIA_Text_TextChangedEventId,
+        E::ElementSelected => UIA_SelectionItem_ElementSelectedEventId,
+        E::ElementAddedToSelection => UIA_SelectionItem_ElementAddedToSelectionEventId,
+        E::ElementRemovedFromSelection => UIA_SelectionItem_ElementRemovedFromSelectionEventId,
+        E::LiveRegionChanged => UIA_LiveRegionChangedEventId,
+        // The design-doc-listed Announcement source for pre-Windows-10 alert
+        // messages and some legacy providers that don't raise
+        // NotificationEvent. Dispatched to EventKind::Announcement in
+        // `AutomationHandler::HandleAutomationEvent`.
+        E::SystemAlert => UIA_SystemAlertEventId,
+    }
+}
 
 // Event IDs registered through `AddAutomationEventHandler` on the *desktop
 // root* (TreeScope_Subtree): the open/close watch, whose handler reconciles
@@ -8348,20 +8431,23 @@ const WATCH_EVENT_IDS: &[UIA_EVENT_ID] = &[
     UIA_Window_WindowClosedEventId,
 ];
 
-// Property IDs watched via `AddPropertyChangedEventHandlerNativeArray`.
-// `WindowVisualState` is the canonical UIA notification for window
-// minimize/maximize/restore: UIA has no dedicated event ID for it, so
-// providers raise PropertyChanged(WindowVisualState) and a provider that
-// doesn't watch the property never sees it.
-const PROPERTY_CHANGE_IDS: &[UIA_PROPERTY_ID] = &[
-    UIA_NamePropertyId,
-    UIA_IsEnabledPropertyId,
-    UIA_ToggleToggleStatePropertyId,
-    UIA_ValueValuePropertyId,
-    UIA_RangeValueValuePropertyId,
-    UIA_ExpandCollapseExpandCollapseStatePropertyId,
-    UIA_WindowWindowVisualStatePropertyId,
-];
+// Property IDs watched via `AddPropertyChangedEventHandlerNativeArray`, for the
+// kinds a subscription asked for. `WindowVisualState` is the canonical UIA
+// notification for window minimize/maximize/restore: UIA has no dedicated
+// event ID for it, so providers raise PropertyChanged(WindowVisualState) and a
+// provider that doesn't watch the property never sees it.
+fn watched_property_id(property: crate::event_plan::WatchedProperty) -> UIA_PROPERTY_ID {
+    use crate::event_plan::WatchedProperty as P;
+    match property {
+        P::Name => UIA_NamePropertyId,
+        P::IsEnabled => UIA_IsEnabledPropertyId,
+        P::ToggleState => UIA_ToggleToggleStatePropertyId,
+        P::Value => UIA_ValueValuePropertyId,
+        P::RangeValue => UIA_RangeValueValuePropertyId,
+        P::ExpandCollapseState => UIA_ExpandCollapseExpandCollapseStatePropertyId,
+        P::WindowVisualState => UIA_WindowWindowVisualStatePropertyId,
+    }
+}
 
 impl WindowsProvider {
     fn subscribe_impl(
@@ -8370,7 +8456,34 @@ impl WindowsProvider {
         pid: u32,
         app_name: String,
         saved_app: Option<SavedSyntheticAppIdentity>,
+        plan: &crate::event_plan::HandlerPlan,
     ) -> Result<Subscription> {
+        // `AddNotificationEventHandler` is on `IUIAutomation5`, which
+        // `CUIAutomation8` implements from Windows 10 1709. Without it there
+        // is no way to receive a Notification: asking for `announcement` by
+        // name then fails here, before anything is registered. An all-kinds
+        // subscription leaves the notification handler out instead of
+        // failing every subscription on such a system; no other mechanism
+        // stands in for it, and live-region and system-alert announcements
+        // still arrive through the automation handler.
+        let automation5 = if plan.notification {
+            match self.automation.cast::<IUIAutomation5>() {
+                Ok(automation5) => Some(automation5),
+                Err(e) if plan.announcement_requested => {
+                    return Err(Error::Unsupported {
+                        feature: format!(
+                            "announcement events on this system: UIA Notification events \
+                             need IUIAutomation5 (Windows 10 version 1709 or later), which \
+                             the UI Automation client does not implement ({e})"
+                        ),
+                    });
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
         let (tx, rx) = xa11y_core::event_channel();
 
         // Enumerate every current top-level window of the pid up front and
@@ -8414,30 +8527,64 @@ impl WindowsProvider {
         // avoids relying on a mutable handle held elsewhere.
         let cache = create_event_cache_request(&self.automation)?;
 
-        let focus: IUIAutomationFocusChangedEventHandler = FocusHandler {
-            ctx: ctx.clone(),
-            cache: cache.clone(),
-        }
-        .into();
+        let focus: Option<IUIAutomationFocusChangedEventHandler> = plan.focus.then(|| {
+            FocusHandler {
+                ctx: ctx.clone(),
+                cache: cache.clone(),
+            }
+            .into()
+        });
         let automation_handler: IUIAutomationEventHandler = AutomationHandler {
             ctx: ctx.clone(),
             cache: cache.clone(),
         }
         .into();
         let visual_states = Arc::new(Mutex::new(HashMap::<usize, i32>::new()));
-        let borrowed_property: BorrowedPropertyChangedEventHandler = PropertyHandler {
-            ctx: ctx.clone(),
-            cache: cache.clone(),
-            visual_state_by_hwnd: Arc::clone(&visual_states),
-        }
-        .into();
-        let property: IUIAutomationPropertyChangedEventHandler =
-            uia_call(|| borrowed_property.cast())?;
-        let structure: IUIAutomationStructureChangedEventHandler = StructureHandler {
-            ctx: ctx.clone(),
-            cache: cache.clone(),
-        }
-        .into();
+        let property = if plan.properties.is_empty() {
+            None
+        } else {
+            let borrowed_property: BorrowedPropertyChangedEventHandler = PropertyHandler {
+                ctx: ctx.clone(),
+                cache: cache.clone(),
+                visual_state_by_hwnd: Arc::clone(&visual_states),
+            }
+            .into();
+            let property: IUIAutomationPropertyChangedEventHandler =
+                uia_call(|| borrowed_property.cast())?;
+            let ids = plan
+                .properties
+                .iter()
+                .map(|p| watched_property_id(*p))
+                .collect();
+            Some((property, ids))
+        };
+        let structure: Option<IUIAutomationStructureChangedEventHandler> =
+            plan.structure.then(|| {
+                StructureHandler {
+                    ctx: ctx.clone(),
+                    cache: cache.clone(),
+                }
+                .into()
+            });
+        let notification = automation5.map(|automation5| {
+            let handler: IUIAutomationNotificationEventHandler = NotificationHandler {
+                ctx: ctx.clone(),
+                cache: cache.clone(),
+            }
+            .into();
+            (automation5, handler)
+        });
+        let handlers = PerWindowHandlers {
+            automation: automation_handler,
+            automation_ids: plan
+                .automation
+                .iter()
+                .map(|e| automation_event_id(*e))
+                .collect(),
+            property,
+            structure,
+            notification,
+        };
 
         // The desktop root anchors the open/close watch below.
         let root = uia_call(|| unsafe { self.automation.GetRootElement() }).map_err(|e| {
@@ -8449,9 +8596,7 @@ impl WindowsProvider {
 
         let state = Arc::new(SubscriptionState {
             automation: ComSend::new(self.automation.clone()),
-            automation_handler: ComSend::new(automation_handler.clone()),
-            property_handler: ComSend::new(property.clone()),
-            structure_handler: ComSend::new(structure.clone()),
+            handlers: ComSend::new(handlers),
             registered: Mutex::new(HashMap::new()),
             visual_states,
             frame_runtime_ids,
@@ -8476,9 +8621,6 @@ impl WindowsProvider {
         let initial_focus = ComSend::new(focus.clone());
         let initial_watch = ComSend::new(watch.clone());
         let initial_root = ComSend::new(root.clone());
-        let initial_automation_handler = ComSend::new(automation_handler);
-        let initial_property = ComSend::new(property);
-        let initial_structure = ComSend::new(structure);
         let initial_state = Arc::clone(&state);
         let initial_ctx = Arc::clone(&ctx);
         on_registration_worker(move || {
@@ -8486,16 +8628,18 @@ impl WindowsProvider {
             let dpi = &crate::dpi::DpiScope::enter()?;
             let cache_request = initial_cache.get();
             let cache = cache_request.get(dpi);
-            let focus = initial_focus.get();
+            let focus = initial_focus.get().as_ref();
             let watch = initial_watch.get();
             let root = initial_root.get();
 
-            unsafe { autom.AddFocusChangedEventHandler(cache, focus) }.map_err(|e| {
-                Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("AddFocusChangedEventHandler failed: {e}"),
-                }
-            })?;
+            if let Some(focus) = focus {
+                unsafe { autom.AddFocusChangedEventHandler(cache, focus) }.map_err(|e| {
+                    Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!("AddFocusChangedEventHandler failed: {e}"),
+                    }
+                })?;
+            }
 
             let cleanup_error = |e: Error| {
                 cleanup_registrations(autom, root, watch, focus, &initial_state);
@@ -8509,9 +8653,7 @@ impl WindowsProvider {
                     hwnd,
                     cache_request,
                     &initial_ctx,
-                    initial_automation_handler.get(),
-                    initial_property.get(),
-                    initial_structure.get(),
+                    initial_state.handlers.get(),
                     &initial_state.visual_states,
                 )
                 .map_err(&cleanup_error)?;
@@ -8554,7 +8696,7 @@ impl WindowsProvider {
                     state_c.automation.get(),
                     root_c.get(),
                     watch_c.get(),
-                    focus_c.get(),
+                    focus_c.get().as_ref(),
                     &state_c,
                 );
                 Ok(())
@@ -10385,26 +10527,46 @@ mod tests {
                 "the watch must cover exactly the top-level window open/close events"
             );
         }
-        assert!(AUTOMATION_EVENT_IDS.contains(&UIA_MenuOpenedEventId));
-        assert!(AUTOMATION_EVENT_IDS.contains(&UIA_MenuClosedEventId));
-        assert!(AUTOMATION_EVENT_IDS.contains(&UIA_Text_TextChangedEventId));
-        assert!(AUTOMATION_EVENT_IDS.contains(&UIA_SelectionItem_ElementSelectedEventId));
-        assert!(AUTOMATION_EVENT_IDS.contains(&UIA_NotificationEventId));
-        assert!(AUTOMATION_EVENT_IDS.contains(&UIA_LiveRegionChangedEventId));
-        assert!(AUTOMATION_EVENT_IDS.contains(&UIA_SystemAlertEventId));
+        let all: Vec<UIA_EVENT_ID> = crate::event_plan::AutomationEvent::ALL
+            .iter()
+            .map(|e| automation_event_id(*e))
+            .collect();
+        assert!(all.contains(&UIA_MenuOpenedEventId));
+        assert!(all.contains(&UIA_MenuClosedEventId));
+        assert!(all.contains(&UIA_Text_TextChangedEventId));
+        assert!(all.contains(&UIA_SelectionItem_ElementSelectedEventId));
+        assert!(all.contains(&UIA_LiveRegionChangedEventId));
+        assert!(all.contains(&UIA_SystemAlertEventId));
+        // NotificationHandler owns Notification; registering it on the
+        // automation handler as well would deliver each request twice.
+        assert!(!all.contains(&UIA_NotificationEventId));
+        assert!(!all.contains(&UIA_Window_WindowOpenedEventId));
+        assert!(!all.contains(&UIA_Window_WindowClosedEventId));
+        let unique: HashSet<i32> = all.iter().map(|e| e.0).collect();
+        assert_eq!(unique.len(), all.len(), "two plan events share a UIA ID");
     }
 
     #[test]
     fn property_change_ids_covers_design_doc() {
         // Property IDs mandated by the events design doc for the Windows
         // PropertyChanged pathway.
-        assert!(PROPERTY_CHANGE_IDS.contains(&UIA_NamePropertyId));
-        assert!(PROPERTY_CHANGE_IDS.contains(&UIA_IsEnabledPropertyId));
-        assert!(PROPERTY_CHANGE_IDS.contains(&UIA_ToggleToggleStatePropertyId));
-        assert!(PROPERTY_CHANGE_IDS.contains(&UIA_ValueValuePropertyId));
-        assert!(PROPERTY_CHANGE_IDS.contains(&UIA_RangeValueValuePropertyId));
-        assert!(PROPERTY_CHANGE_IDS.contains(&UIA_ExpandCollapseExpandCollapseStatePropertyId));
-        assert!(PROPERTY_CHANGE_IDS.contains(&UIA_WindowWindowVisualStatePropertyId));
+        let all: Vec<UIA_PROPERTY_ID> = crate::event_plan::WatchedProperty::ALL
+            .iter()
+            .map(|p| watched_property_id(*p))
+            .collect();
+        assert!(all.contains(&UIA_NamePropertyId));
+        assert!(all.contains(&UIA_IsEnabledPropertyId));
+        assert!(all.contains(&UIA_ToggleToggleStatePropertyId));
+        assert!(all.contains(&UIA_ValueValuePropertyId));
+        assert!(all.contains(&UIA_RangeValueValuePropertyId));
+        assert!(all.contains(&UIA_ExpandCollapseExpandCollapseStatePropertyId));
+        assert!(all.contains(&UIA_WindowWindowVisualStatePropertyId));
+        let unique: HashSet<i32> = all.iter().map(|p| p.0).collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "two plan properties share a UIA ID"
+        );
     }
 
     #[test]

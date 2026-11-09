@@ -593,10 +593,13 @@ impl Element {
     ///
     /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
     /// counts the root; ``detail`` adds ``"text"`` (full text within
-    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
-    /// (seconds) returns what was read when it runs out, with
-    /// ``truncated.by_time``. Releases the GIL while it reads.
-    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    /// ``max_text_bytes`` in total), ``"formatting"`` (the text's formatting
+    /// runs, at most ``max_runs`` in total; implies ``"text"``) and/or
+    /// ``"relations"``; ``timeout`` (seconds) returns what was read when it
+    /// runs out, with ``truncated.by_time``; cancelling ``cancel`` (a
+    /// :class:`CancelToken`) from another thread does the same, with
+    /// ``truncated.by_cancel``. Releases the GIL while it reads.
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None, max_runs=4096, cancel=None))]
     fn capture(
         &self,
         py: Python<'_>,
@@ -605,6 +608,8 @@ impl Element {
         max_text_bytes: usize,
         detail: Option<Bound<'_, PyAny>>,
         timeout: Option<f64>,
+        max_runs: usize,
+        cancel: Option<PyRef<'_, capture::CancelToken>>,
     ) -> PyResult<capture::Capture> {
         let options = capture::parse_options(
             max_depth,
@@ -612,6 +617,8 @@ impl Element {
             max_text_bytes,
             detail.as_ref(),
             timeout,
+            max_runs,
+            cancel.as_deref(),
         )?;
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         let cap = py
@@ -1101,12 +1108,15 @@ impl Locator {
     ///
     /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
     /// counts the root; ``detail`` adds ``"text"`` (full text within
-    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
-    /// (seconds) returns what was read when it runs out, with
-    /// ``truncated.by_time``. Releases the GIL while it reads.
+    /// ``max_text_bytes`` in total), ``"formatting"`` (the text's formatting
+    /// runs, at most ``max_runs`` in total; implies ``"text"``) and/or
+    /// ``"relations"``; ``timeout`` (seconds) returns what was read when it
+    /// runs out, with ``truncated.by_time``; cancelling ``cancel`` (a
+    /// :class:`CancelToken`) from another thread does the same, with
+    /// ``truncated.by_cancel``. Releases the GIL while it reads.
     ///
     /// Resolves the selector once, like :meth:`tree`; does not auto-wait.
-    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None, max_runs=4096, cancel=None))]
     fn capture(
         &self,
         py: Python<'_>,
@@ -1115,6 +1125,8 @@ impl Locator {
         max_text_bytes: usize,
         detail: Option<Bound<'_, PyAny>>,
         timeout: Option<f64>,
+        max_runs: usize,
+        cancel: Option<PyRef<'_, capture::CancelToken>>,
     ) -> PyResult<capture::Capture> {
         let options = capture::parse_options(
             max_depth,
@@ -1122,6 +1134,8 @@ impl Locator {
             max_text_bytes,
             detail.as_ref(),
             timeout,
+            max_runs,
+            cancel.as_deref(),
         )?;
         let locator = self.inner.clone();
         let cap = py
@@ -1575,6 +1589,9 @@ struct Event {
     /// For announcement events: the origin and, where sent, the text.
     #[pyo3(get)]
     announcement: Option<semantics::AnnouncementInfo>,
+    /// When the event was received, in seconds since the epoch.
+    #[pyo3(get)]
+    time: f64,
 }
 
 impl Event {
@@ -1585,6 +1602,7 @@ impl Event {
             }
             _ => (None, None),
         };
+        let time = epoch_seconds(event.time());
         Self {
             event_type: event_kind_to_str(&event.kind).to_string(),
             app_name: event.app_name,
@@ -1595,6 +1613,7 @@ impl Event {
             state_value,
             text_change: event.text_change.map(rich::TextChange::from),
             sequence: event.sequence,
+            time,
             announcement: event.announcement.map(semantics::AnnouncementInfo::new),
         }
     }
@@ -1615,6 +1634,14 @@ impl Event {
             "Event(event_type='{}', app_name='{}', app_pid={})",
             self.event_type, self.app_name, self.app_pid
         )
+    }
+}
+
+/// A wall-clock time as seconds since the epoch (negative before it).
+fn epoch_seconds(t: std::time::SystemTime) -> f64 {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs_f64(),
+        Err(e) => -e.duration().as_secs_f64(),
     }
 }
 
@@ -2147,13 +2174,16 @@ impl App {
     ///
     /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
     /// counts the root; ``detail`` adds ``"text"`` (full text within
-    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
-    /// (seconds) returns what was read when it runs out, with
-    /// ``truncated.by_time``. Releases the GIL while it reads.
+    /// ``max_text_bytes`` in total), ``"formatting"`` (the text's formatting
+    /// runs, at most ``max_runs`` in total; implies ``"text"``) and/or
+    /// ``"relations"``; ``timeout`` (seconds) returns what was read when it
+    /// runs out, with ``truncated.by_time``; cancelling ``cancel`` (a
+    /// :class:`CancelToken`) from another thread does the same, with
+    /// ``truncated.by_cancel``. Releases the GIL while it reads.
     ///
     /// The root is the application; its children are those of every native
     /// registration of the process, as in :meth:`children`.
-    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None, max_runs=4096, cancel=None))]
     fn capture(
         &self,
         py: Python<'_>,
@@ -2162,6 +2192,8 @@ impl App {
         max_text_bytes: usize,
         detail: Option<Bound<'_, PyAny>>,
         timeout: Option<f64>,
+        max_runs: usize,
+        cancel: Option<PyRef<'_, capture::CancelToken>>,
     ) -> PyResult<capture::Capture> {
         let options = capture::parse_options(
             max_depth,
@@ -2169,6 +2201,8 @@ impl App {
             max_text_bytes,
             detail.as_ref(),
             timeout,
+            max_runs,
+            cancel.as_deref(),
         )?;
         let app = xa11y::App::from_data(self.provider.clone(), self.inner_data.clone());
         let cap = py
@@ -2376,10 +2410,13 @@ impl ShellSurface {
     ///
     /// ``max_depth`` stops at that depth (the root is 0); ``max_nodes``
     /// counts the root; ``detail`` adds ``"text"`` (full text within
-    /// ``max_text_bytes`` in total) and/or ``"relations"``; ``timeout``
-    /// (seconds) returns what was read when it runs out, with
-    /// ``truncated.by_time``. Releases the GIL while it reads.
-    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None))]
+    /// ``max_text_bytes`` in total), ``"formatting"`` (the text's formatting
+    /// runs, at most ``max_runs`` in total; implies ``"text"``) and/or
+    /// ``"relations"``; ``timeout`` (seconds) returns what was read when it
+    /// runs out, with ``truncated.by_time``; cancelling ``cancel`` (a
+    /// :class:`CancelToken`) from another thread does the same, with
+    /// ``truncated.by_cancel``. Releases the GIL while it reads.
+    #[pyo3(signature = (*, max_depth=None, max_nodes=2000, max_text_bytes=65536, detail=None, timeout=None, max_runs=4096, cancel=None))]
     fn capture(
         &self,
         py: Python<'_>,
@@ -2388,6 +2425,8 @@ impl ShellSurface {
         max_text_bytes: usize,
         detail: Option<Bound<'_, PyAny>>,
         timeout: Option<f64>,
+        max_runs: usize,
+        cancel: Option<PyRef<'_, capture::CancelToken>>,
     ) -> PyResult<capture::Capture> {
         let options = capture::parse_options(
             max_depth,
@@ -2395,6 +2434,8 @@ impl ShellSurface {
             max_text_bytes,
             detail.as_ref(),
             timeout,
+            max_runs,
+            cancel.as_deref(),
         )?;
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         let cap = py
@@ -3324,6 +3365,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<capture::CapturedText>()?;
     m.add_class::<capture::CaptureError>()?;
     m.add_class::<capture::Truncation>()?;
+    m.add_class::<capture::CaptureStats>()?;
+    m.add_class::<capture::CancelToken>()?;
     m.add_class::<rich::TableInfo>()?;
     m.add_class::<rich::CellInfo>()?;
     m.add_class::<rich::RowInfo>()?;

@@ -132,10 +132,13 @@ mod tests {
                 "state:maximized" => check_state(name, cap, window.states.maximized),
                 "state:fullscreen" => check_state(name, cap, window.states.fullscreen),
                 _ if name.starts_with("text:range_at:") => {
-                    // accesskit_unix gives the AccessKit text field no AT-SPI
-                    // Text interface, so on Linux these rows are covered by
-                    // rich.rs against the GTK 3 fixture instead.
-                    if cfg!(target_os = "linux") {
+                    // The AccessKit text field has no text interface here:
+                    // accesskit_unix implements no AT-SPI Text, and
+                    // accesskit_windows exposes TextPattern only for nodes
+                    // with TextRun children, which the test app has none of.
+                    // These rows are covered by rich.rs (GTK 3) on Linux and
+                    // rich_windows.rs (WPF) on Windows instead.
+                    if cfg!(any(target_os = "linux", target_os = "windows")) {
                         continue;
                     }
                     let unit = TextUnit::parse(name.trim_start_matches("text:range_at:"))

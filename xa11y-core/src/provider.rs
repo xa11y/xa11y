@@ -671,6 +671,21 @@ pub trait Provider: Send + Sync {
     ///
     /// Returns a [`Subscription`] that receives events until dropped.
     fn subscribe(&self, element: &ElementData) -> Result<Subscription>;
+
+    /// Subscribe to only these event kinds, by
+    /// [`EventKind::name`](crate::EventKind::name); `None` is every kind.
+    ///
+    /// A backend whose native subscription is per kind (UIA handlers) skips
+    /// registering the ones no requested kind needs. Delivery is filtered in
+    /// core either way, so a backend that subscribes to everything (the
+    /// default) is still correct, only more expensive.
+    fn subscribe_kinds(
+        &self,
+        element: &ElementData,
+        _kinds: Option<&[&str]>,
+    ) -> Result<Subscription> {
+        self.subscribe(element)
+    }
 }
 
 // Blanket impl so shared references to a provider act as providers themselves.
@@ -880,5 +895,12 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
         (**self).subscribe(element)
+    }
+    fn subscribe_kinds(
+        &self,
+        element: &ElementData,
+        kinds: Option<&[&str]>,
+    ) -> Result<Subscription> {
+        (**self).subscribe_kinds(element, kinds)
     }
 }
