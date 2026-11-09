@@ -81,12 +81,13 @@ pub struct LinuxProvider {
     gtk4: Gtk4Geometry,
 }
 
-/// Caches for [`LinuxProvider::gtk4_screen_extents`]: whether each
-/// application bus is GTK 4, and each object's top-level window. Cleared
-/// with the handle cache on a reconnect, which reuses bus names.
+/// Caches for [`LinuxProvider::gtk4_screen_extents`]: which GTK major
+/// version each application bus runs, and each object's top-level window.
+/// Cleared with the handle cache on a reconnect, which reuses bus names.
 #[derive(Default)]
 struct Gtk4Geometry {
-    is_gtk4: Mutex<HashMap<String, bool>>,
+    /// Each application bus's [`GtkGeneration`].
+    generations: Mutex<HashMap<String, GtkGeneration>>,
     /// Each GTK 4 application bus's process id.
     pids: Mutex<HashMap<String, u32>>,
     /// `bus + path` → the top-level window's `(bus, path)`. Bounded by
@@ -494,7 +495,7 @@ impl LinuxProvider {
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
             self.gtk4
-                .is_gtk4
+                .generations
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
@@ -993,20 +994,27 @@ impl LinuxProvider {
         Ok(extents_to_rect(x, y, w, h).map(|r| r.to_logical(crate::scale::coordinate_scale())))
     }
 
-    /// Whether the application on `bus` is GTK 4, from
+    /// Whether the application on `bus` is GTK 4 (see
+    /// [`gtk_generation`](Self::gtk_generation)).
+    fn is_gtk4(&self, bus: &str) -> Result<bool> {
+        Ok(self.gtk_generation(bus)? == GtkGeneration::Gtk4)
+    }
+
+    /// Which GTK major version the application on `bus` runs, from
     /// `Application.ToolkitName` / `Version`, cached per bus.
     ///
-    /// An unreadable answer is an error, not "no": treating it as "not
-    /// GTK 4" would report GTK 4's raw SCREEN extents. Errors are not
+    /// An unreadable answer is an error, not "neither": treating it as "not
+    /// GTK 4" would report GTK 4's raw SCREEN extents, and as "not GTK 3"
+    /// would skip GTK 3's liveness check on reads. Errors are not
     /// cached, so a transient failure is retried. Two answers settle it
     /// without the version: a toolkit name other than GTK, and a bus whose
     /// root object has no `Application` interface at all. GTK 4 always
     /// exports one there; WebKitGTK's web process, which serves a Tauri
     /// app's page content, does not.
-    fn is_gtk4(&self, bus: &str) -> Result<bool> {
+    fn gtk_generation(&self, bus: &str) -> Result<GtkGeneration> {
         if let Some(known) = self
             .gtk4
-            .is_gtk4
+            .generations
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(bus)
@@ -1022,33 +1030,26 @@ impl LinuxProvider {
                     message: format!("Application.{property} on {bus}: {e}"),
                 })
         };
-        let name = match read("ToolkitName") {
-            Ok(name) => name,
+        let generation = match read("ToolkitName") {
+            Ok(name) if name.eq_ignore_ascii_case("GTK") => {
+                // The toolkit's version is the `Version` property (GTK 4 has
+                // no `ToolkitVersion`; `AtspiVersion` is the protocol's).
+                gtk_generation_of(&name, &read("Version")?)
+            }
+            Ok(_) => GtkGeneration::Neither,
             Err(error) => {
                 if self.root_exports_application(bus)? {
                     return Err(error);
                 }
-                self.gtk4
-                    .is_gtk4
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(bus.to_owned(), false);
-                return Ok(false);
+                GtkGeneration::Neither
             }
         };
-        let gtk4 = if name.eq_ignore_ascii_case("GTK") {
-            // The toolkit's version is the `Version` property (GTK 4 has no
-            // `ToolkitVersion`; `AtspiVersion` is the protocol's).
-            is_gtk4_toolkit(&name, &read("Version")?)
-        } else {
-            false
-        };
         self.gtk4
-            .is_gtk4
+            .generations
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(bus.to_owned(), gtk4);
-        Ok(gtk4)
+            .insert(bus.to_owned(), generation);
+        Ok(generation)
     }
 
     /// Screen extents (physical pixels) for a GTK 4 object.
@@ -4777,9 +4778,27 @@ fn introspection_lists_interface(xml: &str, interface: &str) -> bool {
     xml.contains(&format!("<interface name=\"{interface}\""))
 }
 
-/// Whether `Application.ToolkitName` / `Version` name GTK 4.
-fn is_gtk4_toolkit(name: &str, version: &str) -> bool {
-    name.eq_ignore_ascii_case("GTK") && version.trim().split('.').next() == Some("4")
+/// The GTK major version an application runs, as far as the backend
+/// treats GTK versions differently: GTK 4's window-relative extents
+/// (#487) and GTK 3's destroyed widgets that keep answering (#586).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GtkGeneration {
+    Gtk3,
+    Gtk4,
+    /// Another toolkit, or a GTK major version with neither quirk.
+    Neither,
+}
+
+/// The [`GtkGeneration`] `Application.ToolkitName` / `Version` name.
+fn gtk_generation_of(name: &str, version: &str) -> GtkGeneration {
+    if !name.eq_ignore_ascii_case("GTK") {
+        return GtkGeneration::Neither;
+    }
+    match version.trim().split('.').next() {
+        Some("3") => GtkGeneration::Gtk3,
+        Some("4") => GtkGeneration::Gtk4,
+        _ => GtkGeneration::Neither,
+    }
 }
 
 /// Turn a `Component.GetExtents` reply into bounds, or `None` when the reply
@@ -5591,13 +5610,18 @@ mod tests {
     }
 
     #[test]
-    fn gtk4_is_detected_from_toolkit_name_and_major_version() {
-        assert!(is_gtk4_toolkit("GTK", "4.14.5"));
-        assert!(is_gtk4_toolkit("gtk", "4.16.0"));
-        assert!(!is_gtk4_toolkit("GTK", "3.24.41"));
-        assert!(!is_gtk4_toolkit("GTK", "40.1"));
-        assert!(!is_gtk4_toolkit("Qt", "4.8.7"));
-        assert!(!is_gtk4_toolkit("GTK", ""));
+    fn gtk_generation_is_detected_from_toolkit_name_and_major_version() {
+        use GtkGeneration::*;
+        assert_eq!(gtk_generation_of("GTK", "4.14.5"), Gtk4);
+        assert_eq!(gtk_generation_of("gtk", "4.16.0"), Gtk4);
+        assert_eq!(gtk_generation_of("GTK", "3.24.41"), Gtk3);
+        assert_eq!(gtk_generation_of("GTK", " 3.24.49 "), Gtk3);
+        assert_eq!(gtk_generation_of("GTK", "40.1"), Neither);
+        assert_eq!(gtk_generation_of("GTK", "30.1"), Neither);
+        assert_eq!(gtk_generation_of("GTK", "2.24.33"), Neither);
+        assert_eq!(gtk_generation_of("Qt", "4.8.7"), Neither);
+        assert_eq!(gtk_generation_of("Qt", "3.3.8"), Neither);
+        assert_eq!(gtk_generation_of("GTK", ""), Neither);
     }
 
     #[test]

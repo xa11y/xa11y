@@ -1110,6 +1110,14 @@ impl LinuxProvider {
     }
 
     /// The live object behind `element`, refusing one without `iface`.
+    ///
+    /// On GTK 3 only, the object must also still be attached
+    /// (`ensure_attached`): GTK 3 keeps a destroyed widget's accessible
+    /// answering for 15–20 s (#586), so a text or table read on an old
+    /// handle would otherwise return the dead widget's last contents as if
+    /// they were current. GTK 4, Qt and AccessKit drop the object with the
+    /// widget, so their reads fail on their own and skip the extra round
+    /// trips; the toolkit check is one cached read per application.
     fn with_interface(
         &self,
         element: &ElementData,
@@ -1117,6 +1125,9 @@ impl LinuxProvider {
         action: &str,
     ) -> Result<AccessibleRef> {
         let aref = self.get_cached(element.handle)?;
+        if self.gtk_generation(&aref.bus_name)? == GtkGeneration::Gtk3 {
+            self.ensure_attached(&aref)?;
+        }
         let ifaces = self.get_interfaces(&aref)?;
         let has = match iface {
             "org.a11y.atspi.Table" => ifaces.table,

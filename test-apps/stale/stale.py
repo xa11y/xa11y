@@ -12,11 +12,12 @@ app removes nodes outright. This is the GTK 3 window that
   set with the same names. Its description carries the rebuild count, so a
   test can tell when the swap has happened;
 * the targets: a `GtkButton` ("Doomed button"), a `GtkEntry`
-  ("Doomed entry"), a `GtkSpinButton` ("Doomed spin"), and a second
-  top-level `GtkWindow` ("Doomed window").
+  ("Doomed entry"), a `GtkSpinButton` ("Doomed spin"), a `GtkTreeView`
+  over a two-row `GtkListStore` ("Doomed table", an AT-SPI table with its
+  first row selected), and a second top-level `GtkWindow` ("Doomed window").
 
 A handle read before a rebuild names a destroyed widget, and every action on
-it must fail as stale. The fresh widgets are the control: the same actions
+it, and every text or table read, must fail as stale. The fresh widgets are the control: the same actions
 through a re-resolving locator must succeed, so a check that called
 everything stale would fail the test too.
 
@@ -75,7 +76,18 @@ class Fixture:
         spin.set_value(10)
         spin.get_accessible().set_name("Doomed spin")
 
-        for widget in (button, entry, spin):
+        store = Gtk.ListStore(str, str)
+        store.append(["apple", "red"])
+        store.append(["lemon", "yellow"])
+        table = Gtk.TreeView(model=store)
+        for i, title in enumerate(("Fruit", "Colour")):
+            table.append_column(
+                Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=i)
+            )
+        table.get_selection().select_path(Gtk.TreePath.new_from_indices([0]))
+        table.get_accessible().set_name("Doomed table")
+
+        for widget in (button, entry, spin, table):
             self.targets.pack_start(widget, False, False, 0)
         self.targets.show_all()
 
