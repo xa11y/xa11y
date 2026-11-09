@@ -103,8 +103,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // so nothing below moves. tests/suites/python/test_cocoa_rich.py
         // reads both widgets: attributed text with non-BMP characters for
         // the text-range and formatting-run paths, and an outline for
-        // collection depth and selected_items. Named selectors keep the
-        // suites that find `text_area[name="Notes"]` unaffected.
+        // collection depth, selected_items and the table APIs on an
+        // AXOutline (two headed columns, so cell_at and the column headers
+        // have something to tell apart). Named selectors keep the suites
+        // that find `text_area[name="Notes"]` unaffected.
         let richBox = NSBox(frame: NSRect(x: 12, y: 1325, width: 656, height: 150))
         richBox.title = "Rich"
         docView.addSubview(richBox)
@@ -122,11 +124,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let treeScroll = NSScrollView(frame: NSRect(x: 376, y: 8, width: 256, height: 112))
         produceTree = NSOutlineView(frame: treeScroll.bounds)
         produceTree.setAccessibilityLabel("Produce Tree")
-        produceTree.headerView = nil
+        // A fixed 16pt row with no vertical spacing, so the header and all
+        // five expanded rows fit the 112pt scroll view: a view-based outline
+        // realizes only the rows on screen, and the tests read every row.
+        produceTree.rowSizeStyle = .custom
+        produceTree.rowHeight = 16
+        produceTree.intercellSpacing = NSSize(width: 3, height: 0)
         let treeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("produce"))
-        treeColumn.width = 230
+        treeColumn.title = "Produce"
+        treeColumn.width = 150
         produceTree.addTableColumn(treeColumn)
         produceTree.outlineTableColumn = treeColumn
+        let kindColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("kind"))
+        kindColumn.title = "Kind"
+        kindColumn.width = 70
+        produceTree.addTableColumn(kindColumn)
         produceTree.dataSource = self
         produceTree.delegate = self
         treeScroll.documentView = produceTree
@@ -591,8 +603,18 @@ extension AppDelegate: NSOutlineViewDataSource, NSOutlineViewDelegate {
         !((item as? ProduceNode)?.children.isEmpty ?? true)
     }
 
-    func outlineView(_: NSOutlineView, viewFor _: NSTableColumn?, item: Any) -> NSView? {
-        let text = NSTextField(labelWithString: (item as? ProduceNode)?.name ?? "")
+    /// The "Produce" column shows the name, the "Kind" column "Group" for a
+    /// node with children and "Item" for a leaf. Mirrored in
+    /// test_cocoa_rich.py.
+    func outlineView(_: NSOutlineView, viewFor column: NSTableColumn?, item: Any) -> NSView? {
+        let node = item as? ProduceNode
+        let label: String
+        if column?.identifier.rawValue == "kind" {
+            label = (node?.children.isEmpty ?? true) ? "Item" : "Group"
+        } else {
+            label = node?.name ?? ""
+        }
+        let text = NSTextField(labelWithString: label)
         let cell = NSTableCellView()
         cell.addSubview(text)
         cell.textField = text

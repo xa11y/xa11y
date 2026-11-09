@@ -12,7 +12,9 @@
 //! * Tables: `AXRowCount` / `AXColumnCount` (WebKit, Chromium), or else the
 //!   length of `AXRows` / `AXColumns` (AppKit's `NSTableView`, which has no
 //!   count attribute). A cell's position and span are its `AXRowIndexRange` /
-//!   `AXColumnIndexRange`. A row's index is `AXIndex`.
+//!   `AXColumnIndexRange`. A row's index is `AXIndex`. An `AXOutline`
+//!   (`NSOutlineView`, an `NSTableView` subclass) keeps the list role but
+//!   answers every table call the same way; see [`has_table_api`].
 //! * Collections: `AXARIAPosInSet` / `AXARIASetSize` (1-based) on rows, tabs
 //!   and radio buttons, and `AXDisclosureLevel` (0-based) for the depth of an
 //!   outline row.
@@ -377,6 +379,24 @@ fn individual_range(element: AXUIElementRef, attribute: &str) -> Option<(i64, i6
     r
 }
 
+/// The `table`, `cell`, `table_row` and `collection` fields of
+/// `ElementParts`, in that order.
+pub(super) type Metadata = (
+    Option<TableInfo>,
+    Option<CellInfo>,
+    Option<RowInfo>,
+    Option<CollectionInfo>,
+);
+
+/// Whether an element answers the table APIs (`table` info, `cell_at`, table
+/// headers). A table does, and so does an AppKit outline: `AXOutline` maps to
+/// [`Role::List`] (selectors written against that role keep working), but
+/// `NSOutlineView` is an `NSTableView` and has the same `AXRows`,
+/// `AXColumns` and per-column `AXHeader` a table has.
+fn has_table_api(role: Role, ax_role: &str) -> bool {
+    role == Role::Table || ax_role == "AXOutline"
+}
+
 /// The roles whose snapshot carries a [`CollectionInfo`].
 fn is_collection_role(role: Role) -> bool {
     matches!(
@@ -422,39 +442,40 @@ impl PositionAttrs {
     }
 
     /// The four metadata fields of `ElementParts`.
+    ///
+    /// Fails when counting `AXRows` / `AXColumns` fails with anything but
+    /// "no such attribute" or "no value" (a deadline cut included, which
+    /// `ax_bounded` has already recorded): a count that could not be read is
+    /// not the same answer as one the platform does not report.
     pub(super) fn to_metadata(
         &self,
         element: AXUIElementRef,
         role: Role,
         ax_role: &str,
         subrole: Option<&str>,
-    ) -> (
-        Option<TableInfo>,
-        Option<CellInfo>,
-        Option<RowInfo>,
-        Option<CollectionInfo>,
-    ) {
-        let table = (role == Role::Table).then(|| {
-            // AppKit's NSTableView reports no AXRowCount / AXColumnCount; its
-            // AXRows / AXColumns arrays hold every row and column (AXVisibleRows
-            // is the realized subset), so their length is the platform's
-            // total. A read failure leaves the count unreported, like every
-            // other snapshot attribute read.
-            let count = |reported: Option<i64>, array: &str| {
-                reported.map(Count::from_signed).or_else(|| {
-                    attribute_count(element, array)
-                        .ok()
-                        .flatten()
-                        .map(Count::Known)
-                })
+    ) -> Result<Metadata> {
+        let table = if has_table_api(role, ax_role) {
+            // AppKit's NSTableView and NSOutlineView report no AXRowCount /
+            // AXColumnCount; their AXRows / AXColumns arrays hold every row
+            // and column (AXVisibleRows is the realized subset), so their
+            // length is the platform's total. `attribute_count` answers
+            // `None` only for an attribute the element does not have or that
+            // holds no value; any other failure is the read's error.
+            let count = |reported: Option<i64>, array: &str| -> Result<Option<Count>> {
+                match reported {
+                    Some(n) => Ok(Some(Count::from_signed(n))),
+                    None => Ok(attribute_count(element, array)?.map(Count::Known)),
+                }
             };
             let info: TableInfo = TableParts {
-                row_count: count(self.row_count, "AXRows"),
-                column_count: count(self.column_count, "AXColumns"),
+                row_count: count(self.row_count, "AXRows")?,
+                column_count: count(self.column_count, "AXColumns")?,
             }
             .into();
-            info
-        });
+            Some(info)
+        } else {
+            None
+        };
         let cell = (role == Role::TableCell).then(|| {
             let start = |r: Option<(i64, i64)>| r.and_then(|(loc, _)| u32::try_from(loc).ok());
             let span = |r: Option<(i64, i64)>| {
@@ -492,12 +513,12 @@ impl PositionAttrs {
             .into();
             info
         });
-        (
+        Ok((
             table.filter(|t| !t.is_empty()),
             cell.filter(|c| !c.is_empty()),
             table_row,
             collection.filter(|c| !c.is_empty()),
-        )
+        ))
     }
 }
 
@@ -695,7 +716,7 @@ impl MacOSProvider {
     }
 
     fn require_table(&self, table: &ElementData) -> Result<AXElement> {
-        if table.role != Role::Table {
+        if !has_table_api(table.role, ax_role_of(table)) {
             return Err(Error::ActionNotSupported {
                 action: "table".to_string(),
                 role: table.role,
@@ -752,9 +773,11 @@ impl MacOSProvider {
             AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_PARAMETERIZED_ATTRIBUTE_UNSUPPORTED => {}
             code => return Err(platform("AXCellForColumnAndRow", code)),
         }
-        // AppKit's NSTableView has no slot query. Its rows are `AXRows` in
-        // row order, and a view-based table's row holds one AXCell per
-        // column, each reporting its own index ranges. The cell is the one
+        // AppKit's NSTableView and NSOutlineView have no slot query. Their
+        // rows are `AXRows` in row order, and a view-based table's row holds
+        // one AXCell per column, each reporting its own index ranges. An
+        // outline row also holds its disclosure triangle, which reports no
+        // column range and so never matches. The cell is the one
         // whose ranges cover the slot, so a row whose cells report no ranges
         // (a cell-based table, which has no AXCell layer) has no cell there.
         let Some(row_el) = attribute_element_at(ax.as_ptr(), "AXRows", row)? else {
@@ -1292,8 +1315,9 @@ mod tests {
             column_range: Some((1, 3)),
             ..Default::default()
         };
-        let (table, info, row, collection) =
-            cell.to_metadata(std::ptr::null(), Role::TableCell, "AXCell", None);
+        let (table, info, row, collection) = cell
+            .to_metadata(std::ptr::null(), Role::TableCell, "AXCell", None)
+            .expect("no read for a cell");
         let info = info.expect("cell info");
         assert_eq!(
             (info.row, info.column, info.row_span, info.column_span),
@@ -1308,12 +1332,14 @@ mod tests {
             disclosure_level: Some(1),
             ..Default::default()
         };
-        let (_, _, row, collection) = item.to_metadata(
-            std::ptr::null(),
-            Role::TreeItem,
-            "AXRow",
-            Some("AXOutlineRow"),
-        );
+        let (_, _, row, collection) = item
+            .to_metadata(
+                std::ptr::null(),
+                Role::TreeItem,
+                "AXRow",
+                Some("AXOutlineRow"),
+            )
+            .expect("no read for a row");
         assert_eq!(row.expect("row").index, Some(4));
         let collection = collection.expect("collection");
         assert_eq!(collection.index, Some(0));
@@ -1327,8 +1353,32 @@ mod tests {
             disclosure_level: Some(0),
             ..Default::default()
         };
-        let (_, _, _, collection) =
-            flat.to_metadata(std::ptr::null(), Role::TableRow, "AXRow", None);
+        let (_, _, _, collection) = flat
+            .to_metadata(std::ptr::null(), Role::TableRow, "AXRow", None)
+            .expect("no read for a row");
         assert!(collection.is_none());
+    }
+
+    /// An outline keeps the list role but carries table info like a table,
+    /// from the counts AX reported, without another read.
+    #[test]
+    fn outline_carries_table_info() {
+        assert!(has_table_api(Role::Table, "AXTable"));
+        assert!(has_table_api(Role::List, "AXOutline"));
+        assert!(!has_table_api(Role::List, "AXList"));
+
+        let outline = PositionAttrs {
+            row_count: Some(5),
+            column_count: Some(2),
+            ..Default::default()
+        };
+        let (table, _, _, _) = outline
+            .to_metadata(std::ptr::null(), Role::List, "AXOutline", None)
+            .expect("both counts were reported");
+        let table = table.expect("table info");
+        assert_eq!(
+            (table.row_count, table.column_count),
+            (Some(Count::Known(5)), Some(Count::Known(2)))
+        );
     }
 }

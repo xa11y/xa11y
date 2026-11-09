@@ -4596,7 +4596,7 @@ fn build_snapshot_data(
         let (table, cell, table_row, collection) =
             attrs
                 .rich
-                .to_metadata(element, role, &attrs.role_str, attrs.subrole_str.as_deref());
+                .to_metadata(element, role, &attrs.role_str, attrs.subrole_str.as_deref())?;
 
         let numeric_value = match role {
             Role::Slider | Role::ProgressBar | Role::SpinButton | Role::ScrollBar => {
