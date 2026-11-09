@@ -75,8 +75,7 @@ fn page_limit(limit: Option<f64>) -> napi::Result<usize> {
 /// The text of one element, read by range.
 ///
 /// Returned by `Element.text()` (bound to that element: a re-rendered
-/// control rejects with `SelectorNotMatchedError`, the class a stale element
-/// maps to) and `Locator.text()`
+/// control rejects with `ElementStaleError`) and `Locator.text()`
 /// (re-resolved on every call, waiting until the selector matches; reads do
 /// not require the element to be visible or enabled).
 ///

@@ -405,9 +405,11 @@ export declare class App {
   /**
    * Read the subtree into a bounded capture: every node read, pre-order,
    * with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
-   * the top of the tree is complete. `detail` adds `'text'` and/or
-   * `'relations'`; `timeout` (ms) resolves with what was read when it runs
-   * out, with `truncated.byTime`.
+   * the top of the tree is complete. `detail` adds `'text'`,
+   * `'formatting'` (text plus its attribute runs, at most `maxRuns` in
+   * total) and/or `'relations'`. `timeout` (ms) resolves with what was
+   * read when it runs out, with `truncated.byTime`; calling `cancel()` on
+   * the `cancel` token does the same, with `truncated.byCancel`.
    */
   capture(options?: CaptureOptions | null): Promise<Capture>;
 
@@ -546,9 +548,11 @@ export declare class ShellSurface {
   /**
    * Read the subtree into a bounded capture: every node read, pre-order,
    * with which limits cut it. Read breadth-first, so when `maxNodes` cuts,
-   * the top of the tree is complete. `detail` adds `'text'` and/or
-   * `'relations'`; `timeout` (ms) resolves with what was read when it runs
-   * out, with `truncated.byTime`.
+   * the top of the tree is complete. `detail` adds `'text'`,
+   * `'formatting'` (text plus its attribute runs, at most `maxRuns` in
+   * total) and/or `'relations'`. `timeout` (ms) resolves with what was
+   * read when it runs out, with `truncated.byTime`; calling `cancel()` on
+   * the `cancel` token does the same, with `truncated.byCancel`.
    */
   capture(options?: CaptureOptions | null): Promise<Capture>;
 
