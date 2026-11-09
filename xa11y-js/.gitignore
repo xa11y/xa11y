@@ -14,3 +14,4 @@ npm/
 # Test/build outputs
 coverage/
 .nyc_output/
+.node-test-output.log
