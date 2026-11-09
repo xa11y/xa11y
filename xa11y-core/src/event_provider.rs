@@ -524,7 +524,7 @@ pub fn subscribe_with(
         }
         Some(names)
     };
-    let sub = provider.subscribe(element)?;
+    let sub = provider.subscribe_kinds(element, kinds.as_deref())?;
     sub.restrict(kinds, buffer);
     Ok(sub)
 }
