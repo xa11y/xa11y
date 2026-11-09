@@ -54,7 +54,9 @@ pub(crate) fn checked_window_coord(value: f64, what: &str) -> napi::Result<i32> 
     {
         Ok(value as i32)
     } else {
-        Err(crate::errors::map_err(xa11y::Error::invalid_action_data(format!("{what} must be a finite whole number in the i32 range, got {value}"))))
+        Err(crate::errors::map_err(xa11y::Error::invalid_action_data(
+            format!("{what} must be a finite whole number in the i32 range, got {value}"),
+        )))
     }
 }
 
@@ -94,9 +96,9 @@ pub fn set_default_timeout(options: napi::Either<f64, types::TimeoutOptions>) ->
     let timeout = types::parse_timeout_options(Some(options), "setDefaultTimeout")
         .map_err(map_err)?
         .ok_or_else(|| {
-            map_err(xa11y::Error::InvalidActionData {
-                message: "setDefaultTimeout: { timeout: ms } is required".to_string(),
-            })
+            map_err(xa11y::Error::invalid_action_data(
+                "setDefaultTimeout: { timeout: ms } is required",
+            ))
         })?;
     xa11y::set_default_timeout(timeout);
     Ok(())

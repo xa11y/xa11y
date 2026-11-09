@@ -60,7 +60,9 @@ impl Locator {
         // Reject n == 0 at the binding boundary instead of forwarding to
         // `Locator::nth`, which asserts and panics (crashes Node).
         if n == 0 {
-            return Err(crate::errors::map_err(xa11y::Error::invalid_action_data("Locator.nth is 1-based; got 0")));
+            return Err(crate::errors::map_err(xa11y::Error::invalid_action_data(
+                "Locator.nth is 1-based; got 0",
+            )));
         }
         Ok(Self::from_inner(self.inner.clone().nth(n as usize)))
     }

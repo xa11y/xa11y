@@ -105,11 +105,9 @@ pub(crate) fn parse_options(
             "text" => out.text(true),
             "formatting" => out.formatting(true),
             "relations" => out.relations(true),
-            other => {
-                return Err(map_err(xa11y::Error::invalid_action_data(format!(
-                        "unknown capture detail {other:?}; expected 'text', 'formatting' or 'relations'"
-                    ))))
-            }
+            other => return Err(map_err(xa11y::Error::invalid_action_data(format!(
+                "unknown capture detail {other:?}; expected 'text', 'formatting' or 'relations'"
+            )))),
         };
     }
     if let Some(ms) = o.timeout {

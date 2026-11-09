@@ -326,7 +326,9 @@ pub fn checked_offset(value: f64, what: &str) -> napi::Result<u32> {
     if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= f64::from(u32::MAX) {
         Ok(value as u32)
     } else {
-        Err(crate::map_err(xa11y::Error::invalid_action_data(format!("{what} must be a whole number in 0..=4294967295, got {value}"))))
+        Err(crate::map_err(xa11y::Error::invalid_action_data(format!(
+            "{what} must be a whole number in 0..=4294967295, got {value}"
+        ))))
     }
 }
 
@@ -349,7 +351,9 @@ pub fn checked_count(value: f64, what: &str) -> xa11y::Result<usize> {
     if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= f64::from(u32::MAX) {
         Ok(value as usize)
     } else {
-        Err(xa11y::Error::invalid_action_data(format!("{what} must be a whole number in 0..=4294967295, got {value}")))
+        Err(xa11y::Error::invalid_action_data(format!(
+            "{what} must be a whole number in 0..=4294967295, got {value}"
+        )))
     }
 }
 
@@ -366,8 +370,8 @@ pub fn checked_millis(value: f64, what: &str) -> xa11y::Result<std::time::Durati
         Ok(std::time::Duration::from_millis(value as u64))
     } else {
         Err(xa11y::Error::invalid_action_data(format!(
-                "{what} must be a whole number of milliseconds in 0..=9007199254740991, got {value}"
-            )))
+            "{what} must be a whole number of milliseconds in 0..=9007199254740991, got {value}"
+        )))
     }
 }
 
@@ -401,12 +405,10 @@ pub fn parse_timeout_options(
 ) -> xa11y::Result<Option<std::time::Duration>> {
     match options {
         None => Ok(None),
-        Some(napi::Either::A(n)) => Err(xa11y::Error::InvalidActionData {
-            message: format!(
-                "{method}: pass {{ timeout: ms }} — a bare number ({n}) is not accepted; \
-                 timeouts are milliseconds in an options object"
-            ),
-        }),
+        Some(napi::Either::A(n)) => Err(xa11y::Error::invalid_action_data(format!(
+            "{method}: pass {{ timeout: ms }} — a bare number ({n}) is not accepted; \
+             timeouts are milliseconds in an options object"
+        ))),
         Some(napi::Either::B(TimeoutOptions { timeout: None })) => Ok(None),
         Some(napi::Either::B(TimeoutOptions { timeout: Some(ms) })) => {
             checked_millis(ms, "timeout").map(Some)
@@ -428,8 +430,12 @@ pub fn parse_select_range(
             let r = range.to_core("range")?;
             Ok((r.start, r.end))
         }
-        (napi::Either::A(_), None) => Err(crate::map_err(xa11y::Error::invalid_action_data("selectText(start, end) needs an end offset, or pass one {start, end} range"))),
-        (napi::Either::B(_), Some(_)) => Err(crate::map_err(xa11y::Error::invalid_action_data("selectText takes either (start, end) or a single {start, end} range, not both"))),
+        (napi::Either::A(_), None) => Err(crate::map_err(xa11y::Error::invalid_action_data(
+            "selectText(start, end) needs an end offset, or pass one {start, end} range",
+        ))),
+        (napi::Either::B(_), Some(_)) => Err(crate::map_err(xa11y::Error::invalid_action_data(
+            "selectText takes either (start, end) or a single {start, end} range, not both",
+        ))),
     }
 }
 
