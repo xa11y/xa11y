@@ -317,6 +317,28 @@ def test_the_element_tools_state_their_per_field_byte_cap(run_client):
         assert "`<field>_bytes`" in description, name
 
 
+def test_the_coordinate_tools_qualify_center_for_wayland(run_client):
+    """`center` is a click target only where element bounds are screen
+    coordinates (#573). On Linux's uinput backend (Wayland) the server omits
+    it and names why in `center_unavailable`; the descriptions say so, so a
+    model is not promised a point the click tool would send somewhere else.
+
+    This suite runs without a desktop, so it holds the contract as the
+    client sees it; the omission itself is asserted in the Wayland integ job
+    (`xa11y/tests/integ/mcp.rs`) and by the unit tests in `tools.rs`.
+    """
+    for name in ("find", "tree"):
+        description = _tool(run_client, name).description
+        assert "not screen coordinates" in description, name
+        assert "`center_unavailable`" in description, name
+        assert "`action`" in description, name
+    click = _tool(run_client, "click").description
+    assert "Wayland" in click, click
+    assert "`action`" in click, click
+    instructions = run_client(lambda c: _identity(c.instructions))
+    assert "`center_unavailable`" in instructions
+
+
 def test_the_tree_tool_says_how_a_pruned_node_reads(run_client):
     """A node cut by `max_depth` or the node cap is not a leaf, and must not read as one."""
     tree = _tool(run_client, "tree")

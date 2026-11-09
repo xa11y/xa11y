@@ -26,8 +26,10 @@
 //! characters (code points), which GTK, Chromium, Gecko and LibreOffice
 //! follow; Qt's adaptor counts UTF-16 code units instead. The unit is chosen
 //! from `Application.ToolkitName` ([`offset_unit_for`]). For code-point
-//! toolkits every conversion reads the text before the offset, which is the
-//! accepted cost of one public unit.
+//! toolkits every conversion reads the text before the offset, and only as
+//! far as the operation needs, which is the accepted cost of one public
+//! unit. A UTF-16 toolkit needs no conversion, so its reads fetch only the
+//! units they are about (see `TextAccess`).
 //!
 //! # Line ends
 //!
@@ -229,8 +231,17 @@ fn is_collection_role(role: Role) -> bool {
     )
 }
 
-/// Parse an AT-SPI colour attribute: `"r,g,b"` with 8-bit channels (GTK 4)
-/// or 16-bit channels (ATK, GTK 3). Values above 255 mark the 16-bit form.
+/// Parse an AT-SPI colour attribute: `"r,g,b"` with 8-bit channels (GTK 4,
+/// Qt, WebKitGTK) or 16-bit channels (GTK 3's widgets). Values above 255
+/// mark the 16-bit form.
+///
+/// The width is read from the values, not from the toolkit, because the
+/// toolkit cannot tell: WebKitGTK's web process (a Tauri app's page) reports
+/// `ToolkitName` "GTK" as GTK 3 does, and sends 8-bit channels. Reading every
+/// "GTK" colour as 16-bit would turn its text black. The values can tell
+/// instead: GTK 3 scales a colour's 0..=255 channels by 257, so a channel it
+/// sends is 0 or at least 257, and never in 1..=255. Only a colour whose
+/// channels are all 0 is ambiguous, and it is black in either width.
 pub(super) fn parse_atspi_color(v: &str) -> Option<Color> {
     let parts: Vec<u32> = v
         .split(',')
@@ -309,15 +320,24 @@ fn is_line_terminator(unit: u16) -> bool {
 /// followed by one (a soft wrap, the end of the text), is returned as is.
 pub(super) fn include_line_terminator(units: &[u16], line: TextRange) -> TextRange {
     let end = line.end as usize;
-    let Some(&next) = units.get(end) else {
+    let last = if end > line.start as usize {
+        end.checked_sub(1).and_then(|i| units.get(i)).copied()
+    } else {
+        None
+    };
+    terminate_line(line, last, units.get(end..).unwrap_or(&[]))
+}
+
+/// [`include_line_terminator`] from the unit before `line`'s end (`None`
+/// for an empty line) and the units after it.
+fn terminate_line(line: TextRange, last: Option<u16>, after: &[u16]) -> TextRange {
+    let Some(&next) = after.first() else {
         return line;
     };
-    let ends_with_terminator =
-        end > line.start as usize && units.get(end - 1).is_some_and(|&u| is_line_terminator(u));
-    if ends_with_terminator || !is_line_terminator(next) {
+    if last.is_some_and(is_line_terminator) || !is_line_terminator(next) {
         return line;
     }
-    let width = if next == 0x0D && units.get(end + 1) == Some(&0x0A) {
+    let width = if next == 0x0D && after.get(1) == Some(&0x0A) {
         2
     } else {
         1
@@ -357,24 +377,29 @@ fn call_failed(what: &str, e: zbus::Error) -> Error {
 /// row or column, before refusing.
 const MAX_HEADER_PROBES: i32 = 1000;
 
-/// A text object, its proxy, and the unit its toolkit counts in.
-struct TextAccess<'a> {
-    proxy: Proxy<'a>,
-    unit: OffsetUnit,
+/// The `org.a11y.atspi.Text` calls the text layer makes, in the toolkit's
+/// native offset unit. A trait so the offset arithmetic, and how much text
+/// each operation reads, can be tested without a bus (issue #649).
+trait TextSource {
+    /// `CharacterCount`.
+    fn character_count(&self) -> Result<i32>;
+    /// `GetText(start, end)`.
+    fn get_text(&self, start: i32, end: i32) -> Result<String>;
+    /// The range `GetStringAtOffset(offset, granularity)` reports.
+    fn string_at_offset(&self, offset: i32, granularity: u32) -> Result<(i32, i32)>;
+    /// `GetAttributeRun(offset, true)`: the attributes and the run's range.
+    fn attribute_run(&self, offset: i32) -> Result<(HashMap<String, String>, i32, i32)>;
 }
 
-impl TextAccess<'_> {
-    fn native_count(&self) -> Result<i32> {
-        self.proxy
-            .get_property::<i32>("CharacterCount")
+impl TextSource for Proxy<'_> {
+    fn character_count(&self) -> Result<i32> {
+        self.get_property::<i32>("CharacterCount")
             .map_err(|e| call_failed("Text.CharacterCount", e))
     }
 
-    /// `GetText(0, end)` in native units.
-    fn prefix(&self, end: i32) -> Result<String> {
+    fn get_text(&self, start: i32, end: i32) -> Result<String> {
         let reply = self
-            .proxy
-            .call_method("GetText", &(0i32, end))
+            .call_method("GetText", &(start, end))
             .map_err(|e| call_failed("Text.GetText", e))?;
         reply.body().deserialize().map_err(|e| Error::Platform {
             code: -1,
@@ -382,85 +407,502 @@ impl TextAccess<'_> {
         })
     }
 
-    fn full(&self) -> Result<String> {
-        let count = self.native_count()?;
-        self.prefix(count.max(0))
+    fn string_at_offset(&self, offset: i32, granularity: u32) -> Result<(i32, i32)> {
+        let reply = self
+            .call_method("GetStringAtOffset", &(offset, granularity))
+            .map_err(|e| {
+                if is_absent_member(&e) {
+                    Error::Unsupported {
+                        feature: format!(
+                            "Text.GetStringAtOffset is not implemented by this toolkit: {e}"
+                        ),
+                    }
+                } else {
+                    call_failed("Text.GetStringAtOffset", e)
+                }
+            })?;
+        let (_text, start, end): (String, i32, i32) =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Text.GetStringAtOffset deserialize failed: {e}"),
+            })?;
+        Ok((start, end))
     }
 
-    /// The text from 0 to at least UTF-16 offset `end` (to the end of the
-    /// text if it is shorter), so a read near the start does not fetch the
-    /// whole document. A code point is one or two UTF-16 units, so `end`
-    /// code points always cover `end` units.
-    fn prefix_covering(&self, end: u32) -> Result<String> {
-        let count = self.native_count()?.max(0);
-        let want = i32::try_from(end).unwrap_or(i32::MAX).min(count);
-        let text = self.prefix(want)?;
-        if utf16_len(&text) >= end || want == count {
-            Ok(text)
-        } else {
-            // Only reachable if the toolkit's count disagrees with its text.
-            self.prefix(count)
-        }
+    fn attribute_run(&self, offset: i32) -> Result<(HashMap<String, String>, i32, i32)> {
+        let reply = self
+            .call_method("GetAttributeRun", &(offset, true))
+            .map_err(|e| {
+                if is_absent_member(&e) {
+                    Error::Unsupported {
+                        feature: format!(
+                            "Text.GetAttributeRun is not implemented by this toolkit: {e}"
+                        ),
+                    }
+                } else {
+                    call_failed("Text.GetAttributeRun", e)
+                }
+            })?;
+        reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Text.GetAttributeRun deserialize failed: {e}"),
+        })
+    }
+}
+
+/// A text object and the unit its toolkit counts in.
+///
+/// # What each operation reads
+///
+/// A UTF-16 toolkit (Qt) needs no conversion, so an operation reads its
+/// `CharacterCount` and only the units it is about: a range read fetches the
+/// range, and a pair or line-terminator check fetches one or two units.
+///
+/// A code-point toolkit (GTK) can only convert an offset with the text
+/// before it, so an operation reads a prefix from 0, and only as far as its
+/// highest offset needs ([`Self::prefix_covering`]). The text's UTF-16
+/// length is the one read that needs all of it.
+struct TextAccess<S> {
+    source: S,
+    unit: OffsetUnit,
+}
+
+/// The text from offset 0, as far as an operation needed it.
+struct Prefix {
+    text: String,
+    /// Whether `text` is all of the text.
+    whole: bool,
+    /// The toolkit's `CharacterCount`, in code points.
+    count: i32,
+}
+
+impl Prefix {
+    /// The text's UTF-16 length, known only when the prefix is all of it.
+    fn length(&self) -> Option<u32> {
+        self.whole.then(|| utf16_len(&self.text))
     }
 
-    /// The text of `range`, validated: past the end or splitting a surrogate
-    /// pair fails with `InvalidTextRange`. Reads only up to `range.end`
-    /// (plus one unit, to tell whether the end splits a pair).
-    fn read_range(&self, range: TextRange) -> Result<String> {
-        let text = self.prefix_covering(range.end.saturating_add(1))?;
-        // A prefix no longer than `end` is the whole text, so only then is
-        // its length the text's length.
-        let whole = utf16_len(&text) <= range.end;
-        slice_utf16(&text, range).map_err(|e| match e {
+    /// `e` reporting the text's length, or none: the prefix's own length is
+    /// not the text's unless the prefix is all of it.
+    fn fix(&self, e: Error) -> Error {
+        match e {
             Error::InvalidTextRange {
                 start,
                 end,
-                length,
                 message,
+                ..
             } => Error::InvalidTextRange {
                 start,
                 end,
-                length: if whole { length } else { None },
+                length: self.length(),
                 message,
             },
             other => other,
+        }
+    }
+}
+
+/// A native offset the toolkit reported, refused when negative.
+fn non_negative(n: i32, what: &str) -> Result<u32> {
+    u32::try_from(n).map_err(|_| Error::Platform {
+        code: -1,
+        message: format!("{what} reported a negative text offset {n}"),
+    })
+}
+
+/// A UTF-16 offset as the platform's 32-bit offset.
+fn to_i32(n: u32, length: Option<u32>) -> Result<i32> {
+    i32::try_from(n).map_err(|_| Error::InvalidTextRange {
+        start: n,
+        end: n,
+        length,
+        message: "offset does not fit the platform's 32-bit offset".to_string(),
+    })
+}
+
+/// `ATSPI_TEXT_GRANULARITY_*` for a unit `GetStringAtOffset` answers.
+fn granularity(unit: TextUnit) -> u32 {
+    match unit {
+        TextUnit::Character => 0,
+        TextUnit::Word => 1,
+        TextUnit::Line => 3,
+        TextUnit::Paragraph => 4,
+    }
+}
+
+impl<S: TextSource> TextAccess<S> {
+    /// A UTF-16 toolkit's length: its `CharacterCount`.
+    fn utf16_count(&self) -> Result<u32> {
+        non_negative(self.source.character_count()?, "Text.CharacterCount")
+    }
+
+    /// The text from 0 to at least UTF-16 offset `end` (to the end of the
+    /// text if it is shorter). Code-point toolkits only: `end` code points
+    /// always cover `end` units, so one read suffices.
+    fn prefix_covering(&self, end: u32) -> Result<Prefix> {
+        let count = self.source.character_count()?.max(0);
+        let want = i32::try_from(end).unwrap_or(i32::MAX).min(count);
+        let text = self.source.get_text(0, want)?;
+        if want == count {
+            return Ok(Prefix {
+                text,
+                whole: true,
+                count,
+            });
+        }
+        if utf16_len(&text) >= end {
+            return Ok(Prefix {
+                text,
+                whole: false,
+                count,
+            });
+        }
+        // Only reachable if the toolkit's count disagrees with its text.
+        Ok(Prefix {
+            text: self.source.get_text(0, count)?,
+            whole: true,
+            count,
         })
     }
 
-    /// Convert native offsets to UTF-16, reading the text before the largest
-    /// one when the toolkit counts code points.
-    fn to_utf16(&self, native: &[i32]) -> Result<Vec<u32>> {
-        let non_negative = |n: i32| {
-            u32::try_from(n).map_err(|_| Error::Platform {
-                code: -1,
-                message: format!("toolkit reported a negative text offset {n}"),
-            })
-        };
+    /// Whether UTF-16 units `i` and `i + 1` are a surrogate pair. UTF-16
+    /// toolkits only. Reads just those two units: a pair comes back as one
+    /// scalar value. Two scalars, or a lone half the toolkit had to replace
+    /// to send it over D-Bus, are not a pair.
+    fn pair_at(&self, i: u32, len: u32) -> Result<bool> {
+        if i.saturating_add(2) > len {
+            return Ok(false);
+        }
+        let two = self
+            .source
+            .get_text(to_i32(i, Some(len))?, to_i32(i + 2, Some(len))?)?;
+        let mut chars = two.chars();
+        Ok(matches!(
+            (chars.next(), chars.next()),
+            (Some(c), None) if c.len_utf16() == 2
+        ))
+    }
+
+    /// Whether UTF-16 offset `at` falls inside a surrogate pair. UTF-16
+    /// toolkits only.
+    fn splits_pair(&self, at: u32, len: u32) -> Result<bool> {
+        Ok(at > 0 && at < len && self.pair_at(at - 1, len)?)
+    }
+
+    /// Validate `range` as [`slice_utf16`] does (ordered, in bounds, no end
+    /// splitting a pair) without reading it. UTF-16 toolkits only.
+    fn check_range16(&self, range: TextRange, len: u32) -> Result<()> {
+        check_in_bounds(range, len)?;
+        let split = self.splits_pair(range.start, len)?
+            || (range.end != range.start && self.splits_pair(range.end, len)?);
+        if split {
+            return Err(Error::InvalidTextRange {
+                start: range.start,
+                end: range.end,
+                length: Some(len),
+                message: "range splits a surrogate pair".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The text's length in UTF-16 units.
+    fn length(&self) -> Result<u32> {
         match self.unit {
-            OffsetUnit::Utf16 => native.iter().map(|&n| non_negative(n)).collect(),
+            OffsetUnit::Utf16 => self.utf16_count(),
             OffsetUnit::CodePoints => {
-                let max = native.iter().copied().max().unwrap_or(0);
-                let prefix = self.prefix(max.max(0))?;
+                let count = self.source.character_count()?.max(0);
+                Ok(utf16_len(&self.source.get_text(0, count)?))
+            }
+        }
+    }
+
+    /// Convert native offsets to UTF-16. A code-point toolkit needs the text
+    /// before the largest; `known`, a prefix already read, is used when it
+    /// reaches that far.
+    fn to_utf16(&self, native: &[i32], known: Option<&str>) -> Result<Vec<u32>> {
+        let what = "the toolkit";
+        match self.unit {
+            OffsetUnit::Utf16 => native.iter().map(|&n| non_negative(n, what)).collect(),
+            OffsetUnit::CodePoints => {
+                let max = native.iter().copied().max().unwrap_or(0).max(0);
+                let fetched;
+                let text = match known {
+                    Some(t) if t.chars().count() >= max as usize => t,
+                    _ => {
+                        fetched = self.source.get_text(0, max)?;
+                        fetched.as_str()
+                    }
+                };
                 native
                     .iter()
-                    .map(|&n| char_to_utf16_offset(&prefix, non_negative(n)?))
+                    .map(|&n| char_to_utf16_offset(text, non_negative(n, what)?))
                     .collect()
             }
         }
     }
 
-    /// Convert a UTF-16 offset into `full` to the native unit.
-    fn to_native(&self, full: &str, utf16: u32) -> Result<i32> {
-        let n = match self.unit {
-            OffsetUnit::Utf16 => utf16,
-            OffsetUnit::CodePoints => utf16_to_char_offset(full, utf16)?,
+    /// The text of `range`, validated: past the end or splitting a surrogate
+    /// pair fails with `InvalidTextRange`.
+    fn read_range(&self, range: TextRange) -> Result<String> {
+        match self.unit {
+            OffsetUnit::Utf16 => {
+                let len = self.utf16_count()?;
+                self.check_range16(range, len)?;
+                if range.start == range.end {
+                    return Ok(String::new());
+                }
+                let text = self.source.get_text(
+                    to_i32(range.start, Some(len))?,
+                    to_i32(range.end, Some(len))?,
+                )?;
+                let got = utf16_len(&text);
+                if got != range.end - range.start {
+                    return Err(Error::Platform {
+                        code: -1,
+                        message: format!(
+                            "Text.GetText({}, {}) returned {got} UTF-16 units, expected {}",
+                            range.start,
+                            range.end,
+                            range.end - range.start
+                        ),
+                    });
+                }
+                Ok(text)
+            }
+            OffsetUnit::CodePoints => {
+                // One unit past the end tells whether the end splits a pair.
+                let p = self.prefix_covering(range.end.saturating_add(1))?;
+                slice_utf16(&p.text, range).map_err(|e| p.fix(e))
+            }
+        }
+    }
+
+    /// The native range `GetStringAtOffset` reports for `unit` at native
+    /// offset `native`.
+    fn native_unit_at(&self, native: i32, unit: TextUnit) -> Result<(i32, i32)> {
+        let (start, end) = self.source.string_at_offset(native, granularity(unit))?;
+        // `(-1, -1)` for an in-bounds offset is a toolkit with no notion of
+        // this unit: GTK 3's text view answers it for paragraphs.
+        if start < 0 || end < 0 {
+            return Err(Error::Unsupported {
+                feature: format!(
+                    "Text.GetStringAtOffset({native}, {}) returned ({start}, {end}): this \
+                     toolkit does not report {} boundaries",
+                    unit.to_snake_case(),
+                    unit.to_snake_case()
+                ),
+            });
+        }
+        Ok((start, end))
+    }
+
+    /// The `unit` containing UTF-16 `offset`. At the end of the text it is
+    /// the unit that ends there, and an offset on the second half of a
+    /// surrogate pair answers for the pair, for every unit and toolkit (GTK's
+    /// code-point conversion would otherwise refuse it while Qt's UTF-16
+    /// offsets pass it through).
+    fn range_at(&self, offset: u32, unit: TextUnit) -> Result<TextRange> {
+        let point = TextRange {
+            start: offset,
+            end: offset,
         };
-        i32::try_from(n).map_err(|_| Error::InvalidTextRange {
-            start: utf16,
-            end: utf16,
-            length: Some(utf16_len(full)),
-            message: "offset does not fit the platform's 32-bit offset".to_string(),
-        })
+        let what = "Text.GetStringAtOffset";
+        match self.unit {
+            OffsetUnit::Utf16 => {
+                let len = self.utf16_count()?;
+                check_in_bounds(point, len)?;
+                if len == 0 {
+                    return Ok(TextRange { start: 0, end: 0 });
+                }
+                let at = if offset == len {
+                    if len >= 2 && self.pair_at(len - 2, len)? {
+                        len - 2
+                    } else {
+                        len - 1
+                    }
+                } else if self.splits_pair(offset, len)? {
+                    offset - 1
+                } else {
+                    offset
+                };
+                if unit == TextUnit::Character {
+                    let width = if self.pair_at(at, len)? { 2 } else { 1 };
+                    return Ok(TextRange {
+                        start: at,
+                        end: (at + width).min(len),
+                    });
+                }
+                let (start, end) = self.native_unit_at(to_i32(at, Some(len))?, unit)?;
+                let range = TextRange {
+                    start: non_negative(start, what)?,
+                    end: non_negative(end, what)?,
+                };
+                match unit {
+                    TextUnit::Line | TextUnit::Paragraph => self.terminated16(range, len),
+                    TextUnit::Word | TextUnit::Character => Ok(range),
+                }
+            }
+            OffsetUnit::CodePoints => {
+                // Two units past `offset` cover the pair check and a
+                // character's width.
+                let p = self.prefix_covering(offset.saturating_add(2))?;
+                if let Some(len) = p.length() {
+                    check_in_bounds(point, len)?;
+                    if len == 0 {
+                        return Ok(TextRange { start: 0, end: 0 });
+                    }
+                }
+                let units: Vec<u16> = p.text.encode_utf16().collect();
+                let at = if p.length() == Some(offset) {
+                    utf16_last_scalar_start(&p.text)
+                } else {
+                    offset
+                };
+                // `at` indexes `units`: a whole prefix holds `offset` < its
+                // length (or `at` is its last scalar), and a partial one holds
+                // at least `offset + 2` units.
+                let at = if at > 0 && (0xDC00..=0xDFFF).contains(&units[at as usize]) {
+                    at - 1
+                } else {
+                    at
+                };
+                if unit == TextUnit::Character {
+                    let width = if (0xD800..=0xDBFF).contains(&units[at as usize]) {
+                        2
+                    } else {
+                        1
+                    };
+                    return Ok(TextRange {
+                        start: at,
+                        end: (at + width).min(units.len() as u32),
+                    });
+                }
+                let native = utf16_to_char_offset(&p.text, at).map_err(|e| p.fix(e))?;
+                let (start, end) = self.native_unit_at(to_i32(native, p.length())?, unit)?;
+                let (start, end) = (non_negative(start, what)?, non_negative(end, what)?);
+                // Converting `end`, and the terminator check after it, need
+                // the text up to two code points past `end`.
+                let need = end.saturating_add(2);
+                let text = if p.whole || p.text.chars().count() as u64 >= u64::from(need) {
+                    p.text
+                } else {
+                    let want = i32::try_from(need).unwrap_or(i32::MAX).min(p.count);
+                    self.source.get_text(0, want)?
+                };
+                let range = TextRange {
+                    start: char_to_utf16_offset(&text, start)?,
+                    end: char_to_utf16_offset(&text, end)?,
+                };
+                Ok(match unit {
+                    TextUnit::Line | TextUnit::Paragraph => {
+                        let units: Vec<u16> = text.encode_utf16().collect();
+                        include_line_terminator(&units, range)
+                    }
+                    TextUnit::Word | TextUnit::Character => range,
+                })
+            }
+        }
+    }
+
+    /// [`include_line_terminator`] for a UTF-16 toolkit, reading only the
+    /// unit before `line`'s end and the two after it.
+    fn terminated16(&self, line: TextRange, len: u32) -> Result<TextRange> {
+        if line.end >= len {
+            return Ok(line);
+        }
+        let end = to_i32(line.end, Some(len))?;
+        // A lone surrogate half comes back replaced, never as a terminator,
+        // so reading one at either edge cannot add a terminator wrongly.
+        let last = if line.end > line.start {
+            self.source.get_text(end - 1, end)?.encode_utf16().last()
+        } else {
+            None
+        };
+        let after_end = to_i32(line.end.saturating_add(2).min(len), Some(len))?;
+        let after: Vec<u16> = self
+            .source
+            .get_text(end, after_end)?
+            .encode_utf16()
+            .collect();
+        Ok(terminate_line(line, last, &after))
+    }
+
+    /// `range` validated as a read is (ordered, in bounds, no end splitting
+    /// a surrogate pair) and converted to native offsets. Selection and
+    /// bounds share it, so every toolkit refuses the same ranges.
+    fn native_range(&self, range: TextRange) -> Result<(i32, i32)> {
+        match self.unit {
+            OffsetUnit::Utf16 => {
+                let len = self.utf16_count()?;
+                self.check_range16(range, len)?;
+                Ok((
+                    to_i32(range.start, Some(len))?,
+                    to_i32(range.end, Some(len))?,
+                ))
+            }
+            OffsetUnit::CodePoints => {
+                let p = self.prefix_covering(range.end)?;
+                // A partial prefix reaches `range.end`, so only an unordered
+                // range can fail here; the fix drops the prefix's length.
+                check_in_bounds(range, utf16_len(&p.text)).map_err(|e| p.fix(e))?;
+                let conv = |n: u32| -> Result<i32> {
+                    let c = utf16_to_char_offset(&p.text, n).map_err(|e| p.fix(e))?;
+                    to_i32(c, p.length())
+                };
+                Ok((conv(range.start)?, conv(range.end)?))
+            }
+        }
+    }
+
+    /// The attribute run at UTF-16 `offset`.
+    fn run_at(&self, offset: u32) -> Result<TextRun> {
+        let past_end = |length: Option<u32>| Error::InvalidTextRange {
+            start: offset,
+            end: offset,
+            length,
+            message: "no text at or after this offset".to_string(),
+        };
+        let (native, prefix) = match self.unit {
+            OffsetUnit::Utf16 => {
+                let len = self.utf16_count()?;
+                if offset >= len {
+                    return Err(past_end(Some(len)));
+                }
+                (to_i32(offset, Some(len))?, None)
+            }
+            OffsetUnit::CodePoints => {
+                let p = self.prefix_covering(offset.saturating_add(1))?;
+                if let Some(len) = p.length().filter(|&len| offset >= len) {
+                    return Err(past_end(Some(len)));
+                }
+                let n = utf16_to_char_offset(&p.text, offset).map_err(|e| p.fix(e))?;
+                (to_i32(n, p.length())?, Some(p))
+            }
+        };
+        let (attrs, start, end) = self.source.attribute_run(native)?;
+        if start < 0 || end < start {
+            return Err(Error::Platform {
+                code: -1,
+                message: format!(
+                    "Text.GetAttributeRun at {native} reported the run {start}..{end}"
+                ),
+            });
+        }
+        let ends = self.to_utf16(&[start, end], prefix.as_ref().map(|p| p.text.as_str()))?;
+        let [start16, end16] = ends[..] else {
+            return Err(Error::Platform {
+                code: -1,
+                message: "Text.GetAttributeRun range did not convert".to_string(),
+            });
+        };
+        Ok(TextRun::new(
+            TextRange {
+                start: start16,
+                end: end16,
+            },
+            attributes_from_atspi(&attrs).into(),
+        ))
     }
 }
 
@@ -475,11 +917,24 @@ impl LinuxProvider {
         role_name: &str,
         ifaces: Interfaces,
     ) -> TableMeta {
-        let table = ifaces.table.then(|| self.read_table_info(aref)).flatten();
-        let header = header_kind_for(role_num, role_name);
-        let cell = if ifaces.table_cell {
-            self.read_cell_info(aref, header)
+        // Like the rest of the snapshot, a failed read leaves its field
+        // absent, but the failure is logged rather than dropped: a signature
+        // mismatch would otherwise read as "not a cell" (issue #650).
+        let unread = |what: &str, e: Error| {
+            log::debug!("{what} of {}{} unread: {e}", aref.bus_name, aref.path);
+        };
+        let table = if ifaces.table {
+            self.read_table_info(aref)
+                .map_err(|e| unread("Table", e))
+                .ok()
+                .flatten()
         } else {
+            None
+        };
+        let header = header_kind_for(role_num, role_name);
+        // The header kind comes from the role, so it stands whether or not
+        // the position can be read.
+        let header_only = || {
             header.map(|h| {
                 CellParts {
                     row: None,
@@ -491,13 +946,29 @@ impl LinuxProvider {
                 .into()
             })
         };
+        let cell = if ifaces.table_cell {
+            match self.read_cell_info(aref, header) {
+                Ok(cell) => cell,
+                Err(e) => {
+                    unread("TableCell.GetRowColumnSpan", e);
+                    header_only()
+                }
+            }
+        } else {
+            header_only()
+        };
         // One GetAttributes read serves both the collection position and the
         // document semantics (#476), and only for roles that can carry them,
         // so other nodes pay nothing.
         let attrs = if is_collection_role(role) || carries_document_semantics(role) {
             match self.scan_attributes(aref) {
                 Ok(Some(Some(attrs))) => Some(attrs),
-                _ => None,
+                // The object has gone, or has no attributes: nothing to read.
+                Ok(None) | Ok(Some(None)) => None,
+                Err(e) => {
+                    unread("attributes", e);
+                    None
+                }
             }
         } else {
             None
@@ -526,56 +997,79 @@ impl LinuxProvider {
     }
 
     /// A link's URL: `Hyperlink.GetURI(0)`. `None` when the toolkit reports
-    /// none (an empty string) or the read fails, like the other per-field
-    /// reads in a snapshot.
+    /// none (an empty string); a failed read is logged and left absent, like
+    /// the other per-field reads in a snapshot.
     fn read_link_url(&self, aref: &AccessibleRef) -> Option<String> {
-        let proxy = self
-            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Hyperlink")
-            .ok()?;
-        let uri: String = proxy
-            .call_method("GetURI", &(0i32,))
-            .ok()?
-            .body()
-            .deserialize()
-            .ok()?;
-        Some(uri).filter(|u| !u.is_empty())
+        let read = || -> Result<String> {
+            let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Hyperlink")?;
+            let reply = proxy
+                .call_method("GetURI", &(0i32,))
+                .map_err(|e| Error::Platform {
+                    code: -1,
+                    message: format!("Hyperlink.GetURI: {e}"),
+                })?;
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Hyperlink.GetURI reply: {e}"),
+            })
+        };
+        match read() {
+            Ok(uri) => Some(uri).filter(|u| !u.is_empty()),
+            Err(e) => {
+                log::debug!(
+                    "Hyperlink.GetURI of {}{} unread: {e}",
+                    aref.bus_name,
+                    aref.path
+                );
+                None
+            }
+        }
     }
 
-    fn read_table_info(&self, aref: &AccessibleRef) -> Option<TableInfo> {
-        let proxy = self
-            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Table")
-            .ok()?;
-        let count = |p: &str| {
-            proxy
-                .get_property::<i32>(p)
-                .ok()
-                .map(|n| Count::from_signed(n.into()))
+    fn read_table_info(&self, aref: &AccessibleRef) -> Result<Option<TableInfo>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Table")?;
+        // Each count is its own field: one that fails is logged and left
+        // absent without hiding the other.
+        let count = |p: &str| match proxy.get_property::<i32>(p) {
+            Ok(n) => Some(Count::from_signed(n.into())),
+            Err(e) => {
+                log::debug!("Table.{p} of {}{} unread: {e}", aref.bus_name, aref.path);
+                None
+            }
         };
         let info: TableInfo = TableParts {
             row_count: count("NRows"),
             column_count: count("NColumns"),
         }
         .into();
-        (!info.is_empty()).then_some(info)
+        Ok((!info.is_empty()).then_some(info))
     }
 
-    fn read_cell_info(&self, aref: &AccessibleRef, header: Option<HeaderKind>) -> Option<CellInfo> {
-        let proxy = self
-            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.TableCell")
-            .ok()?;
-        let reply = proxy.call_method("GetRowColumnSpan", &()).ok();
-        let spans: Option<(i32, i32, i32, i32)> = reply.and_then(|r| r.body().deserialize().ok());
+    fn read_cell_info(
+        &self,
+        aref: &AccessibleRef,
+        header: Option<HeaderKind>,
+    ) -> Result<Option<CellInfo>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.TableCell")?;
+        let reply = proxy
+            .call_method("GetRowColumnSpan", &())
+            .map_err(|e| call_failed("TableCell.GetRowColumnSpan", e))?;
+        let (row, column, row_span, column_span): (i32, i32, i32, i32) =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("TableCell.GetRowColumnSpan deserialize failed: {e}"),
+            })?;
         let index = |n: i32| u32::try_from(n).ok();
         let span = |n: i32| u32::try_from(n).ok().filter(|&s| s >= 1);
         let info: CellInfo = CellParts {
-            row: spans.and_then(|s| index(s.0)),
-            column: spans.and_then(|s| index(s.1)),
-            row_span: spans.and_then(|s| span(s.2)),
-            column_span: spans.and_then(|s| span(s.3)),
+            row: index(row),
+            column: index(column),
+            row_span: span(row_span),
+            column_span: span(column_span),
             header,
         }
         .into();
-        (!info.is_empty()).then_some(info)
+        Ok((!info.is_empty()).then_some(info))
     }
 
     /// The live object behind `element`, refusing one without `iface`.
@@ -780,37 +1274,33 @@ impl LinuxProvider {
         Ok(unit)
     }
 
-    fn text_access(&self, element: &ElementData) -> Result<TextAccess<'_>> {
+    fn text_access(&self, element: &ElementData) -> Result<TextAccess<Proxy<'_>>> {
         let aref = self.with_interface(element, "org.a11y.atspi.Text", "text")?;
         let unit = self.offset_unit(&aref.bus_name)?;
-        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Text")?;
-        Ok(TextAccess { proxy, unit })
+        let source = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Text")?;
+        Ok(TextAccess { source, unit })
     }
 
     pub(super) fn rich_text_length(&self, element: &ElementData) -> Result<u32> {
-        let t = self.text_access(element)?;
-        match t.unit {
-            OffsetUnit::Utf16 => Ok(t.to_utf16(&[t.native_count()?])?[0]),
-            OffsetUnit::CodePoints => Ok(utf16_len(&t.full()?)),
-        }
+        self.text_access(element)?.length()
     }
 
     pub(super) fn rich_text_caret(&self, element: &ElementData) -> Result<Option<u32>> {
         let t = self.text_access(element)?;
         let caret: i32 = t
-            .proxy
+            .source
             .get_property("CaretOffset")
             .map_err(|e| call_failed("Text.CaretOffset", e))?;
         if caret < 0 {
             return Ok(None);
         }
-        Ok(Some(t.to_utf16(&[caret])?[0]))
+        Ok(Some(t.to_utf16(&[caret], None)?[0]))
     }
 
     pub(super) fn rich_text_selections(&self, element: &ElementData) -> Result<Vec<TextRange>> {
         let t = self.text_access(element)?;
         let n: i32 = t
-            .proxy
+            .source
             .call_method("GetNSelections", &())
             .map_err(|e| call_failed("Text.GetNSelections", e))?
             .body()
@@ -822,7 +1312,7 @@ impl LinuxProvider {
         let mut native = Vec::new();
         for i in 0..n.max(0) {
             let (start, end): (i32, i32) = t
-                .proxy
+                .source
                 .call_method("GetSelection", &(i,))
                 .map_err(|e| call_failed("Text.GetSelection", e))?
                 .body()
@@ -836,7 +1326,7 @@ impl LinuxProvider {
                 native.push(start.max(end));
             }
         }
-        let utf16 = t.to_utf16(&native)?;
+        let utf16 = t.to_utf16(&native, None)?;
         let mut ranges: Vec<TextRange> = utf16
             .chunks(2)
             .map(|p| TextRange {
@@ -849,8 +1339,7 @@ impl LinuxProvider {
     }
 
     pub(super) fn rich_text_read(&self, element: &ElementData, range: TextRange) -> Result<String> {
-        let t = self.text_access(element)?;
-        t.read_range(range)
+        self.text_access(element)?.read_range(range)
     }
 
     pub(super) fn rich_text_range_at(
@@ -859,104 +1348,7 @@ impl LinuxProvider {
         offset: u32,
         unit: TextUnit,
     ) -> Result<TextRange> {
-        let t = self.text_access(element)?;
-        let full = t.full()?;
-        let length = utf16_len(&full);
-        check_in_bounds(
-            TextRange {
-                start: offset,
-                end: offset,
-            },
-            length,
-        )?;
-        if length == 0 {
-            return Ok(TextRange { start: 0, end: 0 });
-        }
-        // At the end, answer for the unit that ends there.
-        let at = if offset == length {
-            utf16_last_scalar_start(&full)
-        } else {
-            offset
-        };
-        // An offset on the second half of a surrogate pair answers for the
-        // pair, for every unit and toolkit: GTK's code-point conversion would
-        // otherwise refuse it while Qt's UTF-16 offsets pass it through.
-        let units: Vec<u16> = full.encode_utf16().collect();
-        let at = if at > 0 && (0xDC00..=0xDFFF).contains(&units[at as usize]) {
-            at - 1
-        } else {
-            at
-        };
-        if unit == TextUnit::Character {
-            // The scalar value at `at` is known from the text itself.
-            let start = at;
-            let width = if (0xD800..=0xDBFF).contains(&units[start as usize]) {
-                2
-            } else {
-                1
-            };
-            return Ok(TextRange {
-                start,
-                end: (start + width).min(length),
-            });
-        }
-        // ATSPI_TEXT_GRANULARITY_{WORD, LINE, PARAGRAPH}.
-        let granularity: u32 = match unit {
-            TextUnit::Word => 1,
-            TextUnit::Line => 3,
-            TextUnit::Paragraph => 4,
-            TextUnit::Character => 0,
-        };
-        let native = t.to_native(&full, at)?;
-        let reply = t
-            .proxy
-            .call_method("GetStringAtOffset", &(native, granularity))
-            .map_err(|e| {
-                if is_absent_member(&e) {
-                    Error::Unsupported {
-                        feature: format!(
-                            "Text.GetStringAtOffset is not implemented by this toolkit: {e}"
-                        ),
-                    }
-                } else {
-                    call_failed("Text.GetStringAtOffset", e)
-                }
-            })?;
-        let (_text, start, end): (String, i32, i32) =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Text.GetStringAtOffset deserialize failed: {e}"),
-            })?;
-        // `(-1, -1)` for an in-bounds offset is a toolkit with no notion of
-        // this unit: GTK 3's text view answers it for paragraphs.
-        if start < 0 || end < 0 {
-            return Err(Error::Unsupported {
-                feature: format!(
-                    "Text.GetStringAtOffset({native}, {}) returned ({start}, {end}): this \
-                     toolkit does not report {} boundaries",
-                    unit.to_snake_case(),
-                    unit.to_snake_case()
-                ),
-            });
-        }
-        let to16 = |n: i32| -> Result<u32> {
-            let n = u32::try_from(n).map_err(|_| Error::Platform {
-                code: -1,
-                message: format!("Text.GetStringAtOffset reported a negative offset {n}"),
-            })?;
-            match t.unit {
-                OffsetUnit::Utf16 => Ok(n),
-                OffsetUnit::CodePoints => char_to_utf16_offset(&full, n),
-            }
-        };
-        let range = TextRange {
-            start: to16(start)?,
-            end: to16(end)?,
-        };
-        Ok(match unit {
-            TextUnit::Line | TextUnit::Paragraph => include_line_terminator(&units, range),
-            TextUnit::Word | TextUnit::Character => range,
-        })
+        self.text_access(element)?.range_at(offset, unit)
     }
 
     pub(super) fn rich_text_range_bounds(
@@ -965,17 +1357,14 @@ impl LinuxProvider {
         range: TextRange,
     ) -> Result<Option<Rect>> {
         let t = self.text_access(element)?;
-        let full = t.full()?;
-        check_in_bounds(range, utf16_len(&full))?;
-        let start = t.to_native(&full, range.start)?;
-        let end = t.to_native(&full, range.end)?;
+        let (start, end) = t.native_range(range)?;
         let aref = self.get_cached(element.handle)?;
         let gtk4 = self.is_gtk4(&aref.bus_name)?;
         // GTK 4's SCREEN coordinates are wrong (issue #487): ask for WINDOW
         // coordinates and add the window's origin, as element bounds do.
         let coord: u32 = if gtk4 { 1 } else { 0 };
         let reply = t
-            .proxy
+            .source
             .call_method("GetRangeExtents", &(start, end, coord))
             .map_err(|e| call_failed("Text.GetRangeExtents", e))?;
         let (x, y, w, h): (i32, i32, i32, i32) =
@@ -984,9 +1373,18 @@ impl LinuxProvider {
                 message: format!("Text.GetRangeExtents deserialize failed: {e}"),
             })?;
         let rect = if gtk4 {
-            let Some((ox, oy)) = self.gtk4_window_origin(&aref) else {
-                return Ok(None);
-            };
+            // Element bounds go absent here; a text range's bounds fail,
+            // because `Text::bounds` would otherwise drop the line from its
+            // answer without a word (issue #650).
+            let (ox, oy) =
+                self.gtk4_window_origin_or_reason(&aref)
+                    .map_err(|reason| Error::Platform {
+                        code: -1,
+                        message: format!(
+                            "GTK 4 reports text extents relative to the window, and the \
+                         window's screen origin is unknown: {reason}"
+                        ),
+                    })?;
             match (x.checked_add(ox), y.checked_add(oy)) {
                 (Some(x), Some(y)) => extents_to_rect(x, y, w, h),
                 _ => None,
@@ -1002,60 +1400,7 @@ impl LinuxProvider {
         element: &ElementData,
         offset: u32,
     ) -> Result<TextRun> {
-        let t = self.text_access(element)?;
-        let full = t.full()?;
-        let length = utf16_len(&full);
-        if offset >= length {
-            return Err(Error::InvalidTextRange {
-                start: offset,
-                end: offset,
-                length: Some(length),
-                message: "no text at or after this offset".to_string(),
-            });
-        }
-        let native = t.to_native(&full, offset)?;
-        let reply = t
-            .proxy
-            .call_method("GetAttributeRun", &(native, true))
-            .map_err(|e| {
-                if is_absent_member(&e) {
-                    Error::Unsupported {
-                        feature: format!(
-                            "Text.GetAttributeRun is not implemented by this toolkit: {e}"
-                        ),
-                    }
-                } else {
-                    call_failed("Text.GetAttributeRun", e)
-                }
-            })?;
-        let (attrs, start, end): (HashMap<String, String>, i32, i32) =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Text.GetAttributeRun deserialize failed: {e}"),
-            })?;
-        if start < 0 || end < start {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
-                    "Text.GetAttributeRun at {native} reported the run {start}..{end}"
-                ),
-            });
-        }
-        let mut ends = t.to_utf16(&[start, end])?;
-        let (end16, start16) = (ends.pop(), ends.pop());
-        let (Some(start16), Some(end16)) = (start16, end16) else {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Text.GetAttributeRun range did not convert".to_string(),
-            });
-        };
-        Ok(TextRun::new(
-            TextRange {
-                start: start16,
-                end: end16,
-            },
-            attributes_from_atspi(&attrs).into(),
-        ))
+        self.text_access(element)?.run_at(offset)
     }
 
     /// `Text.SetSelection` with UTF-16 offsets.
@@ -1066,18 +1411,13 @@ impl LinuxProvider {
         end: u32,
     ) -> Result<()> {
         let t = self.text_access(element)?;
-        let full = t.full()?;
-        let range = TextRange { start, end };
-        // Validate exactly as a read would, then convert.
-        slice_utf16(&full, range)?;
-        let native_start = t.to_native(&full, start)?;
-        let native_end = t.to_native(&full, end)?;
+        let (native_start, native_end) = t.native_range(TextRange { start, end })?;
         let target = self.get_cached(element.handle)?;
         // `SetSelection(0, ..)` changes selection 0, so it needs one to exist:
         // GTK 3 answers FALSE when nothing is selected. `AddSelection` is the
         // call that creates one. Which applies is a state read, not a retry.
         let existing: i32 = t
-            .proxy
+            .source
             .call_method("GetNSelections", &())
             .map_err(|e| call_failed("Text.GetNSelections", e))?
             .body()
@@ -1088,13 +1428,13 @@ impl LinuxProvider {
             })?;
         let (member, reply) = if existing > 0 {
             let reply = t
-                .proxy
+                .source
                 .call_method("SetSelection", &(0i32, native_start, native_end))
                 .map_err(|e| call_failed("Text.SetSelection", e))?;
             ("SetSelection", reply)
         } else {
             let reply = t
-                .proxy
+                .source
                 .call_method("AddSelection", &(native_start, native_end))
                 .map_err(|e| call_failed("Text.AddSelection", e))?;
             ("AddSelection", reply)
@@ -1212,6 +1552,9 @@ mod tests {
             "#ff0080"
         );
         assert_eq!(parse_atspi_color("255,0,128").unwrap().to_hex(), "#ff0080");
+        // GTK 3 sends 8-bit colours scaled by 257: never a channel in 1..=255.
+        assert_eq!(parse_atspi_color("257,0,0").unwrap().to_hex(), "#010000");
+        assert_eq!(parse_atspi_color("0,0,0").unwrap().to_hex(), "#000000");
         assert!(parse_atspi_color("1,2").is_none());
     }
 
@@ -1298,6 +1641,266 @@ mod tests {
             include_line_terminator(&wrapped, TextRange { start: 0, end: 4 }),
             TextRange { start: 0, end: 4 }
         );
+    }
+
+    // ── Text by range over a fake `Text` object (issue #649) ─────────
+
+    /// A `Text` object holding `text`, answering in `unit` as Qt (UTF-16,
+    /// lines without their terminator) or GTK (code points, lines with it)
+    /// does, and counting what it is asked to send.
+    struct FakeText {
+        /// The text in the native unit: UTF-16 units or scalar values.
+        items: Vec<u32>,
+        unit: OffsetUnit,
+        get_text_calls: std::cell::Cell<usize>,
+        items_sent: std::cell::Cell<usize>,
+    }
+
+    impl FakeText {
+        fn new(text: &str, unit: OffsetUnit) -> TextAccess<FakeText> {
+            let items = match unit {
+                OffsetUnit::Utf16 => text.encode_utf16().map(u32::from).collect(),
+                OffsetUnit::CodePoints => text.chars().map(u32::from).collect(),
+            };
+            TextAccess {
+                source: FakeText {
+                    items,
+                    unit,
+                    get_text_calls: Default::default(),
+                    items_sent: Default::default(),
+                },
+                unit,
+            }
+        }
+
+        fn n(&self) -> i32 {
+            self.items.len() as i32
+        }
+
+        fn is_newline(&self, i: i32) -> bool {
+            self.items.get(i as usize) == Some(&0x0A)
+        }
+
+        fn is_space(&self, i: i32) -> bool {
+            matches!(self.items.get(i as usize), Some(&0x20) | Some(&0x0A))
+        }
+    }
+
+    impl TextSource for FakeText {
+        fn character_count(&self) -> Result<i32> {
+            Ok(self.n())
+        }
+
+        fn get_text(&self, start: i32, end: i32) -> Result<String> {
+            let (s, e) = (
+                start.clamp(0, self.n()) as usize,
+                end.clamp(0, self.n()) as usize,
+            );
+            let piece = &self.items[s..e.max(s)];
+            self.get_text_calls.set(self.get_text_calls.get() + 1);
+            self.items_sent.set(self.items_sent.get() + piece.len());
+            Ok(match self.unit {
+                // A lone surrogate half cannot cross D-Bus: Qt replaces it.
+                OffsetUnit::Utf16 => {
+                    String::from_utf16_lossy(&piece.iter().map(|&u| u as u16).collect::<Vec<_>>())
+                }
+                OffsetUnit::CodePoints => piece.iter().filter_map(|&c| char::from_u32(c)).collect(),
+            })
+        }
+
+        fn string_at_offset(&self, offset: i32, granularity: u32) -> Result<(i32, i32)> {
+            let n = self.n();
+            match granularity {
+                // Word: a run of non-space, or a single space.
+                1 => {
+                    if self.is_space(offset) {
+                        return Ok((offset, offset + 1));
+                    }
+                    let mut s = offset;
+                    while s > 0 && !self.is_space(s - 1) {
+                        s -= 1;
+                    }
+                    let mut e = offset;
+                    while e < n && !self.is_space(e) {
+                        e += 1;
+                    }
+                    Ok((s, e))
+                }
+                // Line / paragraph: the text has no soft wraps.
+                3 | 4 => {
+                    let mut s = offset;
+                    while s > 0 && !self.is_newline(s - 1) {
+                        s -= 1;
+                    }
+                    let mut e = offset;
+                    while e < n && !self.is_newline(e) {
+                        e += 1;
+                    }
+                    match self.unit {
+                        // Qt: no terminator; at the terminator itself, the
+                        // line it ends.
+                        OffsetUnit::Utf16 => Ok((s, e)),
+                        OffsetUnit::CodePoints => Ok((s, (e + 1).min(n))),
+                    }
+                }
+                other => panic!("granularity {other}"),
+            }
+        }
+
+        fn attribute_run(&self, offset: i32) -> Result<(HashMap<String, String>, i32, i32)> {
+            // Runs of four native units.
+            let start = offset / 4 * 4;
+            Ok((HashMap::new(), start, (start + 4).min(self.n())))
+        }
+    }
+
+    const MIXED: &str = "Hi \u{1F600} w\u{f6}rld \u{1D11E}\nsecond line\n\nlast";
+
+    /// Ok values equal, or both errors.
+    fn same<T: PartialEq + std::fmt::Debug>(a: Result<T>, b: Result<T>, what: &str) {
+        match (a, b) {
+            (Ok(a), Ok(b)) => assert_eq!(a, b, "{what}"),
+            (Err(_), Err(_)) => {}
+            (a, b) => panic!("{what}: UTF-16 {a:?} vs code points {b:?}"),
+        }
+    }
+
+    #[test]
+    fn both_units_answer_every_offset_alike() {
+        let qt = FakeText::new(MIXED, OffsetUnit::Utf16);
+        let gtk = FakeText::new(MIXED, OffsetUnit::CodePoints);
+        let len = utf16_len(MIXED);
+        assert_eq!(qt.length().unwrap(), len);
+        assert_eq!(gtk.length().unwrap(), len);
+        for offset in 0..=len + 1 {
+            for unit in [
+                TextUnit::Character,
+                TextUnit::Word,
+                TextUnit::Line,
+                TextUnit::Paragraph,
+            ] {
+                same(
+                    qt.range_at(offset, unit),
+                    gtk.range_at(offset, unit),
+                    &format!("range_at({offset}, {unit:?})"),
+                );
+            }
+            for end in offset..=len + 1 {
+                let range = TextRange { start: offset, end };
+                let what = format!("{range:?}");
+                same(qt.read_range(range), gtk.read_range(range), &what);
+                same(
+                    qt.read_range(range),
+                    slice_utf16(MIXED, range),
+                    &format!("read {what} against the whole text"),
+                );
+                same(
+                    qt.native_range(range).map(|_| ()),
+                    gtk.native_range(range).map(|_| ()),
+                    &format!("bounds {what}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn range_at_anchors() {
+        for t in [
+            FakeText::new(MIXED, OffsetUnit::Utf16),
+            FakeText::new(MIXED, OffsetUnit::CodePoints),
+        ] {
+            let r = |start, end| TextRange { start, end };
+            // The second half of 😀 answers for the pair.
+            assert_eq!(t.range_at(4, TextUnit::Character).unwrap(), r(3, 5));
+            assert_eq!(t.range_at(3, TextUnit::Word).unwrap(), r(3, 5));
+            // The first line, asked at its newline, includes it.
+            assert_eq!(t.range_at(14, TextUnit::Line).unwrap(), r(0, 15));
+            // The blank line is its newline.
+            assert_eq!(t.range_at(27, TextUnit::Line).unwrap(), r(27, 28));
+            // At the end: the last line, which has no terminator.
+            assert_eq!(t.range_at(32, TextUnit::Line).unwrap(), r(28, 32));
+            assert_eq!(t.range_at(32, TextUnit::Character).unwrap(), r(31, 32));
+            assert!(t.range_at(33, TextUnit::Character).is_err());
+            assert!(t.read_range(r(4, 6)).is_err(), "starts mid-pair");
+            assert!(t.native_range(r(0, 13)).is_err(), "ends mid-pair");
+        }
+        let ends_in_pair = FakeText::new("a\u{1F600}", OffsetUnit::Utf16);
+        assert_eq!(
+            ends_in_pair.range_at(3, TextUnit::Character).unwrap(),
+            TextRange { start: 1, end: 3 }
+        );
+    }
+
+    #[test]
+    fn runs_and_ranges_convert_to_utf16() {
+        let gtk = FakeText::new(MIXED, OffsetUnit::CodePoints);
+        // Code points 0..4 are "Hi 😀": five UTF-16 units.
+        assert_eq!(gtk.run_at(0).unwrap().range, TextRange { start: 0, end: 5 });
+        assert_eq!(
+            gtk.native_range(TextRange { start: 5, end: 14 }).unwrap(),
+            (4, 12)
+        );
+        let qt = FakeText::new(MIXED, OffsetUnit::Utf16);
+        assert_eq!(qt.run_at(5).unwrap().range, TextRange { start: 4, end: 8 });
+        assert!(qt.run_at(32).is_err());
+        assert!(gtk.run_at(32).is_err());
+    }
+
+    fn long_document(lines: usize) -> String {
+        (0..lines)
+            .map(|i| format!("line {i:05} of the document\n"))
+            .collect()
+    }
+
+    #[test]
+    fn a_utf16_line_walk_reads_a_few_units_per_line() {
+        let lines = 2000;
+        let doc = long_document(lines);
+        let qt = FakeText::new(&doc, OffsetUnit::Utf16);
+        let len = utf16_len(&doc);
+        let mut pos = 0;
+        let mut walked = 0;
+        while pos < len {
+            pos = qt.range_at(pos, TextUnit::Line).unwrap().end;
+            walked += 1;
+        }
+        assert_eq!(walked, lines);
+        // Before #649 every step read the whole text: about 2000 × 54 000
+        // units. Now a step reads the unit before the line's end and the two
+        // after it, plus the pair checks.
+        let sent = qt.source.items_sent.get();
+        assert!(sent <= 8 * lines, "{sent} units for {lines} lines");
+    }
+
+    #[test]
+    fn a_utf16_chunked_read_reads_each_unit_once() {
+        let doc = long_document(2000);
+        let qt = FakeText::new(&doc, OffsetUnit::Utf16);
+        let len = utf16_len(&doc);
+        let mut text = String::new();
+        let mut pos = 0;
+        while pos < len {
+            let end = (pos + 4096).min(len);
+            text.push_str(&qt.read_range(TextRange { start: pos, end }).unwrap());
+            pos = end;
+        }
+        assert_eq!(text, doc);
+        // Each chunk, plus four units for the pair checks at its ends.
+        let sent = qt.source.items_sent.get();
+        assert!(sent <= len as usize + 4 * 14, "{sent} units for {len}");
+    }
+
+    #[test]
+    fn a_code_point_read_near_the_start_reads_only_the_start() {
+        let doc = long_document(2000);
+        let gtk = FakeText::new(&doc, OffsetUnit::CodePoints);
+        let first = gtk.range_at(10, TextUnit::Line).unwrap();
+        assert_eq!(first, TextRange { start: 0, end: 27 });
+        gtk.run_at(5).unwrap();
+        gtk.native_range(TextRange { start: 0, end: 20 }).unwrap();
+        gtk.read_range(TextRange { start: 0, end: 20 }).unwrap();
+        let sent = gtk.source.items_sent.get();
+        assert!(sent < 200, "{sent} units of {}", doc.len());
     }
 
     #[test]

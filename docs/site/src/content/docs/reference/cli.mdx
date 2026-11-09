@@ -187,7 +187,9 @@ xa11y find "list > list_item" --app Finder
 ```
 
 `-o` selects the output format: `pretty` (the default, shown above), `bounds`,
-or `center`.
+or `center`. On Linux with the uinput input backend, which Wayland sessions
+use, `-o center` fails with an operation error, because element bounds there
+are not screen coordinates. Act on the element with `xa11y action` instead.
 
 `--stable` waits until visible bounds are observed unchanged for at least
 750 ms across repeated fresh polls, then prints the match. It waits up to the default
@@ -682,7 +684,10 @@ kind from the `subscription_not_found` an id that was never issued gets.
 Every tool returns `structuredContent`, mirrored as JSON in a text block for
 clients on revisions that predate `structuredContent`. `find` reports each
 match's `bounds` and a precomputed `center`, so a result feeds straight into
-`click` or `screenshot` without arithmetic. With `stable: true`, `find` first
+`click` or `screenshot` without arithmetic. Where element bounds are not screen
+coordinates, on Linux with the uinput input backend, every element-returning
+tool omits `center` and its result carries `center_unavailable` with the
+reason. With `stable: true`, `find` first
 waits for its one match to stop moving, the same as `find --stable`.
 
 Results are bounded, because each one lands in a model's context window.

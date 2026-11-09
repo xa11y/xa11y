@@ -103,6 +103,14 @@ pub(crate) struct AccessibleRef {
     pub(crate) path: String,
 }
 
+impl AccessibleRef {
+    /// AT-SPI's null reference (`/org/a11y/atspi/null`, or an empty bus or
+    /// path): "no object", e.g. the `Parent` of a detached accessible.
+    fn is_null(&self) -> bool {
+        self.path == "/org/a11y/atspi/null" || self.bus_name.is_empty() || self.path.is_empty()
+    }
+}
+
 /// The optional AT-SPI interfaces an object reports via
 /// `Accessible.GetInterfaces`, read once per node so every property fetch
 /// that depends on one can be gated without another round trip.
@@ -863,33 +871,40 @@ impl LinuxProvider {
 
     /// Screen position of the X11 client window holding a GTK 4 object, for
     /// turning its WINDOW coordinates into screen ones. `None` when the window
-    /// cannot be identified uniquely.
+    /// cannot be identified uniquely; the reason is logged at debug level.
     fn gtk4_window_origin(&self, aref: &AccessibleRef) -> Option<(i32, i32)> {
-        let toplevel = self.toplevel_of(aref)?;
-        let title = self.get_name(&toplevel).ok().filter(|t| !t.is_empty())?;
-        let pid = self.gtk4_pid(&aref.bus_name)?;
-        let (ox, oy) = match self.window_manager.x11_client_origin(pid, &title) {
-            Ok(Some(origin)) => origin,
-            Ok(None) => {
-                log::debug!(
-                    "no bounds for {}{}: no single X11 client window for pid {pid} titled \
-                     {title:?}",
-                    aref.bus_name,
-                    aref.path
-                );
-                return None;
-            }
-            Err(error) => {
-                log::debug!(
-                    "no bounds for {}{}: X11 client origin for pid {pid} titled {title:?}: \
-                     {error}",
-                    aref.bus_name,
-                    aref.path
-                );
-                return None;
-            }
+        self.gtk4_window_origin_or_reason(aref)
+            .map_err(|reason| {
+                log::debug!("no bounds for {}{}: {reason}", aref.bus_name, aref.path);
+            })
+            .ok()
+    }
+
+    /// [`Self::gtk4_window_origin`], saying why when there is none.
+    fn gtk4_window_origin_or_reason(
+        &self,
+        aref: &AccessibleRef,
+    ) -> std::result::Result<(i32, i32), String> {
+        let toplevel = self
+            .toplevel_of(aref)
+            .ok_or_else(|| "no top-level window above the object".to_string())?;
+        let title = match self.get_name(&toplevel) {
+            Ok(t) if !t.is_empty() => t,
+            Ok(_) => return Err("its top-level window has no title to match".to_string()),
+            Err(e) => return Err(format!("reading its top-level window's title: {e}")),
         };
-        Some((ox, oy))
+        let pid = self
+            .gtk4_pid(&aref.bus_name)
+            .ok_or_else(|| format!("no process id for {}", aref.bus_name))?;
+        match self.window_manager.x11_client_origin(pid, &title) {
+            Ok(Some(origin)) => Ok(origin),
+            Ok(None) => Err(format!(
+                "no single X11 client window for pid {pid} titled {title:?}"
+            )),
+            Err(error) => Err(format!(
+                "X11 client origin for pid {pid} titled {title:?}: {error}"
+            )),
+        }
     }
 
     /// Whether `bus`'s root object lists `org.a11y.atspi.Application` in
@@ -1342,10 +1357,10 @@ impl LinuxProvider {
         );
 
         // Fetch all independent properties in parallel.
-        // Left tree: (name+value, description)
+        // Left tree: (name+value, (description, table metadata))
         // Right tree: ((states, bounds), (actions, numeric_values))
         let (
-            ((mut name, value), description),
+            ((mut name, value), (description, meta)),
             (
                 ((states, state_bits, state_read_ok), bounds_read),
                 ((actions, action_index_map), (numeric_value, min_value, max_value)),
@@ -1362,7 +1377,17 @@ impl LinuxProvider {
                         };
                         (name, value)
                     },
-                    || self.get_description(aref).ok().filter(|s| !s.is_empty()),
+                    || {
+                        // Table, cell and collection metadata, gated on the
+                        // interfaces read above so a node without them costs
+                        // nothing (see `rich`). It runs here, beside the
+                        // other reads, because a table dump pays it once per
+                        // cell (issue #650).
+                        (
+                            self.get_description(aref).ok().filter(|s| !s.is_empty()),
+                            self.read_table_metadata(aref, role, role_num, &role_name, ifaces),
+                        )
+                    },
                 )
             },
             || {
@@ -1455,10 +1480,6 @@ impl LinuxProvider {
         // `false` reply or a D-Bus NotSupported error honestly as
         // ActionNotSupported (tenet 3; tenet 1 — no silent fallback — is
         // why there is no substitute mechanism to advertise instead).
-
-        // Table, cell and collection metadata, gated on the interfaces read
-        // above so a node without them costs nothing (see `rich`).
-        let meta = self.read_table_metadata(aref, role, role_num, &role_name, ifaces);
 
         let raw = {
             let raw_role = if role_name.is_empty() {
@@ -1773,8 +1794,24 @@ impl LinuxProvider {
         })
     }
 
-    /// Get the AT-SPI parent of an accessible ref.
+    /// Get the AT-SPI parent of an accessible ref: `None` for a top-level
+    /// object (the null reference, or the registry or application root).
     fn get_atspi_parent(&self, aref: &AccessibleRef) -> Result<Option<AccessibleRef>> {
+        let parent = self.read_parent_ref(aref)?;
+        if parent.is_null() {
+            return Ok(None);
+        }
+        // If the parent is the registry root, this is a top-level app — no parent
+        if parent.path == "/org/a11y/atspi/accessible/root" {
+            return Ok(None);
+        }
+        Ok(Some(parent))
+    }
+
+    /// The raw `Parent` reference of an accessible, unmapped: the null
+    /// reference and the roots come back as they are, which
+    /// [`Self::ensure_attached`] needs to tell apart.
+    fn read_parent_ref(&self, aref: &AccessibleRef) -> Result<AccessibleRef> {
         // Read the Parent property via the D-Bus Properties interface.
         let proxy = self.make_proxy(
             &aref.bus_name,
@@ -1815,18 +1852,10 @@ impl LinuxProvider {
                     message: format!("Parent deserialize struct failed: {}", e),
                 },
             )?;
-        let path_str = path.as_str();
-        if path_str == "/org/a11y/atspi/null" || bus.is_empty() || path_str.is_empty() {
-            return Ok(None);
-        }
-        // If the parent is the registry root, this is a top-level app — no parent
-        if path_str == "/org/a11y/atspi/accessible/root" {
-            return Ok(None);
-        }
-        Ok(Some(AccessibleRef {
+        Ok(AccessibleRef {
             bus_name: bus,
-            path: path_str.to_string(),
-        }))
+            path: path.as_str().to_string(),
+        })
     }
 
     /// Fetch an accessible's AT-SPI2 state bitfield as a single `u64`.
@@ -2039,9 +2068,20 @@ impl LinuxProvider {
     /// `GetChildAtIndex` at that index must be this object. A parent that
     /// `MANAGES_DESCENDANTS` (large tables and tree views) does not keep its
     /// children as live objects, so there only the object's own `DEFUNCT`
-    /// state is consulted. A top-level object (no parent, or the registry
-    /// root) has nothing to be detached from and passes. An object or parent
-    /// that is already gone is stale too; any other failure is returned.
+    /// state is consulted.
+    ///
+    /// A top-level object (a window whose parent is the application root, or
+    /// an application whose parent is the registry root) has nothing to be
+    /// detached from and passes. A *null* parent is not top-level: it is what
+    /// GTK 3 reports for a destroyed widget, window included (issue #586),
+    /// alongside `GetIndexInParent` -1 and an empty state set, while every
+    /// live object keeps a parent link up to the application root. An object
+    /// or parent that is already gone is stale too; any other failure is
+    /// returned.
+    ///
+    /// Every Linux path that acts on an element runs this first: `DoAction`,
+    /// `GrabFocus` (`focus`, `activate`), `Value` writes, `EditableText`
+    /// writes, `Text.SetSelection` and `Component.ScrollTo`.
     fn ensure_attached(&self, aref: &AccessibleRef) -> Result<()> {
         const DEFUNCT: u64 = 1 << 6;
         const MANAGES_DESCENDANTS: u64 = 1 << 31;
@@ -2051,12 +2091,17 @@ impl LinuxProvider {
                 format!("{}{}", aref.bus_name, aref.path),
             )
         };
-        let parent = match self.get_atspi_parent(aref) {
-            Ok(Some(parent)) => parent,
-            Ok(None) => return Ok(()),
+        let parent = match self.read_parent_ref(aref) {
+            Ok(parent) => parent,
             Err(Error::ElementStale { .. }) => return Err(stale()),
             Err(e) => return Err(e),
         };
+        if parent.is_null() {
+            return Err(stale());
+        }
+        if parent.path == "/org/a11y/atspi/accessible/root" {
+            return Ok(());
+        }
         let Some(parent_state) = self.scan_state_bits(&parent)? else {
             return Err(stale());
         };
@@ -3293,6 +3338,8 @@ impl Provider for LinuxProvider {
 
     fn focus(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
+        // A destroyed GTK 3 widget still answers GrabFocus (#586).
+        self.ensure_attached(&target)?;
         // The only mechanism is Component.GrabFocus, which returns a boolean
         // indicating success — we must check it. Fixes GitHub issue #98.
         //
@@ -3452,6 +3499,9 @@ impl Provider for LinuxProvider {
         if let Ok(index) = self.get_action_index(element.handle, "increment") {
             return self.do_atspi_action_by_index(&target, index);
         }
+        // The action-index path checks attachment itself; this one writes
+        // Value.CurrentValue, which a destroyed GTK 3 widget accepts (#586).
+        self.ensure_attached(&target)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
         let current: f64 = proxy
             .get_property("CurrentValue")
@@ -3474,6 +3524,9 @@ impl Provider for LinuxProvider {
         if let Ok(index) = self.get_action_index(element.handle, "decrement") {
             return self.do_atspi_action_by_index(&target, index);
         }
+        // The action-index path checks attachment itself; this one writes
+        // Value.CurrentValue, which a destroyed GTK 3 widget accepts (#586).
+        self.ensure_attached(&target)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
         let current: f64 = proxy
             .get_property("CurrentValue")
@@ -3493,6 +3546,8 @@ impl Provider for LinuxProvider {
 
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
+        // A destroyed GTK 3 widget still answers ScrollTo (#586).
+        self.ensure_attached(&target)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
         let not_supported = || Error::ActionNotSupported {
             action: "scroll_into_view".to_string(),
@@ -3602,10 +3657,14 @@ impl Provider for LinuxProvider {
         // fix is a direct Action probe on this failure path, not a cache
         // lookup the role/name mapping rules can never fill.
         self.ensure_top_level_window_target(element, "activate")?;
+        // A destroyed GTK 3 window's accessible keeps answering for a while
+        // (#586). Checked before either mechanism, so a dead handle is stale
+        // whichever one would have run.
+        let target = self.get_cached(element.handle)?;
+        self.ensure_attached(&target)?;
         if self.window_manager.uses_native() {
             return self.window_manager.activate(element);
         }
-        let target = self.get_cached(element.handle)?;
         let proxy = self
             .make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
             .map_err(|e| Error::Platform {
@@ -3746,6 +3805,8 @@ impl Provider for LinuxProvider {
 
     fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
         let target = self.get_cached(element.handle)?;
+        // A destroyed GTK 3 widget still accepts EditableText writes (#586).
+        self.ensure_attached(&target)?;
         self.ensure_text_writable(&target, element, "set_value")?;
         let proxy = self
             .make_proxy(
@@ -3788,6 +3849,8 @@ impl Provider for LinuxProvider {
 
     fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
         let target = self.get_cached(element.handle)?;
+        // A destroyed GTK 3 widget still accepts Value writes (#586).
+        self.ensure_attached(&target)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
         proxy
             .set_property("CurrentValue", value)
@@ -3799,6 +3862,8 @@ impl Provider for LinuxProvider {
 
     fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
         let target = self.get_cached(element.handle)?;
+        // A destroyed GTK 3 widget still accepts EditableText writes (#586).
+        self.ensure_attached(&target)?;
         self.ensure_text_writable(&target, element, "type_text")?;
         // Insert text via EditableText interface (accessibility API, not input simulation).
         // Get cursor position from Text interface, then insert at that position.
@@ -3832,7 +3897,10 @@ impl Provider for LinuxProvider {
 
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
         // UTF-16 offsets, converted to the toolkit's unit (see `rich`). A
-        // FALSE reply is still an error, not success.
+        // FALSE reply is still an error, not success. A destroyed GTK 3
+        // widget still answers Text.SetSelection, so attachment is checked
+        // first (#586).
+        self.ensure_attached(&self.get_cached(element.handle)?)?;
         self.rich_set_text_selection(element, start, end)
     }
 
@@ -6065,11 +6133,25 @@ mod tests {
                 .expect("live")
                 .serve_at("/live", action(&server_calls))
                 .expect("live action")
-                // GTK 3's zombie: still answers, index -1.
+                // Still answers, still names its parent, index -1.
                 .serve_at("/zombie", peer("/panel", vec![], -1, 0))
                 .expect("zombie")
                 .serve_at("/zombie", action(&server_calls))
                 .expect("zombie action")
+                // GTK 3's real zombie (#586): the parent link is already the
+                // null reference, the index -1, the state set empty.
+                .serve_at("/gtk3_zombie", peer("/org/a11y/atspi/null", vec![], -1, 0))
+                .expect("gtk3 zombie")
+                .serve_at("/gtk3_zombie", action(&server_calls))
+                .expect("gtk3 zombie action")
+                // A top-level window: its parent is the application root.
+                .serve_at(
+                    "/window",
+                    peer("/org/a11y/atspi/accessible/root", vec![], -1, 0),
+                )
+                .expect("window")
+                .serve_at("/window", action(&server_calls))
+                .expect("window action")
                 // Claims an index whose slot now holds a different object.
                 .serve_at("/usurped", peer("/panel", vec![], 0, 0))
                 .expect("usurped")
@@ -6121,7 +6203,7 @@ mod tests {
             matches!(&err, Error::ElementStale { element: selector, .. } if selector == "org.test.Attach/zombie"),
             "{err:?}"
         );
-        for path in ["/usurped", "/dead_cell", "/gone"] {
+        for path in ["/gtk3_zombie", "/usurped", "/dead_cell", "/gone"] {
             assert!(
                 matches!(
                     provider.do_atspi_action_by_index(&at(path), 0),
@@ -6141,6 +6223,11 @@ mod tests {
             .do_atspi_action_by_index(&at("/cell"), 0)
             .expect("a live managed cell acts");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // A top-level object has nothing to be detached from.
+        provider
+            .do_atspi_action_by_index(&at("/window"), 0)
+            .expect("a top-level window acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     /// Accessible half of the `scroll_into_view` fixture: answers `GetState`,
@@ -6157,6 +6244,17 @@ mod tests {
                 return Err(zbus::fdo::Error::Failed("state unreadable".into()));
             }
             Ok(vec![0, 0])
+        }
+
+        /// A window's parent: the application root, so the attachment check
+        /// `scroll_into_view` runs first (#586) passes without a sibling walk.
+        #[zbus(property)]
+        fn parent(&self) -> (String, zbus::zvariant::OwnedObjectPath) {
+            (
+                "org.test.Scroll".into(),
+                zbus::zvariant::OwnedObjectPath::try_from("/org/a11y/atspi/accessible/root")
+                    .expect("test path"),
+            )
         }
     }
 

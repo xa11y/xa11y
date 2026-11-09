@@ -188,6 +188,19 @@ control, whether or not it lists one. A verb the element genuinely cannot do com
 `action_not_supported` rather than doing something else, so trying the one \
 the properties imply is safe.";
 
+/// What an element's `center` is, and where there is none (issue #573).
+///
+/// On Linux's uinput input backend (Wayland sessions) the library refuses an
+/// element-targeted pointer action, because accessibility bounds are not
+/// screen coordinates there. A description that promised `center` as a click
+/// target without this would be a contract the handler cannot keep.
+pub(super) const CENTER_NOTE: &str = "\
+Where element bounds are not screen coordinates (Linux with the uinput input \
+backend, which Wayland sessions use), elements carry no `center`, the result's \
+`center_unavailable` says why, and `bounds` is not a position on screen. There, \
+act on an element with `action` (press, focus, ...) rather than with the \
+coordinate tools.";
+
 /// The per-field byte cap, as the element-returning tools state it.
 ///
 /// Built from [`MAX_FIELD_BYTES`] so the number a model reads is the number
@@ -704,6 +717,7 @@ fn tool_definition(name: &str) -> Value {
                      `subtree_truncated` is complete: no `children` means a leaf. To \
                      see what was cut, call `find` with a selector reaching into that \
                      node (`list[name=\"Files\"] list_item`), or `tree` again with a larger `max_depth`.\n\n\
+                     {CENTER_NOTE}\n\n\
                      Every node carries a `ref` (`c3:17`) that `action`, `text` and `table` \
                      accept in place of a selector, to act on exactly that element.\n\n\
                      {field_cap}\n\n\
@@ -755,6 +769,7 @@ fn tool_definition(name: &str) -> Value {
                      scope, so read those before guessing again. Each match also carries \
                      a `ref` that `action`, `text` and `table` accept in place of a \
                      selector.\n\n\
+                     {CENTER_NOTE}\n\n\
                      Without `stable` this reads the tree once and does not wait. Set \
                      `stable: true` before clicking or dragging something that may \
                      still be moving (sliding in, resizing, settling after a layout \
@@ -919,7 +934,10 @@ fn tool_definition(name: &str) -> Value {
                 "click",
                 "Click",
                 "Click at a screen coordinate. Coordinates only: get them from \
-                 `find`, which reports each match's `center`.",
+                 `find`, which reports each match's `center`. On Linux with the \
+                 uinput input backend (Wayland sessions) element bounds are not \
+                 screen coordinates, so `find` reports no `center` there; press \
+                 the element with `action` instead.",
                 object_schema(props, &["x", "y"]),
             )
         }
@@ -1898,10 +1916,19 @@ fn tool_tree(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     let max_depth = opt_usize(args, "max_depth", TREE_DEFAULT_MAX_DEPTH, TREE_DEPTH)?;
     let detail = tree_detail(args)?;
     let target = target(args)?;
-    let (node, cap) = tree_json(&target, max_depth, TREE_MAX_NODES, detail, refs)?;
+    let center = cli::pointer_center();
+    let (node, cap) = tree_json(
+        &target,
+        max_depth,
+        TREE_MAX_NODES,
+        detail,
+        center.is_usable(),
+        refs,
+    )?;
 
     let mut out = Map::new();
     target_fields(&target, &mut out);
+    note_center(&mut out, &center);
     out.insert("max_depth".into(), json!(max_depth));
     let mut truncated = Map::new();
     truncated.insert("by_depth".into(), json!(cap.truncated.by_depth));
@@ -1965,6 +1992,7 @@ fn tree_json(
     max_depth: usize,
     max_nodes: usize,
     detail: TreeDetail,
+    center: bool,
     refs: &RefTable,
 ) -> CliResult<(Value, crate::Capture)> {
     let options = crate::CaptureOptions::new()
@@ -1979,7 +2007,7 @@ fn tree_json(
     // Built bottom-up: in pre-order every child comes after its parent.
     let mut built: Vec<Option<Value>> = vec![None; cap.nodes.len()];
     for node in cap.nodes.iter().rev() {
-        let mut value = element_data_json(&node.element);
+        let mut value = element_data_json(&node.element, center);
         let obj = value
             .as_object_mut()
             .expect("element_data_json always builds an object");
@@ -2064,7 +2092,14 @@ fn tool_find(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
             Ok(element) => element,
             Err(matches) => return Err(ambiguous(selector, &matches)),
         };
-        return Ok(find_output(selector, &target, &[element], limit, refs));
+        return Ok(find_output(
+            selector,
+            &target,
+            &[element],
+            limit,
+            &cli::pointer_center(),
+            refs,
+        ));
     }
 
     let locator = target.locator(selector);
@@ -2086,16 +2121,27 @@ fn tool_find(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
         }
     }
 
-    Ok(find_output(selector, &target, &elements, limit, refs))
+    Ok(find_output(
+        selector,
+        &target,
+        &elements,
+        limit,
+        &cli::pointer_center(),
+        refs,
+    ))
 }
 
 /// The `find` result: at most `limit` of `elements`, with the counts that
 /// say whether the list was cut.
+///
+/// `center` says whether each match carries a precomputed `center`; when it
+/// does not, the result carries `center_unavailable` with the reason.
 fn find_output(
     selector: &str,
     target: &Target,
     elements: &[Element],
     limit: usize,
+    center: &cli::PointerCenter,
     refs: &RefTable,
 ) -> ToolOutput {
     let total = elements.len();
@@ -2104,7 +2150,7 @@ fn find_output(
         .iter()
         .take(limit)
         .map(|el| {
-            let mut encoded = element_data_json(el);
+            let mut encoded = element_data_json(el, center.is_usable());
             if let Some(obj) = encoded.as_object_mut() {
                 obj.insert("ref".into(), json!(capture.add(el)));
             }
@@ -2116,6 +2162,7 @@ fn find_output(
     let mut out = Map::new();
     out.insert("selector".into(), json!(selector));
     target_fields(target, &mut out);
+    note_center(&mut out, center);
     out.insert("match_count".into(), json!(total));
     out.insert("returned".into(), json!(matches.len()));
     out.insert("truncated".into(), json!(total > matches.len()));
@@ -2367,7 +2414,14 @@ fn tool_table(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
     match subject {
         Subject::Selector(selector) => {
             let target = target(args)?;
-            tool_table_parsed(&target, selector, op_name, op, limit)
+            tool_table_parsed(
+                &target,
+                selector,
+                op_name,
+                op,
+                limit,
+                &cli::pointer_center(),
+            )
         }
         Subject::Ref(reference) => {
             let element = resolve_ref_for_read(refs, reference)?;
@@ -2375,7 +2429,14 @@ fn tool_table(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
             let mut out = Map::new();
             out.insert("op".into(), json!(op_name));
             out.insert("ref".into(), json!(reference));
-            Ok(table_output(out, &element, op, &found, limit))
+            Ok(table_output(
+                out,
+                &element,
+                op,
+                &found,
+                limit,
+                &cli::pointer_center(),
+            ))
         }
     }
 }
@@ -2443,6 +2504,9 @@ fn relations_output(
     limit: usize,
     refs: &RefTable,
 ) -> CliResult<ToolOutput> {
+    let center = cli::pointer_center();
+    note_center(&mut out, &center);
+    let center = center.is_usable();
     let found = element.relations(kinds)?;
     let mut capture = refs.begin();
     let relations: Vec<Value> = found
@@ -2452,7 +2516,7 @@ fn relations_output(
                 .iter()
                 .take(limit)
                 .map(|el| {
-                    let mut encoded = element_data_json(el);
+                    let mut encoded = element_data_json(el, center);
                     if let Some(obj) = encoded.as_object_mut() {
                         obj.insert("ref".into(), json!(capture.add(el)));
                     }
@@ -2469,7 +2533,7 @@ fn relations_output(
         })
         .collect();
     refs.keep(capture);
-    out.insert("element".into(), element_data_json(element));
+    out.insert("element".into(), element_data_json(element, center));
     out.insert("relations".into(), Value::Array(relations));
     Ok(ToolOutput::json(Value::Object(out)))
 }
@@ -2481,6 +2545,7 @@ fn tool_table_parsed(
     op_name: &str,
     op: cli::TableOp,
     limit: usize,
+    center: &cli::PointerCenter,
 ) -> CliResult<ToolOutput> {
     let element = match cli::resolve_table_element(target, selector)? {
         Ok(element) => element,
@@ -2491,7 +2556,7 @@ fn tool_table_parsed(
     out.insert("op".into(), json!(op_name));
     out.insert("selector".into(), json!(selector));
     target_fields(target, &mut out);
-    Ok(table_output(out, &element, op, &found, limit))
+    Ok(table_output(out, &element, op, &found, limit, center))
 }
 
 /// The rest of a `table` result after its header fields: the cell for
@@ -2502,14 +2567,16 @@ fn table_output(
     op: cli::TableOp,
     found: &[Element],
     limit: usize,
+    center: &cli::PointerCenter,
 ) -> ToolOutput {
+    note_center(&mut out, center);
     if let cli::TableOp::CellAt { row, column } = op {
         out.insert("row".into(), json!(row));
         out.insert("column".into(), json!(column));
         out.insert("found".into(), json!(!found.is_empty()));
         match found.first() {
             Some(cell) => {
-                out.insert("cell".into(), element_data_json(cell));
+                out.insert("cell".into(), element_data_json(cell, center.is_usable()));
             }
             None => {
                 out.insert("cell".into(), Value::Null);
@@ -2524,7 +2591,7 @@ fn table_output(
     let listed: Vec<Value> = found
         .iter()
         .take(limit)
-        .map(|el| element_data_json(el))
+        .map(|el| element_data_json(el, center.is_usable()))
         .collect();
     out.insert("count".into(), json!(found.len()));
     out.insert("returned".into(), json!(listed.len()));
@@ -2563,7 +2630,7 @@ fn tool_windows(args: &Value) -> CliResult<ToolOutput> {
     } else {
         App::list()?
     };
-    tool_windows_with(&apps, limit)
+    tool_windows_with(&apps, limit, &cli::pointer_center())
 }
 
 /// `enable_web_accessibility` tool. Resolution and the wait are the CLI's
@@ -2588,7 +2655,11 @@ fn tool_enable_web_accessibility(args: &Value) -> CliResult<ToolOutput> {
 
 /// The window-listing half against an explicit app list — the unit-testable
 /// sibling of [`tool_windows`], which only resolves where the apps come from.
-fn tool_windows_with(apps: &[App], limit: usize) -> CliResult<ToolOutput> {
+fn tool_windows_with(
+    apps: &[App],
+    limit: usize,
+    center: &cli::PointerCenter,
+) -> CliResult<ToolOutput> {
     let mut windows: Vec<Element> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     for app in apps {
@@ -2615,7 +2686,7 @@ fn tool_windows_with(apps: &[App], limit: usize) -> CliResult<ToolOutput> {
     let listed: Vec<Value> = windows
         .iter()
         .take(limit)
-        .map(|w| element_data_json(w))
+        .map(|w| element_data_json(w, center.is_usable()))
         .collect();
 
     // The error list is capped like the window list: each entry carries an
@@ -2627,14 +2698,18 @@ fn tool_windows_with(apps: &[App], limit: usize) -> CliResult<ToolOutput> {
     let total_errors = errors.len();
     let listed_errors: Vec<String> = errors.into_iter().take(limit).collect();
 
-    Ok(ToolOutput::json(json!({
+    let mut out = json!({
         "count": total,
         "returned": listed.len(),
         "truncated": total > listed.len(),
         "windows": listed,
         "errors": listed_errors,
         "errors_truncated": total_errors > listed_errors.len(),
-    })))
+    });
+    if let Some(obj) = out.as_object_mut() {
+        note_center(obj, center);
+    }
+    Ok(ToolOutput::json(out))
 }
 
 /// One line naming a candidate, carrying only what tells it apart from its
@@ -2925,7 +3000,12 @@ fn tool_events_poll(registry: &Registry, args: &Value) -> CliResult<ToolOutput> 
         u64::try_from(timeout_ms)
             .map_err(|_| usage(format!("\"timeout_ms\" must not be negative: {timeout_ms}")))?,
     );
-    Ok(ToolOutput::json(registry.poll(id, max, timeout)?))
+    Ok(ToolOutput::json(registry.poll(
+        id,
+        max,
+        timeout,
+        &cli::pointer_center(),
+    )?))
 }
 
 fn tool_events_stop(registry: &Registry, args: &Value) -> CliResult<ToolOutput> {
@@ -3030,6 +3110,17 @@ fn legend_json<T: serde::Serialize>(what: &str, value: &T) -> CliResult<Value> {
 
 // ── Element encoding ────────────────────────────────────────────────────────
 
+/// Result-level field naming why element encodings carry no `center`.
+pub(super) const CENTER_UNAVAILABLE_FIELD: &str = "center_unavailable";
+
+/// Record on a result why its elements carry no `center`, once, rather than
+/// on every node. Absent when centers are reported.
+pub(super) fn note_center(out: &mut Map<String, Value>, policy: &cli::PointerCenter) {
+    if let cli::PointerCenter::Unavailable(reason) = policy {
+        out.insert(CENTER_UNAVAILABLE_FIELD.into(), json!(reason));
+    }
+}
+
 /// Encode element data as a wire node.
 ///
 /// Hand-built rather than `serde_json::to_value(data)`: `ElementData` also
@@ -3037,7 +3128,12 @@ fn legend_json<T: serde::Serialize>(what: &str, value: &T) -> CliResult<Value> {
 /// pointer), neither of which means anything to a model and both of which
 /// would dominate the payload. Absent fields are omitted rather than sent as
 /// nulls, for the same reason.
-pub(super) fn element_data_json(data: &crate::ElementData) -> Value {
+///
+/// `center` is whether to precompute the bounds' center as a pointer target.
+/// The caller decides once per result from [`cli::pointer_center`] and, when
+/// it is withheld, says why with [`note_center`] — a node whose `center` is
+/// simply missing would read as an element without bounds (issue #573).
+pub(super) fn element_data_json(data: &crate::ElementData, center: bool) -> Value {
     let mut node = Map::new();
     node.insert("role".into(), json!(data.role.to_snake_case()));
     insert_text(&mut node, "name", data.name.as_deref());
@@ -3051,14 +3147,18 @@ pub(super) fn element_data_json(data: &crate::ElementData) -> Value {
             json!({ "x": b.x, "y": b.y, "width": b.width, "height": b.height }),
         );
         // The point the click / move / scroll tools want, precomputed so the
-        // model does not have to do arithmetic to press a button.
-        node.insert(
-            "center".into(),
-            json!({
-                "x": b.x + (b.width as i32) / 2,
-                "y": b.y + (b.height as i32) / 2,
-            }),
-        );
+        // model does not have to do arithmetic to press a button. Withheld
+        // where element bounds are not screen coordinates (Wayland), because
+        // there it is not a point those tools can use.
+        if center {
+            node.insert(
+                "center".into(),
+                json!({
+                    "x": b.x + (b.width as i32) / 2,
+                    "y": b.y + (b.height as i32) / 2,
+                }),
+            );
+        }
     }
 
     if let Some(nv) = data.numeric_value {
@@ -3420,12 +3520,12 @@ mod tests {
         let app = crate::App::by_pid_with(provider, 1234, std::time::Duration::ZERO).unwrap();
         let target = cli::Target::App(app);
         let refs = RefTable::default();
-        let (tree, _) = tree_json(&target, 1, 21, TreeDetail::default(), &refs).unwrap();
+        let (tree, _) = tree_json(&target, 1, 21, TreeDetail::default(), true, &refs).unwrap();
         let children = tree["children"].as_array().unwrap();
         assert_eq!(children.len(), 2);
         assert_eq!(children[1]["name"], "Second Window");
         assert!(children.iter().all(|child| child.get("children").is_none()));
-        let (tree, cap) = tree_json(&target, 5, 2, TreeDetail::default(), &refs).unwrap();
+        let (tree, cap) = tree_json(&target, 5, 2, TreeDetail::default(), true, &refs).unwrap();
         assert_eq!(tree["children"].as_array().unwrap().len(), 1);
         assert!(cap.truncated.by_nodes);
     }
@@ -3450,6 +3550,7 @@ mod tests {
             max_depth,
             budget + 1,
             TreeDetail::default(),
+            true,
             &RefTable::default(),
         )
         .expect("the mock tree captures");
@@ -3573,7 +3674,7 @@ mod tests {
         data.value = Some(value.clone());
         data.name = Some("x".repeat(MAX_FIELD_BYTES));
         data.description = Some("d".repeat(MAX_FIELD_BYTES + 1));
-        let encoded = element_data_json(&data);
+        let encoded = element_data_json(&data, true);
 
         let kept = encoded["value"].as_str().expect("value is a string");
         assert!(kept.len() <= MAX_FIELD_BYTES, "{}", kept.len());
@@ -4225,6 +4326,7 @@ mod tests {
             TREE_DEFAULT_MAX_DEPTH,
             TREE_MAX_NODES,
             TreeDetail::default(),
+            true,
             refs,
         )
         .expect("the mock tree captures");
@@ -4319,7 +4421,14 @@ mod tests {
             .locator(r#"button[name="Back"]"#)
             .element()
             .expect("Back");
-        let out = find_output(r#"button[name="Back"]"#, &target, &[element], 1, &refs);
+        let out = find_output(
+            r#"button[name="Back"]"#,
+            &target,
+            &[element],
+            1,
+            &cli::PointerCenter::Usable,
+            &refs,
+        );
         let body = out.structured.expect("structured");
         let r = body["matches"][0]["ref"].as_str().expect("ref");
         assert!(refs.resolve(r).is_ok());
@@ -4572,7 +4681,7 @@ mod tests {
         );
         let mut data = crate::ElementData::for_role(crate::Role::StaticText);
         data.name = Some("x".repeat(MAX_FIELD_BYTES + 1));
-        let encoded = element_data_json(&data);
+        let encoded = element_data_json(&data, true);
         for key in ["name_truncated", "name_bytes"] {
             assert!(encoded.get(key).is_some(), "{key} in {encoded}");
         }
@@ -5012,8 +5121,8 @@ mod tests {
             panic!("the mock target must be an app");
         };
         let apps = vec![app];
-        let out =
-            tool_windows_with(&apps, FIND_DEFAULT_LIMIT).expect("the windows listing must succeed");
+        let out = tool_windows_with(&apps, FIND_DEFAULT_LIMIT, &cli::PointerCenter::Usable)
+            .expect("the windows listing must succeed");
         let structured = out.structured.expect("windows results are structured");
         assert_eq!(structured["count"], json!(1), "{structured}");
         assert_eq!(structured["returned"], json!(1), "{structured}");
@@ -5027,8 +5136,8 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["name"], json!("Main Window"), "{structured}");
         // Bounding: a limit below the count truncates and says so.
-        let truncated =
-            tool_windows_with(&apps, 0).expect("a zero-limit listing is still a valid call");
+        let truncated = tool_windows_with(&apps, 0, &cli::PointerCenter::Usable)
+            .expect("a zero-limit listing is still a valid call");
         let structured = truncated.structured.expect("structured");
         assert_eq!(structured["count"], json!(1), "{structured}");
         assert_eq!(structured["returned"], json!(0), "{structured}");
@@ -5052,7 +5161,8 @@ mod tests {
             .next()
             .expect("mock must vend one app");
         main.data.role = crate::Role::Window;
-        let out = tool_windows_with(&[main], FIND_DEFAULT_LIMIT).expect("the listing must succeed");
+        let out = tool_windows_with(&[main], FIND_DEFAULT_LIMIT, &cli::PointerCenter::Usable)
+            .expect("the listing must succeed");
         let structured = out.structured.expect("structured");
         assert_eq!(structured["count"], json!(0), "{structured}");
         let errors = structured["errors"].as_array().expect("errors is an array");
@@ -5093,8 +5203,12 @@ mod tests {
             .expect("mock must resolve its app by pid");
         assert_eq!(first.pid, second.pid, "both entries must share the pid");
 
-        let out = tool_windows_with(&[first, second], FIND_DEFAULT_LIMIT)
-            .expect("the listing must succeed");
+        let out = tool_windows_with(
+            &[first, second],
+            FIND_DEFAULT_LIMIT,
+            &cli::PointerCenter::Usable,
+        )
+        .expect("the listing must succeed");
         let structured = out.structured.expect("windows results are structured");
         let windows = structured["windows"]
             .as_array()
@@ -5231,6 +5345,7 @@ mod tests {
             &target,
             &[element],
             1,
+            &cli::PointerCenter::Usable,
             &RefTable::default(),
         );
         let structured = out.structured.expect("find results are structured");
@@ -5531,7 +5646,7 @@ mod tests {
             width: 100,
             height: 40,
         });
-        let encoded = element_data_json(&data);
+        let encoded = element_data_json(&data, true);
         assert_eq!(encoded["role"], "button");
         assert_eq!(encoded["name"], "OK");
         assert_eq!(encoded["center"]["x"], 60);
@@ -5547,10 +5662,134 @@ mod tests {
         );
     }
 
+    // ── `center` where element bounds are not screen coordinates (#573) ─────
+
+    #[test]
+    fn element_encoding_withholds_center_when_it_is_not_a_pointer_target() {
+        let mut data = crate::ElementData::for_role(crate::Role::Button);
+        data.bounds = Some(Rect {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 40,
+        });
+        let encoded = element_data_json(&data, false);
+        assert!(encoded.get("center").is_none(), "{encoded}");
+        // Bounds stay: they are what the platform reported, and the
+        // result-level note says they are not a screen position.
+        assert_eq!(encoded["bounds"]["x"], 10);
+    }
+
+    #[test]
+    fn find_reports_center_and_no_note_where_bounds_are_screen_coordinates() {
+        let (target, _provider) = mock_target_app();
+        let elements = target
+            .locator(r#"button[name="Back"]"#)
+            .elements()
+            .expect("the mock resolves");
+        let out = find_output(
+            r#"button[name="Back"]"#,
+            &target,
+            &elements,
+            FIND_DEFAULT_LIMIT,
+            &cli::PointerCenter::Usable,
+            &RefTable::default(),
+        );
+        let structured = out.structured.expect("find results are structured");
+        assert!(
+            structured.get(CENTER_UNAVAILABLE_FIELD).is_none(),
+            "{structured}"
+        );
+        let first = &structured["matches"][0];
+        assert!(first.get("bounds").is_some(), "{first}");
+        assert!(first.get("center").is_some(), "{first}");
+    }
+
+    #[test]
+    fn find_omits_center_and_says_why_where_bounds_are_not_screen_coordinates() {
+        let (target, _provider) = mock_target_app();
+        let elements = target
+            .locator("button")
+            .elements()
+            .expect("the mock resolves");
+        assert!(!elements.is_empty());
+        let policy = cli::PointerCenter::from_capability(Ok(false));
+        let out = find_output(
+            "button",
+            &target,
+            &elements,
+            FIND_DEFAULT_LIMIT,
+            &policy,
+            &RefTable::default(),
+        );
+        let structured = out.structured.expect("find results are structured");
+        let reason = structured[CENTER_UNAVAILABLE_FIELD]
+            .as_str()
+            .expect("the result must say why center is missing");
+        assert!(reason.contains("not screen coordinates"), "{reason}");
+        for m in structured["matches"].as_array().expect("matches") {
+            assert!(m.get("center").is_none(), "{m}");
+        }
+    }
+
+    #[test]
+    fn tree_and_windows_follow_the_same_center_policy() {
+        let policy = cli::PointerCenter::from_capability(Ok(false));
+        let (target, _provider) = mock_target_app();
+        let (tree, _) = tree_json(
+            &target,
+            TREE_DEFAULT_MAX_DEPTH,
+            TREE_MAX_NODES,
+            TreeDetail::default(),
+            policy.is_usable(),
+            &RefTable::default(),
+        )
+        .expect("the mock tree captures");
+        fn no_center(node: &Value) {
+            assert!(node.get("center").is_none(), "{node}");
+            if let Some(children) = node.get("children").and_then(Value::as_array) {
+                children.iter().for_each(no_center);
+            }
+        }
+        no_center(&tree);
+
+        let Target::App(app) = target else {
+            panic!("the mock target must be an app");
+        };
+        let out = tool_windows_with(&[app], FIND_DEFAULT_LIMIT, &policy).expect("listing");
+        let structured = out.structured.expect("structured");
+        assert!(
+            structured.get(CENTER_UNAVAILABLE_FIELD).is_some(),
+            "{structured}"
+        );
+        for window in structured["windows"].as_array().expect("windows") {
+            assert!(window.get("center").is_none(), "{window}");
+        }
+    }
+
+    #[test]
+    fn descriptions_state_where_center_is_not_a_pointer_target() {
+        for name in ["find", "tree"] {
+            let description = tool_definition(name)["description"]
+                .as_str()
+                .expect("a description")
+                .to_owned();
+            assert!(description.contains(CENTER_NOTE), "{name}: {description}");
+        }
+        assert!(CENTER_NOTE.contains("`center_unavailable`"));
+        assert!(CENTER_NOTE.contains("Wayland"));
+        let click = tool_definition("click")["description"]
+            .as_str()
+            .expect("a description")
+            .to_owned();
+        assert!(click.contains("Wayland"), "{click}");
+        assert!(click.contains("`action`"), "{click}");
+    }
+
     #[test]
     fn states_send_only_what_is_true_plus_the_gating_pair() {
         let data = crate::ElementData::for_role(crate::Role::Button);
-        let encoded = element_data_json(&data);
+        let encoded = element_data_json(&data, true);
         let states = encoded["states"].as_object().unwrap();
         assert!(states.contains_key("enabled"));
         assert!(states.contains_key("visible"));
@@ -5566,7 +5805,7 @@ mod tests {
     fn a_password_field_says_so_in_its_states() {
         let mut data = crate::ElementData::for_role(crate::Role::TextField);
         data.states.password = true;
-        let encoded = element_data_json(&data);
+        let encoded = element_data_json(&data, true);
         assert_eq!(encoded["role"], "text_field");
         assert_eq!(encoded["states"]["password"], true);
     }
@@ -5576,7 +5815,7 @@ mod tests {
         let mut data = crate::ElementData::for_role(crate::Role::Button);
         data.states.visible = false;
         data.states.hidden_reason = Some(crate::HiddenReason::ScrolledOut);
-        let encoded = element_data_json(&data);
+        let encoded = element_data_json(&data, true);
         assert_eq!(encoded["states"]["visible"], false);
         assert_eq!(encoded["states"]["hidden_reason"], "scrolled_out");
     }
@@ -5640,6 +5879,7 @@ mod tests {
             TREE_DEFAULT_MAX_DEPTH,
             TREE_MAX_NODES,
             TreeDetail::default(),
+            true,
             &refs,
         )
         .expect("tree");
@@ -5655,6 +5895,7 @@ mod tests {
                 text: true,
                 relations: true,
             },
+            true,
             &refs,
         )
         .expect("tree");
@@ -5675,6 +5916,7 @@ mod tests {
                 text: true,
                 relations: false,
             },
+            true,
             &refs,
         )
         .expect("tree");
@@ -5699,7 +5941,7 @@ mod tests {
         let one = |sel: &str| {
             let els = target.locator(sel).elements().expect("resolves");
             assert_eq!(els.len(), 1, "{sel}");
-            element_data_json(&els[0])
+            element_data_json(&els[0], true)
         };
         let h1 = one(r#"heading[heading_level="1"]"#);
         assert_eq!(h1["heading_level"], 1);
@@ -5813,7 +6055,7 @@ mod tests {
         let one = |sel: &str| {
             let els = target.locator(sel).elements().expect("resolves");
             assert_eq!(els.len(), 1, "{sel}");
-            element_data_json(&els[0])
+            element_data_json(&els[0], true)
         };
         let price = one(r#"table_cell[name="Price"]"#);
         assert_eq!(
@@ -6009,10 +6251,17 @@ mod tests {
     ) -> Value {
         let parsed =
             cli::parse_table_op(op, row, column, "\"row\"", "\"column\"").expect("valid op");
-        tool_table_parsed(&table_target(), selector, op, parsed, limit)
-            .expect("table call succeeds")
-            .structured
-            .expect("structured")
+        tool_table_parsed(
+            &table_target(),
+            selector,
+            op,
+            parsed,
+            limit,
+            &cli::PointerCenter::Usable,
+        )
+        .expect("table call succeeds")
+        .structured
+        .expect("structured")
     }
 
     const PRICES: &str = r#"table[name="Prices"]"#;
@@ -6078,6 +6327,7 @@ mod tests {
             "column-headers",
             cli::TableOp::Headers(crate::HeaderKind::Column),
             50,
+            &cli::PointerCenter::Usable,
         )
         .expect_err("a text area is not a table");
         assert_eq!(failure_kind(&err), "action_not_supported");

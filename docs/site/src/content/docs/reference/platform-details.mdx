@@ -722,7 +722,7 @@ Every other configuration fails closed to `1.0`, so the data is never wrong. The
 
 `Point` arguments to input simulation, after the logical→physical conversion, are mapped onto the uinput virtual coordinate range. Override the assumed screen size (default 1920×1080) with `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` env vars if your setup differs.
 
-On Wayland, input simulation refuses pointer actions whose target is an `Element` (`click`, `drag`, `move_to`, `scroll`, and their variants) with an `Unsupported` error. Wayland clients don't know their global position, so the bounds AT-SPI reports are not screen coordinates, and a click computed from them would land somewhere else. Use a semantic action such as `press` or `focus`, or pass a raw screen point. Raw-point pointer actions and keyboard input work as before.
+On Wayland, input simulation refuses pointer actions whose target is an `Element` (`click`, `drag`, `move_to`, `scroll`, and their variants) with an `Unsupported` error. Wayland clients don't know their global position, so the bounds AT-SPI reports are not screen coordinates, and a click computed from them would land somewhere else. Use a semantic action such as `press` or `focus`, or pass a raw screen point. Raw-point pointer actions and keyboard input work as before. For the same reason `xa11y find -o center` fails, and the MCP tools report no `center` for an element and add a `center_unavailable` field to the result.
 
 The refusal follows the input backend, not the session. Forcing `XA11Y_LINUX_INPUT_BACKEND=x11` on a Wayland desktop sends input through XWayland and accepts `Element` targets, which land correctly only in X11 (XWayland) applications. Forcing `wayland` on an X11 session refuses them.
 
