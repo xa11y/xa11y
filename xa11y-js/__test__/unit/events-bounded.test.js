@@ -35,6 +35,9 @@ test('events are numbered and announcements carry their payload', async () => {
     [0, 1, 2, 3],
   );
   assert.equal(dropped, 0);
+  const times = events.map((e) => e.time);
+  assert.deepEqual(times, [...times].sort((a, b) => a - b));
+  for (const t of times) assert.ok(Math.abs(t - Date.now()) < 60_000);
   assert.equal(events[0].announcement ?? null, null);
   assert.deepEqual(events[1].announcement, {
     origin: 'request',

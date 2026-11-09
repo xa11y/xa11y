@@ -20,10 +20,16 @@ pub(crate) fn parse_options(
     max_text_bytes: usize,
     detail: Option<&Bound<'_, PyAny>>,
     timeout: Option<f64>,
+    max_runs: usize,
+    cancel: Option<&CancelToken>,
 ) -> PyResult<xa11y::CaptureOptions> {
     let mut options = xa11y::CaptureOptions::new()
         .max_nodes(max_nodes)
-        .max_text_bytes(max_text_bytes);
+        .max_text_bytes(max_text_bytes)
+        .max_runs(max_runs);
+    if let Some(token) = cancel {
+        options = options.cancel(token.inner.clone());
+    }
     if let Some(depth) = max_depth {
         options = options.max_depth(depth);
     }
@@ -44,9 +50,11 @@ pub(crate) fn parse_options(
         options = match name.as_str() {
             "text" => options.text(true),
             "relations" => options.relations(true),
+            "formatting" => options.formatting(true),
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "unknown capture detail {other:?}; expected \"text\" or \"relations\""
+                    "unknown capture detail {other:?}; expected \"text\", \"formatting\" \
+                     or \"relations\""
                 )))
             }
         };
@@ -80,7 +88,97 @@ pub(crate) fn to_py(py: Python<'_>, cap: xa11y::Capture) -> PyResult<Capture> {
         vanished: cap.vanished,
         started: epoch_seconds(cap.started),
         finished: epoch_seconds(cap.finished),
+        backend: cap.backend,
+        stats: CaptureStats { inner: cap.stats },
     })
+}
+
+/// Stops a capture from another thread: pass it as ``capture(cancel=...)``
+/// and call :meth:`cancel`. The capture returns what it read, with
+/// ``truncated.by_cancel``.
+#[pyclass(frozen)]
+pub(crate) struct CancelToken {
+    inner: xa11y::CancelToken,
+}
+
+#[pymethods]
+impl CancelToken {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: xa11y::CancelToken::new(),
+        }
+    }
+    /// Cancel every capture holding this token. One not yet started stops
+    /// at once.
+    fn cancel(&self) {
+        self.inner.cancel();
+    }
+    /// Whether :meth:`cancel` was called.
+    fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
+    }
+    fn __repr__(&self) -> String {
+        format!(
+            "CancelToken(cancelled={})",
+            if self.inner.is_cancelled() { "True" } else { "False" }
+        )
+    }
+}
+
+/// The reads a capture made, by kind. A read is one call into the backend
+/// for one node.
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+pub(crate) struct CaptureStats {
+    inner: xa11y::CaptureStats,
+}
+
+#[pymethods]
+impl CaptureStats {
+    /// Children reads: one per node whose children were read.
+    #[getter]
+    fn children_reads(&self) -> usize {
+        self.inner.children_reads
+    }
+    /// Identity reads, for cycle detection and relation resolution.
+    #[getter]
+    fn identity_reads(&self) -> usize {
+        self.inner.identity_reads
+    }
+    /// Text reads, with ``"text"`` detail.
+    #[getter]
+    fn text_reads(&self) -> usize {
+        self.inner.text_reads
+    }
+    /// Formatting-run reads, with ``"formatting"`` detail: one per run.
+    #[getter]
+    fn formatting_reads(&self) -> usize {
+        self.inner.formatting_reads
+    }
+    /// Relation reads, with ``"relations"`` detail: one per node.
+    #[getter]
+    fn relation_reads(&self) -> usize {
+        self.inner.relation_reads
+    }
+    /// Bytes of text in the capture, as UTF-8.
+    #[getter]
+    fn text_bytes(&self) -> usize {
+        self.inner.text_bytes
+    }
+    fn __repr__(&self) -> String {
+        let s = &self.inner;
+        format!(
+            "CaptureStats(children_reads={}, identity_reads={}, text_reads={}, \
+             formatting_reads={}, relation_reads={}, text_bytes={})",
+            s.children_reads,
+            s.identity_reads,
+            s.text_reads,
+            s.formatting_reads,
+            s.relation_reads,
+            s.text_bytes
+        )
+    }
 }
 
 /// A bounded read of a subtree: every node read, pre-order, and which limits
@@ -92,6 +190,8 @@ pub(crate) struct Capture {
     vanished: usize,
     started: f64,
     finished: f64,
+    backend: Option<&'static str>,
+    stats: CaptureStats,
 }
 
 #[pymethods]
@@ -112,6 +212,17 @@ impl Capture {
         self.vanished
     }
     /// When the walk began, in seconds since the epoch.
+    /// The source that read the tree: ``"atspi"``, ``"ax"``, ``"uia"`` or
+    /// ``"ia2"``; ``None`` when the root reported no identity.
+    #[getter]
+    fn backend(&self) -> Option<&'static str> {
+        self.backend
+    }
+    /// The reads the capture made, by kind.
+    #[getter]
+    fn stats(&self) -> CaptureStats {
+        self.stats.clone()
+    }
     #[getter]
     fn started(&self) -> f64 {
         self.started
@@ -183,6 +294,16 @@ impl Truncation {
     fn by_time(&self) -> bool {
         self.inner.by_time
     }
+    /// Formatting runs past ``max_runs`` were left out.
+    #[getter]
+    fn by_formatting(&self) -> bool {
+        self.inner.by_formatting
+    }
+    /// The capture's :class:`CancelToken` was cancelled before it finished.
+    #[getter]
+    fn by_cancel(&self) -> bool {
+        self.inner.by_cancel
+    }
     /// Whether any limit dropped something.
     fn any(&self) -> bool {
         self.inner.any()
@@ -193,11 +314,14 @@ impl Truncation {
     fn __repr__(&self) -> String {
         let b = |v: bool| if v { "True" } else { "False" };
         format!(
-            "Truncation(by_depth={}, by_nodes={}, by_text={}, by_time={})",
+            "Truncation(by_depth={}, by_nodes={}, by_text={}, by_time={}, by_formatting={}, \
+             by_cancel={})",
             b(self.inner.by_depth),
             b(self.inner.by_nodes),
             b(self.inner.by_text),
-            b(self.inner.by_time)
+            b(self.inner.by_time),
+            b(self.inner.by_formatting),
+            b(self.inner.by_cancel)
         )
     }
 }
@@ -225,6 +349,20 @@ impl CapturedText {
     #[getter]
     fn truncated(&self) -> bool {
         self.inner.truncated
+    }
+    /// With ``"formatting"`` detail, the :class:`TextRun` s covering
+    /// ``content``, in order; ``None`` when they were not read.
+    #[getter]
+    fn runs(&self) -> Option<Vec<crate::rich::TextRun>> {
+        self.inner
+            .runs
+            .as_ref()
+            .map(|runs| runs.iter().cloned().map(crate::rich::TextRun::from_core).collect())
+    }
+    /// Whether ``runs`` stops short of the end of ``content``.
+    #[getter]
+    fn runs_truncated(&self) -> bool {
+        self.inner.runs_truncated
     }
     fn __repr__(&self) -> String {
         format!(

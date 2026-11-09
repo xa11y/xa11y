@@ -555,6 +555,11 @@ fn event_json(buffered: &Buffered, center: bool) -> Value {
     let mut out = Map::new();
     out.insert("sequence".into(), json!(buffered.sequence));
     out.insert("at_ms".into(), json!(buffered.at_ms));
+    let time_ms = event
+        .time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    out.insert("time_ms".into(), json!(time_ms));
     out.insert("kind".into(), json!(format_event_kind(&event.kind)));
     if let EventKind::StateChanged { flag, value } = event.kind {
         out.insert("state_flag".into(), json!(format_state_flag(flag)));
@@ -780,6 +785,11 @@ mod tests {
 
         let events = collect(&registry, &id, 2);
         assert_eq!(events[0]["sequence"], json!(0));
+        assert!(
+            events[0]["time_ms"].as_u64().is_some_and(|t| t > 0),
+            "{}",
+            events[0]
+        );
         assert_eq!(events[0]["kind"], json!("focus_changed"));
         assert_eq!(
             events[0]["target"]["name"],

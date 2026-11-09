@@ -327,6 +327,17 @@ pub(crate) struct TextRun {
     attributes: TextAttributes,
 }
 
+impl TextRun {
+    pub(crate) fn from_core(run: xa11y::TextRun) -> Self {
+        TextRun {
+            range: run.range.into(),
+            attributes: TextAttributes {
+                inner: run.attributes,
+            },
+        }
+    }
+}
+
 #[pymethods]
 impl TextRun {
     fn __repr__(&self) -> String {
@@ -546,12 +557,7 @@ impl Text {
             runs: page
                 .runs
                 .into_iter()
-                .map(|run| TextRun {
-                    range: run.range.into(),
-                    attributes: TextAttributes {
-                        inner: run.attributes,
-                    },
-                })
+                .map(TextRun::from_core)
                 .collect(),
             truncated: page.truncated,
             next_start: page.next_start,

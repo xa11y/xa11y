@@ -46,6 +46,7 @@ pub struct Event {
     provider: Arc<dyn xa11y::Provider>,
     sequence: u64,
     announcement: Option<AnnouncementInfo>,
+    time: f64,
 }
 
 /// What an `announcement` event carries (`Event.announcement`).
@@ -114,6 +115,7 @@ pub(crate) fn subscribe_options(
 impl Event {
     pub(crate) fn from_core(event: xa11y::Event, provider: Arc<dyn xa11y::Provider>) -> Self {
         let kind_str = event_kind_to_str(&event.kind).to_string();
+        let time = crate::capture::epoch_ms(event.time());
         let (state_flag, state_value) =
             if let xa11y::EventKind::StateChanged { flag, value } = event.kind {
                 (Some(state_flag_to_str(flag).to_string()), Some(value))
@@ -130,6 +132,7 @@ impl Event {
             target_data: event.target,
             provider,
             sequence: event.sequence,
+            time,
             announcement: event.announcement.map(Into::into),
         }
     }
@@ -184,6 +187,13 @@ impl Event {
     #[napi(getter)]
     pub fn sequence(&self) -> i64 {
         i64::try_from(self.sequence).unwrap_or(i64::MAX)
+    }
+
+    /// When the event was received, in milliseconds since the epoch (the
+    /// unit `Date` takes).
+    #[napi(getter)]
+    pub fn time(&self) -> f64 {
+        self.time
     }
 
     /// For announcement events: the origin and, where sent, the text.

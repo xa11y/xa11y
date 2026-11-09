@@ -32,8 +32,8 @@ pub mod mock;
 pub use app::App;
 pub use capabilities::{Capabilities, Capability, Platform, Support};
 pub use capture::{
-    Capture, CaptureError, CaptureOptions, CaptureStep, CapturedNode, CapturedText, RelationTarget,
-    Truncation,
+    CancelToken, Capture, CaptureError, CaptureOptions, CaptureStats, CaptureStep, CapturedNode,
+    CapturedText, RelationTarget, Truncation,
 };
 pub use config::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
 pub use element::{

@@ -27,6 +27,7 @@
 # Bindings expose this type and each of its members.
 mirrored = [
     "App",
+    "CancelToken",
     "Capabilities",
     "Element",
     "Event",
@@ -78,10 +79,11 @@ opaque = [
     { type = "EventSendError", reason = "Returned to a backend by EventSender::send once the subscription is gone; never reaches a binding." },
     { type = "Capture", reason = "Python exposes a frozen Capture class (started/finished as epoch seconds); JS returns a plain object (epoch milliseconds). Same split as Rect: members are covered by the per-binding tests (test_capture.py, capture.test.js)." },
     { type = "CapturedNode", reason = "Python exposes a frozen CapturedNode class; JS returns a plain object. Both carry the node's Element as `element`. Same split as Rect: covered by test_capture.py and capture.test.js." },
-    { type = "CapturedText", reason = "Python exposes a frozen CapturedText class; JS returns a plain { content, length, truncated } object. Same split as Rect." },
+    { type = "CapturedText", reason = "Python exposes a frozen CapturedText class; JS returns a plain { content, length, truncated, runs, runsTruncated } object. Same split as Rect." },
     { type = "CaptureError", reason = "Python exposes a frozen CaptureError class whose `error` is the xa11y exception instance; JS returns a plain { step, code, message } object, since a rejected Error cannot be held as a value in a resolved one." },
-    { type = "Truncation", reason = "Python exposes a frozen Truncation class (truthy when any limit cut); JS returns a plain { byDepth, byNodes, byText, byTime } object. Same split as Rect." },
-    { type = "CaptureStep", reason = "Crosses as identically-spelled snake_case strings ('children', 'identity', 'text', 'relations', 'cycle') via CaptureStep::to_snake_case, as CaptureError.step in both bindings; no binding matches on its variants." },
+    { type = "Truncation", reason = "Python exposes a frozen Truncation class (truthy when any limit cut); JS returns a plain { byDepth, byNodes, byText, byTime, byFormatting, byCancel } object. Same split as Rect." },
+    { type = "CaptureStep", reason = "Crosses as identically-spelled snake_case strings ('children', 'identity', 'text', 'formatting', 'relations', 'cycle') via CaptureStep::to_snake_case, as CaptureError.step in both bindings; no binding matches on its variants." },
+    { type = "CaptureStats", reason = "Capture.stats: Python exposes a frozen CaptureStats class; JS returns a plain { childrenReads, identityReads, textReads, formattingReads, relationReads, textBytes } object. Same split as Rect: covered by test_capture.py and capture.test.js." },
     { type = "RelationTarget", reason = "Crosses as an int (Python) / number (JS) index into Capture.nodes for a target inside the capture, or an Element for one outside it." },
     { type = "LiveRegionInfo", reason = "Python exposes a frozen LiveRegionInfo class; JS returns a plain { politeness, atomic, relevant } object. Same split as Rect: members are covered by the per-binding tests (test_semantics.py, semantics.test.js)." },
     { type = "Count", reason = "Crosses as an int (Python) / number (JS), or the string 'unknown' in both, matching its serde form." },

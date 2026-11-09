@@ -80,3 +80,58 @@ def test_text_detail_reads_document_text(app):
             len(text.content.encode("utf-16-le")) // 2 < text.length
         )
     assert sum(len(t.content.encode()) for t in texts) <= 4096
+
+
+_BACKENDS = {"linux": {"atspi"}, "darwin": {"ax"}, "win32": {"uia", "ia2"}}
+
+
+def test_a_capture_names_its_backend_and_counts_its_reads(app):
+    import sys
+
+    cap = app.capture(max_nodes=500)
+    assert cap.backend in _BACKENDS[sys.platform], cap.backend
+    stats = cap.stats
+    # Structure only: an identity read per node (plus any that vanished or
+    # closed a cycle and were dropped), children read on each node the walk
+    # expanded, and nothing else.
+    assert stats.identity_reads >= len(cap)
+    assert 1 <= stats.children_reads <= len(cap)
+    assert stats.text_reads == stats.formatting_reads == stats.relation_reads == 0
+    assert stats.text_bytes == 0
+
+
+def test_capture_cost_grows_with_what_it_reads(app):
+    small = app.capture(max_nodes=10)
+    large = app.capture(max_nodes=2000)
+    assert len(small) <= 10
+    assert small.stats.identity_reads <= large.stats.identity_reads
+    # Reported, not asserted against a threshold: CI machines vary too much.
+    print(
+        f"capture latency: {len(small)} nodes in "
+        f"{(small.finished - small.started) * 1000:.1f} ms, {len(large)} nodes in "
+        f"{(large.finished - large.started) * 1000:.1f} ms"
+    )
+
+
+def test_formatting_detail_runs_lie_within_the_text(app):
+    cap = app.capture(max_nodes=2000, detail={"formatting"}, max_runs=256)
+    texts = [n.text for n in cap.nodes if n.text is not None]
+    runs = [r for t in texts for r in (t.runs or [])]
+    assert len(runs) <= 256
+    assert cap.stats.formatting_reads == len(runs)
+    assert cap.truncated.by_formatting == any(t.runs_truncated for t in texts)
+    for text in texts:
+        for run in text.runs or []:
+            assert 0 <= run.range.start <= run.range.end <= text.length
+
+
+def test_a_cancel_from_another_thread_stops_the_capture(app):
+    import threading
+
+    token = xa11y.CancelToken()
+    threading.Timer(0.0, token.cancel).start()
+    time.sleep(0.05)
+    cap = app.capture(max_nodes=20000, cancel=token)
+    assert token.is_cancelled()
+    assert cap.truncated.by_cancel
+    assert len(cap) == 1

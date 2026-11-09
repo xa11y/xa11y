@@ -692,12 +692,16 @@ fn tool_definition(name: &str) -> Value {
                         "Extra reads per node. `text`: the full text of each element \
                          with a text interface, as `text` (`content`, `length` in UTF-16 \
                          units, `truncated`), within {} bytes in total, so document \
-                         text that no action needs is still read. `relations`: \
+                         text that no action needs is still read. `formatting`: \
+                         `text` as well, plus `text.runs`, each `start`, `end` (UTF-16, \
+                         0-based, half-open) and `attributes`, within {} runs in total. \
+                         `relations`: \
                          `relations` maps each reported kind (`labelled_by`, \
                          `controls`, ...) to its targets, each a `ref`; a target outside \
                          the result also carries `role`, `name` and `outside: true`. \
                          Each costs a platform read per node.",
-                        crate::capture::DEFAULT_MAX_TEXT_BYTES
+                        crate::capture::DEFAULT_MAX_TEXT_BYTES,
+                        crate::capture::DEFAULT_MAX_RUNS
                     ),
                 }),
             );
@@ -1499,7 +1503,8 @@ fn events_poll_description() -> String {
          block: an empty `events` means nothing has happened yet, not that the \
          subscription is broken.\n\n\
          Each event carries a `kind`, a `sequence` (monotonic, so a gap is exactly \
-         what was dropped), `at_ms` since the subscription started, and the `target` \
+         what was dropped), `at_ms` since the subscription started, `time_ms` (when it was received, \
+         milliseconds since the Unix epoch), and the `target` \
          element in the same shape `find` returns — bounds, states and all. A \
          `state_changed` event also carries `state_flag` and `state_value`. A \
          `text_changed` event carries `text_change` when the platform reports the \
@@ -1938,8 +1943,13 @@ fn tool_tree(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
         truncated.insert("by_text".into(), json!(cap.truncated.by_text));
         truncated.insert("text_limit_bytes".into(), json!(cap.options.max_text_bytes));
     }
+    if detail.formatting {
+        truncated.insert("by_formatting".into(), json!(cap.truncated.by_formatting));
+        truncated.insert("run_limit".into(), json!(cap.options.max_runs));
+    }
     out.insert("truncated".into(), Value::Object(truncated));
     out.insert("vanished".into(), json!(cap.vanished));
+    out.insert("backend".into(), json!(cap.backend));
     out.insert("tree".into(), node);
     Ok(ToolOutput::json(Value::Object(out)))
 }
@@ -1948,11 +1958,12 @@ fn tool_tree(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
 #[derive(Debug, Clone, Copy, Default)]
 struct TreeDetail {
     text: bool,
+    formatting: bool,
     relations: bool,
 }
 
 /// The `detail` names `tree` accepts.
-const TREE_DETAILS: &[&str] = &["text", "relations"];
+const TREE_DETAILS: &[&str] = &["text", "formatting", "relations"];
 
 fn tree_detail(args: &Value) -> CliResult<TreeDetail> {
     let mut detail = TreeDetail::default();
@@ -1964,6 +1975,10 @@ fn tree_detail(args: &Value) -> CliResult<TreeDetail> {
     for item in items {
         match item.as_str() {
             Some("text") => detail.text = true,
+            Some("formatting") => {
+                detail.text = true;
+                detail.formatting = true;
+            }
             Some("relations") => detail.relations = true,
             Some(other) => {
                 return Err(usage(format!(
@@ -1999,6 +2014,7 @@ fn tree_json(
         .max_depth(max_depth)
         .max_nodes(max_nodes)
         .text(detail.text)
+        .formatting(detail.formatting)
         .relations(detail.relations);
     let cap = target.capture(&options)?;
 
@@ -2016,6 +2032,7 @@ fn tree_json(
             let key = match err.step {
                 crate::CaptureStep::Children | crate::CaptureStep::Cycle => "children_error",
                 crate::CaptureStep::Text => "text_error",
+                crate::CaptureStep::Formatting => "formatting_error",
                 crate::CaptureStep::Relations => "relations_error",
                 // Identity only feeds cycle detection and relation
                 // resolution; its failure shows up there.
@@ -2034,14 +2051,26 @@ fn tree_json(
             }
         }
         if let Some(text) = &node.text {
-            obj.insert(
-                "text".into(),
-                json!({
-                    "content": text.content,
-                    "length": text.length,
-                    "truncated": text.truncated,
-                }),
-            );
+            let mut t = json!({
+                "content": text.content,
+                "length": text.length,
+                "truncated": text.truncated,
+            });
+            if let Some(runs) = &text.runs {
+                let runs = runs
+                    .iter()
+                    .map(|run| {
+                        Ok(json!({
+                            "start": run.range.start,
+                            "end": run.range.end,
+                            "attributes": cli::json_without_nulls("text attributes", &run.attributes)?,
+                        }))
+                    })
+                    .collect::<CliResult<Vec<_>>>()?;
+                t["runs"] = Value::Array(runs);
+                t["runs_truncated"] = json!(text.runs_truncated);
+            }
+            obj.insert("text".into(), t);
         }
         let relations: Map<String, Value> = node
             .relations
@@ -5893,6 +5922,7 @@ mod tests {
             TREE_MAX_NODES,
             TreeDetail {
                 text: true,
+                formatting: false,
                 relations: true,
             },
             true,
@@ -5914,6 +5944,7 @@ mod tests {
             TREE_MAX_NODES,
             TreeDetail {
                 text: true,
+                formatting: false,
                 relations: false,
             },
             true,
@@ -5924,11 +5955,29 @@ mod tests {
         assert_eq!(notes["text"]["content"], "Hello 😀 world\nsecond line");
         assert_eq!(notes["text"]["length"], 26);
         assert_eq!(notes["text"]["truncated"], false);
+        assert!(notes["text"].get("runs").is_none(), "{notes}");
+
+        let formatting = tree_detail(&args(json!({ "detail": ["formatting"] }))).expect("parses");
+        assert!(formatting.text && formatting.formatting);
+        let (styled, _) = tree_json(
+            &table_target(),
+            TREE_DEFAULT_MAX_DEPTH,
+            TREE_MAX_NODES,
+            formatting,
+            true,
+            &refs,
+        )
+        .expect("tree");
+        let notes = find(&styled, "Notes");
+        let first = &notes["text"]["runs"][0];
+        assert_eq!(first["start"], 0);
+        assert_eq!(first["attributes"]["font_weight"], 700);
+        assert_eq!(notes["text"]["runs_truncated"], false);
     }
 
     #[test]
     fn an_unknown_tree_detail_is_refused() {
-        for detail in [json!(["formatting"]), json!("text"), json!([1])] {
+        for detail in [json!(["styles"]), json!("text"), json!([1])] {
             let err = tree_detail(&args(json!({ "detail": detail }))).expect_err("refused");
             assert_eq!(failure_kind(&err), "invalid_arguments", "{detail}");
         }

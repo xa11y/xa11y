@@ -3,6 +3,8 @@ against the mock subscription."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 import xa11y
 from xa11y._native import _make_test_app
@@ -20,6 +22,9 @@ def test_events_are_numbered_and_announcements_carry_their_payload():
         events = _drain(sub)
         assert [e.sequence for e in events] == list(range(len(events)))
         assert sub.dropped == 0
+    times = [e.time for e in events]
+    assert times == sorted(times)
+    assert all(abs(t - time.time()) < 60 for t in times)
     kinds = [e.event_type for e in events]
     assert kinds == ["focus_changed", "announcement", "announcement", "announcement"]
     assert events[0].announcement is None

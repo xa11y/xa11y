@@ -361,8 +361,43 @@ class LiveRegionInfo:
 
 # ── Bounded capture ──────────────────────────────────────────────────────────
 
-CaptureDetailName = Literal["text", "relations"]
-CaptureStepName = Literal["children", "identity", "text", "relations", "cycle"]
+CaptureDetailName = Literal["text", "formatting", "relations"]
+CaptureStepName = Literal["children", "identity", "text", "formatting", "relations", "cycle"]
+
+class CancelToken:
+    """Stops a capture in progress. Pass it as ``capture(cancel=token)`` and
+    call :meth:`cancel` from any thread: the walk checks it between nodes."""
+
+    def __new__(cls) -> CancelToken: ...
+    def cancel(self) -> None:
+        """Ask every capture holding this token to stop. Idempotent."""
+    def is_cancelled(self) -> bool:
+        """Whether :meth:`cancel` has been called."""
+    def __repr__(self) -> str: ...
+
+class CaptureStats:
+    """How many platform reads a capture made, by kind. A structure-only
+    capture makes only children and identity reads."""
+
+    @property
+    def children_reads(self) -> int:
+        """Child-list reads, one per node whose children were read."""
+    @property
+    def identity_reads(self) -> int:
+        """Identity reads, one per node."""
+    @property
+    def text_reads(self) -> int:
+        """Text reads (``"text"`` detail)."""
+    @property
+    def formatting_reads(self) -> int:
+        """Attribute runs read (``"formatting"`` detail)."""
+    @property
+    def relation_reads(self) -> int:
+        """Relation reads (``"relations"`` detail)."""
+    @property
+    def text_bytes(self) -> int:
+        """Bytes of text read."""
+    def __repr__(self) -> str: ...
 
 class Truncation:
     """Which limits dropped something. A limit that was reached without
@@ -380,6 +415,12 @@ class Truncation:
     @property
     def by_time(self) -> bool:
         """The time budget ran out before the walk finished."""
+    @property
+    def by_formatting(self) -> bool:
+        """Attribute runs past ``max_runs`` were left out."""
+    @property
+    def by_cancel(self) -> bool:
+        """The ``cancel`` token was cancelled before the walk finished."""
     def any(self) -> bool:
         """Whether any limit dropped something."""
     def __bool__(self) -> bool: ...
@@ -397,6 +438,13 @@ class CapturedText:
     @property
     def truncated(self) -> bool:
         """Whether ``content`` stops short of ``length``."""
+    @property
+    def runs(self) -> list[TextRun] | None:
+        """With ``detail={"formatting"}``: the attribute runs over
+        ``content``."""
+    @property
+    def runs_truncated(self) -> bool:
+        """Whether runs past ``max_runs`` were left out of ``runs``."""
     def __repr__(self) -> str: ...
 
 class CaptureError:
@@ -405,7 +453,7 @@ class CaptureError:
     @property
     def step(self) -> CaptureStepName:
         """What was being read: ``"children"``, ``"identity"``, ``"text"``,
-        ``"relations"`` or ``"cycle"``."""
+        ``"formatting"``, ``"relations"`` or ``"cycle"``."""
     @property
     def error(self) -> XA11yError:
         """The exception the read raised, as an xa11y exception instance."""
@@ -477,6 +525,13 @@ class Capture:
     @property
     def finished(self) -> float:
         """When the walk ended, in seconds since the epoch."""
+    @property
+    def backend(self) -> str | None:
+        """Which platform API read the nodes: ``"atspi"``, ``"ax"``,
+        ``"uia"``, ``"ia2"`` or ``"mock"``."""
+    @property
+    def stats(self) -> CaptureStats:
+        """How many platform reads the capture made, by kind."""
     def root(self) -> CapturedNode:
         """The root node."""
     def subtree(self, index: int) -> list[CapturedNode]:
@@ -714,6 +769,9 @@ class Event:
     @property
     def announcement(self) -> AnnouncementInfo | None:
         """For announcement events: the origin and, where sent, the text."""
+    @property
+    def time(self) -> float:
+        """When the event was received, in seconds since the epoch."""
     def __repr__(self) -> str: ...
 
 AnnouncementOriginName = Literal["request", "live_region", "alert"]
@@ -946,6 +1004,8 @@ class App:
         max_text_bytes: int = 65536,
         detail: Iterable[CaptureDetailName] | None = None,
         timeout: float | None = None,
+        max_runs: int = 4096,
+        cancel: CancelToken | None = None,
     ) -> Capture:
         """Read the subtree into a bounded :class:`Capture`: every node read,
         pre-order, with which limits cut it. Read breadth-first, so when
@@ -1058,6 +1118,8 @@ class ShellSurface:
         max_text_bytes: int = 65536,
         detail: Iterable[CaptureDetailName] | None = None,
         timeout: float | None = None,
+        max_runs: int = 4096,
+        cancel: CancelToken | None = None,
     ) -> Capture:
         """Read the subtree into a bounded :class:`Capture`: every node read,
         pre-order, with which limits cut it. Read breadth-first, so when
@@ -1216,6 +1278,8 @@ class Element:
         max_text_bytes: int = 65536,
         detail: Iterable[CaptureDetailName] | None = None,
         timeout: float | None = None,
+        max_runs: int = 4096,
+        cancel: CancelToken | None = None,
     ) -> Capture:
         """Read the subtree into a bounded :class:`Capture`: every node read,
         pre-order, with which limits cut it. Read breadth-first, so when
@@ -1427,6 +1491,8 @@ class Locator:
         max_text_bytes: int = 65536,
         detail: Iterable[CaptureDetailName] | None = None,
         timeout: float | None = None,
+        max_runs: int = 4096,
+        cancel: CancelToken | None = None,
     ) -> Capture:
         """Read the subtree into a bounded :class:`Capture`: every node read,
         pre-order, with which limits cut it. Read breadth-first, so when

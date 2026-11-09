@@ -149,10 +149,16 @@ export type RelationKindName =
   | 'linked';
 
 /** Which read of a captured node failed (\`CaptureError.step\`). */
-export type CaptureStepName = 'children' | 'identity' | 'text' | 'relations' | 'cycle';
+export type CaptureStepName =
+  | 'children'
+  | 'identity'
+  | 'text'
+  | 'formatting'
+  | 'relations'
+  | 'cycle';
 
 /** Extra reads a capture can make (\`CaptureOptions.detail\`). */
-export type CaptureDetailName = 'text' | 'relations';
+export type CaptureDetailName = 'text' | 'formatting' | 'relations';
 
 /** A platform xa11y has a backend for. */
 export type PlatformName = 'linux' | 'macos' | 'windows';

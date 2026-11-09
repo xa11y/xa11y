@@ -60,8 +60,8 @@ pub use xa11y_core::{NativeObject, NodeIdentity};
 // Bounded capture (see `xa11y_core::capture`).
 pub use xa11y_core::capture;
 pub use xa11y_core::{
-    Capture, CaptureError, CaptureOptions, CaptureStep, CapturedNode, CapturedText, RelationTarget,
-    Truncation,
+    CancelToken, Capture, CaptureError, CaptureOptions, CaptureStats, CaptureStep, CapturedNode,
+    CapturedText, RelationTarget, Truncation,
 };
 
 // Document semantics (see `xa11y_core::semantics`).

@@ -22,6 +22,7 @@ import { EventEmitter } from 'node:events';
 // Re-export Rust-generated classes (except App and _NativeSubscription,
 // which are shadowed by the JS wrapper classes below).
 export {
+  CancelToken,
   Capabilities,
   Element,
   Event,
@@ -53,6 +54,7 @@ export type {
   CapturedNode,
   CapturedRelation,
   CapturedText,
+  CaptureStats,
   CellInfo,
   CheckedState,
   ClickOptions,
