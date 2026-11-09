@@ -2500,7 +2500,10 @@ mod tests {
     // wrapping the call in manual tree dumps.
 
     /// Short wait that exceeds at least one 100 ms poll tick.
-    const SHORT_WAIT: Duration = Duration::from_millis(250);
+    /// Long enough for a scroll and the poll that observes it on a loaded
+    /// runner: no poll runs past the deadline (#531), and one poll of the
+    /// mock tree has been seen to take ~100 ms on macOS CI.
+    const SHORT_WAIT: Duration = Duration::from_secs(1);
 
     #[test]
     fn wait_visible_timeout_diagnosis_never_matched() {
@@ -2974,12 +2977,7 @@ mod tests {
     fn a_stale_handle_during_auto_scroll_is_retried_on_the_next_poll() {
         let (provider, loc) =
             ScrollingProvider::locator(ScrollMode::StaleOnce, HiddenReason::ScrolledOut);
-        // Three polls (stale, scroll, observe) must fit, and a scroll's
-        // re-check is no longer granted past the deadline (#531), so
-        // SHORT_WAIT is too tight for a slow runner.
-        loc.with_timeout(Duration::from_secs(2))
-            .press()
-            .expect("the second poll's fresh handle scrolls");
+        loc.press().expect("the second poll's fresh handle scrolls");
         assert_eq!(provider.calls(), 2);
         assert!(acted(&provider, "press"));
     }
@@ -3241,7 +3239,7 @@ mod wait_stable_tests {
         let frames = (0..200).map(|i| (Some(rect(i * 10)), true)).collect();
         let (_p, loc) = animated(frames);
         let err = loc
-            .wait_stable(Duration::from_millis(350))
+            .wait_stable(Duration::from_secs(1))
             .expect_err("never settles");
         let obs = observed(&err);
         assert!(obs.starts_with("bounds still changing: {x="), "{obs}");
@@ -3288,21 +3286,21 @@ mod wait_stable_tests {
 
     #[test]
     fn a_timeout_after_a_hidden_poll_reports_the_restarted_window() {
-        // Poll 1 sees it hidden; poll 2 (the last before the deadline) sees
-        // it visible. Earlier hidden time cannot count as unchanged bounds.
-        // A third poll cannot start before 200 ms (two 100 ms intervals), and
-        // no poll runs past the deadline (#531), so any timeout under that
-        // gives exactly two; 195 ms leaves a slow runner room for poll 2.
-        let (_p, loc) = animated(vec![(Some(rect(110)), false), (Some(rect(110)), true)]);
-        let err = loc
-            .wait_stable(Duration::from_millis(195))
-            .expect_err("a hidden poll resets the comparison");
-        let observed = observed(&err);
+        // Driven on the window itself, not through wall-clock polls: no poll
+        // runs past the deadline (#531), so how many polls fit a short wait
+        // depends on the runner's load. The diagnosis wording for a 0 ms
+        // window is covered by `a_zero_timeout_explains_...`.
+        let mut stability = StableBounds::default();
+        let at = Duration::from_millis;
+        assert!(!stability.observe(Some(rect(110)), at(0)));
+        // Hidden: earlier visible time cannot count as unchanged bounds.
+        assert!(!stability.observe(None, at(400)));
         assert!(
-            observed.contains("observed unchanged for 0 ms"),
-            "{observed}"
+            !stability.observe(Some(rect(110)), at(900)),
+            "900 ms since the first sighting, but the hidden poll restarted the window"
         );
-        assert!(observed.contains("at least 750 ms"), "{observed}");
+        assert_eq!(stability.unchanged_for(at(900)), Some(Duration::ZERO));
+        assert!(stability.observe(Some(rect(110)), at(1650)));
     }
 
     #[test]
@@ -3351,9 +3349,11 @@ mod wait_stable_tests {
 
     #[test]
     fn plateau_timeout_keeps_the_last_change_and_current_window() {
+        // 600 ms: room for the second poll, and still short of the 750 ms
+        // the settled rect(40) would need to count as stable.
         let (_p, loc) = animated(vec![(Some(rect(0)), true), (Some(rect(40)), true)]);
         let err = loc
-            .wait_stable(Duration::from_millis(350))
+            .wait_stable(Duration::from_millis(600))
             .expect_err("too short");
         let observation = observed(&err);
         assert!(
