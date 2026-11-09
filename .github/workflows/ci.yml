@@ -393,6 +393,10 @@ jobs:
         run: cargo build --workspace
 
       # ── Tauri app (not in workspace — has its own Cargo.lock) ──────
+      - name: Install Linux startup diagnostic tool
+        if: matrix.app == 'tauri' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y strace
+
       - name: Cache Tauri test app build
         if: matrix.app == 'tauri'
         uses: actions/cache@v6
@@ -585,6 +589,19 @@ jobs:
           if [ ! -f test-apps/cocoa/xa11y-cocoa-test-app ]; then
             make -C test-apps/cocoa build
           fi
+
+      - name: Check repeated Linux Tauri startup (#638)
+        if: matrix.app == 'tauri' && runner.os == 'Linux'
+        timeout-minutes: 6
+        run: |
+          .venv/bin/python -u - <<'PY'
+          from tests.harness.launch import _kill_app, _launch_app
+          # Fail on the first bad startup; never retry a failed discovery.
+          for attempt in range(10):
+              print(f"Fresh Tauri startup {attempt + 1}/10", flush=True)
+              process, _, _ = _launch_app("tauri")
+              _kill_app(process)
+          PY
 
       # ── Run harness ───────────────────────────────────────────────
       # On Linux, DISPLAY / D-Bus / AT-SPI (+ the egui/gtk window manager) were

@@ -52,12 +52,28 @@ fn query_ia2(acc: &IAccessible) -> ProbeResult<Option<Accessible2>> {
     let service: IServiceProvider = match acc.cast() {
         Ok(service) => service,
         Err(error) if error.code() == E_NOINTERFACE => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            return Err(windows::core::Error::new(
+                error.code(),
+                format!(
+                    "IAccessible({:p}).QueryInterface(IServiceProvider): {error}",
+                    acc.as_raw()
+                ),
+            )
+            .into())
+        }
     };
     match unsafe { service.QueryService::<Accessible2>(&IAccessible::IID) } {
         Ok(ia2) => Ok(Some(ia2)),
         Err(error) if error.code() == E_NOINTERFACE => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(windows::core::Error::new(
+            error.code(),
+            format!(
+                "IAccessible({:p}).QueryService(IAccessible2): {error}",
+                acc.as_raw()
+            ),
+        )
+        .into()),
     }
 }
 
@@ -162,7 +178,9 @@ fn capture(root: &IAccessible) -> ProbeResult<Vec<Node>> {
                 // Returned variants own their contents. decode_children borrows them
                 // and clones interface references before these variants are cleared.
                 unsafe {
-                    AccessibleChildren(&node.object, 0, &mut values, &mut obtained)?;
+                    AccessibleChildren(&node.object, 0, &mut values, &mut obtained).map_err(
+                        |e| format!("AccessibleChildren at depth {depth}, count={count}: {e}"),
+                    )?;
                 }
                 for child in decode_children(&node.object, &values, obtained)?
                     .into_iter()
@@ -212,23 +230,35 @@ fn identity(ia2: &Accessible2) -> ProbeResult<(i32, HWND)> {
     let mut id = 0;
     let mut hwnd = HWND::default();
     unsafe {
-        (ia2.vtable().unique_id)(ia2.as_raw(), &mut id).ok()?;
-        (ia2.vtable().window_handle)(ia2.as_raw(), &mut hwnd).ok()?;
+        (ia2.vtable().unique_id)(ia2.as_raw(), &mut id)
+            .ok()
+            .map_err(|e| format!("IAccessible2({:p}).uniqueID: {e}", ia2.as_raw()))?;
+        (ia2.vtable().window_handle)(ia2.as_raw(), &mut hwnd)
+            .ok()
+            .map_err(|e| {
+                format!(
+                    "IAccessible2({:p}, uniqueID={id}).windowHandle: {e}",
+                    ia2.as_raw()
+                )
+            })?;
     }
     Ok((id, hwnd))
 }
 
 pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<serde_json::Value> {
+    eprintln!("IA2 identity phase: acquire root pid={pid}, HWND={hwnd:?}, active={active:?}");
     check_window(hwnd, pid)?;
     let generation = process_generation(pid)?;
     let mut raw = std::ptr::null_mut();
     unsafe {
-        AccessibleObjectFromWindow(hwnd, 0xffff_fffc, &IAccessible::IID, &mut raw)?;
+        AccessibleObjectFromWindow(hwnd, 0xffff_fffc, &IAccessible::IID, &mut raw)
+            .map_err(|e| format!("AccessibleObjectFromWindow(HWND={hwnd:?}, pid={pid}): {e}"))?;
     }
     if raw.is_null() {
         return Err("AccessibleObjectFromWindow succeeded with a null interface".into());
     }
     let root = unsafe { IAccessible::from_raw(raw) };
+    eprintln!("IA2 identity phase: capture browser chrome");
     let nodes = capture(&root)?;
     let mut tabs = Vec::new();
     for node in &nodes {
@@ -240,8 +270,17 @@ pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<
         return Err(format!("expected one fixture tab {active:?}, found {}", tabs.len()).into());
     }
     unsafe {
-        tabs[0].object.accDoDefaultAction(&tabs[0].child.into())?;
+        tabs[0]
+            .object
+            .accDoDefaultAction(&tabs[0].child.into())
+            .map_err(|e| {
+                format!(
+                    "accDoDefaultAction(tab={active:?}, child={}): {e}",
+                    tabs[0].child
+                )
+            })?;
     }
+    eprintln!("IA2 identity phase: wait for active document {active:?}");
     let start = Instant::now();
     let (document, examined) = loop {
         check_window(hwnd, pid)?;
@@ -318,6 +357,7 @@ pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<
     if document.child != 0 {
         return Err("browser document unexpectedly represented as simple MSAA child".into());
     }
+    eprintln!("IA2 identity phase: validate document IDs for {active:?}");
     let ia2 = query_ia2(&document.object)?
         .ok_or("selected document does not expose IA2 via QueryService")?;
     let (id, event_window) = identity(&ia2)?;
@@ -535,6 +575,8 @@ mod tests {
             error.downcast_ref::<windows::core::Error>().unwrap().code(),
             E_ACCESSDENIED
         );
+        assert!(error.to_string().contains("QueryService(IAccessible2)"));
+        assert!(error.to_string().contains("IAccessible(0x"));
         assert_eq!(queries.load(Ordering::SeqCst), 2);
         drop(absent);
         drop(denied);

@@ -388,7 +388,75 @@ def test_paused_browser_detaches_after_probe_failure(monkeypatch):
     monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **kw: kernel, raising=False)
     job = fixture.BrowserJob.__new__(fixture.BrowserJob)
     job.verify_event_window = lambda hwnd, pid, top: calls.append(("verify", pid))
-    with pytest.raises(RuntimeError, match="probe failed"):
-        with job.paused_owner(100, 42):
-            raise RuntimeError("probe failed")
+    with pytest.raises(RuntimeError, match="probe failed"), job.paused_owner(100, 42):
+        raise RuntimeError("probe failed")
     assert calls == [("verify", 42), ("pause", 42), ("detach", 42)]
+
+
+def test_timeout_keeps_native_phase_and_partial_output_and_cleans_owned_job():
+    import subprocess
+
+    job = Job()
+
+    def probe(command, **kwargs):
+        raise subprocess.TimeoutExpired(
+            command, 30, output=b"x" * 9000, stderr=b"IA2 phase: embedded objects"
+        )
+
+    with pytest.raises(AssertionError, match="exceeded 30s") as failure:
+        fixture.run_fixture(
+            Path("probe"), Path("browser"), backend=lambda: job, run=probe
+        )
+    assert "embedded objects" in str(failure.value)
+    assert fixture.MARKERS[0] in str(failure.value)
+    assert "pid=42" in str(failure.value)
+    assert len(str(failure.value)) < 9000
+    assert isinstance(failure.value.__cause__, subprocess.TimeoutExpired)
+    assert job.closed
+
+
+def test_consumers_get_their_own_budget_on_each_rich_tab(monkeypatch):
+    import json
+
+    monkeypatch.setenv("XA11Y_IA2_CONSUMERS", "1")
+    job = Job()
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert kwargs["timeout"] == 30
+        if command[0] == "probe":
+            value = report(command[-3], command[-1])
+            value["rich_text_table"] = {"source": "ia2"}
+        else:
+            assert command[-1] == "42"
+            assert command[-2].endswith("windows_ia2_consumers.py")
+            value = dict.fromkeys(("python", "javascript", "cli", "mcp"), True)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(value), stderr="")
+
+    result = fixture.run_fixture(
+        Path("probe"), Path("browser"), backend=lambda: job, run=run
+    )
+    assert len(calls) == 4
+    assert all(report["consumer_sources"]["mcp"] for report in result["reports"])
+    assert job.closed
+
+
+def test_consumer_failure_is_not_hidden_by_a_successful_native_probe(monkeypatch):
+    import json
+
+    monkeypatch.setenv("XA11Y_IA2_CONSUMERS", "1")
+    job = Job()
+
+    def run(command, **kwargs):
+        if command[0] == "probe":
+            value = report(command[-3], command[-1])
+            value["rich_text_table"] = {"source": "ia2"}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(value), stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="CLI read failed")
+
+    with pytest.raises(AssertionError, match="consumer sources.*CLI read failed"):
+        fixture.run_fixture(
+            Path("probe"), Path("browser"), backend=lambda: job, run=run
+        )
+    assert job.closed

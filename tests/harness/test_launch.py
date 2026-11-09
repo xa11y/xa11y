@@ -462,6 +462,16 @@ def test_a_discovery_failure_keeps_the_harness_context(monkeypatch, error_name):
 
     monkeypatch.setattr(launch.subprocess, "Popen", popen)
 
+    if sys.platform == "linux":
+        from tests.harness import linux_process_diagnostics
+
+        def collect(pid):
+            assert pid == holder["proc"].pid
+            assert holder["proc"].poll() is None, "wait evidence must precede teardown"
+            return "owned process blocked in io_schedule"
+
+        monkeypatch.setattr(linux_process_diagnostics, "collect", collect)
+
     with pytest.raises(RuntimeError) as info:
         launch._launch_app("fake")
 
@@ -471,6 +481,8 @@ def test_a_discovery_failure_keeps_the_harness_context(monkeypatch, error_name):
     assert "('Other', 4242)" in message
     assert f"of its {launch.STARTUP_TIMEOUT}s budget" in message
     assert "not found after" not in message
+    if sys.platform == "linux":
+        assert "owned process blocked in io_schedule" in message
     # The spawned app is reaped, not left running.
     assert holder["proc"].poll() is not None
 
