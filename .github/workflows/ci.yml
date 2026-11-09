@@ -594,7 +594,7 @@ jobs:
         if: matrix.app == 'tauri' && runner.os == 'Linux'
         timeout-minutes: 6
         run: |
-          .venv/bin/python -u - <<'PY'
+          .venv-integ/bin/python -u - <<'PY'
           from tests.harness.launch import _kill_app, _launch_app
           # Fail on the first bad startup; never retry a failed discovery.
           for attempt in range(10):
