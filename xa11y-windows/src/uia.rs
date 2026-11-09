@@ -4061,52 +4061,46 @@ impl WindowsProvider {
         app: &ElementData,
         identity: SyntheticAppIdentity,
     ) -> Result<ElementData> {
-        // Strict path: re-acquire via HWND to activate
-        // AccessKit's provider, then populate the snapshot
-        // that build_element_data reads. A failure here is a
-        // real COM failure — the fallback would silently hand
-        // back a window whose provider was never activated
-        // (tenet 1).
-        let el = self.reacquire_via_hwnd(el).map_err(|e| Error::Platform {
+        // native_windows_of_pid_with already obtained this element with
+        // ElementFromHandleBuildCache and our full batch request. That HWND
+        // lookup activates AccessKit too. Reacquiring and rebuilding the
+        // same cache here adds another cross-process read during UWP window
+        // transitions (#670); consume the snapshot we actually enumerated.
+        let hwnd = unsafe { el.CachedNativeWindowHandle() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
-            message: format!("re-acquiring a top-level window via HWND failed: {e}"),
+            message: format!("reading a top-level window snapshot's native HWND failed: {e}"),
         })?;
-        let reacquired_pid = unsafe { el.CurrentProcessId() }.map_err(|e| Error::Platform {
+        let snapshot_pid = unsafe { el.CachedProcessId() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
-            message: format!(
-                "reading the process id of a re-acquired top-level window failed: {e}"
-            ),
+            message: format!("reading a top-level window snapshot's process id failed: {e}"),
         })? as u32;
-        let belongs_to_app = if reacquired_pid == identity.pid {
-            true
-        } else {
-            let hwnd = uia_call(|| unsafe { el.CurrentNativeWindowHandle() })?;
-            // A valid UWP frame still reports ApplicationFrameHost's UIA
-            // process id. Revalidate its current app attribution instead of
-            // mistaking that expected host/app split for HWND reuse.
-            !hwnd.0.is_null()
-                && crate::uwp::is_frame(hwnd)
-                && crate::uwp::PidFilter::for_pid(identity.pid).owns(hwnd)?
-        };
+        if !hwnd.0.is_null() && !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return Err(Error::Platform {
+                code: i64::from(UIA_E_ELEMENTNOTAVAILABLE as i32),
+                message: "the enumerated top-level HWND no longer exists".into(),
+            });
+        }
+        // Some virtual roots have no HWND property. They remain bound to
+        // their UIA object; only an exact app PID can attribute that case.
+        let native_pid = (!hwnd.0.is_null()).then(|| hwnd_pid(hwnd));
+        let owned_frame = !hwnd.0.is_null()
+            && crate::uwp::is_frame(hwnd)
+            && crate::uwp::PidFilter::for_pid(identity.pid).owns(hwnd)?;
+        let belongs_to_app =
+            window_snapshot_belongs_to_app(snapshot_pid, native_pid, identity.pid, owned_frame);
         if !belongs_to_app {
             return Err(Error::stale(
                 xa11y_core::StaleReason::IdentityChanged,
                 format!(
-                    "handle:{} (pid {}); top-level window HWND was reused by pid {reacquired_pid}",
+                    "handle:{} (pid {}); top-level HWND {hwnd:?} snapshot pid {snapshot_pid} no longer matches native owner pid {native_pid:?}",
                     app.handle, identity.pid
                 ),
             ));
         }
-        // Re-check the process generation after resolving the
-        // numeric HWND. HWNDs are reusable too; together these
-        // checks ensure ElementFromHandle cannot redirect this
-        // saved App to another process or process generation.
+        // Validate current native ownership and the app's process generation
+        // even though reading the UIA snapshot requires no further RPC.
         validate_synthetic_app_identity(app.handle, identity, process_creation_time(identity.pid))?;
-        let el = self.populate_cache(dpi, &el).map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("populating the re-acquired top-level window cache failed: {e}"),
-        })?;
-        let mut window_data = self.build_element_data(dpi, &el, Some(identity.pid))?;
+        let mut window_data = self.build_element_data(dpi, el, Some(identity.pid))?;
         if window_data.name.is_none() {
             // Error-preserving live name read (tenet 1): a
             // CurrentName COM failure must not collapse into
@@ -4146,6 +4140,24 @@ impl WindowsProvider {
 // coords.rs. The methods bound to `_dpi` touch no coordinates, and their
 // scope is a defensive habit, not a requirement: it keeps a coordinate call
 // added to one of them later from needing a scope threaded in first.
+fn window_snapshot_belongs_to_app(
+    snapshot_pid: u32,
+    native_pid: Option<u32>,
+    app_pid: u32,
+    owned_frame: bool,
+) -> bool {
+    let Some(native_pid) = native_pid else {
+        return snapshot_pid == app_pid;
+    };
+    if owned_frame {
+        // UIA can expose the frame host or its hosted app. Current
+        // CoreWindow/AUMID attribution must independently prove ownership.
+        snapshot_pid == native_pid || snapshot_pid == app_pid
+    } else {
+        snapshot_pid == app_pid && native_pid == app_pid
+    }
+}
+
 /// Refuse to start a UIA operation once the caller's deadline has passed
 /// (#531), naming it as the pending call.
 ///
@@ -10855,6 +10867,27 @@ mod tests {
 
     fn subscriber_failure() -> windows::core::Error {
         EVENT_E_ALL_SUBSCRIBERS_FAILED.ok().unwrap_err()
+    }
+
+    #[test]
+    fn window_snapshot_ownership_rejects_reuse_and_requires_proved_uwp_attribution() {
+        for (snapshot, native, app, owned_frame, expected) in [
+            (42, Some(42), 42, false, true),
+            (42, Some(99), 42, false, false),
+            (99, Some(42), 42, false, false),
+            (7, Some(7), 42, true, true),
+            (42, Some(7), 42, true, true),
+            (99, Some(7), 42, true, false),
+            (7, Some(7), 42, false, false),
+            (42, None, 42, false, true),
+            (7, None, 42, false, false),
+        ] {
+            assert_eq!(
+                window_snapshot_belongs_to_app(snapshot, native, app, owned_frame),
+                expected,
+                "snapshot={snapshot}, native={native:?}, app={app}, owned_frame={owned_frame}"
+            );
+        }
     }
 
     #[test]
