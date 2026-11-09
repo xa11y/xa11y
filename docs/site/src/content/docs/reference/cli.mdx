@@ -282,11 +282,6 @@ separate exit-fullscreen action — on macOS the only absolute exit is the same
 
 Read an element's text by range and print the result as JSON.
 
-Application operations accept `--backend native|uia|ia2`. The explicit source
-overrides `XA11Y_ACCESSIBILITY_SOURCE` for that attachment. IA2 requires
-Windows; the [platform matrix](/reference/platform-details/#capabilities)
-records its capabilities.
-
 ```bash
 xa11y text info "text_area[name='Notes']" --app TextEdit
 xa11y text read "text_area[name='Notes']" --app TextEdit --range 0,200
@@ -304,7 +299,7 @@ characters.
 | `info` | `length`, `caret`, and the selected ranges | none |
 | `read` | The text of the range, at most `--limit` units (default 4096) | `--range` or `--find`, `--limit` |
 | `find` | The `--occurrence`-th match of `--find`, or `found: false` | `--find`, `--occurrence`, `--range` to search within |
-| `object-at` | The embedded control or link at `--offset`, as a snapshot. IA2 only | `--offset` |
+| `object-at` | The embedded control or link at `--offset` as `object`, one line in the form `find` prints, or `null` when there is none. IA2 only | `--offset` |
 | `range-at` | The `--unit` at `--offset`: `character`, `word`, `line`, or `paragraph` | `--offset`, `--unit` |
 | `lines` | The rendered lines of the range, `--limit` per page (default 100) | `--range` or `--find`, `--limit` |
 | `bounds` | One screen rectangle per rendered line of the range | `--range` or `--find` |
@@ -451,7 +446,7 @@ xa11y screenshot [--region X,Y,W,H] --out PATH
 | --- | --- |
 | `--out PATH` | Required. Writes the PNG to `PATH`, or to stdout for `-` |
 | `--region X,Y,W,H` | Captures this rectangle in desktop coordinates (physical pixels on Windows, logical points elsewhere). Omitted, the capture is whatever the platform treats as the whole screen: the virtual desktop on Windows, one display on macOS, the root window on Linux |
-| `--app NAME` / `--pid PID` / `--shell KIND` | The target whose tree `--annotate` searches, as described under [Flags](#flags) |
+| `--app NAME` / `--pid PID` / `--shell KIND` / `--backend B` | The target whose tree `--annotate` searches, as described under [Flags](#flags) |
 | `--annotate SELECTOR` | Repeatable. One annotation group per occurrence |
 | `--legend text\|json\|none` | Legend format on stdout. Defaults to `text` |
 
@@ -529,13 +524,14 @@ the selector matched nothing. It is `false` on every group when `truncated` is
 
 ### Usage errors
 
-These three exit with code 2 before any capture is taken.
+These four exit with code 2 before any capture is taken.
 
 | Invocation | Message names |
 | --- | --- |
 | `--annotate` with no `--app`, `--pid`, or `--shell` | The three target flags |
 | `--out -` together with a legend | `--out FILE`, or `--legend none` |
 | `--legend` with no `--annotate` | Adding `--annotate SELECTOR`, or dropping `--legend` |
+| `--app`, `--pid`, `--shell`, or `--backend` with no `--annotate` | The flags passed, `--annotate SELECTOR`, and `--region X,Y,W,H` |
 
 PNG bytes and legend text cannot share stdout, so the second refuses rather
 than moving the legend to stderr, where a caller piping the image would never
@@ -575,24 +571,24 @@ gives it selectors to resolve.
 | Tool | Arguments |
 | --- | --- |
 | `apps` | none |
-| `capabilities` | `platform`, `os_version`, `names` |
+| `capabilities` | `platform`, `os_version`, `names`, `backend` |
 | `shell` | none |
-| `windows` | `app`, `pid`, `limit` |
-| `enable_web_accessibility` | `app`, `pid` |
-| `tree` | `app`, `pid`, `shell`, `max_depth`, `detail` |
-| `find` | `selector`, `app`, `pid`, `shell`, `limit` |
-| `action` | `action`, `selector` or `ref`, `app`, `pid`, `shell`, `value`, `at`, `size` |
-| `text` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `start`, `end`, `find`, `occurrence`, `offset`, `unit`, `limit` |
-| `table` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `row`, `column`, `limit` |
-| `relations` | `selector` or `ref`, `app`, `pid`, `shell`, `kinds`, `limit` |
+| `windows` | `app`, `pid`, `backend`, `limit` |
+| `enable_web_accessibility` | `app`, `pid`, `backend` |
+| `tree` | `app`, `pid`, `shell`, `backend`, `max_depth`, `detail` |
+| `find` | `selector`, `app`, `pid`, `shell`, `backend`, `limit`, `stable` |
+| `action` | `action`, `selector` or `ref`, `app`, `pid`, `shell`, `backend`, `value`, `at`, `size` |
+| `text` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `backend`, `start`, `end`, `find`, `occurrence`, `offset`, `unit`, `limit` |
+| `table` | `op`, `selector` or `ref`, `app`, `pid`, `shell`, `backend`, `row`, `column`, `limit` |
+| `relations` | `selector` or `ref`, `app`, `pid`, `shell`, `backend`, `kinds`, `limit` |
 | `click` | `x`, `y`, `button`, `count`, `held` |
 | `move` | `x`, `y` |
 | `drag` | `from_x`, `from_y`, `to_x`, `to_y`, `button`, `duration_ms`, `held` |
 | `scroll` | `x`, `y`, `dx`, `dy` |
 | `key` | `key`, `held` |
 | `type` | `text` |
-| `screenshot` | `x`, `y`, `width`, `height`, `annotate`, `app`, `pid`, `shell` |
-| `events_start` | `app`, `pid`, `kinds` |
+| `screenshot` | `x`, `y`, `width`, `height`, `annotate`, `app`, `pid`, `shell`, `backend` |
+| `events_start` | `app`, `pid`, `backend`, `kinds` |
 | `events_poll` | `subscription_id`, `max`, `timeout_ms` |
 | `events_stop` | `subscription_id` |
 
@@ -604,14 +600,17 @@ gives it selectors to resolve.
 accepts the same key names as [`xa11y key`](#input-simulation). Selectors are
 the same syntax the library takes; see [Selectors](/reference/selectors/).
 
-Every `tree` node, `find` match and `relations` target carries a `ref` such
-as `c3:17`. `action`, `text`, `table` and `relations` take one in place of
-`selector` (and then no `app`, `pid` or `shell`), and act on exactly that
-element. A ref is never re-resolved by selector: an element that was removed
-or replaced fails with `element_stale` and a `stale_reason`. The server keeps
-the refs of its 8 most recent `tree`, `find` and `relations` results, and an
-older ref fails with `ref_expired`. The command
-line has no refs, because each invocation is a new process.
+Every `tree` node, `find` match, `relations` target, `table` element, and
+`text` `object-at` result carries a `ref` such as `c3:17`. `action`, `text`,
+`table` and `relations` take one in place of `selector` (and then no `app`,
+`pid`, `shell` or `backend`), and act on exactly that element. A ref is never
+re-resolved by selector: an element that was removed or replaced fails with
+`element_stale` and a `stale_reason`. The server keeps the refs of its 8 most
+recent results that returned elements, and an older ref fails with
+`ref_expired`. A ref the server never issued, such as an index past the end of
+its result, fails with `invalid_arguments`. `windows` results and event
+targets carry no ref. The command line has no refs, because each invocation is
+a new process.
 
 `shell` takes a kind string, is mutually exclusive with `app`, and combines
 with `pid`. A kind matching several surfaces comes back as an
@@ -676,9 +675,11 @@ event's `sequence` makes the gap visible in the events themselves.
 
 `events_poll` returns at most `max` events (100 by default) and does not block
 by default. A `timeout_ms` up to 15000 waits for the first event and returns as
-soon as one lands. `live: false` means the source is gone — the application
-exited, or the platform dropped the subscription — so nothing further can
-arrive.
+soon as one lands. `live: false` means the platform dropped the subscription,
+so nothing further can arrive. It does not report that the application exited:
+no platform reports that as a dropped subscription, so an application that
+quits keeps returning `live: true` with no events. Call `apps` to find out
+whether it is still running.
 
 A handle lives in the server process and no longer. It stops resolving once
 `events_stop` closes it, or after five minutes without a poll. Either way the
@@ -714,6 +715,12 @@ was waiting for, what it last observed, and which near-miss elements were
 present. `find` and `action` report a miss the same way, so a typo costs one
 call from either. The [agent guide](/guides/agent-guide/#failures) lists
 every `kind`.
+
+Every failure result also carries `delivery`: `not_delivered` when nothing
+reached the application, so the call can be repeated once its cause is fixed,
+or `unknown` when the action was dispatched, or may have been, so a retry may
+apply it twice. The command line prints the same value after a failed action
+command; see [Exit codes](#exit-codes).
 
 ### Prompts and resources
 
@@ -759,6 +766,11 @@ only when `--annotate` gives it selectors to resolve.
 | `--app NAME` | Target application by exact, case-sensitive name (see `xa11y apps`) |
 | `--pid PID` | Target by process ID |
 | `--shell KIND` | Target a shell surface by kind (see `xa11y shell`). Mutually exclusive with `--app`; combine with `--pid` to pick between same-kind surfaces |
+| `--backend native\|uia\|ia2` | The accessibility source for the application, overriding `XA11Y_ACCESSIBILITY_SOURCE` for that attachment. `uia` and `ia2` require Windows; the [platform matrix](/reference/platform-details/#capabilities) records the capabilities of each. Accepted by `apps` and by every command that takes `--app`, but not together with `--shell`. `capabilities --backend` describes that source |
+
+Each command accepts only the flags it reads. Any other flag, an unknown one,
+or a surplus positional argument is a usage error at exit code 2 rather than
+being ignored, and so is an unknown `--backend` value.
 
 `tree`, `find`, and `action` accept `--shell` wherever they accept `--app`.
 The kinds are listed in [Shell surfaces](/reference/shell/#kinds).
@@ -773,6 +785,28 @@ mistakes are usage errors at exit code 2: `--shell` passed together with
 does not always separate them. Two Linux panels drawn by one panel process
 share a pid, so no `--pid` value narrows that match. The refusal says as
 much rather than picking one.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | The operation failed: application not found, no selector match, a platform error |
+| `2` | Usage error: an unknown flag, a flag the command does not take, a bad flag value, a missing or invalid argument |
+
+The message goes to stderr. When an action command (`action`, `click`, `move`,
+`drag`, `scroll`, `key`, `type`, or `enable-web-accessibility`) fails with
+exit code 1, a `delivery:` line follows it:
+
+```
+delivery: not_delivered (the action did not reach the application, so a retry is safe)
+delivery: unknown (the action may have been applied, so re-read the state before retrying)
+```
+
+`not_delivered` means nothing reached the application. `unknown` means the
+action was dispatched, or may have been, and its outcome is unconfirmed, so a
+retry may apply it twice. It is the same value as the MCP failure's `delivery`
+field.
 
 ## Selectors
 

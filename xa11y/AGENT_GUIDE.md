@@ -11,7 +11,8 @@ The command line runs the same operations with two differences. `xa11y action`
 acts on the first match instead of refusing a selector that matches several.
 A failure is an exit code (1 for a failed operation, 2 for a usage error) and a
 message on standard error, without the `kind` and `diagnosis` fields described under
-Failures.
+Failures. A failed action command adds a `delivery:` line, described there too.
+A flag a command does not take is a usage error rather than ignored.
 
 ## Workflow
 
@@ -72,13 +73,16 @@ element is touched. Narrow it with an attribute filter or pick one with
 `:nth(n)`.
 
 To act on an element you have already read, pass its `ref` instead of a
-selector. Every `tree` node, `find` match and `relations` target carries one,
-such as `c3:17`, and `action`, `text`, `table` and `relations` accept it. A ref names exactly that element and
+selector. Every `tree` node, `find` match, `relations` target, `table` element
+and `text` `object-at` result carries one, such as `c3:17`, and `action`,
+`text`, `table` and `relations` accept it. A ref names exactly that element and
 acts at once, without the wait. Buttons that share the name "Save" keep
 different refs. When the element is gone or replaced, the call fails with
 `element_stale` and a `stale_reason` instead of finding a similar one. The
-server keeps the refs of its 8 most recent `tree`, `find` and `relations`
-results.
+server keeps the refs of its 8 most recent results that returned elements; an
+older ref fails with `ref_expired`. A ref the server never issued, such as an
+index past the end of its result, fails with `invalid_arguments`. Elements in
+`windows` results and event targets carry no ref.
 
 `action` auto-waits. It polls until the selector matches one element that is
 visible and enabled, then acts on that element. The window verbs and
@@ -110,7 +114,9 @@ anything whose `states` include `editable`. `toggle` applies to anything with a
 ## Text, tables and relations
 
 `text` reads an element's text by range. Its `op` is `info` (length, caret,
-selections), `read`, `find`, `range-at`, `lines`, `bounds` or `runs`. Offsets
+selections), `read`, `find`, `range-at`, `object-at`, `lines`, `bounds` or
+`runs`. `object-at` returns the embedded control or link at `offset` as
+`object`, with a `ref`, or `null` when there is none. Offsets
 are UTF-16 code units, so an emoji outside the Basic Multilingual Plane counts
 as two. Every range in a result carries its `start`, `end` and `text`. Copy
 those numbers into `select-text` or the next `text` call instead of counting
@@ -181,20 +187,30 @@ A failed tool call returns `isError: true` with a structured payload. Its
 call looked for, what it last observed, and near-miss candidates. Read the
 diagnosis before retrying.
 
+Every failure also carries `delivery`, which says whether a retry is safe.
+`not_delivered` means nothing reached the application: the selector matched
+nothing, an argument was rejected, or a wait timed out before acting. Fix the
+cause and call again. `unknown` means the action was dispatched, or may have
+been, and the outcome is unconfirmed, so a retry may apply it twice. Read the
+state before retrying. On the command line, a failed `action`, `click`,
+`move`, `drag`, `scroll`, `key`, `type` or `enable-web-accessibility` prints
+the same value on standard error, as a `delivery: not_delivered (...)` or
+`delivery: unknown (...)` line after the error message.
+
 | `kind` | Meaning | What to do |
 | --- | --- | --- |
-| `invalid_arguments` | An argument is missing or invalid (wrong type, out of range). | Fix the argument the message names. |
+| `invalid_arguments` | An argument is missing or invalid (wrong type, out of range, an unknown `backend`, a reversed text range, a `ref` that was never issued). | Fix the argument the message names. |
 | `no_match` | No application or element matched. | Read the candidates in the diagnosis, then correct the selector or target. |
 | `ambiguous_selector` | The selector matched several elements where one is required. | Narrow it with an attribute filter or `:nth(n)`. |
 | `ambiguous_shell_surface` | Several shell surfaces of the requested kind exist. | Pass the `pid` of the one you mean, from the candidates. |
 | `timeout` | An auto-wait ran out before its condition held. | Read `last_observed`. "never matched" means the selector is wrong. A state such as `visible=false` means the element exists and cannot be acted on yet. |
 | `element_stale` | The element is gone or replaced; `stale_reason` says which (`removed`, `process_exited`, `process_restarted`, `identity_changed`, `evicted`). Nothing was done to it. | Read the tree again and act on what is there now. |
-| `ref_expired` | The `ref` belongs to a `tree`, `find` or `relations` result the server no longer keeps. | Call `tree` or `find` again for a fresh ref. |
+| `ref_expired` | The `ref` belongs to a result the server no longer keeps. | Call `tree` or `find` again for a fresh ref. |
 | `action_not_supported` | The element cannot perform this verb. | Pick another verb from the element's properties. |
 | `text_value_not_supported` | The platform cannot set text on this element. | Use `type-text`, or the `type` tool after focusing the element. |
 | `invalid_selector` | The selector failed to parse. | Fix the syntax the message points to. |
 | `invalid_action_data` | An action payload failed validation. | Fix the value, point, size or range. |
-| `invalid_text_range` | A text range is reversed, past the end of the text, or splits a surrogate pair. | Read `text_range.length`, the text's current length, and take offsets from a fresh `text` result. |
+| `invalid_text_range` | A text range is past the end of the text or splits a surrogate pair. | Read `text_range.length`, the text's current length, and take offsets from a fresh `text` result. |
 | `invalid_config` | Process configuration is invalid, such as a malformed `XA11Y_DEFAULT_TIMEOUT`. | Fix the server's environment and restart it. |
 | `no_element_bounds` | The element has no screen bounds. | Use `action`, which needs none, or scroll the element into view first. |
 | `unsupported` | No backend covers this operation on this platform or session. | Use another approach. Retrying cannot succeed. |
@@ -213,8 +229,10 @@ action you want to observe. An event is a snapshot from when it fired, so read
 the tree again to see the current state.
 
 An `announcement` event carries `announcement.origin`. A `request` usually
-has the `text` to speak. A `live_region` or `alert` change has no text, so read
-its `target`. Asking `events_start` for a kind the platform never sends fails
+has the `text` to speak, cut to 256 UTF-16 units with `text_truncated` and
+`text_length` when longer. A `live_region` or `alert` change has no text, so
+read its `target`. `politeness`, `platform_priority` and `activity_id` appear
+when the platform reports them. Asking `events_start` for a kind the platform never sends fails
 with `unsupported`, so check `capabilities` first instead of waiting.
 
 ## Platform notes
