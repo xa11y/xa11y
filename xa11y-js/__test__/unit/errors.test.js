@@ -14,6 +14,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const { readFileSync } = require('node:fs');
 
 const xa11y = require('../../index.js');
@@ -100,6 +101,23 @@ test('InvalidActionDataError thrown from native (Locator.nth(0)) is instanceof p
       return true;
     },
   );
+});
+
+test('errors that share a class keep their native code', () => {
+  assert.throws(() => _makeTestLocator().nth(0), {
+    name: 'InvalidActionDataError',
+    code: 'XA11Y_INVALID_ACTION_DATA',
+  });
+  const out = execFileSync(
+    process.execPath,
+    [
+      '-e',
+      'try { require(process.argv[1]).getDefaultTimeout() } catch (e) { console.log(e.name, e.code) }',
+      require.resolve('../../index.js'),
+    ],
+    { env: { ...process.env, XA11Y_DEFAULT_TIMEOUT: 'not-a-number' } },
+  );
+  assert.equal(out.toString().trim(), 'InvalidActionDataError XA11Y_INVALID_CONFIG');
 });
 
 test('TimeoutError from waitDetached is instanceof public class', async () => {
