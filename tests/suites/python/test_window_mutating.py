@@ -539,10 +539,11 @@ def test_controls_of_a_minimized_window_are_not_visible(
         _settled_window(
             app, "minimize", lambda w: w.minimized is False, "restore must report restored"
         )
-        _wait_until(
-            lambda: button.element().visible is True,
-            5.0,
-            "OK must report visible again after restore",
+        # The frame can be restored before UWP reattaches its CoreWindow.
+        # wait_visible retries a missing control as well as a hidden one;
+        # element() would raise on that transient absence and abort the poll.
+        assert button.wait_visible(timeout=5.0).visible is True, (
+            "OK must report visible again after restore"
         )
     except Exception:
         _restore_window_best_effort(app)
