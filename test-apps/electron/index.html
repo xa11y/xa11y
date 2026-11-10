@@ -18,7 +18,11 @@
   <button id="cancel">Cancel</button>
   <label for="entry">Search</label>
   <input id="entry" type="text" aria-label="Search" value="hello world">
-  <label><input id="agree" type="checkbox"> Agree to terms</label>
+  <!-- aria-label, as the Tauri app has: on macOS Chromium sometimes exposes
+       this checkbox with an empty AXTitle and AXDescription when its name
+       comes only from the wrapping <label>, which failed every checkbox test
+       in that run. -->
+  <label><input id="agree" type="checkbox" aria-label="Agree to terms"> Agree to terms</label>
 
   <!-- Range controls (markup mirrors test-apps/tauri/frontend/index.html so
        the cross-app selectors in tests/suites/python/conftest.py line up) -->

@@ -102,6 +102,13 @@ def test_type_text_line_break_is_one_break(app, typed):
         notes.set_value(WINDOWS_ORIGINAL_NOTES[APP])
 
 
+# Each attempt takes about 2 s on a hosted Windows runner, and the probe makes
+# 6 * REPEATS of them. At 60 it took 7.5-11.4 min against the 720 s limit and
+# timed out on slower runners. 30 still gives 120 paced attempts: a regression
+# to the control's ~4% drop rate passes all 120 well under 1% of the time.
+REPEATS = 30
+
+
 @pytest.mark.skipif(
     sys.platform != "win32" or APP not in ("winforms", "wpf"),
     reason="needs a native Windows multiline edit control (winforms / wpf test apps)",
@@ -121,7 +128,14 @@ def test_type_text_clean_client_comparison(app, capsys):
     original = notes.element().value or ""
     try:
         result = subprocess.run(
-            [sys.executable, str(probe), "--pid", str(app.pid), "--repeats", "60"],
+            [
+                sys.executable,
+                str(probe),
+                "--pid",
+                str(app.pid),
+                "--repeats",
+                str(REPEATS),
+            ],
             capture_output=True,
             text=True,
             timeout=720,
@@ -137,9 +151,9 @@ def test_type_text_clean_client_comparison(app, capsys):
     assert result.returncode == 0, (
         f"paced typing failed in the clean client: {report}; stderr={result.stderr[:4000]}"
     )
-    assert report["control"]["plain"]["attempts"] == 120
+    assert report["control"]["plain"]["attempts"] == 2 * REPEATS
     assert set(report["paced"]) == {"plain", "newline", "unicode", "composed"}
-    assert all(item["attempts"] == 60 for item in report["paced"].values())
+    assert all(item["attempts"] == REPEATS for item in report["paced"].values())
     assert all(item["bad"] == 0 for item in report["paced"].values())
 
 
