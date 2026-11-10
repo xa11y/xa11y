@@ -41,6 +41,7 @@ platform facts rather than xa11y choices:
 - A ``textarea`` answers ``AXRangeForLine`` with the whole text, so wrapped
   text is one line with one bounding rectangle.
 - AX has no word unit, so ``range_at(.., "word")`` is unsupported.
+- A selected range means no caret, as it does for AppKit.
 - Chromium does not list ``AXSelectedTextRanges`` and answers a read of it
   with ``kAXErrorFailure``, so selections come from ``AXSelectedTextRange``.
 - A ``contenteditable`` does not answer ``AXBoundsForRange`` itself; its
@@ -74,6 +75,16 @@ WRAPPED_TEXT = "alpha beta gamma delta epsilon zeta"
 def electron_only(app_name):
     if app_name != "electron":
         pytest.skip("reads the Electron test app's Rich section")
+
+
+def caret_after_selecting(end: int) -> int | None:
+    """The caret once a non-empty range ending at ``end`` is selected.
+
+    AT-SPI puts it at the selection's end. AX reports the insertion point as
+    an empty selection, so on macOS a selected range means no caret, as
+    ``test_cocoa_rich.py`` pins for AppKit.
+    """
+    return None if MACOS else end
 
 
 def r(start: int, end: int) -> xa11y.TextRange:
@@ -321,7 +332,7 @@ def test_rich_editor_selection_and_caret(rich_editor):
     text = rich_editor.text()
     rich_editor.select_text(1, 3)
     assert settle(text.selections, [r(1, 3)]) == [r(1, 3)]
-    assert text.caret() == 3
+    assert text.caret() == caret_after_selecting(3)
     rich_editor.select_text(2, 2)
     assert settle(text.caret, 2) == 2
     assert text.selections() == []
@@ -353,7 +364,7 @@ def test_rtl_selection_uses_logical_offsets(app, name):
     text = element.text()
     element.select_text(5, 8)
     assert settle(text.selections, [r(5, 8)]) == [r(5, 8)]
-    assert text.caret() == 8
+    assert text.caret() == caret_after_selecting(8)
 
 
 @pytest.mark.parametrize("name", ["RTL Editor", "RTL Notes"])
