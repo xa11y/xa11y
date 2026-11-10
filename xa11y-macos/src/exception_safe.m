@@ -733,6 +733,21 @@ int safe_ax_copy_parameterized_attribute_value(
     }
 }
 
+// Safe wrapper for AXUIElementCopyAttributeNames: which attributes an element
+// advertises, for a capability an element can answer with an error rather
+// than kAXErrorAttributeUnsupported (Chromium and AXSelectedTextRanges).
+int safe_ax_copy_attribute_names(
+    AXUIElementRef element,
+    CFArrayRef *names
+) {
+    @try {
+        return AXUIElementCopyAttributeNames(element, names);
+    } @catch (NSException *e) {
+        *names = NULL;
+        return -9999;
+    }
+}
+
 // Safe wrapper for AXUIElementGetAttributeValueCount: the length of an array
 // attribute (AXRows) without copying every element in it.
 int safe_ax_get_attribute_value_count(
