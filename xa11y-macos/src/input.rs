@@ -382,13 +382,13 @@ impl MacOSInputProvider {
         Ok(event)
     }
 
-    /// Post one key-down/key-up pair carrying `text` (at most
-    /// [`TYPE_CHUNK_CHARS`] characters, no line breaks).
+    /// Post one key-down/key-up pair carrying the character `c`.
     /// `CGEventKeyboardSetUnicodeString` replaces the synthetic keystroke
     /// the event would normally generate with the supplied UTF-16 string,
     /// so we get correct case/IME without synthesising shift chords.
-    fn type_unicode_chunk(&self, text: &str) -> Result<()> {
-        let utf16: Vec<u16> = text.encode_utf16().collect();
+    fn type_unicode_char(&self, c: char) -> Result<()> {
+        let mut buf = [0u16; 2];
+        let utf16 = c.encode_utf16(&mut buf);
         let ev = self.keyboard_event(0, true)?;
         // SAFETY: `utf16.as_ptr()` is valid for `utf16.len()` u16 reads
         // for the duration of the call.
@@ -718,7 +718,7 @@ impl InputProvider for MacOSInputProvider {
     fn type_text(&self, text: &str) -> Result<()> {
         for step in plan_type_text(text) {
             match step {
-                TypeStep::Text(s) => self.type_unicode_chunk(&s)?,
+                TypeStep::Char(c) => self.type_unicode_char(c)?,
                 // A line break is the Enter key on every platform (#498).
                 // As Unicode text, AppKit text views insert "\r" or "\n"
                 // inconsistently and controls that act on Return never see
@@ -788,30 +788,24 @@ impl InputProvider for MacOSInputProvider {
     }
 }
 
-/// Characters per Unicode keyboard event in `type_text`.
-const TYPE_CHUNK_CHARS: usize = 20;
-
-/// One step of `type_text`: a run of text posted as Unicode, or a line break
+/// One step of `type_text`: a character posted as Unicode, or a line break
 /// posted as the Return key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Each character is its own key event. An app that reads key events, not
+/// text input, takes only the first character of an event's string: a
+/// 20-character event typed "7" of "7*6=" into Calculator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TypeStep {
-    Text(String),
+    Char(char),
     LineBreak,
 }
 
-/// Split `text` into Unicode chunks of at most [`TYPE_CHUNK_CHARS`]
-/// characters, with each line break (`"\r\n"`, `"\r"` or `"\n"`) as one
-/// [`TypeStep::LineBreak`]. Pairing is per call: a `"\r"` ending one call and
-/// a `"\n"` starting the next are two line breaks.
+/// Split `text` into one [`TypeStep::Char`] per character, with each line
+/// break (`"\r\n"`, `"\r"` or `"\n"`) as one [`TypeStep::LineBreak`].
+/// Pairing is per call: a `"\r"` ending one call and a `"\n"` starting the
+/// next are two line breaks.
 fn plan_type_text(text: &str) -> Vec<TypeStep> {
     let mut steps = Vec::new();
-    let mut run: Vec<char> = Vec::new();
-    let flush = |run: &mut Vec<char>, steps: &mut Vec<TypeStep>| {
-        for chunk in run.chunks(TYPE_CHUNK_CHARS) {
-            steps.push(TypeStep::Text(chunk.iter().collect()));
-        }
-        run.clear();
-    };
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -819,13 +813,11 @@ fn plan_type_text(text: &str) -> Vec<TypeStep> {
                 if c == '\r' && chars.peek() == Some(&'\n') {
                     chars.next();
                 }
-                flush(&mut run, &mut steps);
                 steps.push(TypeStep::LineBreak);
             }
-            _ => run.push(c),
+            _ => steps.push(TypeStep::Char(c)),
         }
     }
-    flush(&mut run, &mut steps);
     steps
 }
 
@@ -980,8 +972,8 @@ mod tests {
         }
     }
 
-    fn text(s: &str) -> TypeStep {
-        TypeStep::Text(s.to_string())
+    fn chars(s: &str) -> Vec<TypeStep> {
+        s.chars().map(TypeStep::Char).collect()
     }
 
     #[test]
@@ -990,13 +982,13 @@ mod tests {
         assert_eq!(
             plan_type_text("a\r\nb\rc\nd"),
             vec![
-                text("a"),
+                TypeStep::Char('a'),
                 TypeStep::LineBreak,
-                text("b"),
+                TypeStep::Char('b'),
                 TypeStep::LineBreak,
-                text("c"),
+                TypeStep::Char('c'),
                 TypeStep::LineBreak,
-                text("d"),
+                TypeStep::Char('d'),
             ]
         );
     }
@@ -1016,32 +1008,24 @@ mod tests {
         assert_eq!(
             plan_type_text("x\n\ry"),
             vec![
-                text("x"),
+                TypeStep::Char('x'),
                 TypeStep::LineBreak,
                 TypeStep::LineBreak,
-                text("y")
+                TypeStep::Char('y')
             ]
         );
     }
 
     #[test]
-    fn text_runs_are_chunked_by_characters() {
-        let long: String = "é".repeat(TYPE_CHUNK_CHARS + 3);
-        assert_eq!(
-            plan_type_text(&format!("{long}\n")),
-            vec![
-                text(&"é".repeat(TYPE_CHUNK_CHARS)),
-                text("ééé"),
-                TypeStep::LineBreak,
-            ]
-        );
-        // Chunks count characters, not UTF-16 units: a non-BMP emoji is one
-        // character and is never split across events.
-        assert_eq!(
-            plan_type_text(&"😀".repeat(TYPE_CHUNK_CHARS + 1)),
-            vec![text(&"😀".repeat(TYPE_CHUNK_CHARS)), text("😀")]
-        );
+    fn each_character_is_its_own_event() {
+        assert_eq!(plan_type_text("7*6="), chars("7*6="));
+        // A non-BMP emoji is one character: its surrogate pair is never
+        // split across events.
+        assert_eq!(plan_type_text("é😀\n"), {
+            let mut steps = chars("é😀");
+            steps.push(TypeStep::LineBreak);
+            steps
+        });
         assert_eq!(plan_type_text(""), vec![]);
-        assert_eq!(plan_type_text("plain"), vec![text("plain")]);
     }
 }

@@ -93,6 +93,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let dropTarget = DropTargetView(frame: NSRect(x: 300, y: stripY, width: 160, height: 28))
         dropTarget.autoresizingMask = [.minYMargin]
         container.addSubview(dropTarget)
+        let keyEvents = KeyEventView(frame: NSRect(x: 480, y: stripY, width: 180, height: 28))
+        keyEvents.autoresizingMask = [.minYMargin]
+        container.addSubview(keyEvents)
 
         let docView = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 1480))
         scroll.documentView = docView
@@ -677,6 +680,41 @@ class OpenOnlyHost: NSView {
     override func accessibilityChildren() -> [Any]? {
         element.setAccessibilityFrameInParentSpace(bounds)
         return [element]
+    }
+}
+
+// ── Key events ────────────────────────────────────────────────────────────────
+
+/// Keeps the first character of each key event it receives, as a control
+/// that handles `keyDown` (Calculator, a game, a terminal) does. Text views
+/// read the whole string of an event, so they cannot show a typed string that
+/// arrives as one event. Focusing it clears what it kept.
+class KeyEventView: NSView {
+    private var keys = ""
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        if let first = event.characters?.first {
+            keys.append(first)
+        }
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Key Events" }
+    override func accessibilityValue() -> Any? { keys }
+    override func isAccessibilityFocused() -> Bool { window?.firstResponder === self }
+    override func setAccessibilityFocused(_ focused: Bool) {
+        if focused {
+            keys = ""
+            window?.makeFirstResponder(self)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.systemBlue.setFill()
+        bounds.fill()
     }
 }
 
