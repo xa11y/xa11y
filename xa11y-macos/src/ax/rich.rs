@@ -26,10 +26,12 @@
 //!   has parameterized attributes for a rendered line (`AXLineForIndex` +
 //!   `AXRangeForLine`), and none for a word or a paragraph, so those two
 //!   units are `Unsupported`.
-//! * Selection: `AXSelectedTextRanges` where the element lists it, else
-//!   `AXSelectedTextRange`. Chromium does not list the plural one and fails
-//!   a read of it with `kAXErrorFailure`, so the choice comes from the
-//!   attribute names (#665).
+//! * Selection: `AXSelectedTextRanges` where the element has it, else
+//!   `AXSelectedTextRange`. Web content (an element listing
+//!   `AXSelectedTextMarkerRange`: Chromium, WebKit) has one DOM selection,
+//!   and Chromium fails a read of the plural attribute with
+//!   `kAXErrorFailure` whenever nothing is selected, so web content reads
+//!   the singular one (#665).
 //! * Geometry: `AXBoundsForRange`. In web content an editor's text is
 //!   rendered by `AXStaticText` descendants and only they answer it (a
 //!   Chromium `contenteditable` answers nothing), so a range is split
@@ -285,11 +287,8 @@ fn require_param(element: AXUIElementRef, attribute: &str, parameter: CFTypeRef)
 
 /// Whether `element` lists `attribute` among its attribute names.
 ///
-/// For a capability an element answers with an error rather than
-/// `kAXErrorAttributeUnsupported`: Chromium does not list
-/// `AXSelectedTextRanges` and answers a read of it with `kAXErrorFailure`
-/// (#665), so the read alone cannot tell "not this capability" from a
-/// failure.
+/// For a capability decided by what kind of element this is rather than by
+/// the error one read returns (see `rich_text_selections`).
 fn advertises(element: AXUIElementRef, attribute: &str) -> Result<bool> {
     let mut names: CFArrayRef = std::ptr::null();
     let err = ax_bounded(
@@ -330,6 +329,11 @@ fn advertises(element: AXUIElementRef, attribute: &str) -> Result<bool> {
 /// on a huge editor fails loudly rather than walking the whole document.
 const TEXT_LEAF_NODE_LIMIT: usize = 4096;
 
+/// `"AXStaticText"` as UTF-16, for comparing a role read as a CFString.
+const STATIC_TEXT: &[u16] = &[
+    0x41, 0x58, 0x53, 0x74, 0x61, 0x74, 0x69, 0x63, 0x54, 0x65, 0x78, 0x74,
+];
+
 /// One `AXStaticText` descendant of a text element and the span of the
 /// element's text it renders.
 struct TextLeaf {
@@ -346,7 +350,9 @@ fn is_unrendered_gap(u: u16) -> bool {
 
 /// The `AXStaticText` descendants of `ax`, in document order, each placed
 /// at the span of the element's own text (its first `length` units, read
-/// only once a static text is found) it renders.
+/// only once a static text is found) it renders. The walk stops at the
+/// first leaf that ends past `until`, so a range near the start of a long
+/// editor does not visit the rest of it.
 ///
 /// Web content keeps an editor's rendered text in static-text children, and
 /// only those answer `AXBoundsForRange`: Chromium answers it on a node that
@@ -355,7 +361,7 @@ fn is_unrendered_gap(u: u16) -> bool {
 /// previous one ended, after at most a run of unrendered characters (see
 /// [`is_unrendered_gap`]); any other mismatch is an error rather than a
 /// guessed position.
-fn text_leaves(ax: AXUIElementRef, length: u32) -> Result<Vec<TextLeaf>> {
+fn text_leaves(ax: AXUIElementRef, length: u32, until: u32) -> Result<Vec<TextLeaf>> {
     let mut leaves = Vec::new();
     let mut text: Option<Vec<u16>> = None;
     let mut cursor = 0usize;
@@ -364,6 +370,11 @@ fn text_leaves(ax: AXUIElementRef, length: u32) -> Result<Vec<TextLeaf>> {
     let mut stack: Vec<AXElement> = ax_element_list_strict(ax, "AXChildren")?;
     stack.reverse();
     while let Some(node) = stack.pop() {
+        // Leaves past the range cannot change its bounds; an empty range at
+        // `until` still needs the leaf that starts there.
+        if leaves.last().is_some_and(|l: &TextLeaf| l.end > until) {
+            break;
+        }
         visited += 1;
         if visited > TEXT_LEAF_NODE_LIMIT {
             return Err(Error::Unsupported {
@@ -372,7 +383,11 @@ fn text_leaves(ax: AXUIElementRef, length: u32) -> Result<Vec<TextLeaf>> {
                 ),
             });
         }
-        if ax_string(node.as_ptr(), "AXRole").as_deref() != Some("AXStaticText") {
+        let is_static_text = match read(node.as_ptr(), "AXRole")? {
+            Read::Value(v) => cf_utf16(v.ptr()).as_deref() == Some(STATIC_TEXT),
+            Read::NoValue | Read::Unsupported => false,
+        };
+        if !is_static_text {
             let mut children = ax_element_list_strict(node.as_ptr(), "AXChildren")?;
             children.reverse();
             stack.extend(children);
@@ -1148,14 +1163,18 @@ impl MacOSProvider {
         let ax = self.get_cached(element.handle)?;
         // AXSelectedTextRanges (multiple selection) where the element has it;
         // AXSelectedTextRange is the single-range attribute every text
-        // element has. Which one applies is a capability, not a retry, and
-        // it is read from the attribute names: Chromium does not list
-        // AXSelectedTextRanges and answers a read of it with
-        // kAXErrorFailure rather than kAXErrorAttributeUnsupported (#665).
-        let multiple = if advertises(ax.as_ptr(), "AXSelectedTextRanges")? {
-            read(ax.as_ptr(), "AXSelectedTextRanges")?
-        } else {
+        // element has. Which one applies is a capability, not a retry.
+        //
+        // Web content has one DOM selection, and its element says so by
+        // listing AXSelectedTextMarkerRange. Chromium also lists
+        // AXSelectedTextRanges, but builds it as an array holding
+        // AXSelectedTextRange, which is nil whenever there is no visible
+        // caret or selection; the array literal then throws and AX answers
+        // kAXErrorFailure (#665). So web content reads the singular one.
+        let multiple = if advertises(ax.as_ptr(), "AXSelectedTextMarkerRange")? {
             Read::Unsupported
+        } else {
+            read(ax.as_ptr(), "AXSelectedTextRanges")?
         };
         let mut ranges = match multiple {
             Read::Value(v) => ranges_in(v.ptr())?,
@@ -1328,7 +1347,7 @@ impl MacOSProvider {
         // geometry, and the range is split across them. Otherwise (AppKit,
         // and Chromium's atomic text fields) the element answers itself.
         // Which applies is read from the tree, not tried in turn.
-        let leaves = text_leaves(ax.as_ptr(), length)?;
+        let leaves = text_leaves(ax.as_ptr(), length, range.end)?;
         let rect = if leaves.is_empty() {
             bounds_for_range(ax.as_ptr(), range)?
         } else {
