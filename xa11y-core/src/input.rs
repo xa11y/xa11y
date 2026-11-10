@@ -1491,6 +1491,7 @@ impl Keyboard<'_> {
     ///
     /// `"\r\n"`, `"\r"` and `"\n"` each type one Return/Enter keypress, so
     /// in a single-line field this may activate the default button.
+    /// `"\t"` types the Tab key, which can move focus to the next control.
     pub fn type_text(&self, text: &str) -> Result<()> {
         self.backend.type_text(text)
     }
