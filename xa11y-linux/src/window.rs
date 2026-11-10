@@ -724,6 +724,7 @@ struct X11Atoms {
     net_wm_name: Atom,
     utf8_string: Atom,
     net_frame_extents: Atom,
+    gtk_frame_extents: Atom,
     net_wm_state: Atom,
     net_wm_state_hidden: Atom,
     net_wm_state_max_horz: Atom,
@@ -754,6 +755,7 @@ impl X11Atoms {
             net_wm_name: atom(conn, b"_NET_WM_NAME")?,
             utf8_string: atom(conn, b"UTF8_STRING")?,
             net_frame_extents: atom(conn, b"_NET_FRAME_EXTENTS")?,
+            gtk_frame_extents: atom(conn, b"_GTK_FRAME_EXTENTS")?,
             net_wm_state: atom(conn, b"_NET_WM_STATE")?,
             net_wm_state_hidden: atom(conn, b"_NET_WM_STATE_HIDDEN")?,
             net_wm_state_max_horz: atom(conn, b"_NET_WM_STATE_MAXIMIZED_HORZ")?,
@@ -773,7 +775,7 @@ impl X11Atoms {
 /// owning pid and title.
 type OriginKey = (u32, String);
 
-/// A cached client window and its root origin (physical pixels).
+/// A cached client window and the root origin of its content (physical pixels).
 type CachedOrigin = (Window, (i32, i32));
 
 struct X11WindowBackend {
@@ -1203,6 +1205,8 @@ impl X11WindowBackend {
     ///   `DestroyNotify`). A reparenting window manager moves the frame, not
     ///   the client, and tells the client with a synthetic `ConfigureNotify`
     ///   (ICCCM 4.1.5), which reaches us through the same event mask;
+    /// - a watched window's `_GTK_FRAME_EXTENTS` changed: the shadow size
+    ///   is part of the cached origin;
     /// - a watched window's `_NET_WM_NAME` or `_NET_WM_PID` changed: its own
     ///   entries go now, and the window joins `renamed` for
     ///   [`Self::forget_renamed`], which reads each new identity once after
@@ -1222,6 +1226,11 @@ impl X11WindowBackend {
             {
                 origins.retain(|_, (cached, _)| *cached != e.window);
                 renamed.insert(e.window);
+            }
+            Event::PropertyNotify(e)
+                if e.window != self.root && e.atom == self.atoms.gtk_frame_extents =>
+            {
+                origins.retain(|_, (cached, _)| *cached != e.window)
             }
             Event::PropertyNotify(e)
                 if e.window == self.root && e.atom == self.atoms.net_client_list =>
@@ -1362,13 +1371,44 @@ impl X11WindowBackend {
                 .map_err(platform)?
                 .reply()
                 .map_err(platform)?;
-            let origin = (i32::from(translated.dst_x), i32::from(translated.dst_y));
+            let (shadow_x, shadow_y) = self.gtk_shadow(conn, window)?;
+            let origin = (
+                i32::from(translated.dst_x) + shadow_x,
+                i32::from(translated.dst_y) + shadow_y,
+            );
             self.origins
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(key, (window, origin));
             Ok(Some(origin))
         })
+    }
+
+    /// The left and top size of the shadow that GTK draws inside `window`,
+    /// from `_GTK_FRAME_EXTENTS`. GTK 4 window-relative extents start at the
+    /// visible frame, inside the shadow. A window without the property has no
+    /// shadow; a malformed value is an error.
+    fn gtk_shadow(&self, conn: &RustConnection, window: Window) -> Result<(i32, i32)> {
+        let extents = property_u32(
+            conn,
+            window,
+            self.atoms.gtk_frame_extents,
+            AtomEnum::CARDINAL.into(),
+        )?;
+        match extents.as_slice() {
+            [] => Ok((0, 0)),
+            &[left, _, top, _] => Ok((
+                i32::try_from(left).map_err(platform)?,
+                i32::try_from(top).map_err(platform)?,
+            )),
+            other => Err(Error::Platform {
+                code: -1,
+                message: format!(
+                    "_GTK_FRAME_EXTENTS of window {window:#x} has {} values, not 4",
+                    other.len()
+                ),
+            }),
+        }
     }
 
     /// A top-level's owning pid and title, without its geometry. `None`
@@ -2888,6 +2928,115 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `client_origin` skips the shadow GTK draws inside its client window,
+    /// and follows a change of `_GTK_FRAME_EXTENTS`.
+    #[test]
+    #[ignore = "requires Xvfb; run through scripts/run_integ_tests.sh"]
+    fn x11_client_origin_adds_the_gtk_shadow() {
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::xproto::{
+            AtomEnum, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass,
+        };
+        use x11rb::wrapper::ConnectionExt as _;
+
+        let (_xvfb, display) = isolated_xvfb();
+        let (observer, screen) = x11rb::rust_connection::RustConnection::connect(Some(&display))
+            .expect("connect isolated Xvfb");
+        let root = observer.setup().roots[screen].root;
+        let backend =
+            super::X11WindowBackend::connect(Some(&display)).expect("X11 backend on bare Xvfb");
+        let net_wm_pid = intern(&observer, b"_NET_WM_PID");
+        let net_wm_name = intern(&observer, b"_NET_WM_NAME");
+        let utf8_string = intern(&observer, b"UTF8_STRING");
+        let gtk_frame_extents = intern(&observer, b"_GTK_FRAME_EXTENTS");
+        let pid = std::process::id();
+        let sync = || {
+            observer
+                .get_input_focus()
+                .expect("round trip")
+                .reply()
+                .expect("round trip reply");
+        };
+        let window = observer.generate_id().expect("XID");
+        observer
+            .create_window(
+                0,
+                window,
+                root,
+                100,
+                60,
+                300,
+                200,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new(),
+            )
+            .expect("create window")
+            .check()
+            .expect("created window");
+        observer
+            .change_property32(
+                PropMode::REPLACE,
+                window,
+                net_wm_pid,
+                AtomEnum::CARDINAL,
+                &[pid],
+            )
+            .expect("set PID")
+            .check()
+            .expect("PID stored");
+        observer
+            .change_property8(PropMode::REPLACE, window, net_wm_name, utf8_string, b"Calc")
+            .expect("set title")
+            .check()
+            .expect("title stored");
+        let shadow = |extents: &[u32]| {
+            observer
+                .change_property32(
+                    PropMode::REPLACE,
+                    window,
+                    gtk_frame_extents,
+                    AtomEnum::CARDINAL,
+                    extents,
+                )
+                .expect("set _GTK_FRAME_EXTENTS")
+                .check()
+                .expect("_GTK_FRAME_EXTENTS stored");
+            sync();
+        };
+        observer
+            .map_window(window)
+            .expect("map window")
+            .check()
+            .expect("window mapped");
+        sync();
+
+        assert_eq!(
+            backend.client_origin(pid, "Calc").unwrap(),
+            Some((100, 60)),
+            "a window without _GTK_FRAME_EXTENTS has no shadow"
+        );
+        // gnome-calculator's shadow, then gtk4-widget-factory's.
+        shadow(&[61, 61, 55, 67]);
+        assert_eq!(
+            backend.client_origin(pid, "Calc").unwrap(),
+            Some((161, 115)),
+            "the origin must start inside the left and top shadow"
+        );
+        shadow(&[14, 14, 12, 17]);
+        assert_eq!(
+            backend.client_origin(pid, "Calc").unwrap(),
+            Some((114, 72)),
+            "a shadow change must drop the cached origin"
+        );
+        shadow(&[1, 2, 3]);
+        assert!(
+            backend.client_origin(pid, "Calc").is_err(),
+            "a malformed _GTK_FRAME_EXTENTS is an error, not a zero shadow"
+        );
     }
 
     /// `client_origin` against a real X server: the origin follows a move,

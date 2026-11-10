@@ -1059,7 +1059,7 @@ impl LinuxProvider {
     /// window-relative position, wherever the window is (issue #487). The
     /// `WINDOW` extents are right, so the screen position is those plus the
     /// root origin of the top-level's X11 client window, found by pid and
-    /// title. `None` — no bounds, rather than wrong ones — under the Wayland
+    /// title, plus the shadow GTK draws inside that window. `None` — no bounds, rather than wrong ones — under the Wayland
     /// window backend, when the window cannot be matched to exactly one X11
     /// window, or when any read fails; the reason is logged at debug level.
     fn gtk4_screen_extents(&self, aref: &AccessibleRef) -> Option<Rect> {
