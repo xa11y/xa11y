@@ -77,12 +77,25 @@ const K_CG_SCROLL_EVENT_UNIT_LINE: u32 = 1;
 
 // CGEventField
 const K_CG_MOUSE_EVENT_CLICK_STATE: u32 = 1;
+const K_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
+
+const K_CG_EVENT_KEY_DOWN: u32 = 10;
+const K_CG_EVENT_KEY_UP: u32 = 11;
+
+// CGEventSourceStateID
+const K_CG_EVENT_SOURCE_STATE_PRIVATE: i32 = -1;
 
 // CGEventFlags (modifier flags applied at post time).
 const K_CG_EVENT_FLAG_MASK_SHIFT: u64 = 0x0002_0000;
 const K_CG_EVENT_FLAG_MASK_CONTROL: u64 = 0x0004_0000;
 const K_CG_EVENT_FLAG_MASK_ALTERNATE: u64 = 0x0008_0000;
 const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
+
+// Flags that macOS puts on a key by its key code (arrows, Home, F-keys),
+// not modifiers that a key-down holds.
+const K_CG_EVENT_FLAG_MASK_NUMERIC_PAD: u64 = 0x0020_0000;
+const K_CG_EVENT_FLAG_MASK_SECONDARY_FN: u64 = 0x0080_0000;
+const KEY_CODE_FLAGS: u64 = K_CG_EVENT_FLAG_MASK_NUMERIC_PAD | K_CG_EVENT_FLAG_MASK_SECONDARY_FN;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -120,6 +133,12 @@ unsafe extern "C" {
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
 
     fn CGEventGetFlags(event: CGEventRef) -> u64;
+
+    fn CGEventGetType(event: CGEventRef) -> u32;
+
+    fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
+
+    fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
 
     fn CGEventKeyboardSetUnicodeString(event: CGEventRef, length: usize, chars: *const u16);
 }
@@ -319,10 +338,29 @@ impl MacOSInputProvider {
         // `held_flags` for why the window server's own state can't be relied
         // on here. OR rather than assign, so flags the event already carries
         // (caps lock, a physically-held key) survive.
+        //
+        // An event from a NULL source also copies the session's Fn and
+        // NumericPad flags, which the last arrow, Home or F-key left there,
+        // so "a" after Home went out as Fn+A. Drop the ones that this event's
+        // own key code does not carry, and leave other flags untouched.
         let held = self.held_flags.load(Ordering::SeqCst);
-        if held != 0 {
+        // SAFETY: `event` is a valid CGEventRef we just created.
+        let flags = unsafe { CGEventGetFlags(event) };
+        let borrowed = if flags & KEY_CODE_FLAGS == 0 {
+            0
+        } else {
+            match key_code_flags(event) {
+                Ok(own) => flags & KEY_CODE_FLAGS & !own,
+                Err(error) => {
+                    // SAFETY: `event` is a valid CGEventRef we own and do not post.
+                    unsafe { CFRelease(event as CFTypeRef) };
+                    return Err(error);
+                }
+            }
+        };
+        if held != 0 || borrowed != 0 {
             // SAFETY: `event` is a valid CGEventRef we just created.
-            unsafe { CGEventSetFlags(event, CGEventGetFlags(event) | held) };
+            unsafe { CGEventSetFlags(event, (flags & !borrowed) | held) };
         }
         // SAFETY: `event` is a valid CGEventRef we just created; CGEventPost
         // takes an owned +0 borrow and does not consume it.
@@ -417,6 +455,38 @@ impl MacOSInputProvider {
 }
 
 // ── Mapping helpers ─────────────────────────────────────────────────
+
+/// The Fn and NumericPad flags that macOS gives the key of a key event, read
+/// from a new event of a private source, which holds no session state.
+fn key_code_flags(event: CGEventRef) -> Result<u64> {
+    // SAFETY: `event` is a valid CGEventRef; the probe and its source are
+    // released before return.
+    unsafe {
+        let ty = CGEventGetType(event);
+        if ty != K_CG_EVENT_KEY_DOWN && ty != K_CG_EVENT_KEY_UP {
+            return Ok(0);
+        }
+        let vk = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) as u16;
+        let source = CGEventSourceCreate(K_CG_EVENT_SOURCE_STATE_PRIVATE);
+        if source.is_null() {
+            return Err(Error::Platform {
+                code: -1,
+                message: "CGEventSourceCreate(private) returned NULL".to_string(),
+            });
+        }
+        let probe = CGEventCreateKeyboardEvent(source, vk, ty == K_CG_EVENT_KEY_DOWN);
+        CFRelease(source as CFTypeRef);
+        if probe.is_null() {
+            return Err(Error::Platform {
+                code: -1,
+                message: format!("CGEventCreateKeyboardEvent failed (key code {vk})"),
+            });
+        }
+        let flags = CGEventGetFlags(probe) & KEY_CODE_FLAGS;
+        CFRelease(probe as CFTypeRef);
+        Ok(flags)
+    }
+}
 
 fn cg_button(b: MouseButton) -> u32 {
     match b {
