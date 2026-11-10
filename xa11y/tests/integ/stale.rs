@@ -22,6 +22,7 @@
 //! `tests/suites/python/test_actions.py` covers on GTK 4; `press` on the
 //! doomed button is asserted here as well, for the GTK 3 zombie.
 
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use xa11y::*;
@@ -296,4 +297,48 @@ fn actions_through_a_locator_reach_the_rebuilt_gtk3_widgets() {
     doomed_window(&app)
         .activate()
         .expect("activate the fresh Doomed window");
+}
+
+/// Reads through the `App` of a process that exited fail as stale
+/// (`process_exited`), as actions on its elements do. A second copy of the
+/// fixture is the process that exits, so the shared one keeps running.
+#[test]
+#[ignore]
+fn reads_through_the_app_of_an_exited_process_are_stale() {
+    let python = std::env::var("XA11Y_PANEL_PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../test-apps/stale/stale.py");
+    let mut child = Command::new(&python)
+        .arg(script)
+        .spawn()
+        .unwrap_or_else(|e| panic!("start {python} {script}: {e}"));
+    let app = App::by_pid(child.id(), Duration::from_secs(10));
+    let app = match app {
+        Ok(app) => app,
+        Err(e) => {
+            child.kill().expect("kill the second fixture");
+            panic!("the second fixture never appeared: {e}");
+        }
+    };
+    assert!(
+        matches!(app.locator(REBUILD).count(), Ok(1)),
+        "the second fixture has no Rebuild button"
+    );
+    child.kill().expect("kill the second fixture");
+    child.wait().expect("reap the second fixture");
+
+    let reads: [(&str, Result<()>); 2] = [
+        ("locator count", app.locator(REBUILD).count().map(drop)),
+        ("windows", app.windows().map(drop)),
+    ];
+    for (read, result) in reads {
+        match result {
+            Err(Error::ElementStale {
+                reason: StaleReason::ProcessExited,
+                ..
+            }) => {}
+            other => {
+                panic!("{read} on an exited app: expected stale (process_exited), got {other:?}")
+            }
+        }
+    }
 }

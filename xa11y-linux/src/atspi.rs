@@ -812,11 +812,15 @@ impl LinuxProvider {
     }
 
     /// Read a live subtree, distinguishing a destroyed object from an empty
-    /// child list. Only `UnknownObject` is absence; broken peers still fail.
+    /// child list. Only `UnknownObject` is absence; a peer that left the bus
+    /// fails as stale (`ProcessExited`), and broken peers still fail.
     fn live_atspi_children(&self, aref: &AccessibleRef) -> Result<Option<Vec<AccessibleRef>>> {
         match self.get_atspi_children(aref) {
             Ok(children) => Ok(Some(children)),
-            Err(Error::ElementStale { .. }) => Ok(None),
+            Err(Error::ElementStale {
+                reason: xa11y_core::StaleReason::Removed,
+                ..
+            }) => Ok(None),
             Err(err) => Err(err),
         }
     }
@@ -2974,8 +2978,10 @@ impl Provider for LinuxProvider {
                     if self.is_application_object(child_ref) {
                         // Nested application objects can also disappear between
                         // enumeration and this read. Prune only confirmed absence.
-                        let Some(grandchildren) = self.live_atspi_children(child_ref)? else {
-                            continue;
+                        let grandchildren = match self.live_atspi_children(child_ref) {
+                            Ok(Some(grandchildren)) => grandchildren,
+                            Ok(None) | Err(Error::ElementStale { .. }) => continue,
+                            Err(err) => return Err(err),
                         };
                         for gc_ref in grandchildren {
                             if gc_ref.path == "/org/a11y/atspi/null"
@@ -4858,12 +4864,17 @@ const UNKNOWN_OBJECT: &str = "org.freedesktop.DBus.Error.UnknownObject";
 
 /// Classify the structured reply before rendering it. `UnknownObject` means
 /// this exact accessible was destroyed, not that the peer timed out or that
-/// `GetChildren` is unimplemented. Direct reads retain the stale-element error;
-/// live traversals prune it through `live_atspi_children`.
+/// `GetChildren` is unimplemented. A departed peer means its process exited.
+/// Direct reads retain the stale-element error; live traversals prune a
+/// destroyed object through `live_atspi_children`.
 fn children_call_error(err: zbus::Error, aref: &AccessibleRef) -> Error {
     match &err {
         zbus::Error::MethodError(name, ..) if name.as_str() == UNKNOWN_OBJECT => Error::stale(
             xa11y_core::StaleReason::Removed,
+            format!("{}{}", aref.bus_name, aref.path),
+        ),
+        _ if is_peer_gone(&err) => Error::stale(
+            xa11y_core::StaleReason::ProcessExited,
             format!("{}{}", aref.bus_name, aref.path),
         ),
         _ => Error::Platform {
@@ -6153,25 +6164,40 @@ mod tests {
     }
 
     #[test]
-    fn children_errors_classify_only_unknown_object_as_stale() {
+    fn children_errors_classify_destroyed_objects_and_departed_peers_as_stale() {
         let aref = AccessibleRef {
             bus_name: ":1.42".into(),
             path: "/org/a11y/atspi/accessible/7".into(),
         };
-        let err = children_call_error(
-            method_error("org.freedesktop.DBus.Error.UnknownObject"),
-            &aref,
-        );
-        assert!(matches!(err, Error::ElementStale { element: selector, .. }
-            if selector.contains(&aref.bus_name) && selector.contains(&aref.path)));
+        for (name, stale_reason) in [
+            (
+                "org.freedesktop.DBus.Error.UnknownObject",
+                xa11y_core::StaleReason::Removed,
+            ),
+            (
+                "org.freedesktop.DBus.Error.ServiceUnknown",
+                xa11y_core::StaleReason::ProcessExited,
+            ),
+            (
+                "org.freedesktop.DBus.Error.NameHasNoOwner",
+                xa11y_core::StaleReason::ProcessExited,
+            ),
+        ] {
+            assert!(
+                matches!(children_call_error(method_error(name), &aref),
+                Error::ElementStale { element: selector, reason }
+                    if reason == stale_reason
+                        && selector.contains(&aref.bus_name)
+                        && selector.contains(&aref.path)),
+                "{name}"
+            );
+        }
         for name in [
             "org.freedesktop.DBus.Error.UnknownMethod",
             "org.freedesktop.DBus.Error.UnknownInterface",
             "org.freedesktop.DBus.Error.NoReply",
             "org.freedesktop.DBus.Error.Timeout",
             "org.freedesktop.DBus.Error.AccessDenied",
-            "org.freedesktop.DBus.Error.ServiceUnknown",
-            "org.freedesktop.DBus.Error.NameHasNoOwner",
         ] {
             assert!(
                 matches!(children_call_error(method_error(name), &aref),
