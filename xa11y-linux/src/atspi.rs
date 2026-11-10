@@ -3448,6 +3448,11 @@ impl Provider for LinuxProvider {
     /// enumerate each registered application's top-level children and return
     /// the first application that owns a window reporting `ACTIVE`.
     ///
+    /// More than one application can report an `ACTIVE` window: xfwm4 keeps
+    /// one on an off-screen 5x5 window. So when the window manager reports
+    /// an active window (`_NET_ACTIVE_WINDOW` on X11), the applications with
+    /// that window's pid are searched first.
+    ///
     /// Returns [`Error::SelectorNotMatched`] when no window is active (no app
     /// has the foreground — e.g. focus is on the shell or a non-AT-SPI
     /// surface). The core reads that as "nothing focused", not a failure.
@@ -3459,7 +3464,11 @@ impl Provider for LinuxProvider {
             bus_name: "org.a11y.atspi.Registry".to_string(),
             path: "/org/a11y/atspi/accessible/root".to_string(),
         };
-        let apps = self.get_atspi_children(&registry)?;
+        let mut apps = self.get_atspi_children(&registry)?;
+        if let Some(pid) = self.window_manager.active_window_pid()? {
+            // A stable sort keeps the registry order within each group.
+            apps.sort_by_cached_key(|app| self.get_app_pid(app) != Some(pid));
+        }
 
         for app in apps.iter().filter(|c| c.path != "/org/a11y/atspi/null") {
             // An application that left the bus mid-scan (or whose root has no
