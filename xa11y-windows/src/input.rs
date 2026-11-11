@@ -282,6 +282,8 @@ enum Typed {
     Character(char),
     /// A line break, as a `VK_RETURN` tap.
     LineBreak,
+    /// A tab, as a `VK_TAB` tap.
+    Tab,
 }
 
 /// What `type_text` sends for `text`.
@@ -296,6 +298,9 @@ enum Typed {
 /// A `"\r\n"` pair is one break, and a lone CR or a lone LF is one break
 /// each, so `"\n\r"` and `"\r\r"` are two. The pairing is per call: a CR
 /// ending one `type_text` call and an LF starting the next are two breaks.
+///
+/// A tab is the Tab key for the same reason: it is how a person types one,
+/// and it matches the other platforms, where a Unicode U+0009 is not typable.
 fn typed_events(text: &str) -> Vec<Typed> {
     const CR: char = '\r';
     const LF: char = '\n';
@@ -305,6 +310,7 @@ fn typed_events(text: &str) -> Vec<Typed> {
         match character {
             LF if prev == Some(CR) => {}
             CR | LF => out.push(Typed::LineBreak),
+            '\t' => out.push(Typed::Tab),
             _ => out.push(Typed::Character(character)),
         }
         prev = Some(character);
@@ -838,6 +844,10 @@ impl InputProvider for WindowsInputProvider {
                     inputs.push(key_input(VK_RETURN, KEYBD_EVENT_FLAGS(0)));
                     inputs.push(key_input(VK_RETURN, KEYEVENTF_KEYUP));
                 }
+                Typed::Tab => {
+                    inputs.push(key_input(VK_TAB, KEYBD_EVENT_FLAGS(0)));
+                    inputs.push(key_input(VK_TAB, KEYEVENTF_KEYUP));
+                }
             }
             self.send_locked(&dpi, &inputs, Target::Keyboard)?;
             // Include the final scalar: the next type_text call may start
@@ -903,13 +913,15 @@ mod tests {
         assert_eq!(absolute_axis(100, 0, 100), 65535);
     }
 
-    /// Render the events as text, with `⏎` for each Enter tap.
+    /// Render the events as text, with `⏎` for each Enter tap and `⇥` for
+    /// each Tab tap.
     fn typed(text: &str) -> String {
         typed_events(text)
             .into_iter()
             .map(|e| match e {
                 Typed::Character(character) => character.to_string(),
                 Typed::LineBreak => "\u{23CE}".into(),
+                Typed::Tab => "\u{21E5}".into(),
             })
             .collect()
     }
@@ -936,6 +948,13 @@ mod tests {
         assert_eq!(typed("\r\r\n"), "\u{23CE}\u{23CE}");
         // The LF after a collapsed pair is a break of its own.
         assert_eq!(typed("\r\n\n"), "\u{23CE}\u{23CE}");
+    }
+
+    #[test]
+    fn tab_is_the_tab_key() {
+        assert_eq!(typed("a\tb"), "a\u{21E5}b");
+        assert_eq!(typed("\t\t"), "\u{21E5}\u{21E5}");
+        assert_eq!(typed("a\t\r\nb"), "a\u{21E5}\u{23CE}b");
     }
 
     #[test]

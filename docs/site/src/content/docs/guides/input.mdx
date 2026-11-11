@@ -324,6 +324,8 @@ On Windows, letters and digits are positional virtual keys (`VK_A`, `VK_1`), as 
 
 On every platform, `type_text` types each line break as a press of the Enter key. A `"\r\n"` pair is one line break, and a lone `"\r"` or `"\n"` is one line break each. In a single-line field, Enter can trigger the default button, as it does when a person types it.
 
+A `"\t"` is a press of the Tab key on every platform, so it can move focus to the next control.
+
 ## Example: drag-and-drop
 
 Drag-and-drop has no accessibility equivalent on most platforms. Resolve both endpoints via the a11y tree first, then synthesise the drag.

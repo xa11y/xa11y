@@ -154,6 +154,8 @@ pub(crate) fn plan_keystrokes<K: Copy>(
                 XK_RETURN
             }
             '\n' => XK_RETURN,
+            // The Unicode keysym for U+0009 is in no layout either.
+            '\t' => XK_TAB,
             _ => char_keysym(c),
         };
         let (keycode, needs_shift) = lookup(keysym).ok_or_else(|| Error::Unsupported {
@@ -902,6 +904,15 @@ mod tests {
         // …but LF CR is two, as are consecutive breaks.
         assert_eq!(plan("\n\r"), vec![ret, ret]);
         assert_eq!(plan("\r\n\r\n"), vec![ret, ret]);
+    }
+
+    #[test]
+    fn tab_types_the_tab_key() {
+        let mut map = keymap(true);
+        // Keycode 11: Tab.
+        map.syms.extend([XK_TAB, 0]);
+        let plan = plan_keystrokes("a\tb", "X keyboard layout", |k| map.lookup(k)).expect("plans");
+        assert_eq!(plan, vec![(8, None), (11, None), (9, None)]);
     }
 
     #[test]
