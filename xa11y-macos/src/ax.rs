@@ -5999,6 +5999,15 @@ impl Provider for MacOSProvider {
         // step is `unknown`.
         activate_owning_app(ax.as_ptr(), "activate", element.role)
             .map_err(|e| unknown_after_step(e, "clearing AXMinimized"))?;
+        // The main window of the app is already the front one, so AXRaise has
+        // nothing left to do. SwiftUI scene windows advertise AXRaise but answer
+        // it with kAXErrorAttributeUnsupported, even when they are main.
+        if read_bool_attr(ax.as_ptr(), "AXMain", "activate", element.role)
+            .map_err(|e| unknown_after_step(e, "activating the owning app"))?
+            == Some(true)
+        {
+            return Ok(());
+        }
         // The window or its app has changed by now, so an AXRaise refusal
         // must not read as "not delivered".
         perform_ax_action(ax.as_ptr(), "AXRaise", "activate", element.role)

@@ -1122,6 +1122,39 @@ def test_locator_activate(app: xa11y.App) -> None:
     locator.activate()
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin" or APP != "cocoa",
+    reason="requires the cocoa fixture's SwiftUI scene window",
+)
+def test_activate_a_swiftui_scene_window() -> None:
+    """``activate`` succeeds on a SwiftUI scene window that refuses AXRaise.
+
+    The window advertises AXRaise and answers it with
+    kAXErrorAttributeUnsupported, also when it is already the app's main
+    window (Calculator on macOS 26 does the same).
+    """
+    import subprocess
+    from pathlib import Path
+
+    binary = (
+        Path(__file__).resolve().parents[3] / "test-apps" / "cocoa" / "xa11y-cocoa-test-app"
+    )
+    proc = subprocess.Popen([str(binary), "--swiftui-scene"])
+    try:
+        scene = xa11y.App.by_pid(proc.pid, timeout=10.0)
+        window = scene.locator('window[name="xa11y SwiftUI Scene"]')
+        window.wait_attached(timeout=10.0)
+        assert "activate" in window.element().actions
+        window.element().activate()
+        deadline = time.monotonic() + 5.0
+        while xa11y.App.foreground().pid != proc.pid:
+            assert time.monotonic() < deadline, "the scene app is not foreground after activate"
+            time.sleep(0.05)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
 def test_locator_move_to_restores_the_original_position(app: xa11y.App) -> None:
     """``Locator.move_to`` dispatches, and the window is put back where it was."""
     win = _window_advertising(app, "move_to")
