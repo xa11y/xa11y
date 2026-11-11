@@ -64,7 +64,7 @@ use xa11y_core::input::{
 };
 use xa11y_core::{Error, Rect, Result};
 
-use crate::input::{key_to_keysym, plan_keystrokes};
+use crate::input::{key_to_keysym, plan_keystrokes, MULTI_CLICK_GAP};
 
 /// Virtual coordinate range for the absolute pointer. Compositors scale
 /// this onto the active virtual screen — same convention used by graphics
@@ -328,17 +328,27 @@ impl WaylandInputBackend {
         let (x, y) = self.map(at)?;
         let key = button_key(button);
         let mut s = self.lock();
-        // Move + click as one frame so the compositor sees the position
-        // and the button-down on the same input report.
-        let mut frame = vec![
-            InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_X.0, x),
-            InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_Y.0, y),
-        ];
-        for _ in 0..count {
-            frame.push(InputEvent::new(EventType::KEY.0, key.0, 1));
-            frame.push(InputEvent::new(EventType::KEY.0, key.0, 0));
+        let press = InputEvent::new(EventType::KEY.0, key.0, 1);
+        let release = InputEvent::new(EventType::KEY.0, key.0, 0);
+        // Move + first click as one frame so the compositor sees the
+        // position and the button-down on the same input report.
+        emit(
+            &mut s.device,
+            &[
+                InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_X.0, x),
+                InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_Y.0, y),
+                press,
+                release,
+            ],
+        )?;
+        // Each further click is its own frame, after the same gap as on X11.
+        // In one frame, every press and release shares one timestamp, and
+        // the compositor sees one report of the button's final state.
+        for _ in 1..count {
+            std::thread::sleep(MULTI_CLICK_GAP);
+            emit(&mut s.device, &[press, release])?;
         }
-        emit(&mut s.device, &frame)
+        Ok(())
     }
 
     pub(crate) fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {

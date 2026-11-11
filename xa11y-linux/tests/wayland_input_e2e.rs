@@ -203,6 +203,32 @@ fn pointer_click_emits_button_down_then_up() {
 
 #[test]
 #[ignore]
+fn pointer_double_click_sends_each_click_in_its_own_frame() {
+    drive(|sim, dev| {
+        sim.pointer_click(Point::new(100, 100), MouseButton::Left, 2)
+            .expect("double click");
+        let events = collect_events(dev, &[EventType::KEY], 4, Duration::from_secs(1));
+        let presses: Vec<_> = events
+            .iter()
+            .filter(|e| e.code() == KeyCode::BTN_LEFT.0)
+            .collect();
+        let values: Vec<_> = presses.iter().map(|e| e.value()).collect();
+        assert_eq!(values, vec![1, 0, 1, 0], "two press/release pairs");
+        // In one frame both clicks shared a timestamp; a separate frame
+        // after the gap carries a later one.
+        let gap = presses[2]
+            .timestamp()
+            .duration_since(presses[1].timestamp())
+            .expect("second press is not earlier than the first release");
+        assert!(
+            gap >= Duration::from_millis(10),
+            "second click followed the first after {gap:?}, not after the multi-click gap"
+        );
+    });
+}
+
+#[test]
+#[ignore]
 fn pointer_right_click_uses_btn_right() {
     drive(|sim, dev| {
         sim.pointer_click(Point::new(0, 0), MouseButton::Right, 1)

@@ -47,6 +47,14 @@ use xa11y_core::{Error, Rect, Result};
 use crate::session::{select_backend, DesktopBackend};
 use crate::wayland_input::WaylandInputBackend;
 
+/// The pause between the clicks of a multi-click, on X11 and on Wayland.
+///
+/// With no gap, GTK on X11 took about one double-click in fifteen as two
+/// single clicks (3 to 5 of 60 lost); a 2 ms gap already lost none. 12 ms
+/// leaves margin and is far below any double-click time (GTK's default is
+/// 400 ms), so a triple-click still counts as one gesture.
+pub(crate) const MULTI_CLICK_GAP: std::time::Duration = std::time::Duration::from_millis(12);
+
 // X11 keysyms — lifted from /usr/include/X11/keysymdef.h. Only the keysyms
 // named by [`Key`] plus the modifiers we need to hold for shifted text.
 // Shared with the Wayland backend via `key_to_keysym`.
@@ -394,7 +402,10 @@ impl X11InputBackend {
         }
         self.pointer_move(at)?;
         let btn = button_number(button);
-        for _ in 0..count {
+        for i in 0..count {
+            if i > 0 {
+                std::thread::sleep(MULTI_CLICK_GAP);
+            }
             self.button_event(btn, true)?;
             self.button_event(btn, false)?;
         }
