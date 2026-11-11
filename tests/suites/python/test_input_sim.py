@@ -529,6 +529,44 @@ def test_scroll_reports_wheel(tauri_input_app, sim):
     assert "wheel" in log
 
 
+def _wheel_signs(log: str) -> list[tuple[int, int]]:
+    """The signs of (deltaX, deltaY) of each DOM wheel event in the log."""
+
+    def sign(value: float) -> int:
+        return (value > 0) - (value < 0)
+
+    signs = []
+    for line in log.split("\n"):
+        if not line.startswith("wheel "):
+            continue
+        fields = dict(part.split("=", 1) for part in line.split()[1:] if "=" in part)
+        signs.append((sign(float(fields["dx"])), sign(float(fields["dy"]))))
+    return signs
+
+
+@pytest.mark.parametrize(
+    ("dx", "dy", "expected"),
+    [
+        (0, 2, (0, 1)),
+        (0, -2, (0, -1)),
+        (2, 0, (1, 0)),
+        (-2, 0, (-1, 0)),
+    ],
+    ids=["down", "up", "right", "left"],
+)
+def test_scroll_direction_matches_dom_wheel_deltas(tauri_input_app, sim, dx, dy, expected):
+    """Positive dy scrolls toward the end and positive dx toward the right, on
+    every platform: the DOM reports deltaY / deltaX with the same sign (#688)."""
+    _clear_log(tauri_input_app)
+    sim.scroll(_hit_center(tauri_input_app), dx=dx, dy=dy)
+    log = _wait_for_log(tauri_input_app, lambda t: bool(_wheel_signs(t)))
+    signs = set(_wheel_signs(log))
+    assert signs == {expected}, (
+        f"scroll(dx={dx}, dy={dy}) gave wheel events with (deltaX, deltaY) signs "
+        f"{sorted(signs)}, expected {expected}. Log:\n{log}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Smoke
 # ---------------------------------------------------------------------------

@@ -730,6 +730,9 @@ impl InputProvider for WindowsInputProvider {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         self.validate_point(&dpi, at)?;
         self.move_locked(&dpi, at)?;
+        // A positive `mouseData` is a forward turn, away from the user, which
+        // scrolls toward the top; positive `dy` scrolls toward the end (#688).
+        // A positive horizontal `mouseData` already scrolls right, as `dx` does.
         if delta.dy != 0 {
             self.send_locked(
                 &dpi,
@@ -737,7 +740,7 @@ impl InputProvider for WindowsInputProvider {
                     MOUSEEVENTF_WHEEL.0,
                     0,
                     0,
-                    delta.dy * WHEEL_DELTA,
+                    -delta.dy * WHEEL_DELTA,
                 )],
                 Target::PointerAt(at),
             )?;

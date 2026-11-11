@@ -115,7 +115,12 @@ unsafe extern "C" {
         mouse_button: u32,
     ) -> CGEventRef;
 
-    fn CGEventCreateScrollWheelEvent(
+    // `CGEventCreateScrollWheelEvent` is variadic (`wheel1, ...`). Declared
+    // here with fixed parameters, wheel2 went where a variadic callee does
+    // not look on arm64, and every scroll carried a garbage deltaX
+    // (826560 in the WKWebView). The `2` variant takes all three wheels as
+    // fixed parameters.
+    fn CGEventCreateScrollWheelEvent2(
         source: CGEventSourceRef,
         units: u32,
         wheel_count: u32,
@@ -739,24 +744,24 @@ impl InputProvider for MacOSInputProvider {
             .unwrap_or_else(|error| error.into_inner());
         self.validate_pointer_target(at)?;
         self.move_pointer(at)?;
-        // Quartz scroll convention: positive wheel1 = scroll up (content down),
-        // which matches the xa11y ScrollDelta doc invariant ("positive dy
-        // scrolls content down").
+        // Quartz: a positive wheel1 scrolls toward the top and a positive
+        // wheel2 toward the left. Positive `dy` scrolls toward the end and
+        // positive `dx` toward the right (#688), so both are negated.
         // SAFETY: nil source is valid.
         let ev = unsafe {
-            CGEventCreateScrollWheelEvent(
+            CGEventCreateScrollWheelEvent2(
                 std::ptr::null_mut(),
                 K_CG_SCROLL_EVENT_UNIT_LINE,
                 2,
-                delta.dy,
-                delta.dx,
+                -delta.dy,
+                -delta.dx,
                 0,
             )
         };
         if ev.is_null() {
             return Err(Error::Platform {
                 code: -1,
-                message: "CGEventCreateScrollWheelEvent failed".to_string(),
+                message: "CGEventCreateScrollWheelEvent2 failed".to_string(),
             });
         }
         self.post(ev)

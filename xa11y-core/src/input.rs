@@ -242,8 +242,11 @@ pub enum MouseButton {
 }
 
 /// Direction and magnitude of a scroll event, in platform "ticks" (typically
-/// one notch of a physical scroll wheel). Positive `dy` scrolls content
-/// downward (i.e. moves the viewport up); positive `dx` scrolls right.
+/// one notch of a physical scroll wheel). Positive `dy` scrolls toward the end
+/// of the content, so the view moves down the page, as when a wheel is turned
+/// toward the user; positive `dx` scrolls toward the right. This is the sign
+/// of a DOM `WheelEvent`'s `deltaY` / `deltaX` and of a WebDriver wheel
+/// action, and it is the same on every platform.
 #[allow(
     clippy::exhaustive_structs,
     reason = "Closed domain: scrolling has two axes. A third would need a \

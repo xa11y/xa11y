@@ -1047,7 +1047,7 @@ fn tool_definition(name: &str) -> Value {
             );
             props.insert(
                 "dy".into(),
-                COORD.property("Vertical scroll delta. Positive scrolls down. Default 0.".into()),
+                COORD.property("Vertical scroll delta, in wheel ticks. Positive scrolls down, toward the end of the content. Default 0.".into()),
             );
             tool(
                 "scroll",
