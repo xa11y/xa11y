@@ -90,6 +90,10 @@ const K_CG_EVENT_FLAG_MASK_SHIFT: u64 = 0x0002_0000;
 const K_CG_EVENT_FLAG_MASK_CONTROL: u64 = 0x0004_0000;
 const K_CG_EVENT_FLAG_MASK_ALTERNATE: u64 = 0x0008_0000;
 const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
+const MODIFIER_FLAGS: u64 = K_CG_EVENT_FLAG_MASK_SHIFT
+    | K_CG_EVENT_FLAG_MASK_CONTROL
+    | K_CG_EVENT_FLAG_MASK_ALTERNATE
+    | K_CG_EVENT_FLAG_MASK_COMMAND;
 
 // Flags that macOS puts on a key by its key code (arrows, Home, F-keys),
 // not modifiers that a key-down holds.
@@ -780,7 +784,20 @@ impl InputProvider for MacOSInputProvider {
         // reports the modifier as already released.
         let flags = modifier_flag_for(key);
         if flags != 0 {
-            self.held_flags.fetch_and(!flags, Ordering::SeqCst);
+            let held = self.held_flags.fetch_and(!flags, Ordering::SeqCst) & !flags;
+            // The event copied the session's modifier flags when it was
+            // created, and the window server has not yet seen the key-ups
+            // posted just before it. After Cmd+Ctrl+R, the Ctrl key-up still
+            // carried Ctrl, and the window server kept Ctrl in the session
+            // state: the next "a" arrived as Ctrl+A. A modifier key-up
+            // therefore carries only the modifiers still held through
+            // `key_down`. A modifier held on the physical keyboard is dropped
+            // from this one event; the next event copies it back.
+            // SAFETY: `ev` is a valid CGEventRef we just created.
+            unsafe {
+                let current = CGEventGetFlags(ev);
+                CGEventSetFlags(ev, (current & !MODIFIER_FLAGS) | held);
+            }
         }
         self.post(ev)
     }
