@@ -669,6 +669,12 @@ export class XA11yError extends Error {
    * apply it twice.
    */
   delivery: DeliveryName;
+  /**
+   * The `XA11Y_*` code of the Rust error variant, for example
+   * `'XA11Y_NO_ELEMENT_BOUNDS'`. It tells apart the variants that share a
+   * class. Set on every error from the native layer.
+   */
+  code?: string;
 }
 
 /** Accessibility permissions have not been granted. */

@@ -46,8 +46,6 @@ enum Backend {
 
 struct X11Backend {
     conn: Mutex<RustConnection>,
-    root_width: u16,
-    root_height: u16,
     root: u32,
 }
 
@@ -69,14 +67,10 @@ impl LinuxScreenshot {
                         message: "X server reported no screens".into(),
                     })?;
                 let root = screen.root;
-                let root_width = screen.width_in_pixels;
-                let root_height = screen.height_in_pixels;
                 Ok(Self {
                     backend: Backend::X11(Box::new(X11Backend {
                         conn: Mutex::new(conn),
                         root,
-                        root_width,
-                        root_height,
                     })),
                 })
             }
@@ -96,12 +90,26 @@ impl LinuxScreenshot {
         &self,
         conn: &Mutex<RustConnection>,
         root: u32,
-        root_w: u16,
-        root_h: u16,
         rect: Option<Rect>,
     ) -> Result<Screenshot> {
+        let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
         let (x, y, w, h) = match rect {
-            None => (0_i16, 0_i16, root_w, root_h),
+            // Read the root size at each capture: a RandR change after
+            // connect makes the size in the connection setup stale.
+            None => {
+                let root_geometry = guard
+                    .get_geometry(root)
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("GetGeometry of the root window: {e}"),
+                    })?
+                    .reply()
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("GetGeometry of the root window reply: {e}"),
+                    })?;
+                (0_i16, 0_i16, root_geometry.width, root_geometry.height)
+            }
             Some(r) => {
                 let x = i16::try_from(r.x).map_err(|_| Error::Platform {
                     code: -1,
@@ -129,7 +137,6 @@ impl LinuxScreenshot {
             });
         }
 
-        let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
         let reply = guard
             .get_image(ImageFormat::Z_PIXMAP, root, x, y, w, h, !0)
             .map_err(|e| Error::Platform {
@@ -304,7 +311,7 @@ impl ScreenshotProvider for LinuxScreenshot {
         // raw pixels; the scale is metadata applied here. See `crate::scale`.
         let scale = crate::scale::screenshot_scale();
         let mut shot = match &self.backend {
-            Backend::X11(x) => self.capture_x11(&x.conn, x.root, x.root_width, x.root_height, None),
+            Backend::X11(x) => self.capture_x11(&x.conn, x.root, None),
             Backend::Wayland { conn } => self.capture_wayland(conn, None),
         }?;
         shot.scale = scale as f32;
@@ -330,9 +337,7 @@ impl ScreenshotProvider for LinuxScreenshot {
         let scale = crate::scale::screenshot_scale();
         let phys = rect.to_physical(scale);
         let mut shot = match &self.backend {
-            Backend::X11(x) => {
-                self.capture_x11(&x.conn, x.root, x.root_width, x.root_height, Some(phys))
-            }
+            Backend::X11(x) => self.capture_x11(&x.conn, x.root, Some(phys)),
             Backend::Wayland { conn } => self.capture_wayland(conn, Some(phys)),
         }?;
         shot.scale = scale as f32;
