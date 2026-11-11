@@ -20,9 +20,17 @@ extern "C" {
         out_scale: *mut f64,
         out_origin_x: *mut f64,
         out_origin_y: *mut f64,
+        step_timeout_ms: i64,
     ) -> i32;
     fn safe_cg_free_pixels(pixels: *mut u8);
 }
+
+/// How long each ScreenCaptureKit step may take to call back.
+///
+/// A capture normally takes about 200 ms in all. ScreenCaptureKit can leave a
+/// completion handler uncalled (#682), and without a bound the caller would
+/// wait forever with no error.
+const SCK_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct MacOSScreenshot;
 
@@ -79,6 +87,7 @@ impl MacOSScreenshot {
                 &mut scale,
                 &mut origin_x,
                 &mut origin_y,
+                SCK_STEP_TIMEOUT.as_millis() as i64,
             )
         };
 
@@ -110,6 +119,8 @@ impl MacOSScreenshot {
                     code: -5,
                     message: "requested rect has zero/negative dimensions".into(),
                 },
+                -6 => sck_timeout("SCShareableContent.getShareableContent"),
+                -7 => sck_timeout("SCScreenshotManager.captureImageWithFilter"),
                 -9999 => Error::Platform {
                     code: -9999,
                     message: "ObjC exception during capture".into(),
@@ -162,4 +173,18 @@ impl ScreenshotProvider for MacOSScreenshot {
         // caller does not already have.
         self.capture(Some(rect)).map(|(shot, _)| shot)
     }
+}
+
+/// The error for a ScreenCaptureKit step that never called back.
+fn sck_timeout(step: &str) -> Error {
+    Error::timeout(SCK_STEP_TIMEOUT).diagnose(
+        xa11y_core::Diagnosis::new()
+            .condition(format!(
+                "ScreenCaptureKit {step} to call its completion handler"
+            ))
+            .last_observed(
+                "no callback. ScreenCaptureKit has been seen to stall like this in a second \
+                 process that captures after another process from the same app did (#682)",
+            ),
+    )
 }
