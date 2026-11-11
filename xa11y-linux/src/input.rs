@@ -402,8 +402,8 @@ impl X11InputBackend {
     fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
         self.pointer_move(at)?;
         // X11 scroll-wheel convention: button 4 = up, 5 = down, 6 = left, 7 = right.
-        // The input-sim contract: positive dy scrolls content down (viewport
-        // up), which is the "wheel rolled toward the user" direction — that's
+        // The input-sim contract: positive dy scrolls toward the end of the
+        // content, the "wheel rolled toward the user" direction, which is
         // button 5 on X11.
         for _ in 0..delta.dy.abs() {
             let btn = if delta.dy > 0 { 5 } else { 4 };

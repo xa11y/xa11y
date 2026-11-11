@@ -398,8 +398,9 @@ impl InputSim {
         }))
     }
 
-    /// Scroll at `target`. `dx` positive → right, `dy` positive → content
-    /// scrolls down. Defaults: `0`, `0` (a no-op).
+    /// Scroll at `target`, in wheel ticks. Positive `dy` scrolls down, toward
+    /// the end of the content; positive `dx` scrolls right. Defaults: `0`,
+    /// `0` (a no-op).
     #[napi(ts_return_type = "Promise<void>")]
     pub fn scroll(
         &self,

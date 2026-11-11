@@ -1755,7 +1755,9 @@ class InputSim:
         dx: int = 0,
         dy: int = 0,
     ) -> None:
-        """Scroll at ``target``. ``dx`` positive → right, ``dy`` positive → down."""
+        """Scroll at ``target``, in wheel ticks. Positive ``dy`` scrolls down, toward
+        the end of the content; positive ``dx`` scrolls right.
+        """
     def press(self, key: str) -> None:
         """Tap a key (press + release)."""
     def chord(self, key: str, held: list[str] = ...) -> None:

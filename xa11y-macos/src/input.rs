@@ -735,17 +735,17 @@ impl InputProvider for MacOSInputProvider {
             .unwrap_or_else(|error| error.into_inner());
         self.validate_pointer_target(at)?;
         self.move_pointer(at)?;
-        // Quartz scroll convention: positive wheel1 = scroll up (content down),
-        // which matches the xa11y ScrollDelta doc invariant ("positive dy
-        // scrolls content down").
+        // Quartz: a positive wheel1 scrolls toward the top and a positive
+        // wheel2 toward the left. Positive `dy` scrolls toward the end and
+        // positive `dx` toward the right (#688), so both are negated.
         // SAFETY: nil source is valid.
         let ev = unsafe {
             CGEventCreateScrollWheelEvent(
                 std::ptr::null_mut(),
                 K_CG_SCROLL_EVENT_UNIT_LINE,
                 2,
-                delta.dy,
-                delta.dx,
+                -delta.dy,
+                -delta.dx,
                 0,
             )
         };

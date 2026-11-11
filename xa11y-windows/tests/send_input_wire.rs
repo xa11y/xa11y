@@ -673,7 +673,9 @@ fn pointer_scroll_reports_wheel_notches() {
         "{events:?}"
     );
     let (_, _, _, mouse_data, _) = expect_mouse(events[1]);
-    assert_eq!(wheel_delta(mouse_data), 3 * WHEEL_DELTA, "{events:?}");
+    // Positive dy scrolls toward the end: the wheel turns toward the user,
+    // which Win32 reports as a negative delta (#688).
+    assert_eq!(wheel_delta(mouse_data), -3 * WHEEL_DELTA, "{events:?}");
 
     clear();
     sim.pointer_scroll(TARGET, ScrollDelta::new(-2, 0))
@@ -699,7 +701,7 @@ fn pointer_scroll_reports_wheel_notches() {
     );
     let (_, _, _, vertical, _) = expect_mouse(events[1]);
     let (_, _, _, horizontal, _) = expect_mouse(events[2]);
-    assert_eq!(wheel_delta(vertical), -WHEEL_DELTA, "{events:?}");
+    assert_eq!(wheel_delta(vertical), WHEEL_DELTA, "{events:?}");
     assert_eq!(wheel_delta(horizontal), WHEEL_DELTA, "{events:?}");
 }
 

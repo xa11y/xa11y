@@ -234,7 +234,7 @@ In Rust, additional anchors are available via `ClickOptions.anchor` (`Anchor::To
     sim.right_click((100, 100))             # right click
     sim.move_to((200, 200))                 # move without clicking
     sim.drag((50, 50), (200, 200))          # left-drag
-    sim.scroll((400, 300), dy=-3)           # 3 ticks down
+    sim.scroll((400, 300), dy=3)            # 3 ticks down
     sim.scroll((400, 300), dx=2, dy=0)      # 2 ticks right
     ```
   </TabItem>
@@ -245,12 +245,12 @@ In Rust, additional anchors are available via `ClickOptions.anchor` (`Anchor::To
     await sim.rightClick([100, 100]);       // right click
     await sim.moveTo([200, 200]);           // move without clicking
     await sim.drag([50, 50], [200, 200]);   // left-drag
-    await sim.scroll([400, 300], 0, -3);    // dx=0, dy=-3 (3 ticks down)
+    await sim.scroll([400, 300], 0, 3);     // dx=0, dy=3 (3 ticks down)
     ```
   </TabItem>
 </Tabs>
 
-Scroll units are platform "ticks", typically one notch of a physical scroll wheel. Positive `dx` scrolls right. Positive `dy` scrolls content down, which moves the viewport up.
+Scroll units are platform "ticks", typically one notch of a physical scroll wheel. Positive `dy` scrolls down, toward the end of the content, and negative `dy` scrolls up. Positive `dx` scrolls right. The sign is the same on every platform, and matches `deltaY` and `deltaX` of a browser wheel event.
 
 ## Keyboard
 

@@ -2702,8 +2702,8 @@ impl InputSim {
             .map_err(to_py_err)
     }
 
-    /// Scroll at `target`. `dx` positive → scroll right, `dy` positive →
-    /// scroll content down.
+    /// Scroll at `target`, in wheel ticks. Positive `dy` scrolls down, toward
+    /// the end of the content; positive `dx` scrolls right.
     #[pyo3(signature = (target, dx=0, dy=0))]
     fn scroll(&self, py: Python<'_>, target: Bound<'_, PyAny>, dx: i32, dy: i32) -> PyResult<()> {
         let pt = parse_target(&self.inner, &target)?;

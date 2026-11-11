@@ -345,7 +345,7 @@ impl WaylandInputBackend {
         let (x, y) = self.map(at)?;
         let mut s = self.lock();
         // REL_WHEEL: negative = down, positive = up. ScrollDelta uses
-        // "positive dy = content scrolls down" (wheel rolled toward the
+        // "positive dy = scroll toward the end" (wheel rolled toward the
         // user), so wheel value = -dy.
         let wheel = -delta.dy;
         let hwheel = delta.dx;

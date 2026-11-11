@@ -277,7 +277,7 @@ class ScrollAction(BaseModel):
     type: Literal["scroll"] = Field(description="Scroll the wheel over an element or point")
     target: PointerTarget
     dx: int = Field(default=0, description="Horizontal steps; positive scrolls right.")
-    dy: int = Field(default=0, description="Vertical steps; positive scrolls down.")
+    dy: int = Field(default=0, description="Vertical steps; positive scrolls down, toward the end of the content.")
 
     @model_validator(mode="after")
     def _needs_a_direction(self) -> "ScrollAction":
