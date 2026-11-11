@@ -5999,19 +5999,40 @@ impl Provider for MacOSProvider {
         // step is `unknown`.
         activate_owning_app(ax.as_ptr(), "activate", element.role)
             .map_err(|e| unknown_after_step(e, "clearing AXMinimized"))?;
-        // The main window of the app is already the front one, so AXRaise has
-        // nothing left to do. SwiftUI scene windows advertise AXRaise but answer
-        // it with kAXErrorAttributeUnsupported, even when they are main.
-        if read_bool_attr(ax.as_ptr(), "AXMain", "activate", element.role)
-            .map_err(|e| unknown_after_step(e, "activating the owning app"))?
-            == Some(true)
-        {
-            return Ok(());
-        }
         // The window or its app has changed by now, so an AXRaise refusal
         // must not read as "not delivered".
-        perform_ax_action(ax.as_ptr(), "AXRaise", "activate", element.role)
-            .map_err(|e| unknown_after_step(e, "activating the owning app"))
+        let raise = CFString::new("AXRaise");
+        let call = do_perform_action(ax.as_ptr(), &raise);
+        if call == AX_ERROR_ATTRIBUTE_UNSUPPORTED {
+            // SwiftUI scene windows (and Calculator on macOS 26) list AXRaise
+            // and then answer it with kAXErrorAttributeUnsupported, even when
+            // they are already the app's main window. Nothing visible tells
+            // such a window apart before the call, so the refusal is reported
+            // here. AXMain is not taken as proof the window is in front: it
+            // can be stale right after AXFrontmost, and skipping the raise on
+            // it would report success for a raise that never ran (tenet 1).
+            return Err(Error::Platform {
+                code: call.code as i64,
+                message: "activate: the app was brought to the front, but the window \
+                          refused AXRaise (kAXErrorAttributeUnsupported) although it \
+                          lists AXRaise among its actions, so it may not be the front \
+                          window"
+                    .to_string(),
+            });
+        }
+        if call != AX_ERROR_SUCCESS {
+            return Err(unknown_after_step(
+                action_error(
+                    ax.as_ptr(),
+                    call,
+                    "activate",
+                    element.role,
+                    "AXRaise failed",
+                ),
+                "activating the owning app",
+            ));
+        }
+        Ok(())
     }
 
     fn minimize(&self, element: &ElementData) -> Result<()> {
