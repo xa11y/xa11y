@@ -111,7 +111,12 @@ unsafe extern "C" {
         mouse_button: u32,
     ) -> CGEventRef;
 
-    fn CGEventCreateScrollWheelEvent(
+    // `CGEventCreateScrollWheelEvent` is variadic (`wheel1, ...`). Declared
+    // here with fixed parameters, wheel2 went where a variadic callee does
+    // not look on arm64, and every scroll carried a garbage deltaX
+    // (826560 in the WKWebView). The `2` variant takes all three wheels as
+    // fixed parameters.
+    fn CGEventCreateScrollWheelEvent2(
         source: CGEventSourceRef,
         units: u32,
         wheel_count: u32,
@@ -740,7 +745,7 @@ impl InputProvider for MacOSInputProvider {
         // positive `dx` toward the right (#688), so both are negated.
         // SAFETY: nil source is valid.
         let ev = unsafe {
-            CGEventCreateScrollWheelEvent(
+            CGEventCreateScrollWheelEvent2(
                 std::ptr::null_mut(),
                 K_CG_SCROLL_EVENT_UNIT_LINE,
                 2,
@@ -752,7 +757,7 @@ impl InputProvider for MacOSInputProvider {
         if ev.is_null() {
             return Err(Error::Platform {
                 code: -1,
-                message: "CGEventCreateScrollWheelEvent failed".to_string(),
+                message: "CGEventCreateScrollWheelEvent2 failed".to_string(),
             });
         }
         self.post(ev)
