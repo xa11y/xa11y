@@ -47,6 +47,11 @@ use xa11y_core::{Error, Rect, Result};
 use crate::session::{select_backend, DesktopBackend};
 use crate::wayland_input::WaylandInputBackend;
 
+/// The pause between the clicks of an X11 multi-click. With no gap, GTK takes
+/// about one double-click in fifteen as two single clicks. 12 ms is also the
+/// default delay of `xdotool click --repeat`.
+const X11_MULTI_CLICK_GAP: std::time::Duration = std::time::Duration::from_millis(12);
+
 // X11 keysyms — lifted from /usr/include/X11/keysymdef.h. Only the keysyms
 // named by [`Key`] plus the modifiers we need to hold for shifted text.
 // Shared with the Wayland backend via `key_to_keysym`.
@@ -392,7 +397,10 @@ impl X11InputBackend {
         }
         self.pointer_move(at)?;
         let btn = button_number(button);
-        for _ in 0..count {
+        for i in 0..count {
+            if i > 0 {
+                std::thread::sleep(X11_MULTI_CLICK_GAP);
+            }
             self.button_event(btn, true)?;
             self.button_event(btn, false)?;
         }
