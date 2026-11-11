@@ -1122,6 +1122,54 @@ def test_locator_activate(app: xa11y.App) -> None:
     locator.activate()
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin" or APP != "cocoa",
+    reason="requires the cocoa fixture's SwiftUI scene window",
+)
+def test_activate_a_swiftui_scene_window_reports_the_refused_raise(app: xa11y.App) -> None:
+    """``activate`` on a window that refuses AXRaise raises, naming the refusal.
+
+    A SwiftUI scene window lists AXRaise and answers it with
+    kAXErrorAttributeUnsupported (Calculator on macOS 26 does the same). The
+    app-activation step still runs, so the scene app comes to the front, but
+    ``activate`` must not report a raise that never happened.
+
+    The fixture app is brought forward first, so the scene app starts in the
+    background and the foreground check below proves the activation step ran.
+    """
+    import subprocess
+    from pathlib import Path
+
+    def wait_foreground(pid: int, what: str) -> None:
+        deadline = time.monotonic() + 5.0
+        while xa11y.App.foreground().pid != pid:
+            assert time.monotonic() < deadline, what
+            time.sleep(0.05)
+
+    binary = (
+        Path(__file__).resolve().parents[3] / "test-apps" / "cocoa" / "xa11y-cocoa-test-app"
+    )
+    proc = subprocess.Popen([str(binary), "--swiftui-scene"])
+    try:
+        scene = xa11y.App.by_pid(proc.pid, timeout=10.0)
+        window = scene.locator('window[name="xa11y SwiftUI Scene"]')
+        window.wait_attached(timeout=10.0)
+
+        fixture_window = _window_advertising(app, "activate")
+        assert fixture_window is not None, "the fixture app has no window advertising activate"
+        fixture_window.activate()
+        wait_foreground(app.pid, "the fixture app is not foreground after its activate")
+
+        element = window.element()
+        assert "activate" in element.actions
+        with pytest.raises(xa11y.PlatformError, match="refused AXRaise"):
+            element.activate()
+        wait_foreground(proc.pid, "the scene app is not foreground after activate")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
 def test_locator_move_to_restores_the_original_position(app: xa11y.App) -> None:
     """``Locator.move_to`` dispatches, and the window is put back where it was."""
     win = _window_advertising(app, "move_to")

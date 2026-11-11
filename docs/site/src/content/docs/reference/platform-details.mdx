@@ -181,7 +181,7 @@ API is separate from its element-action interface:
 
 | xa11y Action | macOS | Linux X11 | Linux Wayland (Sway) | Windows (UIA) |
 | --- | --- | --- | --- | --- |
-| `Activate` | activate app, restore if minimized, then AXRaise | `_NET_ACTIVE_WINDOW` | Sway `focus` | restore if minimized, then SetForegroundWindow (verified with GetForegroundWindow, up to 3 tries; fails if the window is still not in front) and SetFocus |
+| `Activate` | restore if minimized, activate app, then AXRaise (fails if the window refuses `AXRaise`) | `_NET_ACTIVE_WINDOW` | Sway `focus` | restore if minimized, then SetForegroundWindow (verified with GetForegroundWindow, up to 3 tries; fails if the window is still not in front) and SetFocus |
 | `Minimize` | clear AXFullScreen when fullscreen, then set AXMinimized=true | ICCCM `WM_CHANGE_STATE(IconicState)` | unsupported | WindowPattern.SetWindowVisualState(Minimized) |
 | `Maximize` | unsupported | `_NET_WM_STATE_MAXIMIZED_HORZ` + `_VERT` | unsupported | WindowPattern.SetWindowVisualState(Maximized) |
 | `EnterFullscreen` | set AXFullScreen=true | `_NET_WM_STATE_FULLSCREEN` | Sway `fullscreen enable` | unsupported |
@@ -248,6 +248,12 @@ activation performed on a background app's window visibly does nothing.
 `Activate` on macOS brings the app forward first (sets `AXFrontmost` on the
 application element), then raises the window. A failure to activate is a
 surfaceable error, never a silent success.
+
+Some windows list `AXRaise` and then refuse it with
+`kAXErrorAttributeUnsupported`: windows that SwiftUI's scene lifecycle creates,
+and Calculator on macOS 26. Nothing tells them apart before the call. The app
+still comes to the front, but `Activate` returns a `Platform` error that names
+the refusal, because it can't confirm that the window came to the front.
 
 ### `EnterFullscreen`: native fullscreen on macOS
 
