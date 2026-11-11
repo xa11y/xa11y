@@ -499,20 +499,20 @@ def test_type_text_line_breaks_press_enter(tauri_input_app, sim):
     assert enters(log) == 3, f"expected 3 Enter presses, log:\n{log}"
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="Linux X11/uinput tab mapping; other platforms type it as Unicode text",
-)
 def test_type_text_tab_presses_tab(tauri_input_app, sim):
-    """A tab character types the Tab key."""
+    """A tab character types the Tab key, on every platform."""
     _clear_log(tauri_input_app)
     _focus_hit_target(tauri_input_app)
     sim.type_text("a\tb")
+    # A character typed as Unicode text does not reach the DOM as a key event
+    # on every platform, so "b" cannot mark the end. A pressed key always
+    # does, and it follows the typed text through the same input queue.
+    sim.press("z")
 
     def tabs(text: str) -> int:
         return sum(1 for line in text.split("\n") if line.startswith("keyup key=Tab"))
 
-    log = _wait_for_log(tauri_input_app, lambda t: "keyup key=b" in t)
+    log = _wait_for_log(tauri_input_app, lambda t: "keyup key=z" in t)
     assert tabs(log) == 1, f"expected 1 Tab press, log:\n{log}"
 
 

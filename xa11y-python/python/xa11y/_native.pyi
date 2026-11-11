@@ -1774,7 +1774,8 @@ class InputSim:
 
         ``"\\r\\n"``, ``"\\r"`` and ``"\\n"`` each type one Return/Enter
         keypress, so in a single-line field this may activate the default
-        button.
+        button. ``"\\t"`` types the Tab key, which can move focus to the next
+        control.
         """
 
 # ── Screenshot ───────────────────────────────────────────────────────────────

@@ -797,6 +797,12 @@ impl InputProvider for MacOSInputProvider {
                     self.key_down(&Key::Enter)?;
                     self.key_up(&Key::Enter)?;
                 }
+                // A tab is the Tab key, as on the other platforms: as Unicode
+                // text, a control that moves focus on Tab never sees the key.
+                TypeStep::Tab => {
+                    self.key_down(&Key::Tab)?;
+                    self.key_up(&Key::Tab)?;
+                }
             }
         }
         Ok(())
@@ -858,8 +864,8 @@ impl InputProvider for MacOSInputProvider {
     }
 }
 
-/// One step of `type_text`: a character posted as Unicode, or a line break
-/// posted as the Return key.
+/// One step of `type_text`: a character posted as Unicode, a line break
+/// posted as the Return key, or a tab posted as the Tab key.
 ///
 /// Each character is its own key event. An app that reads key events, not
 /// text input, takes only the first character of an event's string: a
@@ -868,10 +874,12 @@ impl InputProvider for MacOSInputProvider {
 enum TypeStep {
     Char(char),
     LineBreak,
+    Tab,
 }
 
 /// Split `text` into one [`TypeStep::Char`] per character, with each line
-/// break (`"\r\n"`, `"\r"` or `"\n"`) as one [`TypeStep::LineBreak`].
+/// break (`"\r\n"`, `"\r"` or `"\n"`) as one [`TypeStep::LineBreak`] and
+/// each `"\t"` as one [`TypeStep::Tab`].
 /// Pairing is per call: a `"\r"` ending one call and a `"\n"` starting the
 /// next are two line breaks.
 fn plan_type_text(text: &str) -> Vec<TypeStep> {
@@ -885,6 +893,7 @@ fn plan_type_text(text: &str) -> Vec<TypeStep> {
                 }
                 steps.push(TypeStep::LineBreak);
             }
+            '\t' => steps.push(TypeStep::Tab),
             _ => steps.push(TypeStep::Char(c)),
         }
     }
@@ -1097,5 +1106,19 @@ mod tests {
             steps
         });
         assert_eq!(plan_type_text(""), vec![]);
+    }
+
+    #[test]
+    fn tab_is_the_tab_key() {
+        assert_eq!(
+            plan_type_text("a\tb\t\r\n"),
+            vec![
+                TypeStep::Char('a'),
+                TypeStep::Tab,
+                TypeStep::Char('b'),
+                TypeStep::Tab,
+                TypeStep::LineBreak,
+            ]
+        );
     }
 }

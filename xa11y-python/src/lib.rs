@@ -2753,7 +2753,8 @@ impl InputSim {
     ///
     /// ``"\r\n"``, ``"\r"`` and ``"\n"`` each type one Return/Enter
     /// keypress, so in a single-line field this may activate the default
-    /// button.
+    /// button. ``"\t"`` types the Tab key, which can move focus to the next
+    /// control.
     fn type_text(&self, py: Python<'_>, text: &str) -> PyResult<()> {
         py.detach(move || self.inner.keyboard().type_text(text))
             .map_err(to_py_err)

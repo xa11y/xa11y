@@ -472,7 +472,8 @@ impl InputSim {
     /// Type literal text into the currently focused control.
     ///
     /// `"\r\n"`, `"\r"` and `"\n"` each type one Return/Enter keypress, so in
-    /// a single-line field this may activate the default button.
+    /// a single-line field this may activate the default button. `"\t"` types
+    /// the Tab key, which can move focus to the next control.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn type_text(&self, text: String) -> AsyncTask<KeyboardTask> {
         AsyncTask::new(KeyboardTask {
