@@ -84,6 +84,7 @@ const K_CG_EVENT_KEY_UP: u32 = 11;
 
 // CGEventSourceStateID
 const K_CG_EVENT_SOURCE_STATE_PRIVATE: i32 = -1;
+const K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION: i32 = 0;
 
 // CGEventFlags (modifier flags applied at post time).
 const K_CG_EVENT_FLAG_MASK_SHIFT: u64 = 0x0002_0000;
@@ -149,6 +150,8 @@ unsafe extern "C" {
 
     fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
 
+    fn CGEventSourceFlagsState(state_id: i32) -> u64;
+
     fn CGEventKeyboardSetUnicodeString(event: CGEventRef, length: usize, chars: *const u16);
 }
 
@@ -178,6 +181,16 @@ pub struct MacOSInputProvider {
     /// post makes the modifier deterministic, with no sleep to tune. It also
     /// covers `drag_with(held: …)`, which reaches the same primitives.
     held_flags: AtomicU64,
+    /// Modifier flags released through `key_up` that the session state may
+    /// still report.
+    ///
+    /// An event from a NULL source copies the session's modifiers when it is
+    /// created, and the window server applies a synthetic key-up a moment
+    /// after the post. So after `chord("u", ["Meta"])`, the next "i" copied
+    /// Cmd and arrived as Cmd+I (#681). `post` strips these flags from every
+    /// event until the session state no longer reports them, then forgets
+    /// them, so a modifier held on the physical keyboard after that is kept.
+    released_flags: AtomicU64,
 }
 
 /// Quartz display bounds and CGEvent positions share the global logical
@@ -355,6 +368,21 @@ impl MacOSInputProvider {
         let held = self.held_flags.load(Ordering::SeqCst);
         // SAFETY: `event` is a valid CGEventRef we just created.
         let flags = unsafe { CGEventGetFlags(event) };
+        // Modifiers that xa11y released and the session still reports. Once
+        // the session no longer reports one, it is forgotten (see
+        // `released_flags`).
+        let released = self.released_flags.load(Ordering::SeqCst);
+        let stale = if released == 0 {
+            0
+        } else {
+            // SAFETY: CGEventSourceFlagsState takes a state ID and has no
+            // other preconditions.
+            let session =
+                unsafe { CGEventSourceFlagsState(K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION) };
+            self.released_flags
+                .fetch_and(session | !released, Ordering::SeqCst);
+            flags & released & !held
+        };
         let borrowed = if flags & KEY_CODE_FLAGS == 0 {
             0
         } else {
@@ -367,9 +395,9 @@ impl MacOSInputProvider {
                 }
             }
         };
-        if held != 0 || borrowed != 0 {
+        if held != 0 || borrowed != 0 || stale != 0 {
             // SAFETY: `event` is a valid CGEventRef we just created.
-            unsafe { CGEventSetFlags(event, (flags & !borrowed) | held) };
+            unsafe { CGEventSetFlags(event, (flags & !borrowed & !stale) | held) };
         }
         // SAFETY: `event` is a valid CGEventRef we just created; CGEventPost
         // takes an owned +0 borrow and does not consume it.
@@ -778,6 +806,7 @@ impl InputProvider for MacOSInputProvider {
         let flags = modifier_flag_for(key);
         if flags != 0 {
             self.held_flags.fetch_or(flags, Ordering::SeqCst);
+            self.released_flags.fetch_and(!flags, Ordering::SeqCst);
         }
         self.post(ev)
     }
@@ -790,6 +819,7 @@ impl InputProvider for MacOSInputProvider {
         let flags = modifier_flag_for(key);
         if flags != 0 {
             let held = self.held_flags.fetch_and(!flags, Ordering::SeqCst) & !flags;
+            self.released_flags.fetch_or(flags, Ordering::SeqCst);
             // The event copied the session's modifier flags when it was
             // created, and the window server has not yet seen the key-ups
             // posted just before it. After Cmd+Ctrl+R, the Ctrl key-up still

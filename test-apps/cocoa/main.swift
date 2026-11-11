@@ -692,7 +692,9 @@ class OpenOnlyHost: NSView {
 /// Keeps the first character of each key event it receives, as a control
 /// that handles `keyDown` (Calculator, a game, a terminal) does. Text views
 /// read the whole string of an event, so they cannot show a typed string that
-/// arrives as one event. Focusing it clears what it kept.
+/// arrives as one event. A key that arrives with Command held is kept with a
+/// "⌘" in front, so a lost Command key-up shows as "⌘i" rather than "i".
+/// Focusing it clears what it kept.
 class KeyEventView: NSView {
     private var keys = ""
 
@@ -700,6 +702,9 @@ class KeyEventView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if let first = event.characters?.first {
+            if event.modifierFlags.contains(.command) {
+                keys.append("⌘")
+            }
             keys.append(first)
         }
     }

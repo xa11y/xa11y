@@ -85,3 +85,44 @@ def test_cocoa_key_after_a_chord_has_no_modifier(app_name, app):
 
     value = wait_for_keys(view, "a")
     assert value == "a", f"Key Events kept {value!r} after Cmd+Ctrl+R, not 'a'."
+
+
+CHORD_ROUNDS = 50
+
+
+@pytest.mark.xa11y_requires("input_sim")
+@pytest.mark.xa11y_frontmost
+def test_cocoa_key_right_after_a_cmd_chord_has_no_cmd(app_name, app):
+    """A key pressed right after a Cmd chord arrives without Cmd (#681).
+
+    #681 measured the next key lost or arriving as Cmd+key about one time
+    in twenty, with no wait between the two calls. The view marks a
+    key that arrives with Command held with "⌘". Whether Cmd+U itself
+    reaches the view is up to the menu, so only the "i" keys are judged: all
+    of them must arrive, none with Cmd.
+    """
+    if sys.platform != "darwin" or app_name != "cocoa":
+        pytest.skip("the key-event fixture belongs to the macOS Cocoa cell")
+
+    view = app.locator('[name="Key Events"]')
+    view.focus()
+    view.wait_focused(timeout=SETTLE_TIMEOUT)
+    sim = xa11y.input_sim()
+    for _ in range(CHORD_ROUNDS):
+        sim.chord("u", ["Meta"])
+        sim.press("i")
+
+    expected = "i" * CHORD_ROUNDS
+    deadline = time.monotonic() + SETTLE_TIMEOUT
+    value = keys = ""
+    while time.monotonic() < deadline:
+        value = view.element().value or ""
+        keys = value.replace("⌘u", "")
+        if keys == expected:
+            break
+        time.sleep(0.05)
+    assert keys == expected, (
+        f"Key Events kept {value!r} after {CHORD_ROUNDS} rounds of Cmd+U then i. "
+        f"{keys.count('⌘i')} 'i' arrived with Cmd, and "
+        f"{CHORD_ROUNDS - keys.count('i')} were lost."
+    )
