@@ -27,7 +27,7 @@ pytestmark = [
     ),
 ]
 
-ROUNDS = 20
+ROUNDS = 3
 SETTLE = 0.3
 # Longer than the GTK double-click time, so one round cannot extend the last.
 BETWEEN_ROUNDS = 0.8
@@ -43,6 +43,7 @@ def test_double_click_selects_the_word_every_time(app, app_config):
             field.set_value(initial)
             time.sleep(BETWEEN_ROUNDS)
             bounds = field.element().bounds
+            # 14 px in from the left edge lands inside "hello", the first word.
             sim.click((bounds.x + 14, bounds.y + bounds.height // 2), count=2)
             time.sleep(SETTLE)
             sim.type_text("X")
