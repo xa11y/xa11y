@@ -7,10 +7,14 @@
 ///
 /// Run with:
 ///
-///     ./xa11y-cocoa-test-app [--headless] [--pid-file PATH]
+///     ./xa11y-cocoa-test-app [--headless] [--pid-file PATH] [--swiftui-scene]
+///
+/// `--swiftui-scene` shows one SwiftUI `WindowGroup` window instead of the
+/// AppKit widget window.
 
 import Cocoa
 import Foundation
+import SwiftUI
 
 // ── App entry point ───────────────────────────────────────────────────────────
 
@@ -882,9 +886,30 @@ extension AppDelegate: NSTableViewDelegate {
     }
 }
 
+// ── SwiftUI scene window ──────────────────────────────────────────────────────
+
+/// A window that SwiftUI's scene lifecycle creates. Its AX element advertises
+/// AXRaise and answers it with kAXErrorAttributeUnsupported (macOS 26), unlike
+/// an NSWindow that hosts SwiftUI content.
+struct SceneWindowApp: App {
+    init() {
+        DispatchQueue.main.async { NSApp.setActivationPolicy(.regular) }
+    }
+
+    var body: some Scene {
+        WindowGroup("xa11y SwiftUI Scene") {
+            Text("SwiftUI scene window").frame(width: 320, height: 160)
+        }
+    }
+}
+
 // ── Run ───────────────────────────────────────────────────────────────────────
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+if args.contains("--swiftui-scene") {
+    SceneWindowApp.main()
+} else {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.run()
+}
