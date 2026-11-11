@@ -556,7 +556,14 @@ CFTypeRef safe_ax_value_create_cg_size(double width, double height) {
 //   -3  pixel buffer allocation failed
 //   -4  bitmap context creation failed
 //   -5  requested rect has zero / negative dimensions
+//   -6  getShareableContent did not call back within `step_timeout_ms`
+//   -7  captureImageWithFilter did not call back within `step_timeout_ms`
 //   -9999 ObjC exception
+// ScreenCaptureKit can leave a completion handler uncalled (#682: a second
+// process capturing after the first), so each wait is bounded. A handler
+// that fires after its wait gave up writes only to the block's own heap
+// copy of the `__block` variables; a late image is leaked, once, on a path
+// that is already an error.
 // `out_origin_x` / `out_origin_y` receive the **logical** screen coordinate
 // that the returned image's pixel (0, 0) sits at: the requested rect's origin
 // for a region capture, and the captured display's `frame.origin` for a full
@@ -571,7 +578,8 @@ int safe_cg_capture_rgba(
     uint32_t *out_height,
     double *out_scale,
     double *out_origin_x,
-    double *out_origin_y
+    double *out_origin_y,
+    int64_t step_timeout_ms
 ) {
     @try {
         if (out_pixels) *out_pixels = NULL;
@@ -595,7 +603,10 @@ int safe_cg_capture_rgba(
                 contentError = e;
                 dispatch_semaphore_signal(sem1);
             }];
-        dispatch_semaphore_wait(sem1, DISPATCH_TIME_FOREVER);
+        if (dispatch_semaphore_wait(sem1, dispatch_time(DISPATCH_TIME_NOW,
+                step_timeout_ms * (int64_t)NSEC_PER_MSEC)) != 0) {
+            return -6;
+        }
         if (content == nil || content.displays.count == 0) {
             if (contentError) {
                 NSLog(@"xa11y SCShareableContent error: %@", contentError);
@@ -651,7 +662,10 @@ int safe_cg_capture_rgba(
                     }
                     dispatch_semaphore_signal(sem2);
                 }];
-        dispatch_semaphore_wait(sem2, DISPATCH_TIME_FOREVER);
+        if (dispatch_semaphore_wait(sem2, dispatch_time(DISPATCH_TIME_NOW,
+                step_timeout_ms * (int64_t)NSEC_PER_MSEC)) != 0) {
+            return -7;
+        }
         if (image == NULL) {
             if (captureError) {
                 NSLog(@"xa11y SCScreenshotManager error: %@", captureError);

@@ -115,3 +115,39 @@ def test_passing_both_element_and_region_raises(app):
     el = app.locator("button").first().element()
     with pytest.raises(ValueError, match="element.*region"):
         xa11y.screenshot(element=el, region=(0, 0, 10, 10))
+
+
+def test_a_second_process_capturing_returns(app, xa11y_capabilities):
+    """A capture in a child process returns after this process captured (#682).
+
+    On macOS, ScreenCaptureKit was seen to leave the child's completion
+    handler uncalled, and the child then waited forever with no error. Each
+    step now has a 10 s bound, so the child must finish: with an image, or
+    with a ``TimeoutError`` that names the ScreenCaptureKit step.
+    """
+    import subprocess
+    import sys
+
+    with xa11y_capabilities.guard("screenshot"):
+        xa11y.screenshot()
+
+    child = (
+        "import xa11y\n"
+        "try:\n"
+        "    shot = xa11y.screenshot()\n"
+        "    print('captured', shot.width, shot.height)\n"
+        "except xa11y.TimeoutError as e:\n"
+        "    print('timeout', e)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", child],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    out = result.stdout.strip()
+    if out.startswith("timeout"):
+        assert "ScreenCaptureKit" in out, out
+    else:
+        assert out.startswith("captured"), out
