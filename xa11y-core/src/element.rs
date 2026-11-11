@@ -223,15 +223,19 @@ reader_writer_pair! {
         pub live_region: Option<crate::semantics::LiveRegionInfo>,
 
         /// Platform-assigned stable identifier for cross-snapshot correlation.
-        /// - macOS: `AXIdentifier`
-        /// - Windows: native window handle (`hwnd:0x…`) for top-level windows,
-        ///   `AutomationId` for the elements that have one — UIA excludes
-        ///   top-level windows from the AutomationId contract, and the handle
-        ///   is session-scoped (like the Linux object path; HWNDs are reused
-        ///   after a window closes)
-        /// - Linux: D-Bus `object_path`
+        /// - macOS: `AXIdentifier`, which the app sets and which survives an
+        ///   app restart.
+        /// - Windows: the native window handle (`hwnd:0x…`) for a top-level
+        ///   window; for any other element, its `AutomationId`, or its own
+        ///   window handle when it has no `AutomationId`. The handle is valid
+        ///   only while the window exists, and Windows reuses it after the
+        ///   window closes. The `AutomationId` survives a restart.
+        /// - Linux: the D-Bus object path, valid only while the app runs. A
+        ///   restarted app gives its elements new paths.
         ///
-        /// Not all elements have one.
+        /// It identifies the same element across snapshots of one running
+        /// app. It does not identify an element across app restarts, except
+        /// where noted above. Not all elements have one.
         pub stable_id: Option<String>,
 
         /// Process ID of the application that owns this element.

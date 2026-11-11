@@ -3095,8 +3095,11 @@ fn build_snapshot_data(
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
-    let native_handle = unsafe { element.CachedNativeWindowHandle() }.ok();
-    let stable_id = uia_stable_id(native_handle, automation_id.clone());
+    let native_handle = unsafe { element.CachedNativeWindowHandle() }
+        .ok()
+        .filter(|h| !h.0.is_null());
+    let top_level = native_handle.is_some_and(is_top_level_hwnd);
+    let stable_id = uia_stable_id(native_handle, top_level, automation_id.clone());
 
     let class_name = unsafe { element.CachedClassName() }
         .ok()
@@ -3123,6 +3126,15 @@ fn build_snapshot_data(
             raw.insert(
                 "automation_id".into(),
                 serde_json::Value::String(aid.clone()),
+            );
+        }
+        // The element's own window, when it has one. `stable_id` no longer
+        // says so for a control with an AutomationId, and the parent walk
+        // needs to know.
+        if let Some(hwnd) = native_handle {
+            raw.insert(
+                "native_window_handle".into(),
+                serde_json::Value::String(format_hwnd(hwnd)),
             );
         }
         if let Some(ref cn) = class_name {
@@ -3759,25 +3771,46 @@ fn is_msaa_framework(framework_id: Option<&str>) -> bool {
 
 /// The stable identity of a UIA element, or `None` when it has none.
 ///
-/// UIA excludes top-level application windows from the AutomationId contract
-/// (they have none — see Microsoft's AutomationId docs), so their stable
-/// identity is the native window handle, which is what the provider already
-/// uses to reacquire and activate windows ([`WindowsProvider::reacquire_via_hwnd`]).
-/// Nested framework controls (WPF/WinForms) carry an AutomationId but no HWND
-/// of their own. Prefer the HWND when one exists, fall back to the
-/// AutomationId: that populates `stable_id` for both element kinds, which is
-/// what cross-snapshot correlation, `[stable_id=...]` selectors, and the
-/// window-list dedup all need.
+/// A top-level window's identity is its native window handle, which is what
+/// the provider uses to reacquire and activate windows
+/// ([`WindowsProvider::reacquire_via_hwnd`]). UIA excludes top-level windows
+/// from the AutomationId contract, and where a framework sets one anyway (a
+/// WinForms form reports its `Name`) every instance of that form shares it,
+/// so two open windows would merge in the window-list dedup.
+///
+/// Every other element prefers its AutomationId, which the app sets and which
+/// survives a restart (#684). A classic Win32 control has both an HWND and an
+/// AutomationId (its control ID); the HWND changes with each launch. An
+/// element with neither falls back to its HWND, if it has one.
 ///
 /// The handle is formatted as `hwnd:0x…` in lowercase hex, stable for the
 /// life of the window within a session (like the Linux D-Bus object path;
 /// HWNDs are reused after a window closes, so the identity is session-scoped,
-/// not launch-scoped).
-fn uia_stable_id(native_handle: Option<HWND>, automation_id: Option<String>) -> Option<String> {
-    native_handle
-        .filter(|h| !h.0.is_null())
-        .map(|h| format!("hwnd:{:#x}", h.0 as usize))
-        .or(automation_id)
+/// not launch-scoped). `native_handle` must already exclude a null HWND.
+fn uia_stable_id(
+    native_handle: Option<HWND>,
+    top_level: bool,
+    automation_id: Option<String>,
+) -> Option<String> {
+    let hwnd = native_handle.map(|h| format!("hwnd:{}", format_hwnd(h)));
+    if top_level {
+        hwnd.or(automation_id)
+    } else {
+        automation_id.or(hwnd)
+    }
+}
+
+/// `0x…` in lowercase hex.
+fn format_hwnd(hwnd: HWND) -> String {
+    format!("{:#x}", hwnd.0 as usize)
+}
+
+/// Whether `hwnd` is a top-level window: its parent is the desktop, or it
+/// has none. A dead handle has no parent, so it counts as top-level and keeps
+/// the identity it had.
+fn is_top_level_hwnd(hwnd: HWND) -> bool {
+    let parent = unsafe { GetAncestor(hwnd, GA_PARENT) };
+    parent.0.is_null() || parent == unsafe { GetDesktopWindow() }
 }
 
 /// Translate a window-verb `GetCurrentPatternAs` failure. Only the two
@@ -4397,10 +4430,7 @@ impl Provider for WindowsProvider {
         // HWND-bearing parent uses its own anyway), so the child's
         // remembered answer serves; a child with its own HWND, or one
         // not built here, needs the walk.
-        let child_has_own_hwnd = element
-            .stable_id
-            .as_deref()
-            .is_some_and(|id| id.starts_with("hwnd:"));
+        let child_has_own_hwnd = element.raw.contains_key("native_window_handle");
         let host_hwnd = if child_has_own_hwnd {
             self.walk_to_host_hwnd(&parent)?
         } else {
@@ -10757,31 +10787,35 @@ mod tests {
     }
 
     #[test]
-    fn uia_stable_id_prefers_hwnd_and_falls_back_to_automation_id() {
-        // Top-level windows have no AutomationId (UIA excludes them by
-        // contract), so their identity is the HWND; nested controls have an
-        // AutomationId and no HWND of their own. HWND wins when both exist;
-        // a null HWND is the same as no HWND.
-        let hwnd = |v: usize| HWND(v as *mut _);
-        let hwnd_of = |v: usize| Some(hwnd(v));
+    fn uia_stable_id_prefers_hwnd_for_windows_and_automation_id_for_controls() {
+        let hwnd_of = |v: usize| Some(HWND(v as *mut _));
+        // A top-level window keeps its HWND even when it has an AutomationId:
+        // every instance of a WinForms form reports the same one.
         assert_eq!(
-            uia_stable_id(hwnd_of(0x1234), Some("btn-close".into())),
+            uia_stable_id(hwnd_of(0x1234), true, Some("MainForm".into())),
             Some("hwnd:0x1234".into())
         );
         assert_eq!(
-            uia_stable_id(hwnd_of(0x1A2B), None),
+            uia_stable_id(hwnd_of(0x1A2B), true, None),
             Some("hwnd:0x1a2b".into())
         );
+        // A Win32 control has its own HWND and an AutomationId; the
+        // AutomationId survives a restart and the HWND does not (#684).
         assert_eq!(
-            uia_stable_id(hwnd_of(0), None),
-            None,
-            "a null HWND must not produce a bogus identity"
+            uia_stable_id(hwnd_of(0x2801d0), false, Some("15".into())),
+            Some("15".into())
         );
+        // A control with an HWND and no AutomationId keeps the HWND.
         assert_eq!(
-            uia_stable_id(None, Some("PanelFields".into())),
+            uia_stable_id(hwnd_of(0x2801d0), false, None),
+            Some("hwnd:0x2801d0".into())
+        );
+        // A windowless framework control has only its AutomationId.
+        assert_eq!(
+            uia_stable_id(None, false, Some("PanelFields".into())),
             Some("PanelFields".into())
         );
-        assert_eq!(uia_stable_id(None, None), None);
+        assert_eq!(uia_stable_id(None, false, None), None);
     }
 
     #[test]
