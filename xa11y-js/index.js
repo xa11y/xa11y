@@ -229,6 +229,7 @@ function toTypedError(err) {
   if (!Cls) return err;
   const detail = message.slice(colon + 2);
   const typed = new Cls(detail);
+  typed.code = tag;
   typed.stack = err.stack;
   if (diagnosis && typeof diagnosis === 'object') {
     if (diagnosis.delivery === 'not_delivered' || diagnosis.delivery === 'unknown') {

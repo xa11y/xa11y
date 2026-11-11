@@ -44,6 +44,9 @@ rather than an xa11y class, so `except xa11y.XA11yError` does not catch them.
 Every other variant descends from `XA11yError` in Python and from `XA11yError`
 in JavaScript.
 
+In JavaScript, an error from the native layer also has a `code`, such as
+`XA11Y_NO_ELEMENT_BOUNDS`. Use it to tell apart the variants that share a class.
+
 ## Which surfaces raise what
 
 Most variants can come from any call. These are the ones tied to a particular
