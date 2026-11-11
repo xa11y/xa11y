@@ -182,6 +182,7 @@ fi
 #     log treatment and fail-fast rule as the fixtures above.
 STALE_LOG="target/xa11y-test-stale.log"
 echo "Launching xa11y stale fixture ($PANEL_PY, log: $STALE_LOG)..."
+export XA11Y_PANEL_PYTHON="$PANEL_PY"
 "$PANEL_PY" test-apps/stale/stale.py > "$STALE_LOG" 2>&1 &
 CLEANUP_PIDS+=($!)
 STALE_READY=0
