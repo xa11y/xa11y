@@ -109,6 +109,17 @@ impl WindowManager {
         }
     }
 
+    /// The pid of the window that the window manager reports as active
+    /// (`_NET_ACTIVE_WINDOW`). `Ok(None)` when the backend cannot say: no
+    /// X11 window manager with `_NET_ACTIVE_WINDOW`, no active window, an
+    /// active window without `_NET_WM_PID`, or the Wayland backend.
+    pub(crate) fn active_window_pid(&self) -> Result<Option<u32>> {
+        match &self.backend {
+            WindowBackend::X11(backend) => backend.active_window_pid(),
+            WindowBackend::Sway(_) | WindowBackend::Unavailable(_) => Ok(None),
+        }
+    }
+
     pub(crate) fn uses_native(&self) -> bool {
         matches!(
             &self.backend,
@@ -1489,6 +1500,33 @@ impl X11WindowBackend {
         .to_logical(crate::scale::coordinate_scale()))
     }
 
+    fn active_window_pid(&self) -> Result<Option<u32>> {
+        if !self.supports(self.atoms.net_active_window) {
+            return Ok(None);
+        }
+        // Under the grab, so the active window cannot go away between the
+        // two reads.
+        self.with_server_grab(|conn| {
+            let active = property_u32(
+                conn,
+                self.root,
+                self.atoms.net_active_window,
+                AtomEnum::WINDOW.into(),
+            )?;
+            let Some(&window) = active.first().filter(|&&window| window != 0) else {
+                return Ok(None);
+            };
+            Ok(property_u32(
+                conn,
+                window,
+                self.atoms.net_wm_pid,
+                AtomEnum::CARDINAL.into(),
+            )?
+            .first()
+            .copied())
+        })
+    }
+
     fn activate(&self, element: &ElementData) -> Result<()> {
         self.require(self.atoms.net_active_window, "activate")?;
         self.send_for(
@@ -2551,6 +2589,105 @@ mod tests {
         assert!(error.to_string().contains("session changed"));
         server.join().expect("fake Sway IPC server");
         std::fs::remove_file(socket).expect("remove fake socket");
+    }
+
+    /// `active_window_pid` reads the pid of `_NET_ACTIVE_WINDOW`, and says
+    /// nothing when there is no active window or the WM does not support it.
+    #[test]
+    #[ignore = "requires Xvfb; run through scripts/run_integ_tests.sh"]
+    fn x11_active_window_pid_reads_the_ewmh_active_window() {
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::xproto::{
+            AtomEnum, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass,
+        };
+        use x11rb::wrapper::ConnectionExt as _;
+
+        let (_xvfb, display) = isolated_xvfb();
+        let (observer, screen) = x11rb::rust_connection::RustConnection::connect(Some(&display))
+            .expect("connect isolated Xvfb");
+        let root = observer.setup().roots[screen].root;
+        let connect = || {
+            x11rb::rust_connection::RustConnection::connect(Some(&display))
+                .expect("connect backend to isolated Xvfb")
+                .0
+        };
+        let backend_conn = connect();
+        let atoms = super::X11Atoms::new(&backend_conn).expect("X11 atoms");
+        let backend = |conn, supported: &[u32]| super::X11WindowBackend {
+            conn: std::sync::Mutex::new(conn),
+            origins: std::sync::Mutex::new(std::collections::HashMap::new()),
+            bindings: std::sync::Mutex::new(std::collections::HashMap::new()),
+            destroyed_handles: std::sync::Mutex::new(std::collections::HashSet::new()),
+            root,
+            atoms,
+            supported: supported.iter().copied().collect(),
+            has_window_manager: true,
+            origins_watched: std::sync::atomic::AtomicBool::new(false),
+        };
+        let ewmh = backend(backend_conn, &[atoms.net_active_window]);
+        let set_active = |window: u32| {
+            observer
+                .change_property32(
+                    PropMode::REPLACE,
+                    root,
+                    atoms.net_active_window,
+                    AtomEnum::WINDOW,
+                    &[window],
+                )
+                .expect("set _NET_ACTIVE_WINDOW")
+                .check()
+                .expect("_NET_ACTIVE_WINDOW stored");
+        };
+        let window = observer.generate_id().expect("XID");
+        observer
+            .create_window(
+                0,
+                window,
+                root,
+                0,
+                0,
+                300,
+                200,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new(),
+            )
+            .expect("create window")
+            .check()
+            .expect("created window");
+        observer
+            .change_property32(
+                PropMode::REPLACE,
+                window,
+                atoms.net_wm_pid,
+                AtomEnum::CARDINAL,
+                &[4242],
+            )
+            .expect("set PID")
+            .check()
+            .expect("PID stored");
+
+        assert_eq!(
+            ewmh.active_window_pid().unwrap(),
+            None,
+            "no _NET_ACTIVE_WINDOW yet"
+        );
+        set_active(window);
+        assert_eq!(ewmh.active_window_pid().unwrap(), Some(4242));
+        set_active(0);
+        assert_eq!(
+            ewmh.active_window_pid().unwrap(),
+            None,
+            "window 0 means no active window"
+        );
+        set_active(window);
+        let no_ewmh = backend(connect(), &[]);
+        assert_eq!(
+            no_ewmh.active_window_pid().unwrap(),
+            None,
+            "a WM without _NET_ACTIVE_WINDOW support is not asked"
+        );
     }
 
     #[test]
