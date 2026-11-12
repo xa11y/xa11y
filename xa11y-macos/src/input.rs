@@ -770,19 +770,30 @@ impl InputProvider for MacOSInputProvider {
             .pointer_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        self.validate_pointer_target(at)?;
-        self.move_pointer(at)?;
         // Quartz: a positive wheel1 scrolls toward the top and a positive
         // wheel2 toward the left. Positive `dy` scrolls toward the end and
-        // positive `dx` toward the right (#688), so both are negated.
+        // positive `dx` toward the right (#688), so both are negated. Done
+        // before the first OS call: `i32::MIN` has no negation, and a refused
+        // delta must not leave the pointer moved.
+        let negate = |axis: &str, n: i32| {
+            n.checked_neg().ok_or_else(|| {
+                Error::invalid_action_data(format!(
+                    "scroll delta {axis}={n} cannot be reversed for Quartz's wheel direction"
+                ))
+            })
+        };
+        let wheel1 = negate("dy", delta.dy)?;
+        let wheel2 = negate("dx", delta.dx)?;
+        self.validate_pointer_target(at)?;
+        self.move_pointer(at)?;
         // SAFETY: nil source is valid.
         let ev = unsafe {
             CGEventCreateScrollWheelEvent2(
                 std::ptr::null_mut(),
                 K_CG_SCROLL_EVENT_UNIT_LINE,
                 2,
-                -delta.dy,
-                -delta.dx,
+                wheel1,
+                wheel2,
                 0,
             )
         };
@@ -804,11 +815,24 @@ impl InputProvider for MacOSInputProvider {
         // a real Shift key-down already reports shift as set. `post` stamps
         // it onto this and every later event until `key_up` clears it.
         let flags = modifier_flag_for(key);
-        if flags != 0 {
-            self.held_flags.fetch_or(flags, Ordering::SeqCst);
-            self.released_flags.fetch_and(!flags, Ordering::SeqCst);
+        let (was_held, was_released) = if flags != 0 {
+            (
+                self.held_flags.fetch_or(flags, Ordering::SeqCst) & flags,
+                self.released_flags.fetch_and(!flags, Ordering::SeqCst) & flags,
+            )
+        } else {
+            (0, 0)
+        };
+        let posted = self.post(ev);
+        if posted.is_err() && flags != 0 {
+            // The key-down never reached the window server, so the modifier
+            // is not held: put both records back as they were, or every
+            // later event would carry a modifier nobody pressed.
+            self.held_flags
+                .fetch_and(!(flags & !was_held), Ordering::SeqCst);
+            self.released_flags.fetch_or(was_released, Ordering::SeqCst);
         }
-        self.post(ev)
+        posted
     }
 
     fn key_up(&self, key: &Key) -> Result<()> {
@@ -817,9 +841,12 @@ impl InputProvider for MacOSInputProvider {
         // Clear before posting, again matching hardware: a real Shift key-up
         // reports the modifier as already released.
         let flags = modifier_flag_for(key);
+        let (mut was_held, mut was_released) = (0, 0);
         if flags != 0 {
-            let held = self.held_flags.fetch_and(!flags, Ordering::SeqCst) & !flags;
-            self.released_flags.fetch_or(flags, Ordering::SeqCst);
+            let before = self.held_flags.fetch_and(!flags, Ordering::SeqCst);
+            was_held = before & flags;
+            let held = before & !flags;
+            was_released = self.released_flags.fetch_or(flags, Ordering::SeqCst) & flags;
             // The event copied the session's modifier flags when it was
             // created, and the window server has not yet seen the key-ups
             // posted just before it. After Cmd+Ctrl+R, the Ctrl key-up still
@@ -834,7 +861,16 @@ impl InputProvider for MacOSInputProvider {
                 CGEventSetFlags(ev, (current & !MODIFIER_FLAGS) | held);
             }
         }
-        self.post(ev)
+        let posted = self.post(ev);
+        if posted.is_err() && flags != 0 {
+            // The key-up never reached the window server, so the modifier is
+            // still down: restore both records, or the next event would go
+            // out without a modifier the session still holds.
+            self.held_flags.fetch_or(was_held, Ordering::SeqCst);
+            self.released_flags
+                .fetch_and(!(flags & !was_released), Ordering::SeqCst);
+        }
+        posted
     }
 
     fn type_text(&self, text: &str) -> Result<()> {

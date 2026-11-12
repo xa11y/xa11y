@@ -18,9 +18,10 @@
 //! * Collections: `AXARIAPosInSet` / `AXARIASetSize` (1-based) on rows, tabs
 //!   and radio buttons, and `AXDisclosureLevel` (0-based) for the depth of an
 //!   outline row.
-//! * Header cells carry no header marker on the cell itself, so
-//!   [`CellInfo::header`] stays `None`; `table_headers` and `cell_headers`
-//!   answer from the table's and cell's header attributes instead.
+//! * Cells carry no data / header marker of their own, so
+//!   [`CellInfo::kind`] stays `None` (AX does not say); `table_headers` and
+//!   `cell_headers` answer from the table's and cell's header attributes
+//!   instead.
 //! * Text units: a character is one Unicode scalar, read from the text
 //!   itself (AX's `AXRangeForIndex` answers a grapheme cluster instead). AX
 //!   has parameterized attributes for a rendered line (`AXLineForIndex` +
@@ -100,7 +101,6 @@ extern "C" {
         w: *mut f64,
         h: *mut f64,
     ) -> bool;
-    fn safe_cf_string_copy_utf16(value: CFTypeRef, buffer: *mut u16, capacity: CFIndex) -> CFIndex;
     fn safe_ax_decode_text_run(attributed: CFTypeRef, out: *mut XA11yTextRun) -> i32;
     #[cfg(test)]
     fn xa11y_test_font_traits(name: CFStringRef, size: f64, italic: *mut i32) -> i32;
@@ -149,17 +149,6 @@ pub(super) fn cf_range(v: CFTypeRef) -> Option<(i64, i64)> {
 fn cf_rect(v: CFTypeRef) -> Option<(f64, f64, f64, f64)> {
     let (mut x, mut y, mut w, mut h) = (0.0, 0.0, 0.0, 0.0);
     unsafe { safe_ax_value_get_rect(v, &mut x, &mut y, &mut w, &mut h) }.then_some((x, y, w, h))
-}
-
-/// A borrowed CFString's UTF-16 code units.
-fn cf_utf16(v: CFTypeRef) -> Option<Vec<u16>> {
-    let n = unsafe { safe_cf_string_copy_utf16(v, std::ptr::null_mut(), 0) };
-    if n < 0 {
-        return None;
-    }
-    let mut buf = vec![0u16; n as usize];
-    let copied = unsafe { safe_cf_string_copy_utf16(v, buf.as_mut_ptr(), n) };
-    (copied == n).then_some(buf)
 }
 
 fn range_value(range: TextRange) -> Result<Owned> {
@@ -283,6 +272,25 @@ fn require_param(element: AXUIElementRef, attribute: &str, parameter: CFTypeRef)
             feature: format!("this element does not answer {attribute}"),
         }),
     }
+}
+
+/// `AXFocused` as a boolean; `None` when the element does not report it.
+fn read_focused(element: AXUIElementRef) -> Result<Option<bool>> {
+    let Some(v) = read(element, "AXFocused")?.value() else {
+        return Ok(None);
+    };
+    unsafe {
+        if safe_cf_get_type_id(v.ptr()) == safe_cf_boolean_get_type_id() {
+            return Ok(Some(safe_cf_boolean_get_value(v.ptr())));
+        }
+    }
+    // Some bridges answer an NSNumber rather than a CFBoolean.
+    cf_i64(v.ptr())
+        .map(|n| Some(n != 0))
+        .ok_or_else(|| Error::Platform {
+            code: -1,
+            message: "AXFocused is neither a boolean nor a number".to_string(),
+        })
 }
 
 /// Whether `element` lists `attribute` among its attribute names.
@@ -580,6 +588,36 @@ fn attribute_element_at(
     }
 }
 
+/// The `AXColumn` of `table` that a cell's `AXColumnIndexRange` location
+/// `column` names.
+///
+/// Both count in the table's column order (`NSTableView.tableColumns`,
+/// which follows a user's reordering), so the column at that position of
+/// `AXColumns` is normally the one. A column that reports an `AXIndex` is
+/// held to it, though: should `AXColumns` leave a column out (a hidden
+/// one), positions after it shift, and the column is then found by its
+/// `AXIndex` instead. A column reporting no `AXIndex` has only its position.
+fn column_at(table: AXUIElementRef, column: u32) -> Result<Option<AXElement>> {
+    let index_of = |col: &AXElement| -> Result<Option<i64>> {
+        Ok(read(col.as_ptr(), "AXIndex")?
+            .value()
+            .and_then(|v| cf_i64(v.ptr())))
+    };
+    if let Some(col) = attribute_element_at(table, "AXColumns", column)? {
+        match index_of(&col)? {
+            None => return Ok(Some(col)),
+            Some(i) if i == i64::from(column) => return Ok(Some(col)),
+            Some(_) => {}
+        }
+    }
+    for col in ax_element_list_strict(table, "AXColumns")? {
+        if index_of(&col)? == Some(i64::from(column)) {
+            return Ok(Some(col));
+        }
+    }
+    Ok(None)
+}
+
 // ── Snapshot metadata ───────────────────────────────────────────────────────
 
 /// The table / collection attributes of one element, as AX reported them.
@@ -717,8 +755,8 @@ impl PositionAttrs {
                 column: start(self.column_range),
                 row_span: span(self.row_range),
                 column_span: span(self.column_range),
-                // AX marks no cell as a header; see the module docs.
-                header: None,
+                // AX marks no cell as data or header; see the module docs.
+                kind: None,
             }
             .into();
             info
@@ -906,8 +944,8 @@ fn flag(n: i32) -> Option<bool> {
 }
 
 fn run_attributes(run: &XA11yTextRun) -> TextAttributeParts {
-    let family = (!run.family.is_null())
-        .then(|| unsafe { CFString::wrap_under_create_rule(run.family as *const _) }.to_string());
+    // Adopts and releases the +1 family string.
+    let family = cf_string_owned(run.family);
     TextAttributeParts {
         font_family: family,
         font_size: (run.size >= 0.0).then_some(run.size),
@@ -938,6 +976,30 @@ fn ax_role_of(element: &ElementData) -> &str {
 }
 
 impl MacOSProvider {
+    /// A rich read's error, with an invalidated-object failure
+    /// (`kAXErrorInvalidUIElement`) reported as the `ElementStale` it is when
+    /// the element the caller asked about is the one that went away.
+    ///
+    /// The read can also reach other objects through `element` (a table's
+    /// rows, a cell's column, a text element's static-text leaves), and one
+    /// of those vanishing under a live subject is churn, not a stale handle:
+    /// `revalidate` decides which, and its reason (`removed`,
+    /// `process_exited`, `identity_changed`) is the one reported. This costs
+    /// one `AXRole` read, on the failure path only.
+    pub(super) fn rich_stale(&self, element: &ElementData, err: Error) -> Error {
+        match &err {
+            Error::Platform { code, .. } if *code == i64::from(AX_ERROR_INVALID_UI_ELEMENT) => {
+                match self.revalidate(element) {
+                    Err(stale @ Error::ElementStale { .. }) => stale,
+                    // The subject still answers (or could not be asked): the
+                    // read's own failure is the accurate report.
+                    Ok(()) | Err(_) => err,
+                }
+            }
+            _ => err,
+        }
+    }
+
     fn build_all(&self, elements: Vec<AXElement>, pid: Option<u32>) -> Result<Vec<ElementData>> {
         elements
             .iter()
@@ -1039,7 +1101,10 @@ impl MacOSProvider {
         };
         let headers = ax_element_list_strict(ax.as_ptr(), attribute)?;
         if !headers.is_empty() || kind == HeaderKind::Row {
-            // AppKit has no row headers; an empty answer is "none".
+            // NSTableView and NSOutlineView have no row headers at all (no
+            // API to declare one), so for them an empty answer is the
+            // toolkit's "none", not a gap in what AX reports; WebKit and
+            // Chromium list theirs here.
             return self.build_all(headers, table.pid);
         }
         // AppKit's NSTableView answers AXColumnHeaderUIElements with
@@ -1060,8 +1125,10 @@ impl MacOSProvider {
         kind: HeaderKind,
     ) -> Result<Vec<ElementData>> {
         if cell.role != Role::TableCell {
+            // Named for the interface the element lacks, as every table read
+            // is (`require_table`), not for this one method.
             return Err(Error::ActionNotSupported {
-                action: "cell_headers".to_string(),
+                action: "table".to_string(),
                 role: cell.role,
             });
         }
@@ -1077,11 +1144,20 @@ impl MacOSProvider {
             return self.build_all(headers, cell.pid);
         }
         // AppKit cells do not. An NSTableView's header is per column: the
-        // `AXHeader` of the AXColumn at the cell's column index. AppKit has
-        // no row headers.
+        // `AXHeader` of the cell's AXColumn. NSTableView and NSOutlineView
+        // have no row headers at all (no API to declare one), so for them
+        // "none" is the toolkit's answer rather than a gap in what AX says.
         let column = match (kind, cell.cell.and_then(|c| c.column)) {
+            (HeaderKind::Row, _) => return Ok(Vec::new()),
             (HeaderKind::Column, Some(column)) => column,
-            _ => return Ok(Vec::new()),
+            // Without its column the header cannot be found, which is not
+            // the same answer as "this column has no header".
+            (HeaderKind::Column, None) => {
+                return Err(Error::Unsupported {
+                    feature: "column headers of a cell that reports no AXColumnIndexRange"
+                        .to_string(),
+                })
+            }
         };
         let mut ancestor = ax.clone();
         for _ in 0..TABLE_ANCESTOR_LIMIT {
@@ -1093,7 +1169,7 @@ impl MacOSProvider {
                 .value()
                 .and_then(|v| cf_utf16(v.ptr()).and_then(|u| String::from_utf16(&u).ok()));
             if matches!(role.as_deref(), Some("AXTable" | "AXOutline" | "AXGrid")) {
-                let Some(col) = attribute_element_at(parent.as_ptr(), "AXColumns", column)? else {
+                let Some(col) = column_at(parent.as_ptr(), column)? else {
                     // The column the cell reports is not in its table.
                     return Err(Error::Platform {
                         code: -1,
@@ -1127,8 +1203,9 @@ impl MacOSProvider {
             _ => "AXSelectedChildren",
         };
         match read(ax.as_ptr(), attribute)? {
+            // Named for the interface the element lacks.
             Read::Unsupported => Err(Error::ActionNotSupported {
-                action: "selected_items".to_string(),
+                action: "selection".to_string(),
                 role: container.role,
             }),
             Read::NoValue => Ok(Vec::new()),
@@ -1144,19 +1221,43 @@ impl MacOSProvider {
         ax_text_length(ax.as_ptr(), element)
     }
 
+    /// The caret, per the contract on `Text::caret`: `None` while the
+    /// element is not focused, the insertion point while it is and nothing
+    /// is selected, and `None` while a range is selected, because AX reports
+    /// the range without saying which end is active. An element that has no
+    /// `AXSelectedTextRange` cannot report a caret at all, which is
+    /// `Unsupported` rather than `None`.
     pub(super) fn rich_text_caret(&self, element: &ElementData) -> Result<Option<u32>> {
         let ax = self.get_cached(element.handle)?;
-        match read(ax.as_ptr(), "AXSelectedTextRange")? {
-            // AX has no separate caret: the insertion point is an empty
-            // selection, and AppKit draws none while a range is selected.
-            Read::Value(v) => Ok(selection_from(v.ptr(), "AXSelectedTextRange")?
-                .filter(|r| r.is_empty())
-                .map(|r| r.start)),
-            Read::NoValue | Read::Unsupported => {
+        // AX has no separate caret: the insertion point is an empty
+        // selection.
+        let selection = match read(ax.as_ptr(), "AXSelectedTextRange")? {
+            Read::Value(v) => selection_from(v.ptr(), "AXSelectedTextRange")?,
+            // The attribute exists and holds nothing: no insertion point.
+            Read::NoValue => None,
+            Read::Unsupported => {
+                // A non-text element is refused as every text read is.
                 ax_text_length(ax.as_ptr(), element)?;
-                Ok(None)
+                return Err(Error::Unsupported {
+                    feature: "a caret on a text element that reports no AXSelectedTextRange"
+                        .to_string(),
+                });
+            }
+        };
+        // AppKit keeps the last selection of a text view that lost focus,
+        // and reports it as if it were still the caret.
+        match read_focused(ax.as_ptr())? {
+            Some(true) => {}
+            Some(false) => return Ok(None),
+            None => {
+                return Err(Error::Unsupported {
+                    feature: "a caret on a text element that does not report AXFocused, so \
+                              whether it holds the caret is unknown"
+                        .to_string(),
+                })
             }
         }
+        Ok(selection.filter(|r| r.is_empty()).map(|r| r.start))
     }
 
     pub(super) fn rich_text_selections(&self, element: &ElementData) -> Result<Vec<TextRange>> {
@@ -1185,8 +1286,15 @@ impl MacOSProvider {
                     .collect(),
                 Read::NoValue => Vec::new(),
                 Read::Unsupported => {
+                    // A non-text element is refused as every text read is;
+                    // a text element without either attribute cannot say
+                    // what is selected, which is not "nothing".
                     ax_text_length(ax.as_ptr(), element)?;
-                    Vec::new()
+                    return Err(Error::Unsupported {
+                        feature: "text selections on a text element that reports neither \
+                                  AXSelectedTextRanges nor AXSelectedTextRange"
+                            .to_string(),
+                    });
                 }
             },
         };
@@ -1286,6 +1394,18 @@ impl MacOSProvider {
                 let line = require_param(ax.as_ptr(), "AXLineForIndex", position)?;
                 let v = require_param(ax.as_ptr(), "AXRangeForLine", line.ptr())?;
                 let line = range_from(v.ptr(), "AXRangeForLine")?;
+                // A line that leaves the text, or does not hold the offset it
+                // was asked for, is the platform's error, not a range to
+                // hand back (or to read past the end of).
+                if line.end > length || !(line.start <= at && at <= line.end) {
+                    return Err(Error::Platform {
+                        code: -1,
+                        message: format!(
+                            "AXRangeForLine reported the line {line} for offset {at}, which \
+                             does not hold that offset inside the text of length {length}"
+                        ),
+                    });
+                }
                 self.with_line_terminator(ax.as_ptr(), line, length)
             }
             TextUnit::Word | TextUnit::Paragraph => Err(Error::Unsupported {
@@ -1306,7 +1426,15 @@ impl MacOSProvider {
         line: TextRange,
         length: u32,
     ) -> Result<TextRange> {
-        if line.end >= length {
+        if line.end > length {
+            return Err(Error::InvalidTextRange {
+                start: line.start,
+                end: line.end,
+                length: Some(length),
+                message: "the line ends past the end of the text".to_string(),
+            });
+        }
+        if line.end == length {
             return Ok(line);
         }
         let start = line.end.saturating_sub(1).max(line.start);

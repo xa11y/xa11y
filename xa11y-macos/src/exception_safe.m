@@ -556,9 +556,13 @@ CFTypeRef safe_ax_value_create_cg_size(double width, double height) {
 //   -3  pixel buffer allocation failed
 //   -4  bitmap context creation failed
 //   -5  requested rect has zero / negative dimensions
-//   -6  getShareableContent did not call back within `step_timeout_ms`
-//   -7  captureImageWithFilter did not call back within `step_timeout_ms`
+//   -6  getShareableContent did not call back in time
+//   -7  captureImageWithFilter did not call back in time
 //   -9999 ObjC exception
+// "In time" is the earlier of `step_timeout_ms` from the start of that wait
+// and `total_timeout_ms` from the start of the capture (the time left on the
+// caller's deadline; negative for no deadline). The caller tells the two
+// apart by whether its deadline has passed.
 // ScreenCaptureKit can leave a completion handler uncalled (#682: a second
 // process capturing after the first), so each wait is bounded. A handler
 // that fires after its wait gave up writes only to the block's own heap
@@ -570,6 +574,14 @@ CFTypeRef safe_ax_value_create_cg_size(double width, double height) {
 // one. The display we capture is `content.displays[0]`, which is not
 // necessarily the display at (0, 0), so a caller that assumed (0, 0) would
 // place everything it maps onto these pixels off by that display's offset.
+// The earlier of `step_timeout_ms` from now and `total`, for one wait. Both
+// are `DISPATCH_TIME_NOW`-based (or `DISPATCH_TIME_FOREVER`), so they compare
+// as plain integers.
+static dispatch_time_t xa11y_capture_wait_until(int64_t step_timeout_ms, dispatch_time_t total) {
+    dispatch_time_t step = dispatch_time(DISPATCH_TIME_NOW, step_timeout_ms * (int64_t)NSEC_PER_MSEC);
+    return step < total ? step : total;
+}
+
 int safe_cg_capture_rgba(
     int use_rect,
     double rect_x, double rect_y, double rect_w, double rect_h,
@@ -579,9 +591,13 @@ int safe_cg_capture_rgba(
     double *out_scale,
     double *out_origin_x,
     double *out_origin_y,
-    int64_t step_timeout_ms
+    int64_t step_timeout_ms,
+    int64_t total_timeout_ms
 ) {
     @try {
+        dispatch_time_t total = (total_timeout_ms >= 0)
+            ? dispatch_time(DISPATCH_TIME_NOW, total_timeout_ms * (int64_t)NSEC_PER_MSEC)
+            : DISPATCH_TIME_FOREVER;
         if (out_pixels) *out_pixels = NULL;
         if (out_width) *out_width = 0;
         if (out_height) *out_height = 0;
@@ -603,8 +619,8 @@ int safe_cg_capture_rgba(
                 contentError = e;
                 dispatch_semaphore_signal(sem1);
             }];
-        if (dispatch_semaphore_wait(sem1, dispatch_time(DISPATCH_TIME_NOW,
-                step_timeout_ms * (int64_t)NSEC_PER_MSEC)) != 0) {
+        if (dispatch_semaphore_wait(sem1,
+                xa11y_capture_wait_until(step_timeout_ms, total)) != 0) {
             return -6;
         }
         if (content == nil || content.displays.count == 0) {
@@ -662,8 +678,8 @@ int safe_cg_capture_rgba(
                     }
                     dispatch_semaphore_signal(sem2);
                 }];
-        if (dispatch_semaphore_wait(sem2, dispatch_time(DISPATCH_TIME_NOW,
-                step_timeout_ms * (int64_t)NSEC_PER_MSEC)) != 0) {
+        if (dispatch_semaphore_wait(sem2,
+                xa11y_capture_wait_until(step_timeout_ms, total)) != 0) {
             return -7;
         }
         if (image == NULL) {

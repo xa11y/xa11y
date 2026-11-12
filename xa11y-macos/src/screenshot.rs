@@ -21,6 +21,7 @@ extern "C" {
         out_origin_x: *mut f64,
         out_origin_y: *mut f64,
         step_timeout_ms: i64,
+        total_timeout_ms: i64,
     ) -> i32;
     fn safe_cg_free_pixels(pixels: *mut u8);
 }
@@ -29,7 +30,8 @@ extern "C" {
 ///
 /// A capture normally takes about 200 ms in all. ScreenCaptureKit can leave a
 /// completion handler uncalled (#682), and without a bound the caller would
-/// wait forever with no error.
+/// wait forever with no error. Under a caller's deadline the waits also end
+/// when it does, so a capture inside a bounded operation cannot outlast it.
 const SCK_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct MacOSScreenshot;
@@ -67,6 +69,29 @@ impl MacOSScreenshot {
             None => (0, 0.0, 0.0, 0.0, 0.0),
         };
 
+        // The time left on the caller's deadline bounds both waits together
+        // (`-1`: none open). Rounded up, so a deadline a fraction of a
+        // millisecond away is not read as already passed.
+        let deadline = xa11y_core::Deadline::current();
+        let total_timeout_ms = match &deadline {
+            None => -1,
+            Some(d) => {
+                let left = d.remaining();
+                if left.is_zero() {
+                    return Err(d.expired(Some("a ScreenCaptureKit capture".to_string())));
+                }
+                if left >= 2 * SCK_STEP_TIMEOUT {
+                    // Further away than both steps' own bounds together, so
+                    // it cannot end a wait (and stays far from overflowing
+                    // the shim's nanosecond arithmetic).
+                    -1
+                } else {
+                    // Below 20 s, so it fits.
+                    left.as_micros().div_ceil(1000) as i64
+                }
+            }
+        };
+
         let mut pixels: *mut u8 = std::ptr::null_mut();
         let mut width: u32 = 0;
         let mut height: u32 = 0;
@@ -88,6 +113,7 @@ impl MacOSScreenshot {
                 &mut origin_x,
                 &mut origin_y,
                 SCK_STEP_TIMEOUT.as_millis() as i64,
+                total_timeout_ms,
             )
         };
 
@@ -119,8 +145,11 @@ impl MacOSScreenshot {
                     code: -5,
                     message: "requested rect has zero/negative dimensions".into(),
                 },
-                -6 => sck_timeout("SCShareableContent.getShareableContent"),
-                -7 => sck_timeout("SCScreenshotManager.captureImageWithFilter"),
+                -6 => sck_timeout(deadline.as_ref(), "SCShareableContent.getShareableContent"),
+                -7 => sck_timeout(
+                    deadline.as_ref(),
+                    "SCScreenshotManager.captureImageWithFilter",
+                ),
                 -9999 => Error::Platform {
                     code: -9999,
                     message: "ObjC exception during capture".into(),
@@ -175,8 +204,13 @@ impl ScreenshotProvider for MacOSScreenshot {
     }
 }
 
-/// The error for a ScreenCaptureKit step that never called back.
-fn sck_timeout(step: &str) -> Error {
+/// The error for a ScreenCaptureKit step that did not call back in time: the
+/// caller's deadline when that is what ended the wait, else the step's own
+/// bound.
+fn sck_timeout(deadline: Option<&xa11y_core::Deadline>, step: &str) -> Error {
+    if let Some(d) = deadline.filter(|d| d.is_expired()) {
+        return d.expired(Some(format!("ScreenCaptureKit {step}")));
+    }
     Error::timeout(SCK_STEP_TIMEOUT).diagnose(
         xa11y_core::Diagnosis::new()
             .condition(format!(
