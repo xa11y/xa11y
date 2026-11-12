@@ -179,8 +179,12 @@ pub struct CellInfo {
     pub row_span: Option<u32>,
     /// Columns this cell covers, at least 1.
     pub column_span: Option<u32>,
+    /// `'data'`, `'column_header'` or `'row_header'`; `null` when the
+    /// platform does not say. Unlike `header`, tells a data cell from a cell
+    /// whose kind is unknown.
+    pub kind: Option<String>,
     /// `'column'` or `'row'` for a header cell; `null` for a data cell or
-    /// when the platform does not say.
+    /// when the platform does not say (read `kind` to tell them apart).
     pub header: Option<String>,
 }
 
@@ -191,8 +195,22 @@ impl From<xa11y::CellInfo> for CellInfo {
             column: c.column,
             row_span: c.row_span,
             column_span: c.column_span,
-            header: c.header.map(header_kind_to_str).map(str::to_string),
+            kind: c.kind.map(cell_kind_to_str).map(str::to_string),
+            header: c.header().map(header_kind_to_str).map(str::to_string),
         }
+    }
+}
+
+/// The `snake_case` spelling of a cell kind. Spelled out arm by arm (not via
+/// `to_snake_case`) so `[[types.variant_coverage]]` sees every variant here.
+/// `CellKind` is `#[non_exhaustive]`; that check, not the compiler, is what
+/// catches a new variant reaching the `_` arm.
+pub fn cell_kind_to_str(kind: xa11y::CellKind) -> &'static str {
+    match kind {
+        xa11y::CellKind::Data => "data",
+        xa11y::CellKind::ColumnHeader => "column_header",
+        xa11y::CellKind::RowHeader => "row_header",
+        other => other.to_snake_case(),
     }
 }
 

@@ -147,6 +147,7 @@ extern "C" {
     fn safe_cf_array_get_type_id() -> u64;
     fn safe_cf_url_get_type_id() -> u64;
     fn safe_cf_url_get_string(url: CFTypeRef) -> CFTypeRef;
+    fn safe_cf_string_copy_utf16(value: CFTypeRef, buffer: *mut u16, capacity: CFIndex) -> CFIndex;
 
     fn safe_ax_is_process_trusted() -> bool;
 
@@ -361,10 +362,14 @@ mod grant_instruction_tests {
 // With no deadline open, or one further away than the element's own bound,
 // the message is sent exactly as before.
 //
-// `AXUIElementSetMessagingTimeout` is per element object, so two threads
-// messaging the *same* element at once can release each other's bound. The
-// cost of that race is a message bounded by the process-wide timeout instead
-// of the deadline, which is the behaviour before #531, never a wrong answer.
+// `AXUIElementSetMessagingTimeout` is state on the element *object*, and the
+// handle cache hands every thread the same object for one handle. Unguarded,
+// one thread's tight bound would cut another thread's unrelated read of that
+// element, and one thread's release would unbind a message another thread
+// had just bounded. So every message to an element object other than the
+// system-wide one holds that object's [`ElementGate`] for the whole
+// set / send / release sequence, and a bound can never be observed by a
+// message it was not set for.
 
 thread_local! {
     /// The element whose messaging timeout a shell-surface probe has bounded
@@ -399,6 +404,105 @@ fn describe_ax_call(element: AXUIElementRef, call: &str) -> String {
     }
 }
 
+/// Mutual exclusion for the messages sent to one AX element object (see the
+/// section comment above). Keyed by the object's address: a pointer is only
+/// reused once its object is freed, and a stale key can at worst make two
+/// unrelated objects share a gate for a moment, which costs a wait and never
+/// a wrong bound.
+struct ElementGate {
+    busy: Mutex<bool>,
+    freed: std::sync::Condvar,
+}
+
+/// The live gates. An entry is removed when the last holder or waiter lets
+/// go of it, so the map holds only elements a message is in flight to.
+fn element_gates() -> &'static Mutex<HashMap<usize, std::sync::Arc<ElementGate>>> {
+    static GATES: std::sync::OnceLock<Mutex<HashMap<usize, std::sync::Arc<ElementGate>>>> =
+        std::sync::OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A claim on an [`ElementGate`]: held (`held == true`) or given up after a
+/// timed-out wait. Either way dropping it removes the map entry once nobody
+/// else holds or waits on the gate.
+struct ElementGateGuard {
+    key: usize,
+    gate: std::sync::Arc<ElementGate>,
+    held: bool,
+}
+
+impl ElementGateGuard {
+    /// Wait for `element`'s gate and hold it. `limit` caps the wait (the
+    /// time left on the caller's deadline); `None` waits until the holder
+    /// finishes, which its own messaging bound limits. Returns the unheld
+    /// claim when the limit ran out first.
+    fn acquire(
+        element: AXUIElementRef,
+        limit: Option<Duration>,
+    ) -> std::result::Result<Self, Self> {
+        let key = element as usize;
+        let gate = element_gates()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_insert_with(|| {
+                std::sync::Arc::new(ElementGate {
+                    busy: Mutex::new(false),
+                    freed: std::sync::Condvar::new(),
+                })
+            })
+            .clone();
+        let mut claim = Self {
+            key,
+            gate,
+            held: false,
+        };
+        let gate = claim.gate.clone();
+        let start = Instant::now();
+        let mut busy = gate.busy.lock().unwrap_or_else(|e| e.into_inner());
+        while *busy {
+            busy = match limit {
+                None => gate.freed.wait(busy).unwrap_or_else(|e| e.into_inner()),
+                Some(limit) => {
+                    let left = limit.saturating_sub(start.elapsed());
+                    if left.is_zero() {
+                        drop(busy);
+                        return Err(claim);
+                    }
+                    gate.freed
+                        .wait_timeout(busy, left)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+            };
+        }
+        *busy = true;
+        drop(busy);
+        claim.held = true;
+        Ok(claim)
+    }
+}
+
+impl Drop for ElementGateGuard {
+    fn drop(&mut self) {
+        if self.held {
+            *self.gate.busy.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            // Every waiter re-checks; one that timed out meanwhile must not
+            // swallow the only wake-up.
+            self.gate.freed.notify_all();
+        }
+        let mut gates = element_gates().lock().unwrap_or_else(|e| e.into_inner());
+        // The map's reference and this one: nobody else holds or waits.
+        if std::sync::Arc::strong_count(&self.gate) == 2
+            && gates
+                .get(&self.key)
+                .is_some_and(|g| std::sync::Arc::ptr_eq(g, &self.gate))
+        {
+            gates.remove(&self.key);
+        }
+    }
+}
+
 /// Send one AX message to `element`, bounded by the caller's deadline.
 ///
 /// `call` names the message for the diagnosis and is built only when the
@@ -413,6 +517,41 @@ fn ax_bounded(
     send: impl FnOnce() -> i32,
 ) -> i32 {
     let bound = element_bound(element);
+    // A messaging timeout set on the system-wide element is the process's
+    // *global* value, not a per-element one: lowering it would cut every
+    // other thread's AX message to this caller's deadline, and the release
+    // below (`0`) would reset the global to the system default rather than
+    // the bound `set_global_messaging_timeout` installed. So a message to the
+    // system-wide element runs at the global bound even under a nearer
+    // deadline; it can overrun the deadline by at most that bound. Nothing
+    // here sets a bound on it, so it needs no gate either.
+    if is_system_wide(element) || element.is_null() {
+        return match xa11y_core::call_timeout(Duration::from_secs_f32(bound), || {
+            describe_ax_call(element, &call())
+        }) {
+            Ok(_) => send(),
+            // The deadline passed before the message was sent, and recorded it.
+            Err(_) => AX_ERROR_CANNOT_COMPLETE,
+        };
+    }
+    // Hold the element's gate for the whole set / send / release, so no
+    // other thread's message runs under this one's bound (or this one under
+    // theirs). Waiting for it counts against the caller's deadline.
+    let wait = xa11y_core::Deadline::current().map(|d| d.remaining());
+    let _gate = match ElementGateGuard::acquire(element, wait) {
+        Ok(g) => g,
+        Err(_) => {
+            if let Some(d) = xa11y_core::Deadline::current() {
+                // Recording the cut is the point; the error is built again
+                // by core with the wait's own context.
+                let _ = d.expired(Some(format!(
+                    "waiting for another thread's message to finish before {}",
+                    describe_ax_call(element, &call())
+                )));
+            }
+            return AX_ERROR_CANNOT_COMPLETE;
+        }
+    };
     let timeout = match xa11y_core::call_timeout(Duration::from_secs_f32(bound), || {
         describe_ax_call(element, &call())
     }) {
@@ -420,14 +559,7 @@ fn ax_bounded(
         // The deadline passed before the message was sent, and recorded it.
         Err(_) => return AX_ERROR_CANNOT_COMPLETE,
     };
-    // A messaging timeout set on the system-wide element is the process's
-    // *global* value, not a per-element one: lowering it would cut every
-    // other thread's AX message to this caller's deadline, and the release
-    // below (`0`) would reset the global to the system default rather than
-    // the bound `set_global_messaging_timeout` installed. So a message to the
-    // system-wide element runs at the global bound even under a nearer
-    // deadline; it can overrun the deadline by at most that bound.
-    if !timeout.is_deadline() || is_system_wide(element) {
+    if !timeout.is_deadline() {
         return send();
     }
     // `call_timeout` never hands back a zero duration, which AX would read
@@ -441,8 +573,9 @@ fn ax_bounded(
     }
     let code = send();
     // Release the element to the bound it had: `0` means "use the global
-    // value". The result does not matter: a failure leaves the element on
-    // the tighter bound, which is a faster failure and never a wrong answer.
+    // value". The result does not matter for this message, which has
+    // already been answered; a failure leaves the element on the tighter
+    // bound, which is a faster failure for a later one, never a wrong answer.
     let release = if bound == AX_MESSAGING_TIMEOUT_SECS {
         0.0
     } else {
@@ -467,9 +600,7 @@ fn attribute_name(attribute: CFStringRef) -> String {
     if attribute.is_null() {
         return "an attribute".to_string();
     }
-    // The attribute names this crate sends are CFStrings it created, so the
-    // get-rule retain cannot meet a misbehaving foreign object.
-    unsafe { CFString::wrap_under_get_rule(attribute as _) }.to_string()
+    cf_string(attribute).unwrap_or_else(|| "an attribute that is not a string".to_string())
 }
 
 /// Wrap a rayon closure so each item runs under the caller's deadline:
@@ -524,6 +655,36 @@ fn ffi_copy_action_names(element: AXUIElementRef, names: *mut CFArrayRef) -> i32
 
 // ── Attribute Helpers ─────────────────────────────────────────────────────────
 
+/// A borrowed CFString's UTF-16 code units. `None` for null or any other
+/// type. Read inside `safe_cf_string_copy_utf16`'s `@try`, so a misbehaving
+/// object cannot unwind into Rust, and with no retain or release of `v`:
+/// `core-foundation`'s `CFString::wrap_under_*` would `CFRetain` /
+/// `CFRelease` it outside the exception-safe wrappers.
+fn cf_utf16(v: CFTypeRef) -> Option<Vec<u16>> {
+    let n = unsafe { safe_cf_string_copy_utf16(v, std::ptr::null_mut(), 0) };
+    if n < 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; n as usize];
+    let copied = unsafe { safe_cf_string_copy_utf16(v, buf.as_mut_ptr(), n) };
+    (copied == n).then_some(buf)
+}
+
+/// A borrowed CFString as a `String` (lone surrogates replaced, as
+/// `CFString`'s `Display` does). `None` for null or any other type.
+fn cf_string(v: CFTypeRef) -> Option<String> {
+    cf_utf16(v).map(|u| String::from_utf16_lossy(&u))
+}
+
+/// An owned (+1) CF value as a `String`, releasing it whatever its type.
+fn cf_string_owned(v: CFTypeRef) -> Option<String> {
+    let s = cf_string(v);
+    if !v.is_null() {
+        unsafe { safe_cf_release(v) };
+    }
+    s
+}
+
 fn ax_attr(element: AXUIElementRef, attribute: &str) -> Option<CFTypeRef> {
     let attr = CFString::new(attribute);
     let mut value: CFTypeRef = std::ptr::null();
@@ -550,7 +711,7 @@ fn cf_url_string(v: CFTypeRef) -> Option<String> {
             return None;
         }
         // Borrowed from the URL (Get rule).
-        Some(CFString::wrap_under_get_rule(s as *const _).to_string())
+        cf_string(s)
     }
 }
 
@@ -558,8 +719,7 @@ fn ax_string(element: AXUIElementRef, attribute: &str) -> Option<String> {
     let value = ax_attr(element, attribute)?;
     unsafe {
         if safe_cf_get_type_id(value) == safe_cf_string_get_type_id() {
-            let s = CFString::wrap_under_create_rule(value as *const _);
-            Some(s.to_string())
+            cf_string_owned(value)
         } else {
             safe_cf_release(value);
             None
@@ -663,9 +823,9 @@ fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
     unsafe {
         let type_id = safe_cf_get_type_id(value);
         // Each branch owns the CFRelease of `value` exactly once: the number
-        // path releases explicitly after the copy; the string path transfers
-        // ownership to `CFString::wrap_under_create_rule`, which releases on
-        // drop; the fall-through releases before returning `None`. The
+        // path releases explicitly after the copy; the string path releases
+        // through `cf_string_owned`; the fall-through releases before
+        // returning `None`. The
         // previous control flow released in the number branch and then read
         // `value` again in the string branch (use-after-free) and released
         // it a second time on the fall-through path (double-release).
@@ -680,10 +840,8 @@ fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
             return if ok { Some(result) } else { None };
         }
         if type_id == safe_cf_string_get_type_id() {
-            // `wrap_under_create_rule` adopts the existing +1 retain; the
-            // resulting `CFString` releases on drop.
-            let s = CFString::wrap_under_create_rule(value as *const _);
-            return s.to_string().trim().parse::<f64>().ok();
+            // `cf_string_owned` releases the +1 copy.
+            return cf_string_owned(value)?.trim().parse::<f64>().ok();
         }
         safe_cf_release(value);
         None
@@ -944,9 +1102,8 @@ fn app_top_level_children(app: AXUIElementRef) -> Result<Vec<AXElement>> {
         let is_menu = match read_raw_attr(child.as_ptr(), "AXRole") {
             RawAttr::Value(v) => {
                 if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
-                    // Adopts the +1 retain; released when the CFString drops.
-                    let role = unsafe { CFString::wrap_under_create_rule(v as *const _) };
-                    role == "AXMenu"
+                    // `cf_string_owned` releases the +1 copy.
+                    cf_string_owned(v).as_deref() == Some("AXMenu")
                 } else {
                     // Not a role string, so not a menu; release the copy.
                     unsafe { safe_cf_release(v) };
@@ -1214,10 +1371,8 @@ fn find_close_button(element: AXUIElementRef, role: Role) -> Result<Option<AXEle
                                 RawAttr::Value(subrole) => {
                                     if safe_cf_get_type_id(subrole) == safe_cf_string_get_type_id()
                                     {
-                                        // CFString compares to `&str`
-                                        // without an owned allocation.
-                                        CFString::wrap_under_create_rule(subrole as *const _)
-                                            == "AXCloseButton"
+                                        // Releases the +1 copy.
+                                        cf_string_owned(subrole).as_deref() == Some("AXCloseButton")
                                     } else {
                                         safe_cf_release(subrole);
                                         false
@@ -1372,8 +1527,7 @@ fn action_names_in(element: AXUIElementRef, context: CannotCompleteContext) -> R
         for i in 0..count {
             let name = safe_cf_array_get_value(names, i);
             if !name.is_null() && safe_cf_get_type_id(name) == safe_cf_string_get_type_id() {
-                let s = CFString::wrap_under_get_rule(name as *const _);
-                result.push(s.to_string());
+                result.extend(cf_string(name));
             }
         }
         safe_cf_release(names);
@@ -1414,8 +1568,7 @@ fn ax_value_string(element: AXUIElementRef) -> Option<String> {
     unsafe {
         let tid = safe_cf_get_type_id(value);
         if tid == safe_cf_string_get_type_id() {
-            let s = CFString::wrap_under_create_rule(value as *const _);
-            return Some(s.to_string());
+            return cf_string_owned(value);
         }
         if tid == safe_cf_number_get_type_id() {
             let mut f: f64 = 0.0;
@@ -1442,8 +1595,7 @@ fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
             }
         }
         if safe_cf_get_type_id(value) == safe_cf_string_get_type_id() {
-            let s = CFString::wrap_under_create_rule(value as *const _);
-            return s.to_string().trim().parse::<f64>().ok();
+            return cf_string_owned(value)?.trim().parse::<f64>().ok();
         }
         safe_cf_release(value);
         None
@@ -1600,8 +1752,7 @@ impl BatchAttrs {
         }
         unsafe {
             if safe_cf_get_type_id(v) == safe_cf_string_get_type_id() {
-                let s = CFString::wrap_under_get_rule(v as *const _);
-                Some(s.to_string())
+                cf_string(v)
             } else {
                 None
             }
@@ -1647,8 +1798,7 @@ impl BatchAttrs {
         unsafe {
             let tid = safe_cf_get_type_id(v);
             if tid == safe_cf_string_get_type_id() {
-                let s = CFString::wrap_under_get_rule(v as *const _);
-                return Some(s.to_string());
+                return cf_string(v);
             }
             if tid == safe_cf_number_get_type_id() {
                 let mut f: f64 = 0.0;
@@ -1674,8 +1824,7 @@ impl BatchAttrs {
                 }
             }
             if safe_cf_get_type_id(v) == safe_cf_string_get_type_id() {
-                let s = CFString::wrap_under_get_rule(v as *const _);
-                return s.to_string().trim().parse::<f64>().ok();
+                return cf_string(v)?.trim().parse::<f64>().ok();
             }
             None
         }
@@ -1866,9 +2015,13 @@ impl ResolvedAttrs {
         let role_str = match role_read {
             RawAttr::Value(v) => {
                 if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
-                    // `wrap_under_create_rule` adopts the +1 retain; the
-                    // CFString releases on drop.
-                    unsafe { CFString::wrap_under_create_rule(v as *const _) }.to_string()
+                    // `cf_string_owned` releases the +1 copy; a string it
+                    // cannot read (the wrapper caught an exception) is as
+                    // malformed as a non-string.
+                    cf_string_owned(v).ok_or_else(|| Error::Platform {
+                        code: -1,
+                        message: "AXRole returned a string that could not be read".to_string(),
+                    })?
                 } else {
                     // A value of another type is a malformed answer, not the
                     // definitive "no role" the `Absent` arm covers: turning
@@ -3964,7 +4117,15 @@ fn matches_ax_with_role(
 /// so the error message and the prompt can never disagree about where to
 /// click.
 pub fn accessibility_grant_instructions() -> String {
-    instructions_for_major(macos_major_version())
+    match macos_major_version() {
+        Ok(major) => instructions_for_major(major),
+        // Naming one pane on a guess would send the user to an entry that
+        // may not exist on their system; name both, by version.
+        Err(_) => "Enable Accessibility in System Settings → Privacy & Security → \
+                   Device Control and Data Access (macOS 27 and later) or \
+                   Privacy & Security → Accessibility (macOS 26 and earlier)"
+            .to_string(),
+    }
 }
 
 /// The instruction text for a given macOS major version. Split out so the
@@ -3982,44 +4143,102 @@ fn instructions_for_major(major: u32) -> String {
     format!("Enable Accessibility in System Settings → {entry}")
 }
 
+extern "C" {
+    // libSystem's sysctl by name; declared here rather than through a libc
+    // crate dependency for this one call.
+    fn sysctlbyname(
+        name: *const std::ffi::c_char,
+        oldp: *mut c_void,
+        oldlenp: *mut usize,
+        newp: *mut c_void,
+        newlen: usize,
+    ) -> std::ffi::c_int;
+}
+
+/// `kern.osproductversion` (e.g. `"15.4.1"`), read in-process with
+/// `sysctlbyname`. The error names what failed.
+fn read_os_product_version() -> std::result::Result<String, String> {
+    const NAME: &std::ffi::CStr = c"kern.osproductversion";
+    let mut len: usize = 0;
+    // SAFETY: a null `oldp` with a valid `oldlenp` asks for the size only.
+    let rc = unsafe {
+        sysctlbyname(
+            NAME.as_ptr(),
+            std::ptr::null_mut(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(format!(
+            "sysctlbyname(kern.osproductversion) size query failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    // SAFETY: `buf` holds `len` writable bytes, and `len` says so.
+    let rc = unsafe {
+        sysctlbyname(
+            NAME.as_ptr(),
+            buf.as_mut_ptr() as *mut c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(format!(
+            "sysctlbyname(kern.osproductversion) failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    buf.truncate(len.min(buf.len()));
+    // The value is NUL-terminated.
+    let text = std::ffi::CStr::from_bytes_until_nul(&buf)
+        .map_err(|_| "kern.osproductversion is not NUL-terminated".to_string())?;
+    text.to_str()
+        .map(str::to_string)
+        .map_err(|e| format!("kern.osproductversion is not UTF-8: {e}"))
+}
+
+/// The major version of a `kern.osproductversion` string.
+fn parse_major_version(version: &str) -> std::result::Result<u32, String> {
+    let version = version.trim();
+    version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse().ok())
+        .filter(|major| *major > 0)
+        .ok_or_else(|| format!("kern.osproductversion is {version:?}, not a macOS version"))
+}
+
 /// macOS major version from `kern.osproductversion`, cached after the first
-/// read. On a probe failure it reports 0. The probe is a local `sysctl` and
-/// should not fail. `0` has two consumers: the grant instruction falls back to
-/// the pre-27 section name (only a hint), and `screen_recording_gates_ax`
-/// treats it as "requires Screen Recording", so an unknown version makes
-/// `MacOSProvider::new` demand the grant rather than skip it.
-fn macos_major_version() -> u32 {
-    static VERSION: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
-        std::process::Command::new("sysctl")
-            .args(["-n", "kern.osproductversion"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .split('.')
-                    .next()
-                    .and_then(|major| major.parse().ok())
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0)
-    });
-    *VERSION
+/// read, or why it could not be read. An unknown version has two consumers:
+/// the grant instruction names both settings panes, and
+/// `screen_recording_gates_ax` treats it as "requires Screen Recording", so
+/// `MacOSProvider::new` demands the grant (and says why) rather than skip it.
+fn macos_major_version() -> std::result::Result<u32, String> {
+    static VERSION: std::sync::LazyLock<std::result::Result<u32, String>> =
+        std::sync::LazyLock::new(|| {
+            read_os_product_version().and_then(|v| parse_major_version(&v))
+        });
+    VERSION.clone()
 }
 
 /// The provider's Screen Recording denial, naming the detected version (or
-/// that it could not be detected, which is why the grant is demanded).
-fn screen_recording_instructions(major: u32) -> String {
-    let why = if major == 0 {
-        "The macOS version could not be detected, so xa11y requires it as it does on \
-         macOS 26+, where it is needed to read window content via the accessibility API."
-            .to_string()
-    } else {
-        format!(
+/// why it could not be detected, which is why the grant is demanded).
+fn screen_recording_instructions(major: &std::result::Result<u32, String>) -> String {
+    let why = match major {
+        Ok(major) => format!(
             "This is macOS {major}; on macOS 26+ it is required to read window content via \
              the accessibility API."
-        )
+        ),
+        Err(reason) => format!(
+            "The macOS version could not be detected ({reason}), so xa11y requires it as it \
+             does on macOS 26+, where it is needed to read window content via the \
+             accessibility API."
+        ),
     };
     format!(
         "Enable Screen Recording in System Settings → Privacy & Security → \
@@ -4029,12 +4248,11 @@ fn screen_recording_instructions(major: u32) -> String {
 }
 
 /// Whether the accessibility API needs Screen Recording to read window
-/// content on macOS `major` (26 and later). An unknown version (`0`, the
-/// probe-failure value of [`macos_major_version`]) is treated as needing it:
-/// demanding a grant the system may not need fails loudly, while skipping
-/// one it does need returns window-less trees with no error.
-fn screen_recording_gates_ax(major: u32) -> bool {
-    major == 0 || major >= 26
+/// content on macOS `major` (26 and later). An unknown version is treated as
+/// needing it: demanding a grant the system may not need fails loudly, while
+/// skipping one it does need returns window-less trees with no error.
+fn screen_recording_gates_ax(major: &std::result::Result<u32, String>) -> bool {
+    major.as_ref().map_or(true, |major| *major >= 26)
 }
 
 /// Global handle counter for mapping ElementData back to AXElements.
@@ -4089,11 +4307,10 @@ impl MacOSProvider {
         // returns only self-referencing AXApplication wrappers and menu bars.
         // Earlier releases read window content without it, so the provider
         // does not demand it there (the screenshot backend always does).
-        if screen_recording_gates_ax(macos_major_version())
-            && !Self::has_screen_recording_permission()
-        {
+        let version = macos_major_version();
+        if screen_recording_gates_ax(&version) && !Self::has_screen_recording_permission() {
             return Err(Error::PermissionDenied {
-                instructions: screen_recording_instructions(macos_major_version()),
+                instructions: screen_recording_instructions(&version),
             });
         }
 
@@ -4152,7 +4369,7 @@ impl MacOSProvider {
                 let name = if !name_val.is_null()
                     && safe_cf_get_type_id(name_val) == safe_cf_string_get_type_id()
                 {
-                    CFString::wrap_under_get_rule(name_val as *const _).to_string()
+                    cf_string(name_val).unwrap_or_default()
                 } else {
                     String::new()
                 };
@@ -5246,6 +5463,10 @@ impl MacOSProvider {
 }
 
 impl Provider for MacOSProvider {
+    fn capabilities(&self) -> Result<xa11y_core::Capabilities> {
+        xa11y_core::Capabilities::current()
+    }
+
     fn relations(
         &self,
         element: &ElementData,
@@ -5305,8 +5526,8 @@ impl Provider for MacOSProvider {
             RawAttr::Value(v) => {
                 let is_string = unsafe { safe_cf_get_type_id(v) == safe_cf_string_get_type_id() };
                 if is_string {
-                    // Adopts the +1 retain; released when the CFString drops.
-                    Some(unsafe { CFString::wrap_under_create_rule(v as *const _) }.to_string())
+                    // `cf_string_owned` releases the +1 copy.
+                    cf_string_owned(v)
                 } else {
                     unsafe { safe_cf_release(v) };
                     None
@@ -5959,18 +6180,24 @@ impl Provider for MacOSProvider {
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
         // `AXScrollToVisible` is the AX counterpart of AT-SPI
         // `Component.ScrollTo` and UIA `ScrollItemPattern.ScrollIntoView`.
-        // Gate on the advertised list, as `press` does: AppKit answers
-        // `kAXErrorSuccess` for actions an element does not implement, so a
-        // blind dispatch would report a scroll that never happened (tenet 1).
-        // Setting the enclosing scroll bar's `AXValue` would be a second
-        // mechanism, so it is deliberately not tried here.
-        if !element.actions.iter().any(|a| a == "scroll_into_view") {
+        // Gate on the advertised list: AppKit answers `kAXErrorSuccess` for
+        // actions an element does not implement, so a blind dispatch would
+        // report a scroll that never happened (tenet 1). The list is read
+        // live and error-preserving, as `press` reads its dispatch target:
+        // the snapshot's `actions` were read with failures folded into an
+        // empty list, so a read that failed then would refuse here as
+        // "not supported". Setting the enclosing scroll bar's `AXValue`
+        // would be a second mechanism, so it is deliberately not tried.
+        let ax = self.get_cached(element.handle)?;
+        if !try_ax_action_names(ax.as_ptr())?
+            .iter()
+            .any(|a| a == "AXScrollToVisible")
+        {
             return Err(Error::ActionNotSupported {
                 action: "scroll_into_view".to_string(),
                 role: element.role,
             });
         }
-        let ax = self.get_cached(element.handle)?;
         perform_ax_action(
             ax.as_ptr(),
             "AXScrollToVisible",
@@ -6317,7 +6544,8 @@ impl Provider for MacOSProvider {
         // Out of bounds or splitting a surrogate pair is refused before the
         // set: AX would clamp the first and select half a character for the
         // second (#646).
-        self.rich_validate_selection(element, start, end)?;
+        self.rich_validate_selection(element, start, end)
+            .map_err(|e| self.rich_stale(element, e))?;
         let ax = self.get_cached(element.handle)?;
         let location = start as isize;
         let length = (end as isize) - (start as isize);
@@ -6352,6 +6580,7 @@ impl Provider for MacOSProvider {
         column: u32,
     ) -> Result<Option<ElementData>> {
         self.rich_table_cell_at(table, row, column)
+            .map_err(|e| self.rich_stale(table, e))
     }
 
     fn table_headers(
@@ -6360,6 +6589,7 @@ impl Provider for MacOSProvider {
         kind: xa11y_core::table::HeaderKind,
     ) -> Result<Vec<ElementData>> {
         self.rich_table_headers(table, kind)
+            .map_err(|e| self.rich_stale(table, e))
     }
 
     fn cell_headers(
@@ -6368,26 +6598,32 @@ impl Provider for MacOSProvider {
         kind: xa11y_core::table::HeaderKind,
     ) -> Result<Vec<ElementData>> {
         self.rich_cell_headers(cell, kind)
+            .map_err(|e| self.rich_stale(cell, e))
     }
 
     fn selected_items(&self, container: &ElementData) -> Result<Vec<ElementData>> {
         self.rich_selected_items(container)
+            .map_err(|e| self.rich_stale(container, e))
     }
 
     fn text_length(&self, element: &ElementData) -> Result<u32> {
         self.rich_text_length(element)
+            .map_err(|e| self.rich_stale(element, e))
     }
 
     fn text_caret(&self, element: &ElementData) -> Result<Option<u32>> {
         self.rich_text_caret(element)
+            .map_err(|e| self.rich_stale(element, e))
     }
 
     fn text_selections(&self, element: &ElementData) -> Result<Vec<xa11y_core::TextRange>> {
         self.rich_text_selections(element)
+            .map_err(|e| self.rich_stale(element, e))
     }
 
     fn text_read(&self, element: &ElementData, range: xa11y_core::TextRange) -> Result<String> {
         self.rich_text_read(element, range)
+            .map_err(|e| self.rich_stale(element, e))
     }
 
     fn text_range_at(
@@ -6397,6 +6633,7 @@ impl Provider for MacOSProvider {
         unit: xa11y_core::text_api::TextUnit,
     ) -> Result<xa11y_core::TextRange> {
         self.rich_text_range_at(element, offset, unit)
+            .map_err(|e| self.rich_stale(element, e))
     }
 
     fn text_range_bounds(
@@ -6405,6 +6642,7 @@ impl Provider for MacOSProvider {
         range: xa11y_core::TextRange,
     ) -> Result<Option<Rect>> {
         self.rich_text_range_bounds(element, range)
+            .map_err(|e| self.rich_stale(element, e))
     }
 
     fn text_attributes_at(
@@ -6413,6 +6651,7 @@ impl Provider for MacOSProvider {
         offset: u32,
     ) -> Result<xa11y_core::text_api::TextRun> {
         self.rich_text_attributes_at(element, offset)
+            .map_err(|e| self.rich_stale(element, e))
     }
 
     // ── Generic action escape hatch ─────────────────────────────────
@@ -6497,7 +6736,26 @@ struct ObserverContext {
     sender: xa11y_core::EventSender,
     app_name: String,
     app_pid: u32,
+    /// Set by the subscription's close. A callback that sees it returns
+    /// without reading anything, so a close waits for at most the one
+    /// callback already running.
+    closing: std::sync::atomic::AtomicBool,
 }
+
+/// The time one notification callback may spend reading its target.
+///
+/// A window notification snapshots the window, and against a hung app each
+/// read waits for the process-wide messaging timeout: unbounded, one
+/// callback ran for many of those, and closing the subscription (which
+/// joins the run-loop thread) blocked for all of it. One messaging timeout
+/// for the whole callback keeps a responsive app's snapshot intact and puts
+/// a hung one's at "target unknown", the documented `None`.
+const OBSERVER_CALLBACK_BUDGET: Duration =
+    Duration::from_millis((AX_MESSAGING_TIMEOUT_SECS * 1000.0) as u64);
+
+/// How long closing a subscription waits for its run-loop thread before
+/// handing the rest of the teardown to a background thread.
+const SUBSCRIPTION_CLOSE_BUDGET: Duration = Duration::from_secs(3);
 
 /// `NSAccessibilityPriorityHigh`; `Low` is 10 and `Medium` 50.
 const AX_PRIORITY_HIGH: i64 = 90;
@@ -6514,7 +6772,7 @@ fn info_string(info: CFTypeRef, key: &str) -> Option<String> {
             return None;
         }
         // Borrowed from the dictionary (Get rule).
-        Some(CFString::wrap_under_get_rule(v as *const _).to_string())
+        cf_string(v)
     }
 }
 
@@ -6586,11 +6844,29 @@ unsafe extern "C" fn ax_observer_callback(
     info: CFTypeRef,
     refcon: *mut c_void,
 ) {
-    let ctx = &*(refcon as *const ObserverContext);
+    // SAFETY: `refcon` is the `ObserverContext` the subscription registered,
+    // freed only after this run loop's thread has exited.
+    let ctx = unsafe { &*(refcon as *const ObserverContext) };
+    if ctx.closing.load(Ordering::SeqCst) {
+        return;
+    }
+    xa11y_core::Deadline::after(OBSERVER_CALLBACK_BUDGET)
+        .scope(|| handle_ax_notification(ctx, element, notification, info));
+}
 
-    let notif_str = {
-        let cf = CFString::wrap_under_get_rule(notification as *const _);
-        cf.to_string()
+/// The body of [`ax_observer_callback`], run under its read budget.
+fn handle_ax_notification(
+    ctx: &ObserverContext,
+    element: AXUIElementRef,
+    notification: CFTypeRef,
+    info: CFTypeRef,
+) {
+    let Some(notif_str) = cf_string(notification) else {
+        eprintln!(
+            "AX notification for pid {} carried no notification name; dropped",
+            ctx.app_pid
+        );
+        return;
     };
 
     // Read the raw role string once — used for both kind dispatch and target building.
@@ -6795,6 +7071,30 @@ fn register_notifications(
     Ok(())
 }
 
+/// Stop a subscription's run loop until its thread has exited, or `limit`
+/// has passed. True once the thread has exited.
+///
+/// CFRunLoopStop only stops a loop that is already running. The worker
+/// reports its run loop before it calls CFRunLoopRun, so a cancel right after
+/// subscribe can land in between; a single stop is then lost. So the stop is
+/// repeated until the worker has exited. The run loop is retained by the
+/// caller, so a stop that races the worker's exit is harmless.
+fn stop_run_loop_thread(
+    handle: &std::thread::JoinHandle<()>,
+    run_loop: usize,
+    limit: Option<Duration>,
+) -> bool {
+    let start = Instant::now();
+    while !handle.is_finished() {
+        if limit.is_some_and(|l| start.elapsed() >= l) {
+            return false;
+        }
+        unsafe { safe_cf_run_loop_stop(run_loop as CFTypeRef) };
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
 impl MacOSProvider {
     fn subscribe_impl(&self, pid: i32, app_name: String) -> Result<Subscription> {
         let (tx, rx) = xa11y_core::event_channel();
@@ -6803,6 +7103,7 @@ impl MacOSProvider {
             sender: tx,
             app_name,
             app_pid: pid as u32,
+            closing: std::sync::atomic::AtomicBool::new(false),
         });
         let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
 
@@ -6957,24 +7258,42 @@ impl MacOSProvider {
         let ctx_usize = ctx_ptr as usize;
 
         let cancel = CancelHandle::new(move || {
-            // CFRunLoopStop only stops a loop that is already running. The
-            // worker reports its run loop before it calls CFRunLoopRun, so a
-            // cancel right after subscribe can land in between; a single
-            // stop is then lost and the join below waits forever. Repeat the
-            // stop until the worker has exited. The run loop is retained, so
-            // a stop that races the worker's exit is harmless.
-            while !handle.is_finished() {
-                unsafe { safe_cf_run_loop_stop(run_loop_usize as CFTypeRef) };
-                std::thread::sleep(Duration::from_millis(5));
+            // No callback that starts from here on reads anything, and the
+            // one already running (if any) is bounded by
+            // `OBSERVER_CALLBACK_BUDGET`.
+            // SAFETY: the context is freed only after the thread has exited,
+            // below or in the reaper.
+            unsafe { &*(ctx_usize as *const ObserverContext) }
+                .closing
+                .store(true, Ordering::SeqCst);
+            let teardown = move |handle: std::thread::JoinHandle<()>| {
+                // The thread has finished; join only collects its result. A
+                // panic in it was already reported on stderr by the runtime.
+                let _ = handle.join();
+                unsafe {
+                    safe_cf_release(run_loop_usize as CFTypeRef);
+                    drop(Box::from_raw(ctx_usize as *mut ObserverContext));
+                    safe_cf_release(observer_usize as CFTypeRef);
+                }
+            };
+            if stop_run_loop_thread(&handle, run_loop_usize, Some(SUBSCRIPTION_CLOSE_BUDGET)) {
+                teardown(handle);
+                return;
             }
-            // The thread has finished; join only collects its result. A
-            // panic in it was already reported on stderr by the runtime.
-            let _ = handle.join();
-            unsafe {
-                safe_cf_release(run_loop_usize as CFTypeRef);
-                drop(Box::from_raw(ctx_usize as *mut ObserverContext));
-                safe_cf_release(observer_usize as CFTypeRef);
-            }
+            // The run-loop thread is still inside a callback (an app that
+            // stopped answering mid-read). Close returns now rather than
+            // block on it; a background thread finishes stopping the loop
+            // and frees the observer and its context once the thread has
+            // exited, never before (the callback still holds the context).
+            eprintln!(
+                "xa11y: closing the event subscription for pid {pid}: its notification \
+                 thread did not stop within {SUBSCRIPTION_CLOSE_BUDGET:?}; finishing the \
+                 teardown in the background"
+            );
+            std::thread::spawn(move || {
+                stop_run_loop_thread(&handle, run_loop_usize, None);
+                teardown(handle);
+            });
         });
 
         Ok(Subscription::new(rx, cancel))
@@ -7697,6 +8016,36 @@ mod tests {
     }
 
     #[test]
+    fn an_element_gate_excludes_other_threads_and_is_released() {
+        // An address no real element has; the gate never dereferences it.
+        let element = 0x10usize as AXUIElementRef;
+        let Ok(held) = ElementGateGuard::acquire(element, None) else {
+            panic!("an idle gate is free");
+        };
+        let key = element as usize;
+        let waited = std::thread::spawn(move || {
+            ElementGateGuard::acquire(key as AXUIElementRef, Some(Duration::from_millis(50)))
+                .is_ok()
+        })
+        .join()
+        .expect("the waiting thread does not panic");
+        assert!(!waited, "a held gate must refuse a bounded wait");
+        let waiter = std::thread::spawn(move || {
+            ElementGateGuard::acquire(key as AXUIElementRef, None).is_ok()
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        drop(held);
+        assert!(waiter.join().expect("the waiting thread does not panic"));
+        assert!(
+            !element_gates()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&key),
+            "a gate nobody holds or waits on is removed"
+        );
+    }
+
+    #[test]
     fn a_message_with_no_deadline_is_sent_unchanged() {
         let code = ax_bounded(std::ptr::null(), || unreachable!(), || -7);
         assert_eq!(code, -7);
@@ -7748,20 +8097,32 @@ mod tests {
 
     #[test]
     fn screen_recording_gates_ax_from_macos_26_and_when_unknown() {
-        assert!(!screen_recording_gates_ax(15));
-        assert!(screen_recording_gates_ax(26));
-        assert!(screen_recording_gates_ax(27));
-        assert!(screen_recording_gates_ax(0));
+        assert!(!screen_recording_gates_ax(&Ok(15)));
+        assert!(screen_recording_gates_ax(&Ok(26)));
+        assert!(screen_recording_gates_ax(&Ok(27)));
+        assert!(screen_recording_gates_ax(&Err("probe failed".to_string())));
     }
 
     #[test]
     fn screen_recording_instructions_name_the_version_and_the_restart() {
-        let known = screen_recording_instructions(26);
+        let known = screen_recording_instructions(&Ok(26));
         assert!(known.contains("This is macOS 26"), "{known}");
         assert!(known.contains("restart this process"), "{known}");
-        let unknown = screen_recording_instructions(0);
+        let unknown = screen_recording_instructions(&Err("sysctl said no".to_string()));
         assert!(unknown.contains("could not be detected"), "{unknown}");
+        assert!(unknown.contains("sysctl said no"), "{unknown}");
         assert!(unknown.contains("restart this process"), "{unknown}");
+    }
+
+    #[test]
+    fn the_os_product_version_is_read_in_process() {
+        let version = read_os_product_version().expect("kern.osproductversion is readable");
+        assert!(parse_major_version(&version).is_ok(), "{version:?}");
+        assert!(macos_major_version().is_ok());
+        assert_eq!(parse_major_version("15.4.1"), Ok(15));
+        assert_eq!(parse_major_version("26\n"), Ok(26));
+        assert!(parse_major_version("").is_err());
+        assert!(parse_major_version("x.1").is_err());
     }
 
     #[test]

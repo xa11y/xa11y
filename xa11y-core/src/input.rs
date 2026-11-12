@@ -1110,6 +1110,28 @@ mod pointer_validation_tests {
     }
 
     #[test]
+    fn an_out_of_range_scroll_is_refused_before_any_event() {
+        let backend = Checked::new();
+        let sim = InputSim::new(backend.clone());
+        let ok = Point::new(5, 5);
+        for delta in [
+            ScrollDelta::vertical(i32::MIN),
+            ScrollDelta::vertical(10_001),
+            ScrollDelta::horizontal(-10_001),
+            ScrollDelta::new(0, i32::MAX),
+        ] {
+            let error = sim.mouse().scroll(ok, delta).unwrap_err();
+            assert!(
+                matches!(error, Error::InvalidActionData { .. }),
+                "{delta:?}: {error:?}"
+            );
+            assert_eq!(error.delivery(), crate::Delivery::NotDelivered);
+        }
+        assert!(backend.events.lock().unwrap().is_empty());
+        assert!(validate_scroll(ScrollDelta::new(-10_000, 10_000)).is_ok());
+    }
+
+    #[test]
     fn pointer_payload_serializes_as_plain_geometry() {
         let bounds = rect(100, 100, 10, 10);
         let point = Point::new(105, 105);
@@ -1423,8 +1445,10 @@ impl Mouse<'_> {
         })
     }
 
-    /// Scroll at `target` by `delta` ticks.
+    /// Scroll at `target` by `delta` ticks, at most
+    /// 10,000 on each axis.
     pub fn scroll(&self, target: impl IntoPoint, delta: ScrollDelta) -> Result<()> {
+        validate_scroll(delta)?;
         let bounds = target.element_bounds();
         let pt = self.resolve(target)?;
         self.validate_target(pt, bounds, Anchor::Center)?;
@@ -1432,6 +1456,24 @@ impl Mouse<'_> {
             .pointer_scroll(pt, delta)
             .map_err(|error| enrich_pointer_error(error, bounds, Anchor::Center))
     }
+}
+
+/// Most ticks one `scroll` sends on an axis. Each tick is an OS event on some
+/// backends (an XTest button click on X11), and the backends scale a tick
+/// into the platform's unit (`WHEEL_DELTA`, 120 per notch, on Windows), so an
+/// unbounded count is both an event flood and an integer overflow.
+const MAX_SCROLL_TICKS: i32 = 10_000;
+
+fn validate_scroll(delta: ScrollDelta) -> Result<()> {
+    for (axis, ticks) in [("dx", delta.dx), ("dy", delta.dy)] {
+        if ticks.unsigned_abs() > MAX_SCROLL_TICKS.unsigned_abs() {
+            return Err(Error::invalid_action_data(format!(
+                "scroll {axis} of {ticks} ticks is out of range: at most \
+                 {MAX_SCROLL_TICKS} ticks either way per call"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Keyboard operations. Obtain via [`InputSim::keyboard`].

@@ -78,7 +78,7 @@ See [Explicit IA2 source on Windows](#explicit-ia2-source-on-windows).
 | `relation:linked` | macOS linked elements: `aria-controls` and `aria-flowto` targets together. | Unsupported (AT-SPI reports controls and flows-to separately) | Supported (`AXLinkedUIElements`) | Unsupported (UIA reports controls and flows-to separately) | Unsupported (IA2 reports controls and flows-to separately) |
 | `action:blur` | Remove keyboard focus from an element (`Element.blur`). | Supported (focuses the parent with Component.GrabFocus; fails if the parent cannot take focus) | Supported (sets AXFocused to false) | Supported (focuses the desktop root) | Unsupported (IA2 has no semantic blur operation) |
 | `app:enable_web_accessibility` | Ask a Chromium or Electron app to build its web accessibility tree (`App.enable_web_accessibility`). | Unsupported (a launch-time switch on Linux; relaunch the app with `--force-renderer-accessibility`) | Supported (sets AXManualAccessibility) | Unsupported (not needed; Chromium builds the tree when a UI Automation client connects) | Unsupported (launch Chromium with `--force-renderer-accessibility=complete` before attaching IA2) |
-| `window:activate` | Bring a window to the foreground and focus it. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
+| `window:activate` | Bring a window to the foreground and focus it. | Partial (X11 (verified through `_NET_ACTIVE_WINDOW`) and Sway; other Wayland compositors: AT-SPI `GrabFocus`, which the compositor may refuse) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
 | `window:minimize` | Send a window to the taskbar or dock (`Element.minimize`). | Partial (X11 only; unsupported on Wayland) | Supported | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
 | `window:maximize` | Make a window fill the screen without entering fullscreen (`Element.maximize`). | Partial (X11 only; unsupported on Wayland) | Unsupported (AX has no zoom state to read or set) | Supported | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
 | `window:enter_fullscreen` | Put a window in native fullscreen. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported (AXFullScreen) | Unsupported (UIA has no fullscreen API) | Unsupported (IA2 is a document source; window-manager verbs are unavailable) |
@@ -91,7 +91,7 @@ See [Explicit IA2 source on Windows](#explicit-ia2-source-on-windows).
 | `state:fullscreen` | Read whether a window is fullscreen. | Partial (X11, and Sway on Wayland; other Wayland compositors: unsupported) | Supported (AXFullScreen) | Unsupported (UIA has no fullscreen state; always unknown) | Unsupported (IA2 reports no window visual state; always unknown) |
 | `table:row_index` | The index of a table row element (`Element.table_row`). | Unsupported (AT-SPI has no row-index call for a row object; read the row from a cell) | Supported (AXIndex) | Partial (when the row object reports a GridItem row) | Unsupported (IA2 has no row-index interface on row objects; read a cell) |
 | `table:cell_header` | Whether a cell is a column or row header (`CellInfo.header`). | Supported (the column header and row header roles) | Unsupported (AX marks no cell as a header) | Supported | Supported (MSAA column/row header roles) |
-| `table:row_headers` | The row header cells of a table or cell. | Supported | Partial (AppKit tables report no row headers) | Supported | Supported (IAccessibleTable2 and IAccessibleTableCell) |
+| `table:row_headers` | The row header cells of a table or cell. | Supported | Partial (AppKit tables have no row headers, so the answer for one is empty) | Supported | Supported (IAccessibleTable2 and IAccessibleTableCell) |
 | `table:collection` | Position and size of an item in a list, tree, tab list or radio group (`Element.collection`). | Partial (toolkits that set the `posinset`, `setsize` and `level` attributes (GTK, Chromium); Qt sets none) | Partial (rows, tabs and radio buttons; web list items are groups in AX and report none) | Supported | Partial (IA2 `posinset`, `setsize` and `level` object attributes when published) |
 | `text:range_at:character` | `Text.range_at` with the character unit. | Supported | Supported | Supported | Supported (IAccessibleText native UTF-16 boundaries) |
 | `text:range_at:word` | `Text.range_at` with the word unit. | Partial (where the toolkit reports word boundaries) | Unsupported (AX has no word boundary API) | Supported | Supported (IAccessibleText native UTF-16 boundaries) |
@@ -379,12 +379,11 @@ Platforms use different attributes to determine an element's `name`:
 | Platform | Source | Survives an app restart |
 |---|---|---|
 | macOS | `AXIdentifier`, set by the app | Yes |
-| Windows, top-level window | Window handle, `hwnd:0x…` | No. Windows reuses a handle after its window closes. |
+| Windows, element with a window of its own | Window handle, `hwnd:0x…` | No. Windows reuses a handle after its window closes. |
 | Windows, other element with an `AutomationId` | `AutomationId`, set by the app | Yes |
-| Windows, other element with no `AutomationId` but a window of its own | Window handle, `hwnd:0x…` | No |
 | Linux | D-Bus object path | No |
 
-A top-level window keeps its handle even when it has an `AutomationId`. Every open copy of a WinForms form reports the same one, its `Name`. On Windows, `raw["native_window_handle"]` holds an element's own window handle, when it has one, whichever identifier `stable_id` uses.
+On Windows a handle wins over an `AutomationId`. A handle is unique, while an `AutomationId` is unique only when the app makes it so, and controls built from one template share it. Read `raw["automation_id"]` for the `AutomationId`, which survives a restart. `raw["native_window_handle"]` holds an element's own window handle, when it has one.
 
 An element whose platform reports none of these has no `stable_id`.
 
@@ -491,9 +490,9 @@ Each failed action reports `not_delivered` or `unknown`. See [errors](/reference
 
 | Platform | `not_delivered` | `unknown` |
 | --- | --- | --- |
-| Linux | The element lists no matching AT-SPI action or lacks the interface the verb needs (`ActionNotSupported`). The object or its peer is gone before dispatch (`ElementStale`). `GrabFocus` (behind `focus` and `activate`) answers `false` or D-Bus `NotSupported`, because the adapter declined to take focus and focusing twice is harmless. Bad arguments or an unsupported session. | A D-Bus method timeout (`Timeout`). A failed `DoAction`, `SetCurrentValue`, `SetTextContents` or `Select*`. `DoAction` returning `false`, because a provider that acts and then returns `false` looks the same as one that declined. A window-manager request that was sent and not confirmed. |
+| Linux | The element lists no matching AT-SPI action or lacks the interface the verb needs (`ActionNotSupported`). The object or its peer is gone before dispatch (`ElementStale`). `GrabFocus` (behind `focus`) answers `false` or D-Bus `NotSupported`, because the adapter declined to take focus and focusing twice is harmless. Bad arguments or an unsupported session. | A D-Bus method timeout (`Timeout`). `activate` refused: `GrabFocus` answering `false` (`Platform`), or an X11 `_NET_ACTIVE_WINDOW` request after which the window did not become active within 1 s (`Platform`, since the window manager may still apply it). A failed `DoAction`, `SetCurrentValue`, `SetTextContents` or `Select*`. `DoAction` returning `false`, because a provider that acts and then returns `false` looks the same as one that declined. A window-manager request that was sent and not confirmed. |
 | macOS | `kAXErrorActionUnsupported` (`ActionNotSupported`). Role and attribute checks made by xa11y itself. Stale handles and bad arguments. | `kAXErrorCannotComplete`, which is also what an expired messaging timeout surfaces as. Every other AX code from the dispatching call, including `kAXErrorInvalidUIElement`. A window verb that did not settle in its budget (`Timeout`). |
-| Windows | Pattern acquisition answers `E_NOINTERFACE`, `UIA_E_INVALIDOPERATION` or an empty error (`ActionNotSupported`). `ValuePattern.SetValue` answers `UIA_E_INVALIDOPERATION` for a read-only control (`TextValueNotSupported`). The handle is not in the cache or no longer matches its identity (`ElementStale`). Bad arguments. | `UIA_E_TIMEOUT` from an element-level call. Every other HRESULT, including `UIA_E_NOTSUPPORTED` and `UIA_E_ELEMENTNOTAVAILABLE`, from the pattern call that performs the action. |
+| Windows | Pattern acquisition answers `E_NOINTERFACE`, `UIA_E_INVALIDOPERATION` or an empty error (`ActionNotSupported`). `ValuePattern.SetValue` answers `UIA_E_INVALIDOPERATION` for a read-only control (`TextValueNotSupported`). The handle is not in the cache or no longer matches its identity (`ElementStale`). Bad arguments. | `UIA_E_TIMEOUT` from an element-level call. Every other HRESULT, including `UIA_E_NOTSUPPORTED` and `UIA_E_ELEMENTNOTAVAILABLE`, from the pattern call that performs the action. An element `type_text` that wrote its value and then failed to place the caret (`Platform`, whose message says the text is already in the control: do not retry it). |
 
 These rules hold on every platform:
 
@@ -523,14 +522,14 @@ JavaScript.
 | --- | --- | --- | --- |
 | `table` (`row_count`, `column_count`) | The `rowcount` / `colcount` object attributes when the table declares them (Chromium sets them from `aria-rowcount` / `aria-colcount`), otherwise `Table.NRows` / `NColumns`; a negative value reads `unknown` | `AXRowCount` / `AXColumnCount`, or the length of `AXRows` / `AXColumns` where those are absent (AppKit). Also set on an `AXOutline` (`NSOutlineView`), which keeps the `list` role and answers every table call below as a table does | Grid row and column counts |
 | `cell` (`row`, `column`, spans) | `TableCell.GetRowColumnSpan` | `AXRowIndexRange` / `AXColumnIndexRange` | GridItem properties |
-| `cell.header` | The `column header` / `row header` roles | Always `None`: AX marks no cell as a header | Cached ARIA header role, WPF header class, or parent Header orientation; explicit header requests label their returned cells |
+| `cell.kind` (`data`, `column_header`, `row_header`; `cell.header` derives from it) | The `table cell`, `column header` / `table column header` and `row header` / `table row header` roles | Always `None` (not reported): AX marks no cell as either | Cached ARIA header role, WPF header class, or parent Header orientation; explicit header requests label their returned cells |
 | `table_row` | Always `None`: AT-SPI has no row-index call for a row object, so read the row from a cell | `AXIndex` of an `AXRow`, including outline rows | GridItem row when the row object reports it |
 | `collection` (`index`, `size`, `depth`) | Object attributes `posinset`, `setsize`, `level`, converted from 1-based; read for list items, tree items, tabs, radio buttons and rows | `AXARIAPosInSet` / `AXARIASetSize` on rows, tabs and radio buttons, converted from 1-based. `depth` comes from `AXDisclosureLevel` on outline rows. Web list items are groups in AX, so they report none | PositionInSet, SizeOfSet and Level; indices converted from 1-based |
 | `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `AXCellForColumnAndRow`; for AppKit tables and outlines, the `AXCell` in row `AXRows[row]` whose index ranges cover the slot | Grid.GetItem; never realizes a virtual cell |
-| `column_headers()`, `row_headers()` | `Table.GetColumnHeader` / `GetRowHeader` per column or row; `Unsupported` above 1000 | `AXColumnHeaderUIElements` / `AXRowHeaderUIElements`; for AppKit, which answers neither, the `AXHeader` of each `AXColumn` | Table header arrays |
+| `column_headers()`, `row_headers()` | `Table.GetColumnHeader` / `GetRowHeader` per column or row, bounded by the caller's deadline | `AXColumnHeaderUIElements` / `AXRowHeaderUIElements`; for AppKit, which answers neither, the `AXHeader` of each `AXColumn` | Table header arrays |
 | `column_header_cells()`, `row_header_cells()` | `TableCell.GetColumnHeaderCells` / `GetRowHeaderCells` | The cell's header attributes; for AppKit, the `AXHeader` of the cell's `AXColumn`, and no row headers | TableItem header arrays |
-| `selected_items()` | `Selection.GetSelectedChild` | `AXSelectedRows` on tables and outlines, `AXSelectedChildren` elsewhere | Selection.GetCurrentSelection |
-| `text()` and every `Text` read | The `Text` interface | `AXNumberOfCharacters`, `AXStringForRange`; caret is an empty `AXSelectedTextRange`, `None` while a range is selected | TextPattern ranges; caret from active TextPattern2 or focused TextPattern selection |
+| `selected_items()` (rows or cells, whichever the platform selects) | `Selection.GetSelectedChild`: cells in a GTK table | `AXSelectedRows` on tables and outlines, `AXSelectedChildren` elsewhere | Selection.GetCurrentSelection |
+| `text()` and every `Text` read | The `Text` interface; caret is `CaretOffset` while the element is focused | `AXNumberOfCharacters`, `AXStringForRange`; caret is an empty `AXSelectedTextRange` while focused, `None` while a range is selected | TextPattern ranges; caret from active TextPattern2 or focused TextPattern selection |
 | `Text.range_at()` units | `Text.GetStringAtOffset`; `Unsupported` when the toolkit reports no boundary for the unit (GTK 3 text view: `paragraph`) | Unicode scalars for characters; `AXLineForIndex` + `AXRangeForLine` for lines; `word` and `paragraph` are `Unsupported` | Unicode scalars for characters; UIA enclosing units for words, lines and paragraphs |
 | `Text.runs()` attributes | `Text.GetAttributeRun`; `script` is always `None` | `AXStyleRangeForIndex` runs, read from `AXAttributedStringForRange`; weight and italic from the run's font | TextRange format units and attributes; unsupported attributes stay `None` |
 | `Text.bounds()` | `Text.GetRangeExtents` per rendered line | `AXBoundsForRange` per rendered line | TextRange.GetBoundingRectangles in physical desktop pixels |
@@ -610,16 +609,16 @@ separately, UTF-16 text and formatting, native parent/header identity,
 merged cells and removed objects. It also verifies headings, landmarks, link
 URLs, relations, embedded controls that accept actions, identity equality and bounded
 capture across both tabs. A separate probe pauses the owned browser with the
-Windows debug API and verifies the five-second stall bound and disabled-worker
-refusal, then detaches before fixture cleanup. Firefox and older Chromium versions have
+Windows debug API and verifies the five-second stall bound and the refusal
+while the call is stuck, then detaches before fixture cleanup. Firefox and older Chromium versions have
 not been verified. Chrome exposes Text, without Text2, in this fixture.
 The Text2 ABI and mapping have been reviewed but have no live fixture evidence.
 The existing UIA source remains available for those apps.
 
 IA2 interfaces live on one COM worker with a queue of 32 requests. Tree
 searches stop with an error above 4096 nodes or depth 32. The registry keeps
-at most 8192 handles, expiring them after five minutes. Expired or evicted
-handles fail as stale. Signed IDs are validated against their event window
+at most 65,536 handles, the same bound as the UIA source, and evicts the
+oldest first. Evicted handles fail as stale. Signed IDs are validated against their event window
 and owning process generation, without resolving a replacement by name.
 
 Each request has a five-second budget that starts when the worker runs it.
@@ -628,11 +627,12 @@ still queued when its caller stops waiting is withdrawn and never runs. It
 fails as a timeout with `not_delivered` delivery and leaves the worker usable.
 A request whose budget or caller deadline expires between native operations
 stops before the next one. That is an ordinary timeout, and the worker stays
-usable. Only a native call still running after its budget disables the worker.
-Then xa11y requests COM cancellation of that caller's own call. Cancellation
-is best effort, so native cleanup may continue after the caller returns. An
-in-flight action has unknown delivery. Restart the host before issuing
-further IA2 requests.
+usable. A native call still running after its budget makes the worker refuse
+new requests while it runs. Then xa11y requests COM cancellation of that
+caller's own call. Cancellation is best effort, so native cleanup may continue
+after the caller returns. An in-flight action has unknown delivery. Refusal
+lasts only while the stuck call is outstanding. Whatever a merely slow call
+returns still reaches its caller.
 An initialization failure also disables this process's IA2 source.
 Native range, attribute and array allocations occur inside the provider
 before their sizes can be checked. Oversized results are refused. Releasing

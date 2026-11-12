@@ -111,9 +111,11 @@ impl Text {
         AsyncTask::new(Blocking::new(move || t.length()))
     }
 
-    /// The caret offset, or `null` when the element has no caret (not
-    /// focused, or not editable). Rejects with `ActionNotSupportedError` when
-    /// the platform cannot report a caret at all.
+    /// The caret offset. `null` when the element is not focused. While a
+    /// range is selected, the selection's active end (`null` on macOS, which
+    /// does not say which end is active; read `selections()` for the range).
+    /// Rejects with `ActionNotSupportedError` (`code` `'XA11Y_UNSUPPORTED'`)
+    /// when the element cannot report a caret.
     #[napi(ts_return_type = "Promise<number | null>")]
     pub fn caret(&self) -> AsyncTask<Blocking<Option<u32>>> {
         let t = self.inner.clone();

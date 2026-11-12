@@ -1,8 +1,8 @@
 //! UIA grids, collection positions, and live text ranges.
 use super::*;
 use xa11y_core::table::{
-    index_from_one_based, CellInfo, CellParts, CollectionInfo, CollectionParts, Count, HeaderKind,
-    RowInfo, RowParts, TableInfo, TableParts,
+    index_from_one_based, CellInfo, CellKind, CellParts, CollectionInfo, CollectionParts, Count,
+    HeaderKind, RowInfo, RowParts, TableInfo, TableParts,
 };
 use xa11y_core::text_api::{
     slice_utf16, utf16_len, Color, TextAttributeParts, TextRange, TextScript,
@@ -50,17 +50,51 @@ pub(super) fn table_info(e: &IUIAutomationElement) -> Result<Option<TableInfo>> 
     Ok((!info.is_empty()).then_some(info))
 }
 
-pub(super) fn cell_info(e: &IUIAutomationElement) -> Result<Option<CellInfo>> {
+/// What the element's role mapping already decided about it, so the cell
+/// kind follows the same signals as the role (see `map_uia_role`).
+#[derive(Clone, Copy)]
+pub(super) struct CellSignals {
+    pub(super) role: Role,
+    pub(super) control_type: UIA_CONTROLTYPE_ID,
+    /// MSAA role, read only for `ControlType.Custom`.
+    pub(super) legacy_role: Option<i32>,
+}
+
+pub(super) fn cell_info(
+    e: &IUIAutomationElement,
+    signals: CellSignals,
+) -> Result<Option<CellInfo>> {
     let index = |id| non_negative(e, id);
     let info: CellInfo = CellParts {
         row: index(UIA_GridItemRowPropertyId)?,
         column: index(UIA_GridItemColumnPropertyId)?,
         row_span: index(UIA_GridItemRowSpanPropertyId)?.filter(|n| *n > 0),
         column_span: index(UIA_GridItemColumnSpanPropertyId)?.filter(|n| *n > 0),
-        header: header_kind(e),
+        kind: cell_kind(e, signals),
     }
     .into();
     Ok((!info.is_empty()).then_some(info))
+}
+
+/// Data cell, header cell, or `None` when the provider does not say.
+///
+/// A header is recognised from its ARIA role, WPF's header class names, or
+/// the MSAA header roles a `Custom` element publishes. Any other element
+/// `map_uia_role` made a cell (a `DataItem` / `TableItem` cell, or MSAA
+/// `ROLE_SYSTEM_CELL`) is a data cell. A `HeaderItem` with no orientation
+/// signal stays unknown here; `parent_header_kind` may label it from its
+/// `Header` container.
+fn cell_kind(e: &IUIAutomationElement, signals: CellSignals) -> Option<CellKind> {
+    if let Some(kind) = header_kind(e) {
+        return Some(kind.into());
+    }
+    match signals.legacy_role.and_then(|r| u32::try_from(r).ok()) {
+        Some(ROLE_SYSTEM_COLUMNHEADER) => return Some(CellKind::ColumnHeader),
+        Some(ROLE_SYSTEM_ROWHEADER) => return Some(CellKind::RowHeader),
+        _ => {}
+    }
+    (signals.role == Role::TableCell && signals.control_type != UIA_HeaderItemControlTypeId)
+        .then_some(CellKind::Data)
 }
 
 fn header_kind(e: &IUIAutomationElement) -> Option<HeaderKind> {
@@ -90,7 +124,7 @@ pub(super) fn parent_header_kind(
     walker: &IUIAutomationTreeWalker,
     cache: &IUIAutomationCacheRequest,
 ) -> Result<()> {
-    if data.cell.is_some_and(|c| c.header.is_some())
+    if data.cell.is_some_and(|c| c.header().is_some())
         || uia_call(|| unsafe { element.CachedControlType() })? != UIA_HeaderItemControlTypeId
     {
         return Ok(());
@@ -121,11 +155,11 @@ pub(super) fn label_headers(headers: &mut [ElementData], kind: HeaderKind) {
                     column: None,
                     row_span: None,
                     column_span: None,
-                    header: None,
+                    kind: None,
                 }
                 .into()
             })
-            .header = Some(kind);
+            .kind = Some(kind.into());
     }
 }
 
@@ -137,7 +171,32 @@ pub(super) fn row_info(e: &IUIAutomationElement, role: Role) -> Result<Option<Ro
         .map(|index| RowParts { index: Some(index) }.into()))
 }
 
-pub(super) fn collection_info(e: &IUIAutomationElement) -> Result<Option<CollectionInfo>> {
+/// The roles whose snapshot carries a [`CollectionInfo`], the same set as
+/// the Linux backend's: an item of a list, tree, tab list, radio group,
+/// table, menu or check-box group, or a group nested in one. Other roles
+/// (a web provider sets `PositionInSet` on far more) carry none, so a
+/// `collection` field means the same thing on every platform.
+pub(crate) fn is_collection_role(role: Role) -> bool {
+    matches!(
+        role,
+        Role::ListItem
+            | Role::TreeItem
+            | Role::Tab
+            | Role::RadioButton
+            | Role::TableRow
+            | Role::MenuItem
+            | Role::CheckBox
+            | Role::Group
+    )
+}
+
+pub(super) fn collection_info(
+    e: &IUIAutomationElement,
+    role: Role,
+) -> Result<Option<CollectionInfo>> {
+    if !is_collection_role(role) {
+        return Ok(None);
+    }
     let info: CollectionInfo = CollectionParts {
         index: property(e, UIA_PositionInSetPropertyId)?
             .and_then(|n| index_from_one_based(n.into())),
@@ -149,6 +208,13 @@ pub(super) fn collection_info(e: &IUIAutomationElement) -> Result<Option<Collect
     }
     .into();
     Ok((!info.is_empty()).then_some(info))
+}
+
+/// Run a table, text, selection or relation read on `e`. The element having
+/// gone while the read ran ([`is_gone_code`]) is `ElementStale`, as for every
+/// other read on a handle, not a bare platform error.
+pub(super) fn read_on<T>(e: &ElementData, read: impl FnOnce() -> Result<T>) -> Result<T> {
+    read().map_err(|err| stale_if_gone(e, err))
 }
 
 impl WindowsProvider {
@@ -187,9 +253,16 @@ impl WindowsProvider {
         dpi: &crate::dpi::DpiScope,
         arr: &IUIAutomationElementArray,
     ) -> Result<Vec<ElementData>> {
-        (0..uia_call(|| unsafe { arr.Length() })?)
-            .map(|i| self.rich_element(dpi, &uia_call(|| unsafe { arr.GetElement(i) })?))
-            .collect()
+        // A member that went away between the listing and its snapshot is no
+        // longer part of the answer, as in a tree snapshot (`live_snapshot`).
+        // Its going must not read as the subject's own staleness.
+        let mut out = Vec::new();
+        for i in 0..uia_len(arr)? {
+            if let Some(data) = live_snapshot(self.rich_element(dpi, &uia_get(arr, i)?))? {
+                out.push(data);
+            }
+        }
+        Ok(out)
     }
 
     pub(super) fn document(&self, e: &ElementData) -> Result<IUIAutomationTextRange> {
@@ -284,7 +357,7 @@ pub(super) fn range(
     range_in(doc, &text, wanted)
 }
 
-fn range_in(
+pub(super) fn range_in(
     doc: &IUIAutomationTextRange,
     text: &str,
     wanted: TextRange,
@@ -359,6 +432,18 @@ pub(super) fn format_sample(
     offset: u32,
 ) -> Result<IUIAutomationTextRange> {
     let text = contents(doc)?;
+    // A run is the one holding the character at `offset`, so there must be
+    // one: the end of the text is refused, as on Linux and macOS.
+    let length = utf16_len(&text);
+    if offset >= length {
+        return Err(Error::InvalidTextRange {
+            start: offset,
+            end: offset,
+            length: Some(length),
+            message: "no text at or after this offset".to_string(),
+        });
+    }
+    // Refuses an offset that splits a surrogate pair.
     slice_utf16(
         &text,
         TextRange {

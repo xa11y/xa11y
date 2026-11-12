@@ -89,7 +89,7 @@ pub use xa11y_core::{Screenshot, ScreenshotProvider};
 // `xa11y_core::table` and `xa11y_core::text_api`).
 pub use xa11y_core::table;
 pub use xa11y_core::text_api;
-pub use xa11y_core::{CellInfo, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
+pub use xa11y_core::{CellInfo, CellKind, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
 #[doc(hidden)]
 pub use xa11y_core::{CellParts, CollectionParts, RowParts, TableParts, TextAttributeParts};
 pub use xa11y_core::{

@@ -32,13 +32,23 @@ fn main() {
                 .get_children(Some(&app))
                 .expect_err("paused browser must not answer MSAA discovery");
             assert!(matches!(error, Error::Platform { .. }), "{error}");
-            assert!(error.to_string().contains("worker disabled"), "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("the worker refuses new requests until the call returns"),
+                "{error}"
+            );
             assert!(started.elapsed() < std::time::Duration::from_secs(9));
             let refused = provider
                 .get_children(Some(&app))
-                .expect_err("stalled worker stays disabled");
+                .expect_err("the worker stays disabled while the call is hung");
+            // Refused at once while the call is still hung. Should
+            // `CoCancelCall` have freed it, the retry hangs in the paused
+            // browser in turn and reports that instead.
+            let refused = refused.to_string();
             assert!(
-                refused.to_string().contains("restart the host"),
+                refused.contains("refused until it returns")
+                    || refused.contains("the worker refuses new requests until the call returns"),
                 "{refused}"
             );
             println!(

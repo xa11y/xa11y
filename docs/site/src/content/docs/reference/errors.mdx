@@ -44,8 +44,11 @@ rather than an xa11y class, so `except xa11y.XA11yError` does not catch them.
 Every other variant descends from `XA11yError` in Python and from `XA11yError`
 in JavaScript.
 
-In JavaScript, an error from the native layer also has a `code`, such as
-`XA11Y_NO_ELEMENT_BOUNDS`. Use it to tell apart the variants that share a class.
+An error from the native layer also has a `code`, such as
+`XA11Y_NO_ELEMENT_BOUNDS`, with the same spelling in Python (`err.code`) and
+JavaScript (`err.code`). Use it to tell apart the variants that share a class:
+`XA11Y_UNSUPPORTED` and `XA11Y_ACTION_NOT_SUPPORTED` both raise
+`ActionNotSupportedError` in Python.
 
 ## Which surfaces raise what
 

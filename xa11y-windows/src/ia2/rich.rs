@@ -28,9 +28,11 @@ pub(super) fn metadata(node: &Node, role: i32) -> Result<(Option<TableInfo>, Opt
     } else {
         None
     };
-    let header = match role {
-        0x19 => Some(HeaderKind::Column),
-        0x1a => Some(HeaderKind::Row),
+    // MSAA ROLE_SYSTEM_COLUMNHEADER / ROWHEADER / CELL.
+    let role_kind = match role {
+        0x19 => Some(CellKind::ColumnHeader),
+        0x1a => Some(CellKind::RowHeader),
+        0x1d => Some(CellKind::Data),
         _ => None,
     };
     let cell = if let Some(c) = capability::<AccessibleTableCell>(a)? {
@@ -60,18 +62,20 @@ pub(super) fn metadata(node: &Node, role: i32) -> Result<(Option<TableInfo>, Opt
                 column: Some(column as u32),
                 row_span: Some(rows as u32),
                 column_span: Some(columns as u32),
-                header,
+                // Implementing IA2 TableCell is the platform saying "cell";
+                // without a header role it is a data cell.
+                kind: Some(role_kind.unwrap_or(CellKind::Data)),
             }
             .into(),
         )
     } else {
-        header.map(|header| {
+        role_kind.map(|kind| {
             CellParts {
                 row: None,
                 column: None,
                 row_span: None,
                 column_span: None,
-                header: Some(header),
+                kind: Some(kind),
             }
             .into()
         })
@@ -316,6 +320,17 @@ impl State {
         let node = self.node(e)?;
         let t = text(&node, e)?;
         let len = length(&t)?;
+        // A run is the one holding the character at `offset`, so there must
+        // be one: the end of the text is refused, as on Linux and macOS.
+        if offset >= len {
+            return Err(Error::InvalidTextRange {
+                start: offset,
+                end: offset,
+                length: Some(len),
+                message: "no text at or after this offset".to_string(),
+            });
+        }
+        // Refuses an offset that splits a surrogate pair.
         read(
             &t,
             TextRange {
@@ -402,7 +417,7 @@ impl State {
         column: u32,
     ) -> Result<Option<ElementData>> {
         let node = self.node(e)?;
-        let t: AccessibleTable2 = node.interface(e, "cell_at")?;
+        let t: AccessibleTable2 = node.interface(e, "table")?;
         let mut rows = 0;
         let mut columns = 0;
         unsafe {
@@ -472,7 +487,7 @@ impl State {
         let mut header = self.snapshot(node)?;
         header.role = Role::TableCell;
         if let Some(cell) = &mut header.cell {
-            cell.header = Some(kind);
+            cell.kind = Some(kind.into());
         } else {
             header.cell = Some(
                 CellParts {
@@ -480,7 +495,7 @@ impl State {
                     column: None,
                     row_span: None,
                     column_span: None,
-                    header: Some(kind),
+                    kind: Some(kind.into()),
                 }
                 .into(),
             );
@@ -489,7 +504,7 @@ impl State {
     }
     pub(super) fn selected(&mut self, e: &ElementData) -> Result<Vec<ElementData>> {
         let node = self.node(e)?;
-        let t: AccessibleTable2 = node.interface(e, "IA2 selected table cells")?;
+        let t: AccessibleTable2 = node.interface(e, "selected_items")?;
         let mut count = 0;
         unsafe {
             (t.vtable().nSelectedCells)(t.as_raw(), &mut count)
@@ -590,7 +605,7 @@ impl State {
         kind: HeaderKind,
     ) -> Result<Vec<ElementData>> {
         let node = self.node(e)?;
-        let t: AccessibleTable2 = node.interface(e, "table_headers")?;
+        let t: AccessibleTable2 = node.interface(e, "table")?;
         let mut rows = 0;
         let mut columns = 0;
         unsafe {

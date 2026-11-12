@@ -88,6 +88,15 @@ class XA11yError(Exception):
     ``'unknown'``: the action was dispatched or may have been (a D-Bus
     ``NoReply``, an AX ``CannotComplete``, a UIA timeout, any platform
     error), so a retry can apply it twice."""
+    code: str
+    """The core error variant as an ``XA11Y_*`` tag, spelled as the JS
+    binding's ``XA11yError.code``: for example ``'XA11Y_UNSUPPORTED'`` (the
+    platform cannot do this at all) versus ``'XA11Y_ACTION_NOT_SUPPORTED'``
+    (this element does not offer the action), which both raise
+    :class:`ActionNotSupportedError`. Always set on errors xa11y raises,
+    including the ``ValueError`` raised for ``XA11Y_INVALID_CONFIG`` and
+    ``XA11Y_NO_ELEMENT_BOUNDS``. ``'XA11Y_UNKNOWN'`` only for a core error
+    this build of the binding does not know."""
 
 class PermissionDeniedError(XA11yError):
     """Accessibility permissions have not been granted."""
@@ -163,6 +172,11 @@ class ElementStaleError(SelectorNotMatchedError):
     element: str
     """What was captured: ``role "name"``, or the handle when that is all
     the provider still has."""
+    selector: str | None
+    """The same description as ``element``. A stale element was never found
+    by a selector of its own, so there is none to report; this is what the
+    inherited attribute held through 0.15, kept so handlers written against
+    :class:`SelectorNotMatchedError` still read it."""
 
 class ActionNotSupportedError(XA11yError):
     """The requested action is not supported on the target element."""
@@ -305,8 +319,14 @@ class CellInfo:
     def column_span(self) -> int | None:
         """Columns the cell covers (at least 1), or ``None`` when not reported."""
     @property
+    def kind(self) -> Literal["data", "column_header", "row_header"] | None:
+        """``"data"``, ``"column_header"`` or ``"row_header"``, or ``None`` when
+        the platform does not say. Unlike ``header``, tells a data cell from a
+        cell whose kind is unknown."""
+    @property
     def header(self) -> Literal["column", "row"] | None:
-        """``"column"`` or ``"row"`` for a header cell, else ``None``."""
+        """``"column"`` or ``"row"`` for a header cell, else ``None`` (a data cell,
+        or a cell whose kind is not reported; read ``kind`` to tell them apart)."""
     def __repr__(self) -> str: ...
 
 class RowInfo:
@@ -700,7 +720,11 @@ class Text:
         """Length in UTF-16 code units, without reading the text where the
         platform allows."""
     def caret(self) -> int | None:
-        """The caret offset, or ``None`` when the element has no caret."""
+        """The caret offset. ``None`` when the element is not focused. While a
+        range is selected, the selection's active end (``None`` on macOS, which
+        does not say which end is active; read ``selections()`` for the range).
+        Raises ``ActionNotSupportedError`` (``code`` ``"XA11Y_UNSUPPORTED"``)
+        when the element cannot report a caret."""
     def selections(self) -> list[TextRange]:
         """The selected ranges in document order; empty when nothing is selected."""
     def read(self, range: RangeLike) -> str:

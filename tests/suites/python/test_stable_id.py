@@ -1,10 +1,11 @@
-"""Which identifier a Windows element reports as ``stable_id`` (#684).
+"""Which identifier a Windows element reports as ``stable_id``.
 
-A WinForms control has a window of its own and an AutomationId (its
-``Name``). The window handle changes each time the app starts, so the
-AutomationId is the control's ``stable_id``. A top-level window keeps its
-handle even when it has an AutomationId: every instance of a form reports
-the same ``Name``, and two open windows would otherwise share an identity.
+An element with a native window of its own (a top-level window, or a
+WinForms control) is identified by that window handle, ``hwnd:0x…``. A
+windowless element falls back to its AutomationId. The AutomationId is
+always in ``raw["automation_id"]`` when the element has one, so a caller
+that wants the identifier the app chose (a WinForms control's ``Name``) can
+read it there, and ``[stable_id=…]`` keeps meaning the handle.
 """
 
 from __future__ import annotations
@@ -24,20 +25,30 @@ pytestmark = pytest.mark.skipif(
 AGREE = 'check_box[name="Agree to terms"]'
 
 
-def test_control_with_automation_id_uses_it_as_stable_id(app):
+def test_control_with_window_uses_its_handle_as_stable_id(app):
     agree = app.locator(AGREE).element()
-    assert "native_window_handle" in agree.raw, (
-        f"the check box has no window of its own, so it cannot show the bug: {agree.raw}"
+    handle = agree.raw.get("native_window_handle")
+    assert handle is not None, (
+        f"the check box has no window of its own, so it cannot show the rule: {agree.raw}"
     )
+    assert agree.stable_id == f"hwnd:{handle}", (
+        f"stable_id is {agree.stable_id!r}, not the window handle 'hwnd:{handle}'"
+    )
+
+
+def test_automation_id_is_in_raw(app):
+    agree = app.locator(AGREE).element()
     assert agree.raw.get("automation_id") == "agreeCheckBox", agree.raw
-    assert agree.stable_id == "agreeCheckBox", (
-        f"stable_id is {agree.stable_id!r}, not the AutomationId 'agreeCheckBox'"
-    )
 
 
-def test_stable_id_finds_the_control(app):
-    found = app.locator('[stable_id="agreeCheckBox"]').element()
+def test_stable_id_finds_the_control_by_handle(app):
+    agree = app.locator(AGREE).element()
+    found = app.locator(f'[stable_id="{agree.stable_id}"]').element()
     assert found.name == "Agree to terms"
+
+
+def test_automation_id_is_not_the_stable_id(app):
+    assert app.locator('[stable_id="agreeCheckBox"]').count() == 0
 
 
 def test_top_level_window_keeps_its_window_handle(app):

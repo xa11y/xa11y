@@ -40,8 +40,8 @@ use xa11y_core::{
 use crate::atspi::{
     is_listable_top_level, is_password_role, read_actions, read_interfaces,
     read_offset_unit_unless_gone, refine_menu_role, role_from_atspi, role_has_actions,
-    try_map_atspi_role_number, AccessibleRef, HandleRegistrar, Interfaces, LinuxProvider,
-    OffsetUnit,
+    try_map_atspi_role_number, unresponsive_peer_error, AccessibleRef, HandleRegistrar, Interfaces,
+    LinuxProvider, OffsetUnit,
 };
 
 /// AT-SPI2 event-interface names we subscribe to via match rules.
@@ -92,9 +92,98 @@ pub(crate) fn subscribe_for_pid(
         message: format!("DBusProxy: {e}"),
     })?;
 
+    // Activate the message receiver *before* the first match rule, and start
+    // draining it at once. A signal the daemon routes to this connection
+    // while no receiver is active fans out to zero subscribers and is
+    // dropped; one that arrives while setup below is still registering,
+    // seeding windows or reading offset units would be dropped the same way
+    // if the receiver were created after it (a `WindowOpened` lost there
+    // also made `note_window` swallow the window's later `WindowClosed`).
+    // The receiver cannot simply sit unread through setup either: zbus
+    // stops reading the socket while a receiver's queue is full, and the
+    // setup's own method replies would then never arrive. So the worker
+    // runs from here, buffers the signals that arrive before the context
+    // exists, and dispatches them, in order, once it does. Any signal that
+    // arrives after an `add_match_rule` call has returned is therefore
+    // delivered.
+    let iter = MessageIterator::from(conn.clone());
+    let stop = Arc::new(AtomicBool::new(false));
+    let (ctx_tx, ctx_rx) = std::sync::mpsc::channel::<Arc<EventContext>>();
+    let stop_for_thread = stop.clone();
+    let handle = thread::spawn(move || run_event_worker(iter, &stop_for_thread, ctx_rx));
+
     let mut rules: Vec<MatchRule<'static>> =
         Vec::with_capacity(EVENT_INTERFACES.len() * sender_buses.len());
-    for sender_bus in &sender_buses {
+    let setup = add_match_rules(&dbus, &sender_buses, &mut rules).and_then(|()| {
+        // Tell the registry which events we listen to. Toolkits that consult
+        // the registered-listener list (Qt, GTK 3's atk-bridge) emit nothing
+        // at all for an unregistered event, so without this a Qt app's
+        // subscription was silent (issue #488). Registration is tied to this
+        // connection's bus name; the cancel path deregisters each one in the
+        // form the registry declares for `DeregisterEvent`, and the registry
+        // also drops them when the connection closes.
+        let registered = register_events(&conn, &sender_buses)?;
+        match build_event_context(provider, &conn, &sender_buses, pid, app_name) {
+            Ok(ctx) => Ok((registered, ctx)),
+            Err(e) => {
+                deregister_events(&conn, &registered);
+                Err(e)
+            }
+        }
+    });
+    let (registered, (ctx, rx)) = match setup {
+        Ok(done) => done,
+        Err(e) => {
+            stop_event_worker(&conn, &stop, &rules, handle);
+            return Err(e);
+        }
+    };
+    // Hand the worker its context, then wake it with a round trip so the
+    // signals it buffered during setup are dispatched now rather than with
+    // the next signal.
+    let handed = ctx_tx
+        .send(ctx)
+        .map_err(|_| Error::Platform {
+            code: -1,
+            message: "the AT-SPI event worker stopped before the subscription was set up"
+                .to_string(),
+        })
+        .and_then(|()| ping_daemon(&conn));
+    if let Err(e) = handed {
+        deregister_events(&conn, &registered);
+        stop_event_worker(&conn, &stop, &rules, handle);
+        return Err(e);
+    }
+
+    // `CancelHandle` captures the connection and rules. On drop:
+    // 1. Deregister the events from the registry.
+    // 2. Flip the stop flag so the thread exits on its next wake-up.
+    // 3. Remove every match rule so the D-Bus daemon stops routing
+    //    matching signals to us.
+    // 4. Issue a Ping to the daemon — its reply travels back through our
+    //    MessageIterator, forcing `.next()` to return and letting the
+    //    thread observe the stop flag.
+    // 5. Join the worker thread.
+    let cancel_conn = conn.clone();
+    let cancel = CancelHandle::new(move || {
+        // Best-effort teardown: a drop cannot report failure, and the
+        // registry drops a closed connection's registrations anyway.
+        deregister_events(&cancel_conn, &registered);
+        stop_event_worker(&cancel_conn, &stop, &rules, handle);
+    });
+
+    Ok(Subscription::new(rx, cancel))
+}
+
+/// Add one match rule per event interface per sender bus, recording each
+/// in `rules` as soon as the daemon has it, so a failure part-way leaves
+/// `rules` naming exactly what [`stop_event_worker`] must remove.
+fn add_match_rules(
+    dbus: &DBusProxy<'_>,
+    sender_buses: &[String],
+    rules: &mut Vec<MatchRule<'static>>,
+) -> Result<()> {
+    for sender_bus in sender_buses {
         for iface in EVENT_INTERFACES {
             // Pass owned Strings so the produced MatchRule is `'static` and
             // can be moved into the cancel closure alongside other owned state.
@@ -114,29 +203,31 @@ pub(crate) fn subscribe_for_pid(
             dbus.add_match_rule(rule.clone())
                 .map_err(|e| Error::Platform {
                     code: -1,
-                    message: format!("add_match_rule({iface}): {e}"),
+                    message: format!("add_match_rule({iface}) for {sender_bus}: {e}"),
                 })?;
             rules.push(rule);
         }
     }
+    Ok(())
+}
 
-    // Tell the registry which events we listen to. Toolkits that consult the
-    // registered-listener list (Qt, GTK 3's atk-bridge) emit nothing at all
-    // for an unregistered event, so without this a Qt app's subscription
-    // was silent (issue #488). Registration is tied to this connection's
-    // bus name; the cancel path deregisters each one in the form the
-    // registry declares for `DeregisterEvent`, and the registry also drops
-    // them when the connection closes.
-    let registered = register_events(&conn, &sender_buses)?;
-
+/// Seed what the dispatcher needs, then build its context and the
+/// subscription's event channel.
+fn build_event_context(
+    provider: &LinuxProvider,
+    conn: &Connection,
+    sender_buses: &[String],
+    pid: u32,
+    app_name: String,
+) -> Result<(Arc<EventContext>, xa11y_core::EventReceiver)> {
     // Seed the top-level window states. This is also the barrier that makes
     // registration effective before `subscribe` returns: the application
     // answers these reads on the same queue that delivered the registry's
     // `EventListenerRegistered` signal, so by the time they return it has
     // switched its emission on.
     let mut windows = HashMap::new();
-    for bus in &sender_buses {
-        seed_top_level_windows(&conn, bus, &sender_buses, &mut windows)?;
+    for bus in sender_buses {
+        seed_top_level_windows(conn, bus, sender_buses, &mut windows)?;
     }
     // Each application's text offset unit, read once here so a
     // `TextChanged` event can say whether its offsets are already UTF-16
@@ -145,8 +236,8 @@ pub(crate) fn subscribe_for_pid(
     // report wrong ranges. An application that has already left the bus is
     // skipped, as the window seed skips it; its events would carry no range.
     let mut offset_units = HashMap::new();
-    for bus in &sender_buses {
-        if let Some(unit) = application_offset_unit(&conn, bus)? {
+    for bus in sender_buses {
+        if let Some(unit) = application_offset_unit(conn, bus)? {
             offset_units.insert(bus.clone(), unit);
         }
     }
@@ -157,8 +248,8 @@ pub(crate) fn subscribe_for_pid(
         .iter()
         .filter(|(_, window)| window.listed)
         .filter_map(|(key, _)| {
-            let aref = window_ref(key, &sender_buses)?;
-            build_event_snapshot(&conn, &aref, Some(pid))
+            let aref = window_ref(key, sender_buses)?;
+            build_event_snapshot(conn, &aref, Some(pid))
                 .filter(|t| is_window_role(t.role))
                 .map(|t| (key.clone(), t))
         })
@@ -166,7 +257,7 @@ pub(crate) fn subscribe_for_pid(
 
     let (tx, rx) = xa11y_core::event_channel();
     let ctx = Arc::new(EventContext {
-        sender_buses: sender_buses.clone(),
+        sender_buses: sender_buses.to_vec(),
         app_name,
         app_pid: pid,
         tx,
@@ -176,66 +267,103 @@ pub(crate) fn subscribe_for_pid(
         offset_units,
         registrar: provider.handle_registrar(),
     });
+    Ok((ctx, rx))
+}
 
-    // Activate the broadcast receiver *before* spawning the worker. If we
-    // waited until inside the spawned thread to construct the iterator,
-    // there would be a window between `add_match_rule` returning above and
-    // the thread scheduling its first statement during which the daemon
-    // could deliver matching signals to our Connection — where they would
-    // fan out to zero subscribers and be dropped. Creating the iterator
-    // here makes the subscription atomic from the caller's point of view:
-    // any signal that arrives after every `add_match_rule` call has
-    // returned is guaranteed to land in our queue.
-    let iter = MessageIterator::from(conn.clone());
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_for_thread = stop.clone();
-    let ctx_for_thread = ctx.clone();
-    let handle = thread::spawn(move || {
-        for msg in iter {
-            if stop_for_thread.load(Ordering::Relaxed) {
-                break;
-            }
-            if let Ok(msg) = msg {
-                ctx_for_thread.dispatch(&msg);
+/// The subscription's worker: dispatch every message the connection
+/// receives. Until setup hands it the context over `ctx_rx`, signals are
+/// buffered (method replies, which setup's own calls also produce here, are
+/// not), then dispatched in arrival order before anything newer. Exits when
+/// `stop` is set, when setup gives up (the sender is dropped) or when the
+/// connection ends.
+fn run_event_worker(
+    iter: MessageIterator,
+    stop: &AtomicBool,
+    ctx_rx: std::sync::mpsc::Receiver<Arc<EventContext>>,
+) {
+    let mut ctx: Option<Arc<EventContext>> = None;
+    let mut early: Vec<zbus::Message> = Vec::new();
+    for msg in iter {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        if ctx.is_none() {
+            match ctx_rx.try_recv() {
+                Ok(ready) => {
+                    for m in early.drain(..) {
+                        ready.dispatch(&m);
+                    }
+                    ctx = Some(ready);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             }
         }
-    });
+        let msg = match msg {
+            Ok(msg) => msg,
+            Err(e) => {
+                // The subscription has no error channel; a malformed message
+                // carries no event to deliver.
+                log::debug!("AT-SPI event subscription: unreadable message: {e}");
+                continue;
+            }
+        };
+        match &ctx {
+            Some(ctx) => ctx.dispatch(&msg),
+            None if msg.message_type() == MessageType::Signal => early.push(msg),
+            None => {}
+        }
+    }
+}
 
-    // `CancelHandle` captures the connection and rules. On drop:
-    // 1. Flip the stop flag so the thread exits on its next wake-up.
-    // 2. Remove every match rule so the D-Bus daemon stops routing
-    //    matching signals to us.
-    // 3. Issue a Ping to the daemon — its reply travels back through our
-    //    MessageIterator, forcing `.next()` to return and letting the
-    //    thread observe the stop flag.
-    // 4. Join the worker thread.
-    let cancel_conn = conn.clone();
-    let cancel = CancelHandle::new(move || {
-        stop.store(true, Ordering::Relaxed);
-        // Best-effort teardown: a drop cannot report failure, and the
-        // registry drops a closed connection's registrations anyway.
-        deregister_events(&cancel_conn, &registered);
-        if let Ok(dbus) = DBusProxy::new(&cancel_conn) {
-            for rule in &rules {
-                let _ = dbus.remove_match_rule(rule.clone());
+/// A round trip to the bus daemon. Its reply arrives through the
+/// subscription's message stream, which wakes a worker blocked on it.
+fn ping_daemon(conn: &Connection) -> Result<()> {
+    conn.call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus.Peer"),
+        "Ping",
+        &(),
+    )
+    .map(drop)
+    .map_err(|e| Error::Platform {
+        code: -1,
+        message: format!("Ping to the accessibility bus daemon: {e}"),
+    })
+}
+
+/// Stop the worker: set `stop`, remove `rules` so the daemon routes nothing
+/// more, wake the worker with a round trip, and join it.
+///
+/// Best-effort: it runs from a drop (the subscription's cancel) and from a
+/// failed setup that is already returning the error that matters. A rule
+/// that cannot be removed goes with the connection when it closes.
+fn stop_event_worker(
+    conn: &Connection,
+    stop: &AtomicBool,
+    rules: &[MatchRule<'static>],
+    handle: thread::JoinHandle<()>,
+) {
+    stop.store(true, Ordering::Relaxed);
+    match DBusProxy::new(conn) {
+        Ok(dbus) => {
+            for rule in rules {
+                if let Err(e) = dbus.remove_match_rule(rule.clone()) {
+                    log::debug!("removing AT-SPI event match rule {rule}: {e}");
+                }
             }
         }
-        // Wake the blocked MessageIterator by forcing a round-trip: the
-        // daemon's Ping reply is broadcast through our connection's
-        // message stream, so `.next()` returns and the thread observes
-        // the stop flag on its next iteration.
-        let _ = cancel_conn.call_method(
-            Some("org.freedesktop.DBus"),
-            "/org/freedesktop/DBus",
-            Some("org.freedesktop.DBus.Peer"),
-            "Ping",
-            &(),
-        );
-        let _ = handle.join();
-    });
-
-    Ok(Subscription::new(rx, cancel))
+        Err(e) => log::debug!("DBusProxy for removing AT-SPI event match rules: {e}"),
+    }
+    // Without the round trip the worker stays blocked until the next
+    // message; it still exits then.
+    if let Err(e) = ping_daemon(conn) {
+        log::debug!("waking the AT-SPI event worker: {e}");
+    }
+    if handle.join().is_err() {
+        log::warn!("the AT-SPI event worker panicked");
+    }
 }
 
 // ── Event context + dispatch ────────────────────────────────────────────────
@@ -300,7 +428,7 @@ impl EventContext {
         let (actions, indices) = if role_has_actions(target.role) {
             get_actions(&self.conn, aref)
         } else {
-            (vec![], HashMap::new())
+            (vec![], Some(HashMap::new()))
         };
         // GTK 3's `menu` role covers both a popup menu and the entry that
         // opens it; the query path tells them apart by the entry's `press`
@@ -445,11 +573,19 @@ impl EventContext {
 
     /// Re-read `bus`'s top-level windows after its application object's
     /// children changed: a new listable window is opened, a known window no
-    /// longer among the children is closed. A failed read emits nothing;
-    /// the subscription has no error channel, and a later change rescans.
+    /// longer among the children is closed. A failed read emits nothing and
+    /// is logged at warn level, naming the application: the subscription
+    /// has no error channel, and a later change rescans.
     fn rescan_top_level_windows(&self, bus: &str) {
         let mut current = HashMap::new();
-        if seed_top_level_windows(&self.conn, bus, &self.sender_buses, &mut current).is_err() {
+        if let Err(e) = seed_top_level_windows(&self.conn, bus, &self.sender_buses, &mut current) {
+            log::warn!(
+                "AT-SPI event subscription for {} (pid {}): rescanning the top-level windows \
+                 of {bus} after its children changed failed, so no WindowOpened / \
+                 WindowClosed is derived from this change: {e}",
+                self.app_name,
+                self.app_pid
+            );
             return;
         }
         let plan = {
@@ -668,7 +804,17 @@ fn application_offset_unit(conn: &Connection, bus: &str) -> Result<Option<Offset
             code: -1,
             message: format!("Application proxy for {bus}: {e}"),
         })?;
-    read_offset_unit_unless_gone(&proxy.into(), bus)
+    read_offset_unit_unless_gone(&proxy.into(), bus, || {
+        unresponsive_peer_error(
+            &AccessibleRef {
+                bus_name: bus.to_owned(),
+                path: APP_ROOT_PATH.to_owned(),
+            },
+            "Application.ToolkitName",
+            None,
+            None,
+        )
+    })
 }
 
 /// The [`TextChange`] an `Object:TextChanged` signal reports, or `None` for
@@ -1500,10 +1646,34 @@ fn make_proxy<'a>(
 
 /// The actions `aref`'s Action interface reports, with each one's
 /// `DoAction` index, read over the subscription's connection.
-fn get_actions(conn: &Connection, aref: &AccessibleRef) -> (Vec<String>, HashMap<String, i32>) {
-    match make_proxy(conn, &aref.bus_name, &aref.path, "org.a11y.atspi.Action") {
-        Some(proxy) => read_actions(&proxy),
-        None => (Vec::new(), HashMap::new()),
+///
+/// `None` for the indices when the read failed: the event target then
+/// advertises no actions, like any other unread field of an event target,
+/// and the failure is logged. It is `None` rather than an empty map so the
+/// registrar leaves the indices a held handle already has untouched (see
+/// `store_action_indices`).
+fn get_actions(
+    conn: &Connection,
+    aref: &AccessibleRef,
+) -> (Vec<String>, Option<HashMap<String, i32>>) {
+    let Some(proxy) = make_proxy(conn, &aref.bus_name, &aref.path, "org.a11y.atspi.Action") else {
+        log::debug!(
+            "actions of event target {}{} unread: no Action proxy",
+            aref.bus_name,
+            aref.path
+        );
+        return (Vec::new(), None);
+    };
+    match read_actions(&proxy) {
+        Ok((actions, indices)) => (actions, Some(indices)),
+        Err(e) => {
+            log::debug!(
+                "actions of event target {}{} unread: {e}",
+                aref.bus_name,
+                aref.path
+            );
+            (Vec::new(), None)
+        }
     }
 }
 

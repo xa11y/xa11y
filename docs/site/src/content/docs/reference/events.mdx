@@ -252,7 +252,8 @@ number is skipped, so a consumer can tell that it missed something.
 Pass `kinds` to keep only some kinds, and `buffer` to change the size:
 `app.subscribe(kinds=["announcement"], buffer=256)` in Python,
 `app.subscribe({ kinds: ['announcement'], buffer: 256 })` in JavaScript (with
-the same spelling as `Event.type`), and `SubscribeOptions` with
+the spelling `Event.type` uses, such as `'focusChanged'`, and
+`'focus_changed'` refused), and `SubscribeOptions` with
 `App::subscribe_with` in Rust. Events of other kinds never enter the buffer.
 A kind the [capability table](/reference/platform-details/#capabilities) marks
 unsupported on this platform fails the subscribe call with `Unsupported`, rather

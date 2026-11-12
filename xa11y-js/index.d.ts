@@ -60,6 +60,7 @@ export type {
   CapturedText,
   CaptureStats,
   CellInfo,
+  CellKindName,
   CheckedState,
   ClickOptions,
   CollectionInfo,

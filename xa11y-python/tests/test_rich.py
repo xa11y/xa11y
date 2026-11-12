@@ -35,6 +35,12 @@ def test_cell_info_and_unreported_spans():
     assert isinstance(price, xa11y.CellInfo)
     assert (price.row, price.column, price.row_span, price.column_span) == (0, 1, 1, 2)
     assert price.header == "column"
+    assert price.kind == "column_header"
+    assert one('table_cell[name="Widget"]').cell.kind == "row_header"
+    # A data cell says so: kind "data", header None.
+    data = one('table_cell[name="1.00"]').cell
+    assert (data.kind, data.header) == ("data", None)
+    assert "kind='column_header'" in repr(price)
     # A span the platform did not report is None, never defaulted to 1.
     assert one('table_cell[name="3.00"]').cell.row_span is None
     assert one('table_cell[name="1.00"]').cell.header is None

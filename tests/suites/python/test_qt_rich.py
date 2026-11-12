@@ -197,6 +197,8 @@ def test_runs_report_the_bold_word(notes):
 
 def test_select_text_takes_utf16_offsets(notes):
     text = notes.text()
+    # A caret belongs to the focused element.
+    notes.focus()
     notes.select_text(3, 5)
     assert text.selections() == [r(3, 5)]
     assert text.caret() == 5
@@ -218,6 +220,7 @@ def test_select_text_takes_utf16_offsets(notes):
 def test_typing_reports_a_utf16_text_change(app):
     """Qt counts UTF-16, so a text_changed event carries its range."""
     pad = app.locator('text_area[name="Edit Pad"]')
+    pad.focus()
     start = pad.text().caret()
     assert start is not None
     typed = "a\U0001f600b"

@@ -79,22 +79,29 @@ impl CellInfo {
     fn column_span(&self) -> Option<u32> {
         self.inner.column_span
     }
-    /// ``"column"`` or ``"row"`` for a header cell, else ``None``.
+    /// ``"data"``, ``"column_header"`` or ``"row_header"``, or ``None`` when
+    /// the platform does not say. Unlike ``header``, tells a data cell from a
+    /// cell whose kind is unknown.
+    #[getter]
+    fn kind(&self) -> Option<&'static str> {
+        self.inner.kind.map(xa11y::CellKind::to_snake_case)
+    }
+    /// ``"column"`` or ``"row"`` for a header cell, else ``None`` (a data cell,
+    /// or a cell whose kind is not reported; read ``kind`` to tell them apart).
     #[getter]
     fn header(&self) -> Option<&'static str> {
-        self.inner.header.map(header_name)
+        self.inner.header().map(header_name)
     }
     fn __repr__(&self) -> String {
+        let quoted = |s: Option<&str>| s.map(|s| format!("'{s}'")).unwrap_or_else(|| "None".into());
         format!(
-            "CellInfo(row={}, column={}, row_span={}, column_span={}, header={})",
+            "CellInfo(row={}, column={}, row_span={}, column_span={}, kind={}, header={})",
             opt(self.inner.row),
             opt(self.inner.column),
             opt(self.inner.row_span),
             opt(self.inner.column_span),
-            self.inner
-                .header
-                .map(|h| format!("'{}'", header_name(h)))
-                .unwrap_or_else(|| "None".into())
+            quoted(self.kind()),
+            quoted(self.header()),
         )
     }
 }
@@ -473,7 +480,11 @@ impl Text {
         let t = self.inner.clone();
         py.detach(move || t.length()).map_err(to_py_err)
     }
-    /// The caret offset, or ``None`` when the element has no caret.
+    /// The caret offset. ``None`` when the element is not focused. While a
+    /// range is selected, the selection's active end (``None`` on macOS, which
+    /// does not say which end is active; read ``selections()`` for the range).
+    /// Raises ``ActionNotSupportedError`` (``code`` ``"XA11Y_UNSUPPORTED"``)
+    /// when the element cannot report a caret.
     fn caret(&self, py: Python<'_>) -> PyResult<Option<u32>> {
         let t = self.inner.clone();
         py.detach(move || t.caret()).map_err(to_py_err)

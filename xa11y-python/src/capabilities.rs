@@ -225,8 +225,10 @@ pub(crate) fn capabilities(
         .map(xa11y::Platform::parse)
         .transpose()
         .map_err(to_py_err)?;
-    // The first call for the running platform reads the OS version, which
-    // spawns `sysctl` / `cmd /C ver`: release the GIL for it (tenet 5).
+    // The first call for the running platform reads the OS version through
+    // a system call. It does not block in practice, but it is a platform
+    // call with no bound the binding controls, so it runs with the GIL
+    // released like every other one (tenet 5).
     let inner = py
         .detach(|| xa11y::capabilities_for_backend(platform, os_version, backend))
         .map_err(to_py_err)?;

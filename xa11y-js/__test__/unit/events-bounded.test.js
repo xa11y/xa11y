@@ -75,6 +75,18 @@ test('a small buffer drops the oldest and counts them', async () => {
 
 test('bad subscribe options are refused', async () => {
   await assert.rejects(eventsApp().subscribe({ kinds: ['focus'] }), InvalidActionDataError);
+  // The error lists the JS spellings, the ones `kinds` takes, not Python's.
+  await assert.rejects(eventsApp().subscribe({ kinds: ['focus'] }), (err) => {
+    assert.match(err.message, /expected one of focusChanged, valueChanged/);
+    assert.doesNotMatch(err.message, /focus_changed/);
+    return true;
+  });
+  // The core's snake_case spelling is not an `EventTypeName`, so it is refused
+  // rather than silently accepted.
+  await assert.rejects(
+    eventsApp().subscribe({ kinds: ['focus_changed'] }),
+    InvalidActionDataError,
+  );
   await assert.rejects(eventsApp().subscribe({ buffer: 0 }), InvalidActionDataError);
 });
 

@@ -74,7 +74,7 @@ pub use selector::{Selector, SelectorGroup};
 pub use semantics::LiveRegionParts;
 pub use semantics::{Landmark, LiveRegionInfo, Politeness, RelationKind};
 pub use shell::{ShellSurface, ShellSurfaceKind};
-pub use table::{CellInfo, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
+pub use table::{CellInfo, CellKind, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
 #[doc(hidden)]
 pub use table::{CellParts, CollectionParts, RowParts, TableParts};
 pub use text::{is_bidi_control, strip_bidi, strip_bidi_opt};

@@ -608,6 +608,14 @@ def test_the_tree_node_cap_is_bounded_in_the_schema_and_the_handler(run_client):
         assert "between 1 and 2000" in result.structured_content["message"]
 
 
+def test_the_tree_relations_detail_states_its_bound(run_client):
+    """A bounded result says it is bounded: the per-node relation cap and the
+    flag that reports a cut are in the contract a client reads."""
+    detail = _tool(run_client, "tree").input_schema["properties"]["detail"]["description"]
+    assert "truncated.by_relations" in detail
+    assert "{count, returned, truncated, elements}" in detail
+
+
 def test_a_tree_detail_mistake_is_a_fixable_error(run_client):
     result = run_client(lambda c: c.call_tool("tree", {"app": "X", "detail": ["styles"]}))
     assert result.is_error is True
@@ -624,6 +632,16 @@ def test_a_relation_kind_mistake_is_a_fixable_error(run_client):
     assert result.is_error is True
     assert result.structured_content["kind"] == "invalid_arguments"
     assert "labelled_by" in result.structured_content["message"]
+
+
+def test_an_empty_relation_kind_list_is_not_an_argument_mistake(run_client):
+    """`kinds: []` means every kind, as in core and both bindings: the call
+    gets past argument parsing and fails on the missing app instead."""
+    result = run_client(
+        lambda c: c.call_tool("relations", {"selector": "text_field", "app": "X", "kinds": []})
+    )
+    assert result.is_error is True
+    assert result.structured_content["kind"] != "invalid_arguments", result.structured_content
 
 
 # ── Screenshot annotation ────────────────────────────────────────────────────

@@ -112,7 +112,7 @@ fn cells_carry_zero_based_positions_and_unit_spans() {
     assert_eq!((cell.row, cell.column), (Some(1), Some(0)));
     // GTK 3 has no merged cells: every span is 1. See the module docs.
     assert_eq!((cell.row_span, cell.column_span), (Some(1), Some(1)));
-    assert_eq!(cell.header, None);
+    assert_eq!(cell.header(), None);
 
     let qty = one(
         &app,
@@ -140,7 +140,7 @@ fn column_headers_are_header_cells_without_a_position() {
         let cell = h
             .cell
             .unwrap_or_else(|| panic!("header {:?} has no cell info", h.name));
-        assert_eq!(cell.header, Some(HeaderKind::Column), "{:?}", h.name);
+        assert_eq!(cell.header(), Some(HeaderKind::Column), "{:?}", h.name);
         // GTK 3 column headers have the header role but no TableCell.
         assert_eq!((cell.row, cell.column), (None, None), "{:?}", h.name);
     }
@@ -454,13 +454,17 @@ fn select_text_takes_utf16_offsets() {
     let app = fixture();
     let view = rich_text(&app);
     let text = view.text().expect("text");
+    // A caret belongs to the focused text element (`Text::caret`).
+    view.focus().expect("focus the text view");
 
     view.select_text(12, 14).expect("select the emoji");
     assert_eq!(text.selections().expect("selections"), [r(12, 14)]);
+    // With a range selected the caret is the active end; AT-SPI's
+    // CaretOffset is that end, whichever one the toolkit put it at.
     let caret = text
         .caret()
         .expect("caret")
-        .expect("a text view has a caret");
+        .expect("a focused text view has a caret");
     assert!(
         caret == 12 || caret == 14,
         "caret {caret} not at a selection end"
@@ -476,6 +480,14 @@ fn select_text_takes_utf16_offsets() {
     view.select_text(57, 57).expect("place the caret");
     assert!(text.selections().expect("selections").is_empty());
     assert_eq!(text.caret().expect("caret"), Some(57));
+
+    // Focus elsewhere: the view keeps its CaretOffset, but it has no caret.
+    edit_text(&app).focus().expect("focus the other text view");
+    assert_eq!(
+        text.caret().expect("caret"),
+        None,
+        "an unfocused text element reports no caret"
+    );
 
     for (start, end) in [(13, 14), (0, 73)] {
         let e = view.select_text(start, end).expect_err("invalid range");
@@ -526,6 +538,10 @@ fn text_edits_and_caret_moves_arrive_as_text_events() {
 
     let sub = app.subscribe().expect("subscribe to the fixture");
     std::thread::sleep(Duration::from_millis(300));
+    while sub.try_recv().is_some() {}
+
+    // The caret is read below, and only a focused element has one.
+    view.focus().expect("focus the edit view");
     while sub.try_recv().is_some() {}
 
     // A caret move is a text selection event, not an item selection one.

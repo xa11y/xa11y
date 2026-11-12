@@ -337,6 +337,27 @@ fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
     }
 }
 
+/// `mouseData` for `notches` wheel notches, negated for the vertical wheel
+/// (see `pointer_scroll`). A count whose `WHEEL_DELTA` multiple does not fit
+/// the signed 32-bit field is refused rather than wrapped into a scroll in
+/// some other direction or amount.
+fn wheel_data(notches: i32, invert: bool) -> Result<i32> {
+    let signed = if invert {
+        notches.checked_neg()
+    } else {
+        Some(notches)
+    };
+    signed
+        .and_then(|n| n.checked_mul(WHEEL_DELTA))
+        .ok_or_else(|| {
+            Error::invalid_action_data(format!(
+                "scroll of {notches} notches is out of range: Windows takes at most {} notches \
+                 per axis in one wheel event",
+                i32::MAX / WHEEL_DELTA
+            ))
+        })
+}
+
 /// Normalize a physical screen pixel to the 0..=65535 absolute coordinate
 /// range expected by `SendInput` with `MOUSEEVENTF_VIRTUALDESK`.
 fn to_absolute(dpi: &crate::dpi::DpiScope, x: i32, y: i32) -> (i32, i32) {
@@ -344,9 +365,18 @@ fn to_absolute(dpi: &crate::dpi::DpiScope, x: i32, y: i32) -> (i32, i32) {
     (absolute_axis(x, vx, vw), absolute_axis(y, vy, vh))
 }
 
+/// The normalized coordinate Windows maps back to pixel `value`.
+///
+/// Windows turns an absolute `MOUSEEVENTF_VIRTUALDESK` coordinate `n` into
+/// pixel `origin + (n * extent) >> 16`, rounding down. The smallest `n` that
+/// lands on `value` is therefore `ceil(offset * 65536 / extent)`; rounding
+/// to nearest (or scaling by 65535) lands one pixel short for some offsets,
+/// a pixel to the left of or above the target.
 fn absolute_axis(value: i32, origin: i32, extent: i32) -> i32 {
     let extent = i64::from(extent.max(1));
-    let normalized = ((i64::from(value) - i64::from(origin)) * 65535 + extent / 2) / extent;
+    let offset = i64::from(value) - i64::from(origin);
+    // Ceiling division that also holds for a negative offset (clamped below).
+    let normalized = -((-offset * 65536).div_euclid(extent));
     // Explicit targets have passed display preflight. Captured movement may
     // leave that region: Win32 absolute input still addresses only this range.
     // Clamp in i64 before narrowing so an extreme captured point cannot wrap.
@@ -734,32 +764,26 @@ impl InputProvider for WindowsInputProvider {
     fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
         let dpi = crate::dpi::DpiScope::enter()?;
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        self.validate_point(&dpi, at)?;
-        self.move_locked(&dpi, at)?;
         // A positive `mouseData` is a forward turn, away from the user, which
         // scrolls toward the top; positive `dy` scrolls toward the end (#688).
         // A positive horizontal `mouseData` already scrolls right, as `dx` does.
+        // Both are computed before any event is posted, so an out-of-range
+        // delta cannot leave the pointer moved and nothing scrolled.
+        let vertical = wheel_data(delta.dy, true)?;
+        let horizontal = wheel_data(delta.dx, false)?;
+        self.validate_point(&dpi, at)?;
+        self.move_locked(&dpi, at)?;
         if delta.dy != 0 {
             self.send_locked(
                 &dpi,
-                &[mouse_input(
-                    MOUSEEVENTF_WHEEL.0,
-                    0,
-                    0,
-                    -delta.dy * WHEEL_DELTA,
-                )],
+                &[mouse_input(MOUSEEVENTF_WHEEL.0, 0, 0, vertical)],
                 Target::PointerAt(at),
             )?;
         }
         if delta.dx != 0 {
             self.send_locked(
                 &dpi,
-                &[mouse_input(
-                    MOUSEEVENTF_HWHEEL.0,
-                    0,
-                    0,
-                    delta.dx * WHEEL_DELTA,
-                )],
+                &[mouse_input(MOUSEEVENTF_HWHEEL.0, 0, 0, horizontal)],
                 Target::PointerAt(at),
             )?;
         }
@@ -901,7 +925,51 @@ mod keymap_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_axis, typed_events, Typed};
+    use super::{absolute_axis, typed_events, wheel_data, Typed, WHEEL_DELTA};
+
+    /// What Windows does with a normalized virtual-desk coordinate.
+    fn to_pixel(normalized: i32, origin: i32, extent: i32) -> i32 {
+        origin + ((i64::from(normalized) * i64::from(extent)) >> 16) as i32
+    }
+
+    #[test]
+    fn absolute_coordinates_map_back_to_the_same_pixel() {
+        for extent in [
+            1, 2, 3, 7, 100, 1024, 1280, 1366, 1920, 2560, 3000, 3840, 5120, 7680, 32768, 65536,
+        ] {
+            for origin in [0, -1920, 1366] {
+                for offset in 0..extent {
+                    let value = origin + offset;
+                    let normalized = absolute_axis(value, origin, extent);
+                    assert!((0..=65535).contains(&normalized));
+                    assert_eq!(
+                        to_pixel(normalized, origin, extent),
+                        value,
+                        "pixel {value} on a {extent}-pixel axis from {origin}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wheel_data_refuses_overflow_instead_of_wrapping() {
+        assert_eq!(wheel_data(1, true).unwrap(), -WHEEL_DELTA);
+        assert_eq!(wheel_data(-2, true).unwrap(), 2 * WHEEL_DELTA);
+        assert_eq!(wheel_data(3, false).unwrap(), 3 * WHEEL_DELTA);
+        assert_eq!(wheel_data(0, true).unwrap(), 0);
+        for (notches, invert) in [
+            (i32::MAX, false),
+            (i32::MIN, true),
+            (i32::MIN, false),
+            (i32::MAX / WHEEL_DELTA + 1, true),
+        ] {
+            assert!(matches!(
+                wheel_data(notches, invert),
+                Err(xa11y_core::Error::InvalidActionData { .. })
+            ));
+        }
+    }
 
     #[test]
     fn absolute_coordinates_widen_before_subtraction_and_clamp_before_narrowing() {

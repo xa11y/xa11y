@@ -52,7 +52,7 @@ use crate::event_provider::Subscription;
 use crate::provider::Provider;
 use crate::role::Role;
 use crate::shell::ShellSurfaceKind;
-use crate::table::{CellParts, CollectionParts, Count, HeaderKind, RowParts, TableParts};
+use crate::table::{CellKind, CellParts, CollectionParts, Count, HeaderKind, RowParts, TableParts};
 use crate::text_api::{
     check_in_bounds, slice_utf16, utf16_len, TextAttributeParts, TextRange, TextRun, TextUnit,
 };
@@ -328,6 +328,10 @@ struct MockNode {
 }
 
 impl Provider for MockProvider {
+    fn capabilities(&self) -> Result<crate::Capabilities> {
+        crate::Capabilities::current()
+    }
+
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         match element {
@@ -575,7 +579,7 @@ impl Provider for MockProvider {
         Ok(descendants(&nodes, table.handle as usize)
             .into_iter()
             .map(|i| &nodes[i].data)
-            .filter(|d| d.cell.and_then(|c| c.header) == Some(kind))
+            .filter(|d| d.cell.and_then(|c| c.header()) == Some(kind))
             .cloned()
             .collect())
     }
@@ -609,7 +613,7 @@ impl Provider for MockProvider {
                         (Some(a), Some(w)) => w >= a && w < a + span.unwrap_or(1),
                         _ => false,
                     };
-                h.header == Some(kind)
+                h.header() == Some(kind)
                     && match kind {
                         HeaderKind::Column => covers(h.column, h.column_span, info.column),
                         HeaderKind::Row => covers(h.row, h.row_span, info.row),
@@ -1658,7 +1662,7 @@ pub fn build_table_provider() -> Arc<MockProvider> {
                     column: Some(column),
                     row_span: spans.map(|s| s.0),
                     column_span: spans.map(|s| s.1),
-                    header,
+                    kind: Some(header.map_or(CellKind::Data, CellKind::from)),
                 }
                 .into(),
             );

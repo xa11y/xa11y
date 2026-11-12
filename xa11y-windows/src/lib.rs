@@ -10,7 +10,10 @@
 //! is `ActionNotSupported`, a read-only `ValuePattern.SetValue` is
 //! `TextValueNotSupported`, and a stale handle is `ElementStale`, all
 //! `NotDelivered`. Every other HRESULT from the call that performs the action,
-//! including `UIA_E_TIMEOUT`, is `Platform` and so `Unknown`. The full table
+//! including `UIA_E_TIMEOUT`, is `Platform` and so `Unknown`. A failure after
+//! `type_text`'s `ValuePattern.SetValue` succeeded (placing the caret after
+//! the inserted text) is also `Platform`, whatever caused it, because the
+//! text is already in the control. The full table
 //! is in the "Delivery disposition" section of the platform details
 //! reference.
 

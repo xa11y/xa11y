@@ -169,31 +169,46 @@ pub(crate) fn read_interfaces(accessible: &Proxy<'_>) -> Result<Interfaces> {
 
 /// Read the actions an object's `org.a11y.atspi.Action` proxy reports, with
 /// each one's `DoAction` index, keeping the first index of each canonical
-/// name ([`map_atspi_action_name`]). Best-effort: an object that does not
-/// answer reports no actions. Shared by the query path
+/// name ([`map_atspi_action_name`]). Shared by the query path
 /// (`LinuxProvider::get_actions`) and event targets, so both advertise the
 /// same list for the same object.
-pub(crate) fn read_actions(proxy: &Proxy<'_>) -> (Vec<String>, HashMap<String, i32>) {
+///
+/// An object that does not implement `Action` (an absent `NActions`
+/// property) reports no actions. Any other failure, a timeout included, is
+/// returned: "no actions" read from a failed call would clear the `DoAction`
+/// indices a held handle relies on (see [`store_action_indices`]), and its
+/// `press` would then fail `ActionNotSupported`.
+pub(crate) fn read_actions(proxy: &Proxy<'_>) -> zbus::Result<(Vec<String>, HashMap<String, i32>)> {
     let mut actions = Vec::new();
     let mut indices = HashMap::new();
-    // NActions may be returned as i32 or u32 depending on AT-SPI implementation.
-    let n_actions = proxy
-        .get_property::<i32>("NActions")
-        .or_else(|_| proxy.get_property::<u32>("NActions").map(|n| n as i32))
-        .unwrap_or(0);
+    // AT-SPI declares NActions as `i`, but some implementations send `u`;
+    // read the variant once and accept either signature.
+    let n_actions: i32 = match proxy.get_property::<zbus::zvariant::OwnedValue>("NActions") {
+        Ok(value) => match &*value {
+            zbus::zvariant::Value::I32(n) => *n,
+            zbus::zvariant::Value::U32(n) => i32::try_from(*n).map_err(|_| {
+                zbus::Error::Failure(format!("Action.NActions {n} is out of range"))
+            })?,
+            other => {
+                return Err(zbus::Error::Failure(format!(
+                    "Action.NActions has signature {}, expected i or u",
+                    other.value_signature()
+                )))
+            }
+        },
+        Err(e) if is_property_absent(&e) => return Ok((actions, indices)),
+        Err(e) => return Err(e),
+    };
     for i in 0..n_actions {
-        if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
-            if let Ok(name) = reply.body().deserialize::<String>() {
-                if let Some(action_name) = map_atspi_action_name(&name) {
-                    if !actions.contains(&action_name) {
-                        indices.insert(action_name.clone(), i);
-                        actions.push(action_name);
-                    }
-                }
+        let name: String = proxy.call_method("GetName", &(i,))?.body().deserialize()?;
+        if let Some(action_name) = map_atspi_action_name(&name) {
+            if !actions.contains(&action_name) {
+                indices.insert(action_name.clone(), i);
+                actions.push(action_name);
             }
         }
     }
-    (actions, indices)
+    Ok((actions, indices))
 }
 
 /// Mints handles into a [`LinuxProvider`]'s handle and action-index caches
@@ -215,18 +230,23 @@ impl HandleRegistrar {
     /// handle: the one it already has if the table still holds it (see
     /// [`HandleTable`]), so a busy subscription re-reports the same widget
     /// under one handle instead of minting a cache entry per event.
+    ///
+    /// `None` for the indices means the read failed, and leaves whatever the
+    /// handle already holds in place.
     pub(crate) fn register(
         &self,
         aref: AccessibleRef,
         role: Role,
-        action_indices: HashMap<String, i32>,
+        action_indices: Option<HashMap<String, i32>>,
     ) -> u64 {
         let handle = self
             .handle_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .intern(aref, role);
-        store_action_indices(&self.action_indices, handle, action_indices);
+        if let Some(indices) = action_indices {
+            store_action_indices(&self.action_indices, handle, indices);
+        }
         handle
     }
 }
@@ -506,6 +526,13 @@ impl LinuxProvider {
                 .clear();
             self.gtk4
                 .toplevels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            // Keyed by bus name like the rest: a reused `:1.N` may now be a
+            // toolkit with a different text offset unit.
+            self.gtk4
+                .offset_units
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
@@ -891,10 +918,16 @@ impl LinuxProvider {
             Ok(reply) => reply,
             Err(e) if is_peer_gone(&e) => return Ok(None),
             Err(e) if is_absent_member(&e) => return Ok(Some(None)),
+            Err(e) if is_timeout(&e) => {
+                return Err(self.unresponsive_peer(aref, "Accessible.GetAttributes"))
+            }
             Err(e) => {
                 return Err(Error::Platform {
                     code: -1,
-                    message: format!("GetAttributes failed: {}", e),
+                    message: format!(
+                        "GetAttributes on {}{} failed: {e}",
+                        aref.bus_name, aref.path
+                    ),
                 })
             }
         };
@@ -959,7 +992,7 @@ impl LinuxProvider {
         match self.is_gtk4(&aref.bus_name) {
             Ok(true) => {
                 return Ok(self
-                    .gtk4_screen_extents(aref)
+                    .gtk4_screen_extents(aref)?
                     .map(|r| r.to_logical(crate::scale::coordinate_scale())));
             }
             Ok(false) => {}
@@ -1027,12 +1060,22 @@ impl LinuxProvider {
         }
         let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application")?;
         let read = |property: &str| {
-            proxy
-                .get_property::<String>(property)
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("Application.{property} on {bus}: {e}"),
-                })
+            proxy.get_property::<String>(property).map_err(|e| {
+                if is_timeout(&e) {
+                    self.unresponsive_peer(
+                        &AccessibleRef {
+                            bus_name: bus.to_owned(),
+                            path: APP_ROOT_PATH.to_owned(),
+                        },
+                        &format!("Application.{property}"),
+                    )
+                } else {
+                    Error::Platform {
+                        code: -1,
+                        message: format!("Application.{property} on {bus}: {e}"),
+                    }
+                }
+            })
         };
         let generation = match read("ToolkitName") {
             Ok(name) if name.eq_ignore_ascii_case("GTK") => {
@@ -1041,6 +1084,9 @@ impl LinuxProvider {
                 gtk_generation_of(&name, &read("Version")?)
             }
             Ok(_) => GtkGeneration::Neither,
+            // A peer that does not answer has not said it lacks the
+            // interface either; asking it to introspect would wait again.
+            Err(error @ Error::Timeout { .. }) => return Err(error),
             Err(error) => {
                 if self.root_exports_application(bus)? {
                     return Err(error);
@@ -1063,31 +1109,70 @@ impl LinuxProvider {
     /// window-relative position, wherever the window is (issue #487). The
     /// `WINDOW` extents are right, so the screen position is those plus the
     /// root origin of the top-level's X11 client window, found by pid and
-    /// title, plus the shadow GTK draws inside that window. `None` — no bounds, rather than wrong ones — under the Wayland
-    /// window backend, when the window cannot be matched to exactly one X11
-    /// window, or when any read fails; the reason is logged at debug level.
-    fn gtk4_screen_extents(&self, aref: &AccessibleRef) -> Option<Rect> {
+    /// title, plus the shadow GTK draws inside that window.
+    ///
+    /// `Ok(None)` only for sentinel extents, as on the SCREEN path. A read
+    /// that fails, and a window origin that cannot be established (the
+    /// Wayland window backend, no single matching X11 window), are errors:
+    /// the element then has no bounds, as before, but the hidden-reason
+    /// climb answers `Unknown` rather than taking "no bounds" for a widget
+    /// that is not drawn, and a timeout stays a timeout.
+    fn gtk4_screen_extents(&self, aref: &AccessibleRef) -> Result<Option<Rect>> {
         const ATSPI_COORD_TYPE_WINDOW: u32 = 1;
-        let proxy = self
-            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
-            .ok()?;
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")?;
         let reply = proxy
             .call_method("GetExtents", &(ATSPI_COORD_TYPE_WINDOW,))
-            .ok()?;
-        let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().ok()?;
-        let (ox, oy) = self.gtk4_window_origin(aref)?;
-        extents_to_rect(x.checked_add(ox)?, y.checked_add(oy)?, w, h)
+            .map_err(|e| {
+                if is_timeout(&e) {
+                    self.unresponsive_peer(aref, "Component.GetExtents")
+                } else {
+                    Error::Platform {
+                        code: -1,
+                        message: format!(
+                            "GetExtents(WINDOW) on {}{} failed: {e}",
+                            aref.bus_name, aref.path
+                        ),
+                    }
+                }
+            })?;
+        let (x, y, w, h): (i32, i32, i32, i32) =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!(
+                    "GetExtents(WINDOW) deserialize failed for {}{}: {e}",
+                    aref.bus_name, aref.path
+                ),
+            })?;
+        // Sentinel extents carry no position to offset.
+        let Some(window_rect) = extents_to_rect(x, y, w, h) else {
+            return Ok(None);
+        };
+        let origin = self.gtk4_window_origin(aref)?;
+        gtk4_window_rect_to_screen(window_rect, origin, crate::scale::coordinate_scale())
+            .map(Some)
+            .ok_or_else(|| Error::Platform {
+                code: -1,
+                message: format!(
+                    "GTK 4 extents ({x}, {y}) of {}{} overflow when offset by the window \
+                     origin {origin:?}",
+                    aref.bus_name, aref.path
+                ),
+            })
     }
 
     /// Screen position of the X11 client window holding a GTK 4 object, for
-    /// turning its WINDOW coordinates into screen ones. `None` when the window
-    /// cannot be identified uniquely; the reason is logged at debug level.
-    fn gtk4_window_origin(&self, aref: &AccessibleRef) -> Option<(i32, i32)> {
+    /// turning its WINDOW coordinates into screen ones. An error, saying
+    /// why, when the window cannot be identified uniquely.
+    fn gtk4_window_origin(&self, aref: &AccessibleRef) -> Result<(i32, i32)> {
         self.gtk4_window_origin_or_reason(aref)
-            .map_err(|reason| {
-                log::debug!("no bounds for {}{}: {reason}", aref.bus_name, aref.path);
+            .map_err(|reason| Error::Platform {
+                code: -1,
+                message: format!(
+                    "no screen bounds for GTK 4 object {}{}: its window's screen origin is \
+                     unknown: {reason}",
+                    aref.bus_name, aref.path
+                ),
             })
-            .ok()
     }
 
     /// [`Self::gtk4_window_origin`], saying why when there is none.
@@ -1205,45 +1290,67 @@ impl LinuxProvider {
     ///
     /// Probes the interface directly rather than relying on the Interfaces property,
     /// which some AT-SPI adapters (e.g. AccessKit) don't expose.
-    fn get_actions(&self, aref: &AccessibleRef) -> (Vec<String>, HashMap<String, i32>) {
-        // Try Action interface directly
-        let (actions, indices) =
-            match self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action") {
-                Ok(proxy) => read_actions(&proxy),
-                Err(_) => (Vec::new(), HashMap::new()),
-            };
-
+    fn get_actions(&self, aref: &AccessibleRef) -> Result<(Vec<String>, HashMap<String, i32>)> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
         // NOTE: We do NOT add implicit "focus" based on Component interface existence.
         // On GTK4, GrabFocus() often returns false even when Component interface exists,
         // violating design tenet 3 ("if action is listed, calling it must work").
         // Only report "focus" if it's explicitly in the AT-SPI Action interface with a
         // proper index. This ensures focus() will work when reported.
         // Fixes GitHub issue #98.
-
-        (actions, indices)
+        read_actions(&proxy).map_err(|e| {
+            if is_timeout(&e) {
+                self.unresponsive_peer(aref, "Action.NActions/GetName")
+            } else {
+                Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "reading the actions of {}{} failed: {e}",
+                        aref.bus_name, aref.path
+                    ),
+                }
+            }
+        })
     }
 
-    /// Return true when the accessible's application identifies itself as GTK
-    /// via `org.a11y.atspi.Application.ToolkitName`.
+    /// `Application.ToolkitName` of the application on `bus`, read for
+    /// `purpose` (named in a failure). `Ok(None)` only when the application
+    /// does not expose the property; a peer that does not answer is the
+    /// unresponsive-peer [`Error::Timeout`], and any other failure an
+    /// [`Error::Platform`] naming the bus and the purpose.
+    fn read_toolkit_name(&self, bus: &str, purpose: &str) -> Result<Option<String>> {
+        let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application")?;
+        match proxy.get_property::<String>("ToolkitName") {
+            Ok(name) => Ok(Some(name)),
+            Err(e) if is_property_absent(&e) => Ok(None),
+            Err(e) if is_timeout(&e) => Err(self.unresponsive_peer(
+                &AccessibleRef {
+                    bus_name: bus.to_owned(),
+                    path: APP_ROOT_PATH.to_owned(),
+                },
+                "Application.ToolkitName",
+            )),
+            Err(e) => Err(Error::Platform {
+                code: -1,
+                message: format!(
+                    "reading Application.ToolkitName of {bus} to {purpose} failed: {e}"
+                ),
+            }),
+        }
+    }
+
+    /// Whether the accessible's application identifies itself as GTK via
+    /// `org.a11y.atspi.Application.ToolkitName`. An application without the
+    /// property is not GTK; a failed read is returned.
     ///
     /// Used to scope the press-fallback heuristic for the
     /// AdwMenuButton/GtkMenuButton wrapper pattern; other toolkits are
     /// unaffected. Note that WebKitGTK also reports "GTK", so the answer is
     /// not a "GtkWidget app" discriminator.
-    fn is_gtk_toolkit(&self, aref: &AccessibleRef) -> bool {
-        let app_root = AccessibleRef {
-            bus_name: aref.bus_name.clone(),
-            path: "/org/a11y/atspi/accessible/root".to_string(),
-        };
-        self.make_proxy(
-            &app_root.bus_name,
-            &app_root.path,
-            "org.a11y.atspi.Application",
-        )
-        .ok()
-        .and_then(|proxy| proxy.get_property::<String>("ToolkitName").ok())
-        .map(|t| t.eq_ignore_ascii_case("GTK"))
-        .unwrap_or(false)
+    fn is_gtk_toolkit(&self, aref: &AccessibleRef) -> Result<bool> {
+        Ok(self
+            .read_toolkit_name(&aref.bus_name, "scope the GTK menu-button press")?
+            .is_some_and(|t| t.eq_ignore_ascii_case("GTK")))
     }
 
     /// Refuse a text write the element's own state rules out, before
@@ -1291,25 +1398,7 @@ impl LinuxProvider {
     /// read it is returned, because guessing bytes for a Qt app is exactly
     /// the corruption this exists to prevent.
     fn insert_text_length(&self, target: &AccessibleRef, text: &str) -> Result<i32> {
-        let proxy = self.make_proxy(
-            &target.bus_name,
-            "/org/a11y/atspi/accessible/root",
-            "org.a11y.atspi.Application",
-        )?;
-        let toolkit = match proxy.get_property::<String>("ToolkitName") {
-            Ok(name) => Some(name),
-            Err(e) if is_property_absent(&e) => None,
-            Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
-                        "reading Application.ToolkitName of {} to size an InsertText \
-                         failed: {e}",
-                        target.bus_name
-                    ),
-                })
-            }
-        };
+        let toolkit = self.read_toolkit_name(&target.bus_name, "size an InsertText")?;
         Ok(insert_text_length_for(toolkit.as_deref(), text))
     }
 
@@ -1325,11 +1414,16 @@ impl LinuxProvider {
     /// Empirically fixes the `GtkMenuButton` / `AdwMenuButton` wrappers that
     /// ship in every stock GNOME app (Calculator, Text Editor, Logs, Clocks,
     /// Characters, …).
+    ///
+    /// Every read the walk makes is propagated: a role, name, state, action
+    /// or children read that fails would otherwise skip a candidate (or a
+    /// whole subtree) and could leave a different, wrong one as the single
+    /// match.
     fn find_gtk_press_fallback(
         &self,
         outer: &AccessibleRef,
         outer_name: &str,
-    ) -> Option<(AccessibleRef, i32)> {
+    ) -> Result<Option<(AccessibleRef, i32)>> {
         let mut queue: VecDeque<(AccessibleRef, u32)> = VecDeque::new();
         queue.push_back((outer.clone(), 0));
         let mut visited: usize = 0;
@@ -1351,11 +1445,11 @@ impl LinuxProvider {
                 String::new()
             } else {
                 visited += 1;
-                self.get_role_name(&node).unwrap_or_default().to_lowercase()
+                self.get_role_name(&node)?.to_lowercase()
             };
 
             if depth > 0 && is_actionable_atspi_role(&role_name) {
-                if let Some(idx) = self.gtk_fallback_pick(&node, outer_name) {
+                if let Some(idx) = self.gtk_fallback_pick(&node, outer_name)? {
                     match shallowest_depth {
                         Some(d) if depth < d => {
                             shallowest_depth = Some(depth);
@@ -1381,46 +1475,46 @@ impl LinuxProvider {
             if stop_descending {
                 continue;
             }
-            if let Ok(children) = self.get_atspi_children(&node) {
-                for c in children {
-                    queue.push_back((c, depth + 1));
-                }
+            for c in self.get_atspi_children(&node)? {
+                queue.push_back((c, depth + 1));
             }
         }
 
         if hits.len() == 1 {
-            Some(hits.into_iter().next().unwrap())
+            Ok(hits.pop())
         } else {
-            None
+            Ok(None)
         }
     }
 
     /// Per-node filter for `find_gtk_press_fallback`. Returns the AT-SPI
     /// action index to invoke when `aref` is a valid fallback candidate.
-    fn gtk_fallback_pick(&self, aref: &AccessibleRef, outer_name: &str) -> Option<i32> {
-        let (_, index_map) = self.get_actions(aref);
-        let idx = *index_map.get("press")?;
-        if !self.is_showing_visible_sensitive(aref) {
-            return None;
+    fn gtk_fallback_pick(&self, aref: &AccessibleRef, outer_name: &str) -> Result<Option<i32>> {
+        let (_, index_map) = self.get_actions(aref)?;
+        let Some(&idx) = index_map.get("press") else {
+            return Ok(None);
+        };
+        if !self.is_showing_visible_sensitive(aref)? {
+            return Ok(None);
         }
         // If the outer has a name, require the candidate to share it. Rules
         // out unrelated suffix widgets (e.g. a switch inside an AdwActionRow
         // that happens to expose `click`).
         if !outer_name.is_empty() {
-            let inner_name = self.get_name(aref).unwrap_or_default();
+            let inner_name = self.get_name(aref)?;
             if !inner_name.is_empty() && inner_name != outer_name {
-                return None;
+                return Ok(None);
             }
         }
-        Some(idx)
+        Ok(Some(idx))
     }
 
     /// True when the accessible's state has SHOWING, VISIBLE, and SENSITIVE
     /// set. ENABLED is deliberately excluded: in GTK4 it reflects "has an
     /// enabled GAction bound", which is false for the exact widgets we
     /// rescue.
-    fn is_showing_visible_sensitive(&self, aref: &AccessibleRef) -> bool {
-        let raw = self.get_state(aref).unwrap_or_default();
+    fn is_showing_visible_sensitive(&self, aref: &AccessibleRef) -> Result<bool> {
+        let raw = self.get_state(aref)?;
         let bits: u64 = if raw.len() >= 2 {
             (raw[0] as u64) | ((raw[1] as u64) << 32)
         } else if raw.len() == 1 {
@@ -1431,7 +1525,7 @@ impl LinuxProvider {
         const SENSITIVE: u64 = 1 << 24;
         const SHOWING: u64 = 1 << 25;
         const VISIBLE: u64 = 1 << 30;
-        (bits & (SHOWING | VISIBLE | SENSITIVE)) == (SHOWING | VISIBLE | SENSITIVE)
+        Ok((bits & (SHOWING | VISIBLE | SENSITIVE)) == (SHOWING | VISIBLE | SENSITIVE))
     }
 
     /// Get value via the Text or Value interface, asking only for the ones
@@ -1549,12 +1643,14 @@ impl LinuxProvider {
         } else {
             None
         };
+        // A failed read refines with no evidence (the role stays `Menu`); the
+        // failure itself is logged with the action list below.
         let role = refine_menu_role(
             coarse_role,
-            prefetched_menu_actions
-                .as_ref()
-                .map(|(actions, _)| actions.as_slice())
-                .unwrap_or(&[]),
+            match &prefetched_menu_actions {
+                Some(Ok((actions, _))) => actions.as_slice(),
+                Some(Err(_)) | None => &[],
+            },
         );
 
         // Fetch all independent properties in parallel.
@@ -1564,7 +1660,7 @@ impl LinuxProvider {
             ((mut name, value), (description, meta)),
             (
                 ((states, state_bits, state_read_ok), bounds_read),
-                ((actions, action_index_map), (numeric_value, min_value, max_value)),
+                (actions_read, (numeric_value, min_value, max_value)),
             ),
         ) = join_carrying_deadline(
             || {
@@ -1614,12 +1710,12 @@ impl LinuxProvider {
                     || {
                         join_carrying_deadline(
                             || {
-                                if let Some(actions) = prefetched_menu_actions.as_ref() {
-                                    actions.clone()
+                                if let Some(actions) = prefetched_menu_actions {
+                                    actions
                                 } else if role_has_actions(role) {
                                     self.get_actions(aref)
                                 } else {
-                                    (vec![], HashMap::new())
+                                    Ok((vec![], HashMap::new()))
                                 }
                             },
                             || {
@@ -1655,6 +1751,19 @@ impl LinuxProvider {
             },
         );
 
+        // Like the other per-field reads, a failed action read leaves the
+        // list empty, but it is logged, and the handle's stored `DoAction`
+        // indices are left as they were: an empty map stored here would
+        // clear them, and a held handle's `press` would fail
+        // `ActionNotSupported` because one read failed.
+        let (actions, action_index_map) = match actions_read {
+            Ok((actions, indices)) => (actions, Some(indices)),
+            Err(e) => {
+                log::debug!("actions of {}{} unread: {e}", aref.bus_name, aref.path);
+                (Vec::new(), None)
+            }
+        };
+
         // For label/static text elements, AT-SPI may put content in the Text
         // interface (returned as value) rather than the Name property.
         if name.is_none() && role == Role::StaticText {
@@ -1678,9 +1787,10 @@ impl LinuxProvider {
         // the integration suites exist to catch (round-4 CI: it failed the
         // activate suites on electron, tauri and qt; only the GTK cell passed).
         // The action stays callable on every toolkit, and the call reports a
-        // `false` reply or a D-Bus NotSupported error honestly as
-        // ActionNotSupported (tenet 3; tenet 1 — no silent fallback — is
-        // why there is no substitute mechanism to advertise instead).
+        // D-Bus NotSupported error as ActionNotSupported and a `false` reply
+        // as the refusal it is, an `Error::Platform` (tenet 3; tenet 1 — no
+        // silent fallback — is why there is no substitute mechanism to
+        // advertise instead).
 
         let raw = {
             let raw_role = if role_name.is_empty() {
@@ -1730,11 +1840,16 @@ impl LinuxProvider {
         let description = xa11y_core::text::strip_bidi_opt(description);
 
         let handle = self.cache_element(aref.clone(), role);
-        store_action_indices(&self.action_indices, handle, action_index_map);
+        if let Some(indices) = action_index_map {
+            store_action_indices(&self.action_indices, handle, indices);
+        }
 
         let bounds = match &bounds_read {
             Ok(bounds) => *bounds,
-            Err(_) => None,
+            Err(e) => {
+                log::debug!("bounds of {}{} unread: {e}", aref.bus_name, aref.path);
+                None
+            }
         };
         let mut states = states;
         states.hidden_reason = match states.hidden_reason {
@@ -2260,8 +2375,10 @@ impl LinuxProvider {
     /// roughly 15–20 s, and `DoAction` on it returns `true` without doing
     /// anything (issue #491). Its parent stops counting it at once, so that is
     /// the check, at constant cost whatever the number of siblings:
-    /// `GetIndexInParent` (-1 means detached), then the parent's
-    /// `GetChildAtIndex` at that index must be this object. A parent that
+    /// `GetIndexInParent`, then the parent's `GetChildAtIndex` at that index
+    /// must be this object. An index of -1 cannot be cross-checked (Qt
+    /// reports it for live popups), so there the object's own state decides:
+    /// `DEFUNCT` or an empty state set is stale. A parent that
     /// `MANAGES_DESCENDANTS` (large tables and tree views) does not keep its
     /// children as live objects, so there only the object's own `DEFUNCT`
     /// state is consulted.
@@ -2311,7 +2428,16 @@ impl LinuxProvider {
             return Err(stale());
         };
         if index < 0 {
-            return Err(stale());
+            // No index to cross-check against the parent. Live objects report
+            // -1 on some toolkits (Qt's popup menus and their items), so -1
+            // alone is not removal: as under MANAGES_DESCENDANTS, the
+            // object's own state decides. A removed object is `DEFUNCT`, or
+            // reports the empty state set GTK 3 gives a destroyed widget
+            // (whose null parent is normally caught above already).
+            return match self.scan_state_bits(aref)? {
+                Some(bits) if bits != 0 && bits & DEFUNCT == 0 => Ok(()),
+                _ => Err(stale()),
+            };
         }
         let Some((bus, path)) = self.attach_call::<(String, zbus::zvariant::OwnedObjectPath)>(
             &parent,
@@ -2603,8 +2729,19 @@ impl LinuxProvider {
         };
         let role = self.refine_text_role(coarse, aref);
         if role == Role::Menu {
-            let (actions, _) = self.get_actions(aref);
-            refine_menu_role(role, &actions)
+            // Like the role reads above, a failed read refines with no
+            // evidence, so the role stays `Menu`; the failure is logged.
+            match self.get_actions(aref) {
+                Ok((actions, _)) => refine_menu_role(role, &actions),
+                Err(e) => {
+                    log::debug!(
+                        "actions of {}{} unread while resolving its role: {e}",
+                        aref.bus_name,
+                        aref.path
+                    );
+                    role
+                }
+            }
         } else {
             role
         }
@@ -2924,6 +3061,10 @@ impl LinuxProvider {
 }
 
 impl Provider for LinuxProvider {
+    fn capabilities(&self) -> Result<xa11y_core::Capabilities> {
+        xa11y_core::Capabilities::current()
+    }
+
     fn identity(&self, element: &ElementData) -> Result<xa11y_core::NodeIdentity> {
         let aref = self.get_cached(element.handle)?;
         // A unique bus name is never reused within one bus lifetime, and the
@@ -2960,8 +3101,15 @@ impl Provider for LinuxProvider {
                 // A node destroyed after its snapshot has no live descendants.
                 // Keep genuine D-Bus failures visible; do not run the Chromium
                 // empty-tree diagnostic on a vanished window.
+                //
+                // A destroyed node is stale, not childless: core's tree
+                // walks drop a child that went stale mid-walk, and a caller
+                // holding the node learns it is gone.
                 let Some(children) = self.live_atspi_children(&aref)? else {
-                    return Ok(Vec::new());
+                    return Err(Error::stale(
+                        xa11y_core::StaleReason::Removed,
+                        xa11y_core::error::stale_subject(element_data),
+                    ));
                 };
                 let pid = element_data.pid;
 
@@ -3455,13 +3603,17 @@ impl Provider for LinuxProvider {
     /// the first application that owns a window reporting `ACTIVE`.
     ///
     /// More than one application can report an `ACTIVE` window: xfwm4 keeps
-    /// one on an off-screen 5x5 window. So when the window manager reports
-    /// an active window (`_NET_ACTIVE_WINDOW` on X11), the applications with
-    /// that window's pid are searched first.
+    /// one on an off-screen 5x5 window (#680). So when the window manager
+    /// names an active window (`_NET_ACTIVE_WINDOW` on X11), only the
+    /// applications with that window's pid are candidates: the answer is
+    /// one of them or [`Error::SelectorNotMatched`], never another
+    /// application's `ACTIVE` window. Without a window-manager answer
+    /// (Wayland, no EWMH), every application is a candidate.
     ///
-    /// Returns [`Error::SelectorNotMatched`] when no window is active (no app
-    /// has the foreground — e.g. focus is on the shell or a non-AT-SPI
-    /// surface). The core reads that as "nothing focused", not a failure.
+    /// Returns [`Error::SelectorNotMatched`] when no candidate has an active
+    /// window (no app has the foreground — e.g. focus is on the shell or a
+    /// non-AT-SPI surface). The core reads that as "nothing focused", not a
+    /// failure.
     fn focused_app(&self) -> Result<ElementData> {
         // AtspiStateType::ACTIVE = 1 → bit position 1.
         const ACTIVE: u64 = 1 << 1;
@@ -3470,13 +3622,22 @@ impl Provider for LinuxProvider {
             bus_name: "org.a11y.atspi.Registry".to_string(),
             path: "/org/a11y/atspi/accessible/root".to_string(),
         };
-        let mut apps = self.get_atspi_children(&registry)?;
-        if let Some(pid) = self.window_manager.active_window_pid()? {
-            // A stable sort keeps the registry order within each group.
-            apps.sort_by_cached_key(|app| self.get_app_pid(app) != Some(pid));
-        }
+        let apps = self.get_atspi_children(&registry)?;
+        let active_pid = self.window_manager.active_window_pid()?;
 
+        let mut candidates = 0usize;
+        let mut windows_examined = 0usize;
         for app in apps.iter().filter(|c| c.path != "/org/a11y/atspi/null") {
+            // The pid is a bus round trip; read it up front only when it
+            // decides candidacy.
+            let known_pid = match active_pid {
+                Some(active) => match self.get_app_pid(app) {
+                    Some(pid) if pid == active => Some(pid),
+                    _ => continue,
+                },
+                None => None,
+            };
+            candidates += 1;
             // An application that left the bus mid-scan (or whose root has no
             // children to give) is skipped. One that does not answer is an
             // error naming it: skipping it would report "nothing focused"
@@ -3486,6 +3647,7 @@ impl Provider for LinuxProvider {
             };
             let mut has_active_window = false;
             for w in windows.iter().filter(|w| w.path != "/org/a11y/atspi/null") {
+                windows_examined += 1;
                 if self
                     .scan_state_bits(w)?
                     .is_some_and(|bits| bits & ACTIVE != 0)
@@ -3499,7 +3661,7 @@ impl Provider for LinuxProvider {
                     // Gone between the state read and now.
                     continue;
                 };
-                let pid = self.get_app_pid(app);
+                let pid = known_pid.or_else(|| self.get_app_pid(app));
                 let mut data = self.build_element_data(app, pid);
                 if !name.is_empty() {
                     data.name = Some(name);
@@ -3508,7 +3670,21 @@ impl Provider for LinuxProvider {
             }
         }
 
-        Err(Error::selector_not_matched("focused application"))
+        let observed = match active_pid {
+            Some(pid) => format!(
+                "_NET_ACTIVE_WINDOW names a window of pid {pid}; {candidates} of {} AT-SPI \
+                 applications have that pid, and none of their {windows_examined} top-level \
+                 windows reports ACTIVE (an ACTIVE window of another application is not the \
+                 foreground)",
+                apps.len()
+            ),
+            None => format!(
+                "no window-manager active window; none of the {windows_examined} top-level \
+                 windows of {candidates} AT-SPI applications reports ACTIVE"
+            ),
+        };
+        Err(Error::selector_not_matched("focused application")
+            .diagnose(xa11y_core::Diagnosis::new().last_observed(observed)))
     }
 
     fn press(&self, element: &ElementData) -> Result<()> {
@@ -3535,9 +3711,12 @@ impl Provider for LinuxProvider {
         // what all three menu-button variants present as). Non-GtkMenuButton
         // roles and non-GTK toolkits continue to fail-fast with
         // ActionNotSupported.
-        if element.role == Role::Button && self.is_gtk_toolkit(&target) {
-            let outer_name = self.get_name(&target).unwrap_or_default();
-            if let Some((inner, index)) = self.find_gtk_press_fallback(&target, &outer_name) {
+        // Every read here is propagated rather than defaulted: an unread
+        // outer name would switch the name filter off, and the walk could
+        // then settle on an unrelated actionable descendant.
+        if element.role == Role::Button && self.is_gtk_toolkit(&target)? {
+            let outer_name = self.get_name(&target)?;
+            if let Some((inner, index)) = self.find_gtk_press_fallback(&target, &outer_name)? {
                 return self.do_atspi_action_by_index(&inner, index);
             }
         }
@@ -3857,8 +4036,13 @@ impl Provider for LinuxProvider {
         // reports the verb the caller requested — `activate` — not `focus`'s
         // name (the two share a mechanism, not an identity).
         //
-        // A GrabFocus(false) reply is an honest "cannot activate this window",
-        // reported as ActionNotSupported: the action-index fallback that
+        // A GrabFocus(false) reply is the toolkit declining to activate this
+        // window. That is a refusal, not a missing capability, so it is an
+        // `Error::Platform` saying so (the provider contract keeps refused
+        // and unsupported distinct, as macOS and Windows report them); a
+        // D-Bus `NotSupported` error is what stays ActionNotSupported
+        // (`grab_focus_error`). There is no fallback either way: the
+        // action-index fallback that
         // `focus` carries cannot fire for window-like roles, because
         // `action_indices` is populated only for roles in `role_has_actions`
         // (Window/Dialog excluded) and `map_atspi_action_name` maps no
@@ -3900,9 +4084,13 @@ impl Provider for LinuxProvider {
         if grabbed {
             return Ok(());
         }
-        Err(Error::ActionNotSupported {
-            action: "activate".to_string(),
-            role: element.role,
+        Err(Error::Platform {
+            code: -1,
+            message: format!(
+                "activate: Component.GrabFocus on window {}{} returned false; the toolkit \
+                 declined to activate it",
+                target.bus_name, target.path
+            ),
         })
     }
 
@@ -4068,12 +4256,21 @@ impl Provider for LinuxProvider {
         // A destroyed GTK 3 widget still accepts Value writes (#586).
         self.ensure_attached(&target)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
-        proxy
-            .set_property("CurrentValue", value)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("SetValue failed: {}", e),
-            })
+        proxy.set_property("CurrentValue", value).map_err(|e| {
+            if is_timeout(&e) {
+                self.unresponsive_peer(&target, "Value.CurrentValue (set)")
+            } else {
+                Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "setting Value.CurrentValue to {value} on {} ({}{}) failed: {e}",
+                        xa11y_core::error::stale_subject(element),
+                        target.bus_name,
+                        target.path
+                    ),
+                }
+            }
+        })
     }
 
     fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
@@ -4823,6 +5020,25 @@ fn gtk_generation_of(name: &str, version: &str) -> GtkGeneration {
 /// they are "no bounds" (issue #489). A zero width *or* height alone (a
 /// separator line) is a real, if thin, rectangle and is kept — the same rule
 /// the Windows backend applies.
+/// GTK 4 `WINDOW` extents, `rect`, as screen extents in physical pixels,
+/// given the screen `origin` of the window's frame (physical pixels, from
+/// [`WindowManager::x11_client_origin`]: the X11 client window's root
+/// position plus the `_GTK_FRAME_EXTENTS` shadow, both of which X11 and GTK
+/// report in device pixels). GTK 4 computes `WINDOW` extents from widget
+/// bounds, which are logical (application) pixels, so they are scaled to
+/// device pixels before the origin is added; the caller then converts the
+/// sum to logical once, as it does SCREEN extents. Adding the two as they
+/// come would mix units on a scaled (HiDPI) X11 session. `None` on
+/// overflow.
+fn gtk4_window_rect_to_screen(rect: Rect, origin: (i32, i32), scale: f64) -> Option<Rect> {
+    let physical = rect.to_physical(scale);
+    Some(Rect {
+        x: physical.x.checked_add(origin.0)?,
+        y: physical.y.checked_add(origin.1)?,
+        ..physical
+    })
+}
+
 fn extents_to_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Rect> {
     if x == i32::MIN || y == i32::MIN || w < 0 || h < 0 || (w == 0 && h == 0) {
         return None;
@@ -5040,8 +5256,17 @@ fn carry_deadline<T, R>(f: impl Fn(T) -> R + Sync + Send) -> impl Fn(T) -> R + S
 /// Whether a failed D-Bus call is the connection's method timeout expiring
 /// (see [`ATSPI_METHOD_TIMEOUT`]): zbus reports it as an I/O error of kind
 /// `TimedOut`, distinct from a peer's own `org.freedesktop.DBus.Error.*` reply.
+///
+/// A property *write* reports its failure wrapped in an `fdo::Error`
+/// (`bounded::Proxy::set_property`), so the wrapped error is checked too.
 fn is_timeout(err: &zbus::Error) -> bool {
-    matches!(err, zbus::Error::InputOutput(io) if io.kind() == std::io::ErrorKind::TimedOut)
+    match err {
+        zbus::Error::InputOutput(io) => io.kind() == std::io::ErrorKind::TimedOut,
+        zbus::Error::FDO(fdo) => {
+            matches!(&**fdo, zbus::fdo::Error::ZBus(inner) if is_timeout(inner))
+        }
+        _ => false,
+    }
 }
 
 /// The scheduler state of a process, read from the third field of
@@ -5103,7 +5328,7 @@ fn pending_peer_call(
 /// the call, the bus name and object, the pid and what `/proc` says about the
 /// process — everything a caller needs to decide whether to skip, retry, or
 /// `SIGCONT` the app without re-running under logging (tenet 6).
-fn unresponsive_peer_error(
+pub(crate) fn unresponsive_peer_error(
     aref: &AccessibleRef,
     call: &str,
     pid: Option<u32>,
@@ -5548,6 +5773,51 @@ mod tests {
         // N×0 and 0×N are thin but real (a separator), as on Windows.
         assert!(extents_to_rect(5, 5, 30, 0).is_some());
         assert!(extents_to_rect(5, 5, 0, 30).is_some());
+    }
+
+    /// GTK 4's WINDOW extents are logical; the X11 origin and GTK shadow are
+    /// device pixels. On a 2x X11 session the extents are scaled up before
+    /// the origin is added, so the later division by the scale lands on the
+    /// logical screen position (origin / 2 + extents), not on
+    /// (origin + extents) / 2.
+    #[test]
+    fn gtk4_window_extents_are_scaled_before_the_device_pixel_origin_is_added() {
+        let window = Rect {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        };
+        let physical = gtk4_window_rect_to_screen(window, (200, 100), 2.0).expect("no overflow");
+        assert_eq!(
+            physical,
+            Rect {
+                x: 220,
+                y: 140,
+                width: 60,
+                height: 80,
+            }
+        );
+        assert_eq!(
+            physical.to_logical(2.0),
+            Rect {
+                x: 110,
+                y: 70,
+                width: 30,
+                height: 40,
+            }
+        );
+        // At 1x nothing changes.
+        assert_eq!(
+            gtk4_window_rect_to_screen(window, (200, 100), 1.0),
+            Some(Rect {
+                x: 210,
+                y: 120,
+                width: 30,
+                height: 40,
+            })
+        );
+        assert_eq!(gtk4_window_rect_to_screen(window, (i32::MAX, 0), 1.0), None);
     }
 
     // ── #485: role number before role name ───────────────────────────────
@@ -6456,6 +6726,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             const DEFUNCT: u64 = 1 << 6;
             const MANAGES_DESCENDANTS: u64 = 1 << 31;
+            const VISIBLE: u64 = 1 << 30;
             let peer = |parent, children, index, state| AttachPeer {
                 parent,
                 children,
@@ -6473,11 +6744,23 @@ mod tests {
                 .expect("live")
                 .serve_at("/live", action(&server_calls))
                 .expect("live action")
-                // Still answers, still names its parent, index -1.
+                // Still answers, still names its parent, index -1, and
+                // reports the empty state set of a destroyed widget.
                 .serve_at("/zombie", peer("/panel", vec![], -1, 0))
                 .expect("zombie")
                 .serve_at("/zombie", action(&server_calls))
                 .expect("zombie action")
+                // Index -1 with a live state set, as Qt reports for a popup
+                // menu item: nothing to cross-check, and not stale.
+                .serve_at("/qt_popup_item", peer("/panel", vec![], -1, VISIBLE))
+                .expect("qt popup item")
+                .serve_at("/qt_popup_item", action(&server_calls))
+                .expect("qt popup item action")
+                // Index -1 and DEFUNCT: removed.
+                .serve_at("/defunct", peer("/panel", vec![], -1, VISIBLE | DEFUNCT))
+                .expect("defunct")
+                .serve_at("/defunct", action(&server_calls))
+                .expect("defunct action")
                 // GTK 3's real zombie (#586): the parent link is already the
                 // null reference, the index -1, the state set empty.
                 .serve_at("/gtk3_zombie", peer("/org/a11y/atspi/null", vec![], -1, 0))
@@ -6543,7 +6826,13 @@ mod tests {
             matches!(&err, Error::ElementStale { element: selector, .. } if selector == "org.test.Attach/zombie"),
             "{err:?}"
         );
-        for path in ["/gtk3_zombie", "/usurped", "/dead_cell", "/gone"] {
+        for path in [
+            "/gtk3_zombie",
+            "/usurped",
+            "/dead_cell",
+            "/defunct",
+            "/gone",
+        ] {
             assert!(
                 matches!(
                     provider.do_atspi_action_by_index(&at(path), 0),
@@ -6568,6 +6857,11 @@ mod tests {
             .do_atspi_action_by_index(&at("/window"), 0)
             .expect("a top-level window acts");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        // A live object reporting index -1 (Qt popups) is not stale.
+        provider
+            .do_atspi_action_by_index(&at("/qt_popup_item"), 0)
+            .expect("a live object with index -1 acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
     }
 
     /// Accessible half of the `scroll_into_view` fixture: answers `GetState`,
@@ -6883,10 +7177,15 @@ mod tests {
             .into_iter()
             .find(|child| child.name.as_deref() == Some("Vanished"))
             .expect("vanished snapshot");
-        assert!(vanished
-            .children()
-            .expect("destroyed node has no live children")
-            .is_empty());
+        // Held directly, the destroyed node says it is gone rather than
+        // reading as childless.
+        assert!(matches!(
+            vanished.children(),
+            Err(Error::ElementStale {
+                reason: xa11y_core::StaleReason::Removed,
+                ..
+            })
+        ));
         assert!(matches!(
             provider.get_atspi_children(&AccessibleRef {
                 bus_name: "org.test.LiveTree".into(),
@@ -7672,6 +7971,100 @@ mod tests {
 
     /// A connected client/server pair over a socket pair: the server end
     /// stands in for the bus, so dropping it is the bus hanging up.
+    /// An `org.a11y.atspi.Action` peer whose `NActions` is a `u` (as some
+    /// bridges send it) and whose `GetName` can fail.
+    struct ActionsPeer {
+        names: Vec<&'static str>,
+        fail_name: bool,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Action")]
+    impl ActionsPeer {
+        #[zbus(property, name = "NActions")]
+        fn n_actions(&self) -> u32 {
+            self.names.len() as u32
+        }
+
+        fn get_name(&self, index: i32) -> zbus::fdo::Result<String> {
+            if self.fail_name {
+                return Err(zbus::fdo::Error::Failed("name unreadable".into()));
+            }
+            Ok(self.names[index as usize].to_string())
+        }
+    }
+
+    /// #703: an action read that fails is an error, not "no actions", and
+    /// an object without the interface is no actions, not an error.
+    #[test]
+    fn read_actions_fails_on_a_failed_read_and_accepts_an_unsigned_count() {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at(
+                    "/ok",
+                    ActionsPeer {
+                        names: vec!["click", "click", "expand or contract"],
+                        fail_name: false,
+                    },
+                )
+                .expect("ok")
+                .serve_at(
+                    "/broken",
+                    ActionsPeer {
+                        names: vec!["click"],
+                        fail_name: true,
+                    },
+                )
+                .expect("broken")
+                // An object with no Action interface.
+                .serve_at("/noaction", ScrollAccessible { state_fails: false })
+                .expect("noaction")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Arc::new(Mutex::new(HandleTable::new(MAX_CACHED_ELEMENTS))),
+            action_indices: Arc::new(Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS))),
+            window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
+        };
+        let at = |path: &str| AccessibleRef {
+            bus_name: "org.test.Actions".into(),
+            path: path.into(),
+        };
+
+        let (actions, indices) = provider.get_actions(&at("/ok")).expect("actions read");
+        assert_eq!(actions.first().map(String::as_str), Some("press"));
+        assert_eq!(indices.get("press"), Some(&0), "first index of a name wins");
+
+        let err = provider
+            .get_actions(&at("/broken"))
+            .expect_err("a failed GetName is not 'no actions'");
+        assert!(
+            matches!(&err, Error::Platform { message, .. }
+                if message.contains("/broken") && message.contains("name unreadable")),
+            "{err:?}"
+        );
+
+        // No Action interface on a live object: no actions.
+        let (actions, indices) = provider
+            .get_actions(&at("/noaction"))
+            .expect("an object without Action has no actions");
+        assert!(actions.is_empty() && indices.is_empty());
+        // A destroyed object is not "no actions".
+        assert!(provider.get_actions(&at("/missing")).is_err());
+    }
+
     fn p2p_pair() -> (Connection, Connection) {
         let (server_socket, client_socket) =
             std::os::unix::net::UnixStream::pair().expect("socket pair");
@@ -7838,7 +8231,7 @@ mod tests {
                 path: "/org/a11y/atspi/accessible/3".into(),
             },
             Role::Button,
-            HashMap::from([("press".to_string(), 2)]),
+            Some(HashMap::from([("press".to_string(), 2)])),
         );
         let inert = registrar.register(
             AccessibleRef {
@@ -7846,7 +8239,7 @@ mod tests {
                 path: "/org/a11y/atspi/accessible/4".into(),
             },
             Role::StaticText,
-            HashMap::new(),
+            Some(HashMap::new()),
         );
         assert_ne!(pressable, 0, "0 is the snapshot sentinel");
         assert_ne!(pressable, inert);
@@ -7875,6 +8268,21 @@ mod tests {
         let aref = provider.get_cached(pressable).expect("registered handle");
         assert_eq!(aref.path, "/org/a11y/atspi/accessible/3");
         assert_eq!(provider.get_action_index(pressable, "press").ok(), Some(2));
+        // A failed action read (`None`) leaves the held handle's indices in
+        // place: an empty map here would make its `press` fail
+        // ActionNotSupported because one event's read failed.
+        assert_eq!(
+            registrar.register(
+                AccessibleRef {
+                    bus_name: ":1.7".into(),
+                    path: "/org/a11y/atspi/accessible/3".into(),
+                },
+                Role::Button,
+                None,
+            ),
+            pressable
+        );
+        assert_eq!(provider.get_action_index(pressable, "press").ok(), Some(2));
         assert!(provider.get_cached(inert).is_ok());
         assert!(
             provider.get_action_index(inert, "press").is_err(),
@@ -7900,7 +8308,7 @@ mod tests {
                 path: "/org/a11y/atspi/accessible/1".into(),
             },
             Role::StaticText,
-            HashMap::new(),
+            Some(HashMap::new()),
         );
         assert!(provider.get_cached(after).is_ok());
     }
@@ -7927,6 +8335,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(handle, HashMap::from([("press".to_string(), 0)]));
+        provider
+            .gtk4
+            .offset_units
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(":1.7".into(), rich::OffsetUnit::Utf16);
 
         // While the connection is live, nothing is reconnected or forgotten.
         let live = provider
@@ -7961,6 +8375,14 @@ mod tests {
             Err(Error::ElementStale { .. })
         ));
         assert!(provider.get_action_index(handle, "press").is_err());
+        // The text offset unit is per bus name too, and the name may now be
+        // a different toolkit.
+        assert!(provider
+            .gtk4
+            .offset_units
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty());
     }
 
     /// One node of the #590 hidden-reason fixture: a role number, a state

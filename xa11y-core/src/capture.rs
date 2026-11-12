@@ -227,14 +227,17 @@ impl CaptureOptions {
     }
 }
 
-/// Which limits dropped something. A limit that was reached without dropping
-/// anything (a tree of exactly `max_nodes` nodes) is not reported.
+/// Which limits dropped something. A depth limit that dropped nothing is not
+/// reported. The node limit is reported once the capture is full while nodes
+/// whose children were never read remain: those children are not read just
+/// to learn whether there are any, so a tree of exactly `max_nodes` nodes
+/// can report it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Truncation {
     /// Children below `max_depth` were left out.
     pub by_depth: bool,
-    /// Nodes past `max_nodes` were left out.
+    /// The capture filled `max_nodes` with children left out or unread.
     pub by_nodes: bool,
     /// Text past `max_text_bytes` was left out.
     pub by_text: bool,
@@ -378,8 +381,8 @@ pub struct CapturedNode {
     /// Indices of the children in the capture, in platform order.
     pub children: Vec<usize>,
     /// How many children the node has, including ones the capture left
-    /// out. `None` when they were not read (a failed read, or the time
-    /// budget ran out first).
+    /// out. `None` when they were not read (a failed read, or the time or
+    /// node budget ran out first).
     pub children_count: Option<usize>,
     /// Whether children of this node are missing from the capture: cut by a
     /// limit, or not read at all.
@@ -560,6 +563,17 @@ fn walk(
             }
             break;
         }
+        // A full capture reads no more children: a read lists every child a
+        // node has, so reading past the budget would cost the platform calls
+        // the budget exists to bound (a 100k-row table under the last node
+        // the capture kept). The unread nodes say so, as the time budget's do.
+        if raw.len() >= options.max_nodes {
+            truncated.by_nodes = true;
+            for j in std::iter::once(i).chain(queue.drain(..)) {
+                raw[j].children_truncated = true;
+            }
+            break;
+        }
         stats.children_reads += 1;
         let read = match root_children.take() {
             Some(read_root) => read_root(),
@@ -570,8 +584,12 @@ fn walk(
         let read = crate::deadline::distrust(read);
         let kids = match read {
             Ok(kids) => kids,
-            // The node went away between being listed and being read.
-            Err(Error::ElementStale { .. }) if i != 0 => {
+            // The node went away between being listed and being read. An
+            // eviction is not that: the node may still exist, and the walk's
+            // own reads pushed its handle out, so it is a failed read.
+            Err(Error::ElementStale { reason, .. })
+                if i != 0 && reason != crate::error::StaleReason::Evicted =>
+            {
                 raw[i].vanished = true;
                 vanished += 1;
                 continue;
@@ -702,8 +720,10 @@ fn read_texts(
             why.mark(truncated);
             return;
         }
-        let text = match node.element.text() {
-            Ok(text) => text,
+        // The length read proves the interface exists and is the length
+        // `read_text` needs: one read, which on GTK fetches the whole text.
+        let length = match node.element.provider().text_length(node.element.data()) {
+            Ok(length) => length,
             // No text interface: nothing to read, not a failure.
             Err(Error::ActionNotSupported { .. }) => continue,
             Err(e) => {
@@ -711,8 +731,9 @@ fn read_texts(
                 continue;
             }
         };
+        let text = crate::text_api::Text::for_fresh_element(node.element.clone());
         stats.text_reads += 1;
-        let mut captured = match read_text(&text, left.bytes) {
+        let mut captured = match read_text(&text, length, left.bytes) {
             Ok(captured) => captured,
             Err(e) => {
                 node.fail(CaptureStep::Text, e);
@@ -742,8 +763,7 @@ fn read_texts(
 }
 
 /// Read `text` from offset 0, in at most `max_bytes` bytes of UTF-8.
-fn read_text(text: &crate::text_api::Text, max_bytes: usize) -> Result<CapturedText> {
-    let length = text.length()?;
+fn read_text(text: &crate::text_api::Text, length: u32, max_bytes: usize) -> Result<CapturedText> {
     if length == 0 {
         return Ok(CapturedText {
             content: String::new(),
@@ -962,24 +982,45 @@ mod tests {
         let shallower_in_full = full.nodes.iter().filter(|n| n.depth < max_depth).count();
         let shallower_here = cap.nodes.iter().filter(|n| n.depth < max_depth).count();
         assert_eq!(shallower_here, shallower_in_full);
-        // The cut nodes say so and keep their real child count.
+        // The cut nodes say so: a node read before the capture filled keeps
+        // its real child count, and one never read has none.
         let cut: Vec<&CapturedNode> = cap.nodes.iter().filter(|n| n.children_truncated).collect();
         assert!(!cut.is_empty());
         for node in cut {
-            assert!(node.children_count.expect("counted") > node.children.len());
+            match node.children_count {
+                Some(count) => assert!(count > node.children.len()),
+                None => assert!(node.children.is_empty()),
+            }
         }
     }
 
     #[test]
-    fn a_limit_that_drops_nothing_is_not_reported() {
+    fn a_full_capture_reads_no_more_children() {
+        // Each read lists a node's every child, so the budget bounds reads,
+        // not only what the capture keeps.
+        for max in 1..=4 {
+            let cap = app(build_provider())
+                .capture(&CaptureOptions::new().max_nodes(max))
+                .expect("capture");
+            assert!(cap.nodes.len() <= max);
+            assert!(
+                cap.stats.children_reads <= max,
+                "{} reads for a budget of {max}",
+                cap.stats.children_reads
+            );
+        }
+    }
+
+    #[test]
+    fn a_capture_with_room_to_spare_is_not_truncated() {
         let full = app(build_provider())
             .capture(&CaptureOptions::new())
             .expect("capture");
-        let exact = app(build_provider())
-            .capture(&CaptureOptions::new().max_nodes(full.nodes.len()))
+        let roomy = app(build_provider())
+            .capture(&CaptureOptions::new().max_nodes(full.nodes.len() + 1))
             .expect("capture");
-        assert!(!exact.truncated.by_nodes);
-        assert_eq!(exact.nodes.len(), full.nodes.len());
+        assert!(!roomy.truncated.by_nodes);
+        assert_eq!(roomy.nodes.len(), full.nodes.len());
     }
 
     #[test]
@@ -1001,6 +1042,27 @@ mod tests {
             .capture(&CaptureOptions::new().max_nodes(0))
             .expect_err("refused");
         assert!(matches!(err, Error::InvalidActionData { .. }), "{err}");
+    }
+
+    #[test]
+    fn an_evicted_handle_is_a_failed_read_not_a_vanished_node() {
+        let provider = build_provider();
+        provider.fail_children(
+            "Navigation",
+            Error::stale(crate::StaleReason::Evicted, "toolbar"),
+        );
+        let cap = app(provider)
+            .capture(&CaptureOptions::new())
+            .expect("capture");
+        assert_eq!(cap.vanished, 0);
+        let nav = cap
+            .nodes
+            .iter()
+            .find(|n| n.name.as_deref() == Some("Navigation"))
+            .expect("an evicted node stays in the capture");
+        assert_eq!(nav.errors.len(), 1);
+        assert_eq!(nav.errors[0].step, CaptureStep::Children);
+        assert!(nav.children_truncated);
     }
 
     #[test]

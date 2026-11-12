@@ -356,11 +356,13 @@ test('the table and text unions survive the build', () => {
   for (const decl of [
     "export type CountValue = number | 'unknown';",
     "export type HeaderKindName = 'column' | 'row';",
+    "export type CellKindName = 'data' | 'column_header' | 'row_header';",
     "export type TextUnitName = 'character' | 'word' | 'line' | 'paragraph';",
     "export type TextScriptName = 'baseline' | 'superscript' | 'subscript';",
     '  rowCount: CountValue | null',
     '  size: CountValue | null',
     '  header: HeaderKindName | null',
+    '  kind: CellKindName | null',
     '  script: TextScriptName | null',
     '  rangeAt(offset: number, unit: TextUnitName): Promise<TextRange>',
     '  selectText(startOrRange: number | TextRange, end?: number | null): Promise<void>',
@@ -369,7 +371,7 @@ test('the table and text unions survive the build', () => {
   }
   assert.doesNotMatch(native, /: Count \| null/, 'the dangling `Count` alias leaked through');
   const index = readFileSync(join(ROOT, 'index.d.ts'), 'utf8');
-  for (const name of ['CountValue', 'HeaderKindName', 'TextUnitName', 'TextScriptName', 'TextRange']) {
+  for (const name of ['CountValue', 'CellKindName', 'HeaderKindName', 'TextUnitName', 'TextScriptName', 'TextRange']) {
     assert.match(index, new RegExp(`^\\s*${name},$`, 'm'), `index.d.ts must export ${name}`);
   }
 });

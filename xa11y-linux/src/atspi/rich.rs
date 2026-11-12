@@ -11,9 +11,10 @@
 //!   the rows that exist; the attribute is the size of the data set, which
 //!   is what [`TableInfo`] reports when a virtualized grid has both.
 //! - `TableCell.GetRowColumnSpan` → [`CellInfo`] row, column and spans.
-//! - The `column header` / `row header` roles → [`CellInfo::header`]. GTK 3
-//!   tree-view column headers have the role but no `TableCell` interface, so
-//!   they carry a header kind and no position.
+//! - The cell's role → [`CellInfo::kind`] ([`cell_kind_for`]): the header
+//!   roles are header cells, `table cell` is a data cell, and any other role
+//!   leaves the kind unreported. GTK 3 tree-view column headers have the role
+//!   but no `TableCell` interface, so they carry a kind and no position.
 //! - Object attributes `posinset` / `setsize` / `level` (1-based, as in ARIA)
 //!   → [`CollectionInfo`], read for every role that can be a set member
 //!   ([`is_collection_role`]).
@@ -50,8 +51,8 @@ use xa11y_core::text_api::{
     TextAttributeParts, TextRange, TextRun, TextUnit,
 };
 use xa11y_core::{
-    CellInfo, CellParts, CollectionInfo, CollectionParts, Count, HeaderKind, RowInfo, TableInfo,
-    TableParts,
+    CellInfo, CellKind, CellParts, CollectionInfo, CollectionParts, Count, HeaderKind, RowInfo,
+    TableInfo, TableParts,
 };
 
 use super::*;
@@ -92,14 +93,20 @@ pub(crate) fn offset_unit_for(toolkit: Option<&str>) -> OffsetUnit {
 /// event subscription, which reads every sender's unit: an application that
 /// exits between being found and being asked has no events to interpret,
 /// and must not fail the whole subscription.
+///
+/// A peer that does not answer fails with `on_timeout()`, the caller's
+/// unresponsive-peer [`Error::Timeout`], like every other read that names a
+/// hung application.
 pub(crate) fn read_offset_unit_unless_gone(
     proxy: &Proxy<'_>,
     bus: &str,
+    on_timeout: impl FnOnce() -> Error,
 ) -> Result<Option<OffsetUnit>> {
     let toolkit = match proxy.get_property::<String>("ToolkitName") {
         Ok(name) => Some(name),
         Err(e) if is_property_absent(&e) => None,
         Err(e) if crate::atspi::is_gone(&e) => return Ok(None),
+        Err(e) if is_timeout(&e) => return Err(on_timeout()),
         Err(e) => {
             return Err(Error::Platform {
                 code: -1,
@@ -113,11 +120,13 @@ pub(crate) fn read_offset_unit_unless_gone(
     Ok(Some(offset_unit_for(toolkit.as_deref())))
 }
 
-/// The header kind an AT-SPI role names, if any.
-pub(super) fn header_kind_for(role_num: u32, role_name: &str) -> Option<HeaderKind> {
+/// The cell kind an AT-SPI role names: a header role is a header cell,
+/// `table cell` is a data cell, and any other role says nothing.
+pub(super) fn cell_kind_for(role_num: u32, role_name: &str) -> Option<CellKind> {
     match (role_num, role_name) {
-        (10, _) | (_, "column header" | "table column header") => Some(HeaderKind::Column),
-        (47, _) | (_, "row header" | "table row header") => Some(HeaderKind::Row),
+        (10 | 57, _) | (_, "column header" | "table column header") => Some(CellKind::ColumnHeader),
+        (47 | 58, _) | (_, "row header" | "table row header") => Some(CellKind::RowHeader),
+        (56, _) | (_, "table cell") => Some(CellKind::Data),
         _ => None,
     }
 }
@@ -130,7 +139,9 @@ pub(super) fn collection_from_attributes(
     let int = |key: &str| attrs.get(key).and_then(|v| v.trim().parse::<i64>().ok());
     let info: CollectionInfo = CollectionParts {
         index: int("posinset").and_then(index_from_one_based),
-        size: int("setsize").map(Count::from_signed),
+        // `setsize` 0 is how a toolkit leaves the size unset (macOS and
+        // Windows read 0 the same way): a member makes a set of at least one.
+        size: int("setsize").filter(|&n| n != 0).map(Count::from_signed),
         depth: int("level").and_then(index_from_one_based),
     }
     .into();
@@ -403,16 +414,28 @@ fn live_ref(bus_name: String, path: String) -> Option<AccessibleRef> {
     }
 }
 
+impl LinuxProvider {
+    /// [`call_failed`], except that a peer that did not answer is the
+    /// unresponsive-peer [`Error::Timeout`] (the deadline's expiry, when the
+    /// caller's deadline cut the call), as every other read reports it.
+    fn rich_call_failed(&self, aref: &AccessibleRef, what: &str, e: zbus::Error) -> Error {
+        if is_timeout(&e) {
+            self.unresponsive_peer(aref, what)
+        } else {
+            Error::Platform {
+                code: -1,
+                message: format!("{what} on {}{} failed: {e}", aref.bus_name, aref.path),
+            }
+        }
+    }
+}
+
 fn call_failed(what: &str, e: zbus::Error) -> Error {
     Error::Platform {
         code: -1,
         message: format!("{what} failed: {e}"),
     }
 }
-
-/// Most header objects [`LinuxProvider::rich_table_headers`] asks for, one per
-/// row or column, before refusing.
-const MAX_HEADER_PROBES: i32 = 1000;
 
 /// The `org.a11y.atspi.Text` calls the text layer makes, in the toolkit's
 /// native offset unit. A trait so the offset arithmetic, and how much text
@@ -892,10 +915,11 @@ impl<S: TextSource> TextAccess<S> {
         }
     }
 
-    /// The attribute run at UTF-16 `offset`. An offset on the second half
-    /// of a surrogate pair answers for the pair, as [`Self::range_at`] does,
-    /// for both toolkits: GTK's code-point conversion would otherwise refuse
-    /// it while Qt's UTF-16 offsets pass it through.
+    /// The attribute run at UTF-16 `offset`. The cross-platform contract
+    /// refuses, with [`Error::InvalidTextRange`], an offset on the second
+    /// half of a surrogate pair (it names no character) and one at or past
+    /// the end of the text, for both toolkits alike: Qt's UTF-16 offsets
+    /// would otherwise pass a split pair through.
     fn run_at(&self, offset: u32) -> Result<TextRun> {
         let past_end = |length: Option<u32>| Error::InvalidTextRange {
             start: offset,
@@ -903,18 +927,22 @@ impl<S: TextSource> TextAccess<S> {
             length,
             message: "no text at or after this offset".to_string(),
         };
+        let splits = |length: Option<u32>| Error::InvalidTextRange {
+            start: offset,
+            end: offset,
+            length,
+            message: "offset splits a surrogate pair".to_string(),
+        };
         let (native, prefix) = match self.unit {
             OffsetUnit::Utf16 => {
                 let len = self.utf16_count()?;
                 if offset >= len {
                     return Err(past_end(Some(len)));
                 }
-                let at = if self.splits_pair(offset, len)? {
-                    offset - 1
-                } else {
-                    offset
-                };
-                (to_i32(at, Some(len))?, None)
+                if self.splits_pair(offset, len)? {
+                    return Err(splits(Some(len)));
+                }
+                (to_i32(offset, Some(len))?, None)
             }
             OffsetUnit::CodePoints => {
                 let p = self.prefix_covering(offset.saturating_add(1))?;
@@ -929,8 +957,10 @@ impl<S: TextSource> TextAccess<S> {
                     .encode_utf16()
                     .nth(offset as usize)
                     .is_some_and(|u| (0xDC00..=0xDFFF).contains(&u));
-                let at = if low_half { offset - 1 } else { offset };
-                let n = utf16_to_char_offset(&p.text, at).map_err(|e| p.fix(e))?;
+                if low_half {
+                    return Err(splits(p.length()));
+                }
+                let n = utf16_to_char_offset(&p.text, offset).map_err(|e| p.fix(e))?;
                 (to_i32(n, p.length())?, Some(p))
             }
         };
@@ -974,34 +1004,43 @@ impl LinuxProvider {
         // Like the rest of the snapshot, a failed read leaves its field
         // absent, but the failure is logged rather than dropped: a signature
         // mismatch would otherwise read as "not a cell" (issue #650).
+        // A timeout is logged at warn level: a field missing because the
+        // application did not answer is not a field the platform lacks.
+        // Under a caller's deadline the cut is also recorded on it, and core
+        // discards the whole snapshot (`deadline::distrust`), so a deadline
+        // expiry never reaches the caller as a missing field.
         let unread = |what: &str, e: Error| {
-            log::debug!("{what} of {}{} unread: {e}", aref.bus_name, aref.path);
+            if matches!(e, Error::Timeout { .. }) {
+                log::warn!("{what} of {}{} unread: {e}", aref.bus_name, aref.path);
+            } else {
+                log::debug!("{what} of {}{} unread: {e}", aref.bus_name, aref.path);
+            }
         };
-        let header = header_kind_for(role_num, role_name);
-        // The header kind comes from the role, so it stands whether or not
+        let kind = cell_kind_for(role_num, role_name);
+        // The cell kind comes from the role, so it stands whether or not
         // the position can be read.
-        let header_only = || {
-            header.map(|h| {
+        let kind_only = || {
+            kind.map(|k| {
                 CellParts {
                     row: None,
                     column: None,
                     row_span: None,
                     column_span: None,
-                    header: Some(h),
+                    kind: Some(k),
                 }
                 .into()
             })
         };
         let cell = if ifaces.table_cell {
-            match self.read_cell_info(aref, header) {
+            match self.read_cell_info(aref, kind) {
                 Ok(cell) => cell,
                 Err(e) => {
                     unread("TableCell.GetRowColumnSpan", e);
-                    header_only()
+                    kind_only()
                 }
             }
         } else {
-            header_only()
+            kind_only()
         };
         // One GetAttributes read serves the collection position, the document
         // semantics (#476) and a table's declared totals, and only for nodes
@@ -1091,22 +1130,27 @@ impl LinuxProvider {
     ) -> Result<Option<TableInfo>> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Table")?;
         // Each count is its own field: one that fails is logged and left
-        // absent without hiding the other.
-        let count = |attr: &str, p: &str| {
+        // absent without hiding the other. A peer that does not answer is
+        // the exception, returned as the unresponsive-peer timeout: asking
+        // it the second count would wait out another timeout.
+        let count = |attr: &str, p: &str| -> Result<Option<Count>> {
             if let Some(declared) = attrs.and_then(|a| declared_count(a, attr)) {
-                return Some(declared);
+                return Ok(Some(declared));
             }
             match proxy.get_property::<i32>(p) {
-                Ok(n) => Some(Count::from_signed(n.into())),
+                Ok(n) => Ok(Some(Count::from_signed(n.into()))),
+                Err(e) if is_timeout(&e) => {
+                    Err(self.unresponsive_peer(aref, &format!("Table.{p}")))
+                }
                 Err(e) => {
                     log::debug!("Table.{p} of {}{} unread: {e}", aref.bus_name, aref.path);
-                    None
+                    Ok(None)
                 }
             }
         };
         let info: TableInfo = TableParts {
-            row_count: count("rowcount", "NRows"),
-            column_count: count("colcount", "NColumns"),
+            row_count: count("rowcount", "NRows")?,
+            column_count: count("colcount", "NColumns")?,
         }
         .into();
         Ok((!info.is_empty()).then_some(info))
@@ -1115,12 +1159,16 @@ impl LinuxProvider {
     fn read_cell_info(
         &self,
         aref: &AccessibleRef,
-        header: Option<HeaderKind>,
+        kind: Option<CellKind>,
     ) -> Result<Option<CellInfo>> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.TableCell")?;
-        let reply = proxy
-            .call_method("GetRowColumnSpan", &())
-            .map_err(|e| call_failed("TableCell.GetRowColumnSpan", e))?;
+        let reply = proxy.call_method("GetRowColumnSpan", &()).map_err(|e| {
+            if is_timeout(&e) {
+                self.unresponsive_peer(aref, "TableCell.GetRowColumnSpan")
+            } else {
+                call_failed("TableCell.GetRowColumnSpan", e)
+            }
+        })?;
         let (row, column, row_span, column_span): (i32, i32, i32, i32) =
             reply.body().deserialize().map_err(|e| Error::Platform {
                 code: -1,
@@ -1133,7 +1181,7 @@ impl LinuxProvider {
             column: index(column),
             row_span: span(row_span),
             column_span: span(column_span),
-            header,
+            kind,
         }
         .into();
         Ok((!info.is_empty()).then_some(info))
@@ -1232,7 +1280,7 @@ impl LinuxProvider {
         };
         let n: i32 = proxy
             .get_property(count_prop)
-            .map_err(|e| call_failed(count_prop, e))?;
+            .map_err(|e| self.rich_call_failed(&aref, &format!("Table.{count_prop}"), e))?;
         // A negative count is "unknown" (virtualized content): there is no
         // range to probe, and an empty answer would read as "no headers".
         if n < 0 {
@@ -1243,20 +1291,15 @@ impl LinuxProvider {
                 ),
             });
         }
-        if n > MAX_HEADER_PROBES {
-            return Err(Error::Unsupported {
-                feature: format!(
-                    "{method} over {n} {}s: more than {MAX_HEADER_PROBES}; read the headers \
-                     of individual cells with column_header_cells / row_header_cells",
-                    kind.to_snake_case()
-                ),
-            });
-        }
+        // One probe per row or column, with no cap: a large table is not
+        // an unsupported one. Each probe is bounded by the caller's open
+        // deadline (`bounded::Proxy`), which is what ends a walk that runs
+        // too long, as a timeout naming the probe it cut.
         let mut refs = Vec::new();
-        for i in 0..n.max(0) {
+        for i in 0..n {
             let reply = proxy
                 .call_method(method, &(i,))
-                .map_err(|e| call_failed(method, e))?;
+                .map_err(|e| self.rich_call_failed(&aref, &format!("Table.{method}({i})"), e))?;
             if let Some(r) = object_ref(reply, method)? {
                 // A header spanning several columns is returned once per column.
                 if !refs
@@ -1301,21 +1344,16 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Selection")?;
         let n: i32 = proxy
             .get_property("NSelectedChildren")
-            .map_err(|e| call_failed("Selection.NSelectedChildren", e))?;
+            .map_err(|e| self.rich_call_failed(&aref, "Selection.NSelectedChildren", e))?;
         // Each item is a full element build (about ten round trips), so a
-        // select-all over a large view is refused rather than walked.
-        if n > MAX_HEADER_PROBES {
-            return Err(Error::Unsupported {
-                feature: format!(
-                    "selected_items over {n} selected children: more than {MAX_HEADER_PROBES}"
-                ),
-            });
-        }
+        // select-all over a large view is slow, but it is not unsupported:
+        // there is no cap, and the caller's open deadline (`bounded::Proxy`)
+        // is what ends a walk that runs too long.
         let mut refs = Vec::new();
         for i in 0..n.max(0) {
-            let reply = proxy
-                .call_method("GetSelectedChild", &(i,))
-                .map_err(|e| call_failed("Selection.GetSelectedChild", e))?;
+            let reply = proxy.call_method("GetSelectedChild", &(i,)).map_err(|e| {
+                self.rich_call_failed(&aref, &format!("Selection.GetSelectedChild({i})"), e)
+            })?;
             if let Some(r) = object_ref(reply, "Selection.GetSelectedChild")? {
                 refs.push(r);
             }
@@ -1340,7 +1378,16 @@ impl LinuxProvider {
             return Ok(*unit);
         }
         let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application")?;
-        let Some(unit) = read_offset_unit_unless_gone(&proxy, bus)? else {
+        let Some(unit) = read_offset_unit_unless_gone(&proxy, bus, || {
+            self.unresponsive_peer(
+                &AccessibleRef {
+                    bus_name: bus.to_owned(),
+                    path: APP_ROOT_PATH.to_owned(),
+                },
+                "Application.ToolkitName",
+            )
+        })?
+        else {
             return Err(self.gone(aref, xa11y_core::error::stale_subject(element)));
         };
         let mut units = self
@@ -1368,12 +1415,26 @@ impl LinuxProvider {
         self.text_access(element)?.length()
     }
 
+    /// The caret, per the `Text::caret` contract: `None` unless the element
+    /// is focused (AT-SPI keeps a `CaretOffset` on every text object, focused
+    /// or not, which is where the last caret was rather than a caret). When
+    /// it is focused, `CaretOffset` is the insertion point, or with a range
+    /// selected the selection's active end, which is what the contract
+    /// reports. A negative `CaretOffset` is AT-SPI's "no caret".
     pub(super) fn rich_text_caret(&self, element: &ElementData) -> Result<Option<u32>> {
         let t = self.text_access(element)?;
+        let aref = self.get_cached(element.handle)?;
+        let Some(bits) = self.scan_state_bits(&aref)? else {
+            return Err(self.gone(&aref, xa11y_core::error::stale_subject(element)));
+        };
+        const FOCUSED: u64 = 1 << 12;
+        if bits & FOCUSED == 0 {
+            return Ok(None);
+        }
         let caret: i32 = t
             .source
             .get_property("CaretOffset")
-            .map_err(|e| call_failed("Text.CaretOffset", e))?;
+            .map_err(|e| self.rich_call_failed(&aref, "Text.CaretOffset", e))?;
         if caret < 0 {
             return Ok(None);
         }
@@ -1468,9 +1529,24 @@ impl LinuxProvider {
                          window's screen origin is unknown: {reason}"
                         ),
                     })?;
-            match (x.checked_add(ox), y.checked_add(oy)) {
-                (Some(x), Some(y)) => extents_to_rect(x, y, w, h),
-                _ => None,
+            // Logical window-relative extents onto a device-pixel origin;
+            // see `gtk4_window_rect_to_screen`.
+            match extents_to_rect(x, y, w, h) {
+                Some(window_rect) => Some(
+                    gtk4_window_rect_to_screen(
+                        window_rect,
+                        (ox, oy),
+                        crate::scale::coordinate_scale(),
+                    )
+                    .ok_or_else(|| Error::Platform {
+                        code: -1,
+                        message: format!(
+                            "GTK 4 text extents ({x}, {y}) overflow when offset by the \
+                             window origin ({ox}, {oy})"
+                        ),
+                    })?,
+                ),
+                None => None,
             }
         } else {
             extents_to_rect(x, y, w, h)
@@ -1605,13 +1681,16 @@ mod tests {
     }
 
     #[test]
-    fn header_roles() {
-        assert_eq!(header_kind_for(10, ""), Some(HeaderKind::Column));
+    fn cell_kind_roles() {
+        assert_eq!(cell_kind_for(10, ""), Some(CellKind::ColumnHeader));
+        assert_eq!(cell_kind_for(57, ""), Some(CellKind::ColumnHeader));
+        assert_eq!(cell_kind_for(58, ""), Some(CellKind::RowHeader));
         assert_eq!(
-            header_kind_for(0, "table row header"),
-            Some(HeaderKind::Row)
+            cell_kind_for(0, "table row header"),
+            Some(CellKind::RowHeader)
         );
-        assert_eq!(header_kind_for(56, "table cell"), None);
+        assert_eq!(cell_kind_for(56, "table cell"), Some(CellKind::Data));
+        assert_eq!(cell_kind_for(91, "tree item"), None);
     }
 
     #[test]
@@ -1646,6 +1725,13 @@ mod tests {
             (Some(2), Some(Count::Unknown), Some(1))
         );
         assert!(collection_from_attributes(&HashMap::new()).is_none());
+        // `setsize` 0 is unset, not an empty set, as on macOS and Windows.
+        let unset: HashMap<String, String> = [("posinset", "1"), ("setsize", "0")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let c = collection_from_attributes(&unset).unwrap();
+        assert_eq!((c.index, c.size), (Some(0), None));
     }
 
     #[test]

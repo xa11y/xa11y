@@ -566,7 +566,9 @@ pub trait Provider: Send + Sync {
         Err(unsupported("text_length"))
     }
 
-    /// The caret offset, `None` when the element has no caret.
+    /// The caret offset, `None` when the element has no caret. See
+    /// [`crate::text_api::Text::caret`] for the contract every backend keeps:
+    /// `None` when unfocused, the active end of a selection.
     fn text_caret(&self, _element: &ElementData) -> Result<Option<u32>> {
         Err(unsupported("text_caret"))
     }
@@ -646,8 +648,13 @@ pub trait Provider: Send + Sync {
     // ── Identity and liveness ───────────────────────────────────────
 
     /// Capability table for this provider instance and its selected backend.
+    ///
+    /// The default fails with [`Error::Unsupported`]: a provider that does
+    /// not say what it supports must not inherit the host platform's answers,
+    /// which describe a different backend. The built-in backends answer with
+    /// [`crate::Capabilities::current`] or a narrower table of their own.
     fn capabilities(&self) -> Result<crate::Capabilities> {
-        crate::Capabilities::current()
+        Err(unsupported("capabilities"))
     }
 
     /// The platform identity of `element`'s node, for equality (see

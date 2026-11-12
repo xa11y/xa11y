@@ -67,7 +67,15 @@ impl RefTable {
     }
 
     /// Hold `capture`'s refs, dropping the oldest capture past the bound.
+    ///
+    /// A capture that issued no refs is not held: the table keeps the refs
+    /// of the last [`MAX_CAPTURES`] results *that returned elements*, so an
+    /// empty `find`, `windows` or `relations` result must not evict an older
+    /// result's refs. Its id is simply never used.
     pub(crate) fn keep(&self, capture: Capture) {
+        if capture.elements.is_empty() {
+            return;
+        }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.captures.push_back((capture.id, capture.elements));
         while state.captures.len() > MAX_CAPTURES {
@@ -145,7 +153,8 @@ mod tests {
         table.keep(first);
         assert!(table.resolve(&r).is_ok());
         for _ in 0..MAX_CAPTURES {
-            let c = table.begin();
+            let mut c = table.begin();
+            c.add(&element());
             table.keep(c);
         }
         match table.resolve(&r) {
@@ -154,6 +163,28 @@ mod tests {
                 assert_eq!(kept.len(), MAX_CAPTURES);
                 assert_eq!(kept[0], "c2");
             }
+            other => panic!("expected RefExpired, got {:?}", other.err()),
+        }
+    }
+
+    #[test]
+    fn a_result_without_elements_evicts_nothing() {
+        let table = RefTable::default();
+        let mut first = table.begin();
+        let r = first.add(&element());
+        table.keep(first);
+        for _ in 0..MAX_CAPTURES * 2 {
+            let empty = table.begin();
+            table.keep(empty);
+        }
+        assert!(
+            table.resolve(&r).is_ok(),
+            "empty results must not age refs out"
+        );
+        // The empty captures are not held, so their ids are expired, not
+        // "never issued" indexes into a held capture.
+        match table.resolve("c2:0") {
+            Err(CliError::RefExpired { kept, .. }) => assert_eq!(kept, vec!["c1".to_string()]),
             other => panic!("expected RefExpired, got {:?}", other.err()),
         }
     }
@@ -196,7 +227,8 @@ mod tests {
         ));
         // An issued ref whose capture aged out is still `ref_expired`.
         for _ in 0..MAX_CAPTURES {
-            let c = table.begin();
+            let mut c = table.begin();
+            c.add(&element());
             table.keep(c);
         }
         assert!(matches!(

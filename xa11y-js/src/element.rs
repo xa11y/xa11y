@@ -102,9 +102,10 @@ impl Element {
     }
 
     /// Platform-assigned identifier that is stable across queries for the
-    /// same element while its app runs. On Linux, and for Windows top-level
-    /// windows (identified by a window handle), it changes when the app
-    /// restarts. Not available on every platform / every widget.
+    /// same element while its app runs. On Linux, and on Windows for an
+    /// element with a window of its own (identified by its window handle),
+    /// it changes when the app restarts. Not available on every platform /
+    /// every widget.
     #[napi(getter)]
     pub fn stable_id(&self) -> Option<String> {
         self.data.stable_id.clone()

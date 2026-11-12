@@ -34,6 +34,12 @@ const STATE_ADD: u32 = 1;
 /// ICCCM `CurrentTime`. A window manager forwarding `WM_DELETE_WINDOW` stamps
 /// it with the triggering event's time; xa11y has no triggering event.
 const CURRENT_TIME: u32 = 0;
+/// How long `activate` waits for the window manager to report the window
+/// active before calling the request refused. Window managers apply it within
+/// a frame or two; the caller's deadline shortens it further.
+const ACTIVATE_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// How often `activate` re-reads `_NET_ACTIVE_WINDOW` while it waits.
+const ACTIVATE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Snapshot-side native window facts. A missing action is not advertised;
 /// direct calls still return the backend's precise unsupported or identity
@@ -1527,13 +1533,71 @@ impl X11WindowBackend {
         })
     }
 
+    /// Ask the window manager to activate the window, then confirm it did.
+    ///
+    /// `_NET_ACTIVE_WINDOW` is a request the window manager may refuse
+    /// (focus-stealing prevention) without replying, so the send alone says
+    /// nothing. The root's `_NET_ACTIVE_WINDOW` is polled until it names this
+    /// window, for at most [`ACTIVATE_CONFIRM_TIMEOUT`] and never past the
+    /// caller's open deadline; a window that never becomes active is a
+    /// refusal, reported as [`Error::Platform`] (an unsupported request is
+    /// `Unsupported`, from `require`, and the two stay distinct). Its
+    /// delivery is `Unknown`: the request reached the window manager, which
+    /// may still apply it late.
     fn activate(&self, element: &ElementData) -> Result<()> {
         self.require(self.atoms.net_active_window, "activate")?;
-        self.send_for(
-            element,
+        let window = self.with_server_grab(|conn| {
+            let window = self.resolve(conn, element)?;
+            send_client_message(
+                conn,
+                self.root,
+                window,
+                self.atoms.net_active_window,
+                [SOURCE_APPLICATION, 0, 0, 0, 0],
+            )?;
+            conn.flush().map_err(platform)?;
+            Ok(window)
+        })?;
+        let budget = xa11y_core::Deadline::current().map_or(ACTIVATE_CONFIRM_TIMEOUT, |d| {
+            d.remaining().min(ACTIVATE_CONFIRM_TIMEOUT)
+        });
+        let until = std::time::Instant::now() + budget;
+        loop {
+            let active = self.active_window()?;
+            if active == Some(window) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= until {
+                let now = match active {
+                    Some(other) => format!("{other:#x}"),
+                    None => "no window".to_string(),
+                };
+                return Err(Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "activate: the window manager did not make window {window:#x} active \
+                         within {budget:?} of the _NET_ACTIVE_WINDOW request (it may refuse \
+                         activation, e.g. focus-stealing prevention); _NET_ACTIVE_WINDOW names \
+                         {now}"
+                    ),
+                });
+            }
+            std::thread::sleep(ACTIVATE_POLL_INTERVAL);
+        }
+    }
+
+    /// The root's `_NET_ACTIVE_WINDOW`, `None` when it names no window.
+    fn active_window(&self) -> Result<Option<Window>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(property_u32(
+            &conn,
+            self.root,
             self.atoms.net_active_window,
-            [SOURCE_APPLICATION, 0, 0, 0, 0],
-        )
+            AtomEnum::WINDOW.into(),
+        )?
+        .first()
+        .copied()
+        .filter(|&window| window != 0))
     }
 
     fn minimize(&self, element: &ElementData) -> Result<()> {
@@ -2814,6 +2878,21 @@ mod tests {
             .expect("move B")
             .check()
             .expect("B moved");
+        // No window manager runs here to apply the request, and `activate`
+        // confirms it through the root's `_NET_ACTIVE_WINDOW`. Name A there
+        // as a window manager would; the ClientMessage read below is what
+        // proves which window the request targeted.
+        observer
+            .change_property32(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                root,
+                atoms.net_active_window,
+                x11rb::protocol::xproto::AtomEnum::WINDOW,
+                &[a],
+            )
+            .expect("set active window")
+            .check()
+            .expect("active window stored");
         observer.flush().expect("flush movement");
         backend
             .activate(&retained_a)

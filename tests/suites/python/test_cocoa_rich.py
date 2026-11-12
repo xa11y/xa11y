@@ -231,10 +231,12 @@ def test_runs_tile_and_report_the_formatting(rich):
 
 def test_select_text_takes_utf16_offsets(rich):
     text = rich.text()
+    # A caret belongs to the focused text element; unfocused, it is None.
+    rich.focus()
     rich.select_text(12, 14)
     assert text.selections() == [r(12, 14)]
-    # AX reports the insertion point as an empty selection, so a selected
-    # range means no caret.
+    # AX reports a selected range without saying which end is active, so a
+    # selected range means no caret.
     assert text.caret() is None
 
     rich.select_text(r(49, LENGTH))

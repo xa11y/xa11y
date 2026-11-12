@@ -46,9 +46,11 @@ test('cell getter reports position, spans and header kind', async () => {
     column: 1,
     rowSpan: 1,
     columnSpan: 2,
+    kind: 'column_header',
     header: 'column',
   });
   assert.equal((await one('table_cell[name="Widget"]')).cell.header, 'row');
+  assert.equal((await one('table_cell[name="Widget"]')).cell.kind, 'row_header');
   // A data cell has no header kind, and an unreported span stays null
   // rather than being defaulted to 1.
   assert.deepEqual((await one('table_cell[name="3.00"]')).cell, {
@@ -56,6 +58,7 @@ test('cell getter reports position, spans and header kind', async () => {
     column: 1,
     rowSpan: null,
     columnSpan: null,
+    kind: 'data',
     header: null,
   });
 });

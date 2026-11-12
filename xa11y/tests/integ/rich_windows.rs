@@ -35,7 +35,7 @@ fn windows_rich_tables_and_headers() {
     assert_eq!(columns.len(), 2);
     assert!(columns.iter().all(|e| e
         .cell
-        .is_some_and(|c| c.header == Some(xa11y::table::HeaderKind::Column))));
+        .is_some_and(|c| c.header() == Some(xa11y::table::HeaderKind::Column))));
     assert_eq!(
         app.locator(r#"table[name="Rich grid"] table_cell[header="column"]"#)
             .elements()

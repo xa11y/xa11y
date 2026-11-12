@@ -373,14 +373,21 @@ const FIND_CHUNK: u32 = 16 * 1024;
 
 #[derive(Clone)]
 enum Source {
+    /// Revalidated before every read, so a platform id that now names
+    /// another node fails with `ElementStale` rather than reading it.
     Element(Element),
+    /// Read without revalidating: the caller read the element moments ago
+    /// and owns the staleness question (a capture, which records a stale
+    /// node itself).
+    Fresh(Element),
     Locator(Locator),
 }
 
 /// Text of one element, read by range.
 ///
-/// Returned by [`Element::text`] (bound to that element: a re-rendered
-/// control fails with [`Error::ElementStale`]) and [`Locator::text`]
+/// Returned by [`Element::text`] (bound to that element: every read first
+/// checks that the element is still the one it was, so a removed or
+/// re-rendered control fails with [`Error::ElementStale`]) and [`Locator::text`]
 /// (re-resolved on every call, waiting until the selector matches; reads do
 /// not require the element to be visible or enabled).
 ///
@@ -398,6 +405,12 @@ impl Text {
         }
     }
 
+    pub(crate) fn for_fresh_element(element: Element) -> Self {
+        Self {
+            source: Source::Fresh(element),
+        }
+    }
+
     pub(crate) fn for_locator(locator: Locator) -> Self {
         Self {
             source: Source::Locator(locator),
@@ -406,7 +419,11 @@ impl Text {
 
     fn target(&self) -> Result<Element> {
         match &self.source {
-            Source::Element(e) => Ok(e.clone()),
+            Source::Element(e) => {
+                e.provider().revalidate(e.data())?;
+                Ok(e.clone())
+            }
+            Source::Fresh(e) => Ok(e.clone()),
             Source::Locator(l) => l.resolve_for_read("read_text"),
         }
     }
@@ -418,9 +435,20 @@ impl Text {
         el.provider().text_length(el.data())
     }
 
-    /// The caret offset, or `None` when the element has no caret (it is not
-    /// focused, or not editable). Fails with [`Error::Unsupported`] when the
-    /// platform cannot report a caret at all.
+    /// The caret offset, or `None` when the element has no caret.
+    ///
+    /// The same state gives the same answer on every platform:
+    ///
+    /// - Not focused: `None`. A caret belongs to the focused text element.
+    /// - Focused, nothing selected: the insertion point.
+    /// - Focused, a range selected: the selection's active end (the end that
+    ///   moves when the selection is extended), where the platform reports
+    ///   which end that is. macOS reports a selected range without saying
+    ///   which end is active, so there the caret is `None` while a range is
+    ///   selected; read [`Text::selections`] for the range.
+    ///
+    /// Fails with [`Error::Unsupported`] when the element cannot report a
+    /// caret at all, never with `Ok(None)`.
     pub fn caret(&self) -> Result<Option<u32>> {
         let el = self.target()?;
         el.provider().text_caret(el.data())
@@ -602,7 +630,7 @@ impl Text {
 impl std::fmt::Debug for Text {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.source {
-            Source::Element(e) => write!(f, "Text({e})"),
+            Source::Element(e) | Source::Fresh(e) => write!(f, "Text({e})"),
             Source::Locator(l) => write!(f, "Text(locator {:?})", l.selector()),
         }
     }
@@ -1072,6 +1100,29 @@ mod api_tests {
     }
 
     #[test]
+    fn a_text_read_through_a_reused_id_is_stale() {
+        let provider = build_table_provider();
+        let el = locator(provider.clone(), "text_area")
+            .element()
+            .expect("fixture element");
+        let text = el.text().expect("text");
+        assert!(text.length().is_ok());
+        // The platform hands the same id to a different node.
+        provider.replace_node_role("Notes", crate::role::Role::Button);
+        let err = text.length().expect_err("a reused id must not be read");
+        assert!(
+            matches!(
+                err,
+                Error::ElementStale {
+                    reason: crate::StaleReason::IdentityChanged,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn embedded_object_mapping_distinguishes_unsupported_and_invalid_offsets() {
         let p = build_table_provider();
         let field = locator(p, "text_area").element().expect("mock text field");
@@ -1094,7 +1145,7 @@ mod api_tests {
             (c.row, c.column, c.column_span),
             (Some(0), Some(1), Some(2))
         );
-        assert_eq!(c.header, Some(HeaderKind::Column));
+        assert_eq!(c.header(), Some(HeaderKind::Column));
         // A span the platform did not report stays None.
         assert_eq!(
             one(r#"table_cell[name="3.00"]"#).cell.unwrap().row_span,

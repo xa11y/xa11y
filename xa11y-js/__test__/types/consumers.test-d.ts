@@ -25,6 +25,7 @@ import {
   type CellInfo,
   type CheckedState,
   type CountValue,
+  type CellKindName,
   type HeaderKindName,
   type TextChange,
   type TextChangeKindName,
@@ -272,10 +273,13 @@ async function tableAndTextChecks(el: Element, loc: Locator) {
   const rows: CountValue | null | undefined = el.table?.rowCount;
   const cell: CellInfo | null = el.cell;
   const header: HeaderKindName | null | undefined = cell?.header;
+  const _kind: CellKindName | null | undefined = cell?.kind;
   const size: number | 'unknown' | null | undefined = el.collection?.size;
   const _rowIndex: number | null | undefined = el.tableRow?.index;
   // @ts-expect-error -- a header kind is 'column' or 'row'
   const _badHeader: HeaderKindName = 'col';
+  // @ts-expect-error -- a cell kind is spelled snake_case, as in Python
+  const _badKind: CellKindName = 'columnHeader';
 
   // Table navigation.
   const _at: Element | null = await el.cellAt(0, 1);

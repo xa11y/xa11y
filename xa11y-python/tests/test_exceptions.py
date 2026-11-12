@@ -308,3 +308,48 @@ def test_platform_error_is_unknown(test_app):
     with pytest.raises(xa11y.PlatformError) as exc_info:
         test_app.element().subscribe()
     assert exc_info.value.delivery == "unknown"
+
+
+# ── Error codes ──────────────────────────────────────────────────────────────
+#
+# Every error carries the core variant as `code`, spelled as JS's
+# `XA11yError.code`, because several variants share one Python class.
+
+
+def test_codes_name_the_core_variant(test_app):
+    with pytest.raises(xa11y.SelectorNotMatchedError) as miss:
+        test_app.descendant('button[name="Nope"]').element()
+    assert miss.value.code == "XA11Y_SELECTOR_NOT_MATCHED"
+    with pytest.raises(xa11y.TimeoutError) as timeout:
+        test_app.descendant("button").wait_detached(timeout=0.05)
+    assert timeout.value.code == "XA11Y_TIMEOUT"
+    with pytest.raises(xa11y.InvalidSelectorError) as bad:
+        test_app.descendant("[[[bad").elements()
+    assert bad.value.code == "XA11Y_INVALID_SELECTOR"
+    with pytest.raises(xa11y.PlatformError) as platform:
+        test_app.element().subscribe()
+    assert platform.value.code == "XA11Y_PLATFORM"
+
+
+def test_code_tells_unsupported_from_action_not_supported():
+    """Both raise ActionNotSupportedError; only `code` tells them apart."""
+    with pytest.raises(xa11y.ActionNotSupportedError) as not_offered:
+        _native._make_test_table_locator('list[name="Results"]').element().column_headers()
+    assert not_offered.value.code == "XA11Y_ACTION_NOT_SUPPORTED"
+    with pytest.raises(xa11y.ActionNotSupportedError) as unsupported:
+        xa11y.capabilities("linux", backend="ia2")
+    assert unsupported.value.code == "XA11Y_UNSUPPORTED"
+
+
+def test_codes_match_the_js_binding():
+    """The Python tags are the JS binding's `codes`, character for character."""
+    import pathlib
+    import re
+
+    errors_rs = pathlib.Path(__file__).resolve().parents[2] / "xa11y-js" / "src" / "errors.rs"
+    if not errors_rs.exists():
+        pytest.skip("not run from a source checkout")
+    js = set(re.findall(r'"(XA11Y_[A-Z_]+)"', errors_rs.read_text()))
+    lib_rs = pathlib.Path(__file__).resolve().parents[1] / "src" / "lib.rs"
+    py = set(re.findall(r'=> "(XA11Y_[A-Z_]+)"', lib_rs.read_text()))
+    assert py == js, (sorted(py - js), sorted(js - py))

@@ -330,6 +330,9 @@ def test_rich_editor_word_includes_trailing_space(rich_editor):
 
 def test_rich_editor_selection_and_caret(rich_editor):
     text = rich_editor.text()
+    # A caret belongs to the focused element; unfocused, every platform
+    # reports none.
+    rich_editor.focus()
     rich_editor.select_text(1, 3)
     assert settle(text.selections, [r(1, 3)]) == [r(1, 3)]
     assert text.caret() == caret_after_selecting(3)
@@ -362,6 +365,7 @@ def test_rtl_text_reads_in_logical_order(app, name):
 def test_rtl_selection_uses_logical_offsets(app, name):
     element = by_name(app, name)
     text = element.text()
+    element.focus()
     element.select_text(5, 8)
     assert settle(text.selections, [r(5, 8)]) == [r(5, 8)]
     assert text.caret() == caret_after_selecting(8)

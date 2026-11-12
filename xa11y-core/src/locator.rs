@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::element::{Element, ElementData, HiddenReason, Rect};
 use crate::error::{AutoScrollOutcome, Delivery, Diagnosis, Error, Result};
@@ -48,6 +48,10 @@ fn describe_observed(data: &ElementData) -> String {
 }
 
 /// Interval between polls of the `wait_*` methods.
+/// The least time an auto-waiting action gives its platform call, however
+/// little of the locator's timeout the wait left. See [`Locator::act`].
+const ACTION_DISPATCH_FLOOR: Duration = Duration::from_secs(1);
+
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Exceeds Chromium's 500 ms publication interval for nonfocused bounds.
@@ -1254,15 +1258,32 @@ impl Locator {
         }
     }
 
-    /// Auto-wait for `action`, then perform it with `perform`, all under one
-    /// deadline of the locator's timeout: a hung application cannot stretch
-    /// the action past it, in the wait or in the platform call (issue #531).
+    /// Auto-wait for `action`, then perform it with `perform`.
+    ///
+    /// The wait runs under a deadline of the locator's timeout, so a hung
+    /// application cannot stretch it (issue #531). The platform call then
+    /// gets what is left of that timeout, but never less than
+    /// [`ACTION_DISPATCH_FLOOR`]: a target that became actionable just
+    /// before the timeout would otherwise get a few milliseconds for the
+    /// call, which can reach the app and still report a timeout whose
+    /// delivery is unknown. An action can therefore run up to the floor past
+    /// the timeout. A deadline the caller opened around the action still
+    /// bounds it.
     fn act(&self, action: &str, perform: impl FnOnce(&Element) -> Result<()>) -> Result<()> {
         let timeout = self.effective_timeout()?;
-        crate::deadline::within(timeout, || {
-            let target = self.auto_wait(action)?;
-            perform(&target).map_err(crate::deadline::action_error)
-        })
+        let outer = crate::deadline::Deadline::current();
+        let start = Instant::now();
+        let target = crate::deadline::within(timeout, || self.auto_wait(action))?;
+        let dispatch = || perform(&target).map_err(crate::deadline::action_error);
+        if timeout.is_zero() {
+            // One attempt, no deadline (see `deadline::within`).
+            return dispatch();
+        }
+        let budget = timeout
+            .saturating_sub(start.elapsed())
+            .max(ACTION_DISPATCH_FLOOR);
+        crate::deadline::Deadline::after(budget)
+            .scope_instead(|| crate::deadline::Deadline::scope_opt(outer, dispatch))
     }
 
     // ── Actions ────────────────────────────────────────────────────
@@ -1775,6 +1796,41 @@ mod tests {
             .iter()
             .map(|e| e.data().name.clone().unwrap_or_default())
             .collect()
+    }
+
+    #[test]
+    fn an_action_gets_at_least_the_dispatch_floor_after_its_wait() {
+        // A 1 ms timeout leaves the call next to nothing once the wait is
+        // done; the floor gives it a usable budget instead.
+        let loc = root_locator(r#"button[name="Back"]"#).with_timeout(Duration::from_millis(1));
+        let mut seen = None;
+        loc.act("press", |_| {
+            seen = crate::deadline::Deadline::current().map(|d| d.remaining());
+            Ok(())
+        })
+        .expect("act");
+        let left = seen.expect("the call runs under a deadline");
+        assert!(
+            left > ACTION_DISPATCH_FLOOR / 2,
+            "the call got {left:?}, under the floor"
+        );
+        assert!(left <= ACTION_DISPATCH_FLOOR);
+    }
+
+    #[test]
+    fn an_action_keeps_a_deadline_the_caller_opened() {
+        let loc = root_locator(r#"button[name="Back"]"#).with_timeout(Duration::from_millis(1));
+        let mut seen = None;
+        crate::deadline::Deadline::after(Duration::from_millis(200))
+            .scope(|| {
+                loc.act("press", |_| {
+                    seen = crate::deadline::Deadline::current().map(|d| d.remaining());
+                    Ok(())
+                })
+            })
+            .expect("act");
+        let left = seen.expect("the call runs under a deadline");
+        assert!(left <= Duration::from_millis(200), "{left:?}");
     }
 
     #[test]

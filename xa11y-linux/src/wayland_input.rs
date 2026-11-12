@@ -352,12 +352,18 @@ impl WaylandInputBackend {
     }
 
     pub(crate) fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
-        let (x, y) = self.map(at)?;
-        let mut s = self.lock();
         // REL_WHEEL: negative = down, positive = up. ScrollDelta uses
         // "positive dy = scroll toward the end" (wheel rolled toward the
-        // user), so wheel value = -dy.
-        let wheel = -delta.dy;
+        // user), so wheel value = -dy, which does not exist for `i32::MIN`.
+        // Checked before anything is emitted.
+        let wheel = delta.dy.checked_neg().ok_or_else(|| {
+            Error::invalid_action_data(format!(
+                "scroll dy {} has no wheel equivalent: its negation overflows i32",
+                delta.dy
+            ))
+        })?;
+        let (x, y) = self.map(at)?;
+        let mut s = self.lock();
         let hwheel = delta.dx;
         let mut frame = vec![
             InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_X.0, x),

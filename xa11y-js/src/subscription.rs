@@ -86,8 +86,14 @@ impl From<xa11y::AnnouncementInfo> for AnnouncementInfo {
 }
 
 /// Turn the JS event type names `kinds` takes (`'focusChanged'`, the same
-/// spelling as `Event.type`) into the core's snake_case names. Unknown names
-/// pass through for core to reject with the list.
+/// spelling as `Event.type` and the `EventTypeName` union) into the core's
+/// snake_case names.
+///
+/// Only those spellings are accepted. The core's own `'focus_changed'` is
+/// refused rather than passed through: it is not a value of `EventTypeName`,
+/// and accepting it would make the typed and untyped surfaces disagree. An
+/// unknown name is refused here, with the JS spellings, rather than by core,
+/// whose message would list the Python ones.
 ///
 /// `buffer` arrives as the raw JS number and is checked here (a negative,
 /// fractional or `NaN` buffer is refused rather than coerced by `ToUint32`).
@@ -97,24 +103,49 @@ pub(crate) fn subscribe_options(
     kinds: Option<Vec<String>>,
     buffer: Option<f64>,
 ) -> xa11y::Result<xa11y::SubscribeOptions> {
-    let snake = |name: &str| {
-        let mut out = String::with_capacity(name.len() + 4);
-        for c in name.chars() {
-            if c.is_ascii_uppercase() {
-                out.push('_');
-                out.push(c.to_ascii_lowercase());
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    };
-    let mut options =
-        xa11y::SubscribeOptions::new().kinds(kinds.unwrap_or_default().iter().map(|k| snake(k)));
+    let kinds = kinds
+        .unwrap_or_default()
+        .iter()
+        .map(|name| {
+            xa11y::event_kind_names()
+                .iter()
+                .find(|snake| js_event_name(snake) == *name)
+                .map(|snake| snake.to_string())
+                .ok_or_else(|| {
+                    let expected: Vec<String> = xa11y::event_kind_names()
+                        .iter()
+                        .map(|snake| js_event_name(snake))
+                        .collect();
+                    xa11y::Error::invalid_action_data(format!(
+                        "unknown event kind {name:?}; expected one of {}",
+                        expected.join(", ")
+                    ))
+                })
+        })
+        .collect::<xa11y::Result<Vec<String>>>()?;
+    let mut options = xa11y::SubscribeOptions::new().kinds(kinds);
     if let Some(buffer) = buffer {
         options = options.buffer(crate::types::checked_count(buffer, "buffer")?);
     }
     Ok(options)
+}
+
+/// The JS spelling of a core event kind name: `focus_changed` ->
+/// `focusChanged`, as `Event.type` reports it.
+fn js_event_name(snake: &str) -> String {
+    let mut out = String::with_capacity(snake.len());
+    let mut upper = false;
+    for c in snake.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            out.push(c.to_ascii_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 impl Event {

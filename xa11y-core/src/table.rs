@@ -156,6 +156,59 @@ impl std::fmt::Display for HeaderKind {
     }
 }
 
+/// Whether a table cell holds data or heads a row or column.
+///
+/// `#[non_exhaustive]`: backends map platform roles to a kind, never the
+/// reverse, and the bindings' string spelling is guarded by
+/// `[[types.variant_coverage]]`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CellKind {
+    /// A data cell.
+    Data,
+    /// A column header cell.
+    ColumnHeader,
+    /// A row header cell.
+    RowHeader,
+}
+
+impl CellKind {
+    /// The `snake_case` name this kind crosses the bindings, the CLI and MCP
+    /// as (`"data"`, `"column_header"`, `"row_header"`).
+    pub fn to_snake_case(self) -> &'static str {
+        match self {
+            Self::Data => "data",
+            Self::ColumnHeader => "column_header",
+            Self::RowHeader => "row_header",
+        }
+    }
+
+    /// The header kind of a header cell, `None` for a data cell.
+    pub fn header(self) -> Option<HeaderKind> {
+        match self {
+            Self::Data => None,
+            Self::ColumnHeader => Some(HeaderKind::Column),
+            Self::RowHeader => Some(HeaderKind::Row),
+        }
+    }
+}
+
+impl From<HeaderKind> for CellKind {
+    fn from(kind: HeaderKind) -> Self {
+        match kind {
+            HeaderKind::Column => Self::ColumnHeader,
+            HeaderKind::Row => Self::RowHeader,
+        }
+    }
+}
+
+impl std::fmt::Display for CellKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_snake_case())
+    }
+}
+
 reader_writer_pair! {
     /// Size of a table, grid or tree grid, on the container element.
     ///
@@ -208,9 +261,10 @@ reader_writer_pair! {
         pub row_span: Option<u32>,
         /// Columns this cell covers, at least 1. `None` when not reported.
         pub column_span: Option<u32>,
-        /// `Some` for a header cell. `None` for a data cell, or when the
-        /// platform does not say.
-        pub header: Option<HeaderKind>,
+        /// Whether this is a data cell or a header cell. `None` only when the
+        /// platform does not say, so a data cell is never mistaken for one
+        /// whose kind is unknown.
+        pub kind: Option<CellKind>,
     }
 }
 
@@ -275,7 +329,14 @@ impl CellInfo {
             && self.column.is_none()
             && self.row_span.is_none()
             && self.column_span.is_none()
-            && self.header.is_none()
+            && self.kind.is_none()
+    }
+
+    /// The header kind of a header cell: `Some` for a header cell, `None`
+    /// for a data cell and for a cell whose kind is not reported. Read
+    /// [`CellInfo::kind`] to tell those two apart.
+    pub fn header(&self) -> Option<HeaderKind> {
+        self.kind.and_then(CellKind::header)
     }
 }
 
@@ -350,7 +411,7 @@ mod tests {
             column: Some(1),
             row_span: None,
             column_span: Some(2),
-            header: Some(HeaderKind::Column),
+            kind: Some(CellKind::ColumnHeader),
         }
         .into();
         assert_eq!(cell.row, Some(2));
