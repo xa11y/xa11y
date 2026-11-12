@@ -2143,10 +2143,15 @@ impl LinuxProvider {
                         xa11y_core::StaleReason::Removed,
                         format!("{}{}", aref.bus_name, aref.path),
                     )
+                } else if is_timeout(&e) {
+                    self.unresponsive_peer(aref, "Accessible.Parent")
                 } else {
                     Error::Platform {
                         code: -1,
-                        message: format!("Get Parent property failed: {}", e),
+                        message: format!(
+                            "Get Parent property of {}{} failed: {e}",
+                            aref.bus_name, aref.path
+                        ),
                     }
                 }
             })?;
