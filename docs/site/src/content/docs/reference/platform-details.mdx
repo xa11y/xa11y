@@ -580,7 +580,10 @@ equal to an IA2 identity. Text fields report `ia2_text` and `ia2_text2`
 interface flags. The source never substitutes UIA operations. An absent
 native interface raises `ActionNotSupported`; an unmapped capability raises
 `Unsupported`. Native failures preserve their HRESULT and operation context.
-MSAA provides navigation and standard role/name/state properties.
+MSAA provides navigation and standard role/name/state properties. When
+`get_accRole` answers with a role string, as Firefox does for `paragraph`,
+the role comes from the IA2 role (`unknown` when that has no mapping), and
+`raw.msaa_role` carries the string.
 
 | IA2 capability | Mapping and limits |
 | --- | --- |

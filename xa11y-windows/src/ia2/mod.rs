@@ -16,7 +16,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Threading::{
     GetCurrentThreadId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::System::Variant::{VARIANT, VT_DISPATCH, VT_I4};
+use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VT_DISPATCH, VT_I4};
 use windows::Win32::UI::Accessibility::{
     AccessibleChildren, AccessibleObjectFromWindow, IAccessible,
 };
@@ -74,6 +74,32 @@ fn integer(v: &VARIANT) -> Result<i32> {
         return Err(platform("MSAA expected VT_I4"));
     }
     Ok(unsafe { v.Anonymous.Anonymous.Anonymous.lVal })
+}
+/// What `IAccessible::get_accRole` answered. MSAA lets a server return a
+/// role string (VT_BSTR) in place of a `ROLE_SYSTEM_*` id: Firefox does for
+/// roles MSAA has no id for (`paragraph`), and older Chromium for some tags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MsaaRole {
+    Id(i32),
+    Name(String),
+}
+fn msaa_role(v: &VARIANT) -> Result<MsaaRole> {
+    if v.vt() == VT_I4 {
+        return Ok(MsaaRole::Id(unsafe {
+            v.Anonymous.Anonymous.Anonymous.lVal
+        }));
+    }
+    if v.vt() == VT_BSTR {
+        let name = BSTR::try_from(v).map_err(native)?;
+        if name.len() > 256 {
+            return Err(platform("MSAA role string exceeds 256 UTF-16 units"));
+        }
+        return Ok(MsaaRole::Name(name.to_string()));
+    }
+    Err(platform(format!(
+        "MSAA get_accRole returned VARIANT type {}, expected VT_I4 or VT_BSTR",
+        v.vt().0
+    )))
 }
 /// MSAA's "this property is not provided": `DISP_E_MEMBERNOTFOUND` or
 /// `E_NOTIMPL`. Any other failure is a real error.
@@ -608,7 +634,33 @@ impl State {
     fn snapshot(&mut self, node: Node) -> Result<ElementData> {
         node.validate()?;
         let child = VARIANT::from(node.child);
-        let role_id = integer(&unsafe { node.object.get_accRole(&child) }.map_err(native)?)?;
+        let msaa = msaa_role(&unsafe { node.object.get_accRole(&child) }.map_err(native)?)?;
+        let mut ia2_states = 0;
+        // IA2's role is the MSAA role where one fits and an IA2_ROLE_* above
+        // 0x400 otherwise. Without IA2 it is the MSAA id; a role string
+        // (below) has no id, so 0, which maps to nothing.
+        let mut ia2_role = match &msaa {
+            MsaaRole::Id(id) => *id,
+            MsaaRole::Name(_) => 0,
+        };
+        if let Some(a) = &node.ia2 {
+            unsafe {
+                (a.vtable().role)(a.as_raw(), &mut ia2_role)
+                    .ok()
+                    .map_err(native)?;
+                (a.vtable().states)(a.as_raw(), &mut ia2_states)
+                    .ok()
+                    .map_err(native)?;
+            }
+        }
+        // A role string (Firefox's `paragraph`, say) is a real answer, not
+        // an error: map the element by its IA2 role, which is Unknown when
+        // that has no mapping either, and report the string in
+        // raw["msaa_role"] so the platform's own answer stays visible.
+        let role_id = match &msaa {
+            MsaaRole::Id(id) => *id,
+            MsaaRole::Name(_) => ia2_role,
+        };
         let role = crate::uia::map_msaa_role(role_id).unwrap_or(Role::Unknown);
         let states = integer(&unsafe { node.object.get_accState(&child) }.map_err(native)?)?;
         let name = bstr(unsafe { node.object.get_accName(&child) })?;
@@ -622,7 +674,13 @@ impl State {
             Err(e) => return Err(native(e)),
         };
         let mut raw = HashMap::new();
-        raw.insert("msaa_role".into(), role_id.into());
+        raw.insert(
+            "msaa_role".into(),
+            match msaa {
+                MsaaRole::Id(id) => id.into(),
+                MsaaRole::Name(name) => name.into(),
+            },
+        );
         if let Some((id, hwnd)) = node.identity {
             raw.insert("ia2_unique_id".into(), id.into());
             raw.insert("ia2_window".into(), hwnd.into());
@@ -641,18 +699,6 @@ impl State {
         }
         let (table, cell) = rich::metadata(&node, role_id)?;
         let attrs = semantics::object_attributes(&node)?;
-        let mut ia2_role = role_id;
-        let mut ia2_states = 0;
-        if let Some(a) = &node.ia2 {
-            unsafe {
-                (a.vtable().role)(a.as_raw(), &mut ia2_role)
-                    .ok()
-                    .map_err(native)?;
-                (a.vtable().states)(a.as_raw(), &mut ia2_states)
-                    .ok()
-                    .map_err(native)?;
-            }
-        }
         let link_url = if role == Role::Link {
             if let Some(a) = &node.ia2 {
                 if let Some(link) = capability::<AccessibleHyperlink>(a)? {
@@ -1714,6 +1760,15 @@ impl Provider for Ia2Provider {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+    #[test]
+    fn msaa_role_strings_are_answers_not_errors() {
+        assert_eq!(msaa_role(&VARIANT::from(0x2a)).unwrap(), MsaaRole::Id(0x2a));
+        assert_eq!(
+            msaa_role(&VARIANT::from(BSTR::from("paragraph"))).unwrap(),
+            MsaaRole::Name("paragraph".into())
+        );
+        assert!(msaa_role(&VARIANT::from(true)).is_err());
+    }
     #[test]
     fn validation_that_finishes_after_deadline_cannot_begin_a_write() {
         let mut state = State::new();

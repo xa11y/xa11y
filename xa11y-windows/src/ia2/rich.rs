@@ -641,9 +641,11 @@ impl State {
                         "IA2 table-wide {line_name} header discovery: the table reports no cell at row {row}, column {column}; read headers per cell with cell_headers"
                     ),
                 })?;
+                // A role string is not a ROLE_SYSTEM_*HEADER id, so such a
+                // cell is not a header.
                 let role =
-                    integer(&unsafe { object.get_accRole(&VARIANT::from(0)) }.map_err(native)?)?;
-                if role != own_role {
+                    msaa_role(&unsafe { object.get_accRole(&VARIANT::from(0)) }.map_err(native)?)?;
+                if role != MsaaRole::Id(own_role) {
                     labelled = Some(object);
                     break;
                 }
