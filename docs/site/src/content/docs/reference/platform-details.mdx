@@ -368,9 +368,15 @@ Bounds use desktop coordinates with origin at the top-left of the primary displa
 
 Platforms use different attributes to determine an element's `name`:
 
-- **macOS** uses AXTitle, then AXDescription, then AXValue (for text elements).
+- **macOS** uses a non-empty AXTitle. A static text without one takes a non-empty AXValue next. Every other element, and a static text with neither, falls back to AXDescription.
 - **Linux** uses Accessible.Name, then Description. For `StaticText` with no name, the first portion of the value is used.
 - **Windows** uses the CurrentName property.
+
+On macOS a `name_changed` event comes from AXTitleChanged, and for a static
+text without a title from AXValueChanged. AX sends no notification when an
+element's AXDescription changes. A static text named by its AXDescription
+therefore raises no `name_changed` event when only the description changes.
+Read the name again to see the new one.
 
 ### Stable ID
 

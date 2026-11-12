@@ -816,7 +816,8 @@ fn derived_ax_name(ax: AXUIElementRef, role: Option<Role>) -> Option<String> {
 /// Whether `target` names itself from a non-empty `AXTitle`. A static text
 /// that does keeps a title-derived name, so a value change there is only a
 /// value change; an empty `AXTitle` (Chromium) is no title, and the name
-/// comes from `AXValue`.
+/// comes from a non-empty `AXValue`, else from `AXDescription` (see
+/// [`accessible_name`]).
 fn has_title_derived_name(target: Option<&ElementData>) -> bool {
     target.is_some_and(|t| {
         t.raw
@@ -7015,13 +7016,21 @@ fn handle_ax_notification(
                 "AXTextField" | "AXTextArea" | "AXSearchField" => {
                     ks.push(EventKind::TextChanged);
                 }
-                // Static text has no (non-empty) AXTitle, so its name is derived from
-                // AXValue (see `build_snapshot_data`): a value change is also
-                // a name change, and the Linux (AT-SPI `accessible-name`) and
-                // Windows (UIA NameProperty) backends emit NameChanged for the
-                // same label update. A static text that carries an AXTitle
-                // keeps a title-derived name, so there a value change really is
-                // only a value change.
+                // A static text with no (non-empty) AXTitle is named by its
+                // non-empty AXValue, else by its AXDescription (see
+                // `accessible_name`). Either way a value change is also a
+                // name change: the name is the new value, or it moves between
+                // the value and the description as the value empties or
+                // fills. The Linux (AT-SPI `accessible-name`) and Windows
+                // (UIA NameProperty) backends emit NameChanged for the same
+                // label update. A static text that carries an AXTitle keeps a
+                // title-derived name, so there a value change really is only
+                // a value change.
+                //
+                // AX has no notification for an AXDescription change, so a
+                // static text named by its description raises no NameChanged
+                // when the description alone changes (documented under the
+                // macOS events in platform-details.mdx).
                 "AXStaticText" if !has_title_derived_name(target.as_ref()) => {
                     ks.push(EventKind::NameChanged);
                 }
