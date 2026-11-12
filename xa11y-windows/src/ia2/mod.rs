@@ -938,6 +938,48 @@ fn data(snapshot: Snapshot, bits: i32, owner: &Owner, handle: u64) -> ElementDat
 
 type Job = Box<dyn FnOnce(&mut State) + Send>;
 
+/// Run the worker's queue until every sender is gone.
+///
+/// A job that panics must not take the worker with it: the thread owns
+/// every retained COM interface, and the process-wide slot would stay
+/// `Ready` with nothing serving it. Each job already turns a panic in its
+/// request into an error for its caller (see `call_with_timeout`); this is
+/// the backstop for a panic outside that, whose caller then sees its answer
+/// channel close. `State` holds caches and handles whose consistency a
+/// panic cannot break in a memory-unsafe way, so it is kept, as a poisoned
+/// cache lock is recovered rather than fatal (tenet 4).
+fn serve(jobs: mpsc::Receiver<Job>, state: &mut State) {
+    while let Ok(job) = jobs.recv() {
+        if let Err(panic) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut *state)))
+        {
+            eprintln!(
+                "xa11y: IA2 worker job panicked outside its request: {}",
+                panic_message(panic.as_ref())
+            );
+        }
+    }
+}
+
+/// The message a panic carried, when it carried a string.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a non-string payload".into())
+}
+
+/// Clears the worker's `running` record when a request ends, however it
+/// ends, so a panic can never leave a record that later reads as a hung
+/// native call.
+struct ClearRunning(Arc<Mutex<Option<Running>>>);
+impl Drop for ClearRunning {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 /// How long past a request's budget its caller keeps waiting before it
 /// treats the native call as hung. A request whose budget ends between
 /// native operations stops at its next `check_deadline`; this covers the gap
@@ -1088,9 +1130,7 @@ impl Ia2Provider {
                 let id = unsafe { GetCurrentThreadId() };
                 if ready_tx.send(Ok(id)).is_ok() {
                     let mut state = State::new();
-                    while let Ok(job) = rx.recv() {
-                        job(&mut state);
-                    }
+                    serve(rx, &mut state);
                     // All retained COM interfaces are released on their owner thread.
                     drop(state);
                 }
@@ -1210,12 +1250,24 @@ impl Ia2Provider {
                         started,
                         budget: timeout,
                     });
+                    let clear = ClearRunning(Arc::clone(&running));
                     state.dispatched = false;
                     state.deadline_hit.set(false);
                     state.deadline = Some(stop_at);
-                    let result = f(state);
+                    let result =
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(state)))
+                        {
+                            Ok(result) => result,
+                            // Whatever the request did before it panicked
+                            // may have reached the app: a platform error,
+                            // whose delivery is Unknown, never a retryable one.
+                            Err(panic) => Err(platform(format!(
+                                "IA2 request panicked on the worker: {}; an in-flight action may have been delivered; the worker keeps serving requests",
+                                panic_message(panic.as_ref())
+                            ))),
+                        };
                     state.deadline = None;
-                    *running.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    drop(clear);
                     let budget_stop =
                         state.deadline_hit.get() && caller_at.is_none_or(|at| at >= budget_end);
                     match result {
@@ -1243,7 +1295,7 @@ impl Ia2Provider {
                 Ok(result) => return self.finish(result, caller.as_ref()),
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(platform(
-                        "IA2 worker dropped a request without answering; worker exited",
+                        "IA2 worker dropped a request without answering (it panicked outside the request, or exited); an in-flight action may have been delivered",
                     ))
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1268,7 +1320,7 @@ impl Ia2Provider {
                 Ok(result) => return self.finish(result, caller.as_ref()),
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(platform(
-                        "IA2 worker dropped a request without answering; worker exited",
+                        "IA2 worker dropped a request without answering (it panicked outside the request, or exited); an in-flight action may have been delivered",
                     ))
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1808,9 +1860,7 @@ mod tests {
             // Released, or the test dropped the sender: either way, serve.
             let _ = paused.recv();
             let mut state = State::new();
-            while let Ok(job) = receiver.recv() {
-                job(&mut state);
-            }
+            serve(receiver, &mut state);
         });
         let p = Ia2Provider {
             worker: Arc::new(Worker::new(sender, id_rx.recv().expect("thread id"))),
@@ -1894,6 +1944,25 @@ mod tests {
         assert!(!p.worker.check_hung());
         p.call(|_| Ok(()))
             .expect("the worker serves requests once the slow call returned");
+        drop(p);
+        thread.join().expect("worker exit");
+    }
+    #[test]
+    fn a_panicking_request_is_an_error_and_the_worker_survives() {
+        let (p, release, thread) = test_worker(32);
+        drop(release);
+        let error = p
+            .call_with_timeout::<()>(Duration::from_millis(50), |_| panic!("boom"))
+            .expect_err("the panic is reported");
+        assert!(
+            matches!(&error, Error::Platform { message, .. } if message.contains("panicked") && message.contains("boom")),
+            "got {error:?}"
+        );
+        assert_eq!(error.delivery(), xa11y_core::error::Delivery::Unknown);
+        // Long past the panicked request's budget, it is not a hung call.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!p.worker.check_hung());
+        assert_eq!(p.call(|_| Ok(7)).expect("the worker still serves"), 7);
         drop(p);
         thread.join().expect("worker exit");
     }
