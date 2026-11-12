@@ -2297,7 +2297,15 @@ pub(crate) fn format_capture(cap: &Capture) -> CliResult<Vec<String>> {
             };
             tail_line(format!("… {missing} more (cut by {why})"), out);
         } else if not_read {
-            tail_line("… children not read (out of time)".into(), out);
+            // A capture stops reading children when its node budget fills
+            // or its time runs out, whichever comes first; a full capture
+            // is the node budget's doing.
+            let why = if cap.truncated.by_nodes && cap.nodes.len() >= cap.options.max_nodes {
+                "cut by --max-nodes"
+            } else {
+                "out of time"
+            };
+            tail_line(format!("… children not read ({why})"), out);
         }
         Ok(())
     }
@@ -7157,9 +7165,11 @@ mod tests {
             "{cut:?}"
         );
         assert!(
-            cut.iter().any(|l| l.contains("more (cut by --max-nodes)")),
+            cut.iter().any(|l| l.contains("(cut by --max-nodes)")),
             "{cut:?}"
         );
+        // Nodes the full capture never read are the budget's doing too.
+        assert!(cut.iter().all(|l| !l.contains("out of time")), "{cut:?}");
 
         let shallow = format_capture(
             &target

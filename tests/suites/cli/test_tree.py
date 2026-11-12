@@ -67,7 +67,10 @@ def test_tree_max_nodes_cuts_and_says_so(run_cli, app_pid):
     assert rc == 0, stderr
     lines = stdout.strip().splitlines()
     assert lines[-1].startswith("(truncated: 3 nodes shown, cut by the node limit of 3"), stdout
-    assert any("more (cut by --max-nodes)" in line for line in lines), stdout
+    # A node the capture counted says how many children it cut; one it never
+    # read (the budget filled first) says its children were not read.
+    assert any("(cut by --max-nodes)" in line for line in lines), stdout
+    assert not any("out of time" in line for line in lines), stdout
 
 
 def test_tree_max_depth_zero_shows_only_the_application(run_cli, app_pid):

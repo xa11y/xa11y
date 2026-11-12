@@ -2878,6 +2878,21 @@ mod tests {
             .expect("move B")
             .check()
             .expect("B moved");
+        // No window manager runs here to apply the request, and `activate`
+        // confirms it through the root's `_NET_ACTIVE_WINDOW`. Name A there
+        // as a window manager would; the ClientMessage read below is what
+        // proves which window the request targeted.
+        observer
+            .change_property32(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                root,
+                atoms.net_active_window,
+                x11rb::protocol::xproto::AtomEnum::WINDOW,
+                &[a],
+            )
+            .expect("set active window")
+            .check()
+            .expect("active window stored");
         observer.flush().expect("flush movement");
         backend
             .activate(&retained_a)
