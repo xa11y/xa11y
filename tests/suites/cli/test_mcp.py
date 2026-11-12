@@ -554,6 +554,34 @@ def test_the_tree_tool_offers_its_detail(mcp):
     assert props["detail"]["items"]["enum"] == ["text", "formatting", "relations"]
 
 
+def test_tree_relations_are_bounded_and_report_truncation(mcp, app_pid):
+    """`detail: ["relations"]` caps each node's list per kind and says so, in
+    the `relations` tool's `{count, returned, truncated, elements}` shape."""
+    result = mcp.call_tool(
+        "tree", {"pid": app_pid, "max_nodes": 300, "detail": ["relations"]}
+    )["result"]
+    assert result["isError"] is False, result["content"]
+    structured = result["structuredContent"]
+    limit = structured["truncated"]["relation_limit"]
+    assert isinstance(limit, int) and limit > 0, structured["truncated"]
+    cut = False
+
+    def walk(node):
+        nonlocal cut
+        for kind, entry in node.get("relations", {}).items():
+            assert set(entry) == {"count", "returned", "truncated", "elements"}, (kind, entry)
+            assert entry["returned"] == len(entry["elements"]) <= limit, (kind, entry)
+            assert entry["truncated"] == (entry["count"] > entry["returned"]), (kind, entry)
+            cut = cut or entry["truncated"]
+            for target in entry["elements"]:
+                assert target["ref"], target
+        for child in node.get("children", []):
+            walk(child)
+
+    walk(structured["tree"])
+    assert structured["truncated"]["by_relations"] == cut, structured["truncated"]
+
+
 def test_the_tree_tool_offers_a_bounded_node_cap(mcp):
     props = _tools_by_name(mcp)["tree"]["inputSchema"]["properties"]
     assert props["max_nodes"]["minimum"] == 1
@@ -594,7 +622,6 @@ def test_the_relations_tool_lists_its_kinds(mcp):
     "kinds, needle",
     [
         (["labeled_by"], "unknown relation kind"),
-        ([], "omit it"),
         ("labelled_by", "array of strings"),
     ],
 )
@@ -606,6 +633,20 @@ def test_relation_kind_mistakes_are_refused_before_any_lookup(mcp, kinds, needle
     structured = result["structuredContent"]
     assert structured["kind"] == "invalid_arguments", structured
     assert needle in structured["message"], structured["message"]
+
+
+def test_an_empty_relation_kind_list_means_every_kind(mcp):
+    """`kinds: []` reads every reported kind, as core's `relations(&[])` and
+    both bindings do; it is not an argument mistake. With no such app the
+    call fails on the lookup instead, which is the proof it got past parsing."""
+    relations = _tools_by_name(mcp)["relations"]
+    kinds_doc = relations["inputSchema"]["properties"]["kinds"]["description"]
+    assert "pass an empty list" in kinds_doc
+    result = mcp.call_tool(
+        "relations", {"selector": "text_field", "app": "no-such-app", "kinds": []}
+    )["result"]
+    assert result["isError"] is True
+    assert result["structuredContent"]["kind"] != "invalid_arguments", result
 
 
 # ── Shell surfaces ───────────────────────────────────────────────────────────
@@ -893,6 +934,19 @@ def test_windows_lists_the_test_apps_windows(mcp, app_pid, app_name):
     by_ref = mcp.call_tool("relations", {"ref": windows[0]["ref"]})["result"]
     if by_ref["isError"]:
         assert by_ref["structuredContent"]["kind"] == "platform", by_ref["content"]
+    else:
+        # The subject comes back with the ref it was asked by, as every
+        # element a result returns carries one.
+        element = by_ref["structuredContent"]["element"]
+        assert element["ref"] == windows[0]["ref"], element
+    # An empty `kinds` is every kind, the same answer as omitting it.
+    by_ref_empty = mcp.call_tool(
+        "relations", {"ref": windows[0]["ref"], "kinds": []}
+    )["result"]
+    assert by_ref_empty["isError"] == by_ref["isError"], by_ref_empty["content"]
+    if not by_ref["isError"]:
+        empty_kinds = [r["kind"] for r in by_ref_empty["structuredContent"]["relations"]]
+        assert empty_kinds == [r["kind"] for r in by_ref["structuredContent"]["relations"]]
 
     # The unfiltered listing must contain the same window set; names are
     # matched when present, since the pid filter is not carried in the

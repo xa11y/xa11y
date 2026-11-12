@@ -53,7 +53,12 @@ test('the node and depth limits cut and say where', async () => {
   assert.equal(cut.truncated.byNodes, true);
   const marked = cut.nodes.filter((n) => n.childrenTruncated);
   assert.ok(marked.length > 0);
-  for (const n of marked) assert.ok(n.childrenCount > n.children.length);
+  // A node read before the capture filled keeps its real child count; one
+  // left unread once it was full has none.
+  for (const n of marked) {
+    if (n.childrenCount == null) assert.equal(n.children.length, 0);
+    else assert.ok(n.childrenCount > n.children.length);
+  }
 
   const shallow = await _makeTestApp().capture({ maxDepth: 1 });
   assert.equal(shallow.truncated.byDepth, true);

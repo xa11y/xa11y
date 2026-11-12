@@ -44,6 +44,10 @@ def test_an_action_on_a_removed_node_raises_stale_and_does_nothing():
     assert str(err).startswith("Element stale (removed)")
     # Still a SelectorNotMatchedError, so existing handlers keep working.
     assert isinstance(err, xa11y.SelectorNotMatchedError)
+    # ...and the parent's `selector` still says what went stale, as it did
+    # before ElementStaleError existed.
+    assert err.selector == err.element
+    assert err.code == "XA11Y_ELEMENT_STALE"
     with pytest.raises(xa11y.ElementStaleError):
         back.check_alive()
 

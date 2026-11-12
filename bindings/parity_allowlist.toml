@@ -87,6 +87,7 @@ opaque = [
     { type = "RelationTarget", reason = "Crosses as an int (Python) / number (JS) index into Capture.nodes for a target inside the capture, or an Element for one outside it." },
     { type = "LiveRegionInfo", reason = "Python exposes a frozen LiveRegionInfo class; JS returns a plain { politeness, atomic, relevant } object. Same split as Rect: members are covered by the per-binding tests (test_semantics.py, semantics.test.js)." },
     { type = "Count", reason = "Crosses as an int (Python) / number (JS), or the string 'unknown' in both, matching its serde form." },
+    { type = "CellKind", reason = "Crosses as the identically-spelled strings 'data' | 'column_header' | 'row_header' via CellKind::to_snake_case (CellInfo.kind). See [[types.variant_coverage]]." },
     { type = "HeaderKind", reason = "Crosses as the identically-spelled strings 'column' | 'row' via HeaderKind::to_snake_case. See [[types.variant_coverage]]." },
     { type = "TextRange", reason = "Python exposes a frozen, hashable TextRange class (and accepts (start, end) tuples); JS uses plain { start, end } objects. Same split as Rect." },
     { type = "TextRun", reason = "Python exposes a frozen TextRun class; JS returns a plain object. Same split as Rect." },
@@ -341,6 +342,14 @@ files = [
     "xa11y/src/cli.rs",
     { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "HeaderKindName" },
+]
+[[types.variant_coverage]]
+type = "CellKind"
+reason = "Crosses as 'data' | 'column_header' | 'row_header'; the JS arms and the Python Literal / TypeScript union are hand-written, and CellKind is #[non_exhaustive], so the JS match's `_` arm would pass a new variant through unnarrowed."
+files = [
+    "xa11y-js/src/types.rs",
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "CellKindName" },
 ]
 [[types.variant_coverage]]
 type = "TextScript"

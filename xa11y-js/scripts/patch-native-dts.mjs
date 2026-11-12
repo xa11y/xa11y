@@ -16,7 +16,7 @@
 //   5b. Narrow `Omission.reason` -> `OmissionReasonName` and
 //      `LegendEntry.color` -> a three-element tuple.
 //   5c. Narrow the table / text plain objects: `Count` (number or
-//      'unknown'), `CellInfo.header`, `TextAttributes.script`,
+//      'unknown'), `CellInfo.kind`, `CellInfo.header`, `TextAttributes.script`,
 //      `TextChange.kind`, and `Text.rangeAt`'s unit parameter.
 //   5d. Narrow the capability table's platform and support strings to
 //      `PlatformName` / `SupportName`.
@@ -115,6 +115,9 @@ export type CountValue = number | 'unknown';
 
 /** Which kind of header a header cell is. Spelled as in Python. */
 export type HeaderKindName = 'column' | 'row';
+
+/** Whether a table cell holds data or heads a row or column. Spelled as in Python. */
+export type CellKindName = 'data' | 'column_header' | 'row_header';
 
 /** A landmark's kind, as its ARIA role (\`Element.landmarkType\`). */
 export type LandmarkName =
@@ -293,6 +296,12 @@ const REPLACEMENTS = [
     from: ': Count | null\n',
     to: ': CountValue | null\n',
     all: 3,
+  },
+  {
+    name: 'CellInfo.kind -> CellKindName | null',
+    from: '  kind: string | null\n',
+    to: '  kind: CellKindName | null\n',
+    all: 1,
   },
   {
     name: 'CellInfo.header -> HeaderKindName | null',

@@ -1728,7 +1728,7 @@ pub(crate) fn format_positions(el: &ElementData) -> String {
         push("column", c.column.map(|n| n.to_string()));
         push("row_span", c.row_span.map(|n| n.to_string()));
         push("column_span", c.column_span.map(|n| n.to_string()));
-        push("header", c.header.map(|h| h.to_snake_case().to_string()));
+        push("header", c.header().map(|h| h.to_snake_case().to_string()));
     } else if let Some(r) = &el.table_row {
         // A row's index matches the selector attribute `row`, as a cell's
         // row does.

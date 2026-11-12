@@ -126,12 +126,17 @@ fn attach_pointer_target(err: PyErr, diagnosis: Option<&xa11y::Diagnosis>) -> Py
 /// retry, `"unknown"` is not).
 fn to_py_err(e: xa11y::Error) -> PyErr {
     let delivery = e.delivery();
+    let code = error_code(&e);
     let err = map_to_py_err(e);
     Python::attach(|py| {
         // A failed setattr is surfaced, not dropped: a missing `delivery` would
         // read as "unknown" to a caller that checks `hasattr`, and the
         // original error stays reachable as the cause.
-        match err.value(py).setattr("delivery", delivery.to_snake_case()) {
+        let value = err.value(py);
+        match value
+            .setattr("delivery", delivery.to_snake_case())
+            .and_then(|()| value.setattr("code", code))
+        {
             Ok(()) => err,
             Err(set_failed) => {
                 set_failed.set_cause(py, Some(err));
@@ -139,6 +144,34 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
             }
         }
     })
+}
+
+/// The `code` attribute of every exception [`to_py_err`] raises: the core
+/// variant, spelled exactly as the JS binding's `XA11yError.code`
+/// (`xa11y-js/src/errors.rs`'s `codes`). Several variants share a Python
+/// class (`Unsupported` and `ActionNotSupported` both raise
+/// `ActionNotSupportedError`), and this is what tells them apart.
+fn error_code(e: &xa11y::Error) -> &'static str {
+    match e {
+        xa11y::Error::PermissionDenied { .. } => "XA11Y_PERMISSION_DENIED",
+        xa11y::Error::AccessibilityNotEnabled { .. } => "XA11Y_ACCESSIBILITY_NOT_ENABLED",
+        xa11y::Error::SelectorNotMatched { .. } => "XA11Y_SELECTOR_NOT_MATCHED",
+        xa11y::Error::ElementStale { .. } => "XA11Y_ELEMENT_STALE",
+        xa11y::Error::ActionNotSupported { .. } => "XA11Y_ACTION_NOT_SUPPORTED",
+        xa11y::Error::TextValueNotSupported => "XA11Y_TEXT_VALUE_NOT_SUPPORTED",
+        xa11y::Error::Timeout { .. } => "XA11Y_TIMEOUT",
+        xa11y::Error::InvalidSelector { .. } => "XA11Y_INVALID_SELECTOR",
+        xa11y::Error::InvalidActionData { .. } => "XA11Y_INVALID_ACTION_DATA",
+        xa11y::Error::InvalidTextRange { .. } => "XA11Y_INVALID_TEXT_RANGE",
+        xa11y::Error::InvalidConfig { .. } => "XA11Y_INVALID_CONFIG",
+        xa11y::Error::Platform { .. } => "XA11Y_PLATFORM",
+        xa11y::Error::NoElementBounds => "XA11Y_NO_ELEMENT_BOUNDS",
+        xa11y::Error::Unsupported { .. } => "XA11Y_UNSUPPORTED",
+        // `xa11y::Error` is `#[non_exhaustive]`; the parity check's variant
+        // coverage of this file fails before a new variant reaches this arm.
+        // The same fallback tag as JS's `codes::UNKNOWN`.
+        _ => "XA11Y_UNKNOWN",
+    }
 }
 
 /// The Python spelling of a stale reason (`ElementStaleError.reason`).
@@ -180,8 +213,18 @@ fn map_to_py_err(e: xa11y::Error) -> PyErr {
         }
         xa11y::Error::ElementStale { reason, element } => {
             let message = xa11y::Error::stale(reason, element.clone()).to_string();
-            let py_err =
-                attach_diagnosis_attrs(ElementStaleError::new_err(message), None, None, None);
+            // `selector` carries what core says went stale, as it did when
+            // `ElementStale { selector }` raised a plain
+            // SelectorNotMatchedError (through 0.15): core has never had the
+            // locator's selector here, and its field held this same
+            // description (`handle:42`, a D-Bus path). A handler written
+            // against the parent class keeps reading something, not `None`.
+            let py_err = attach_diagnosis_attrs(
+                ElementStaleError::new_err(message),
+                Some(element.clone()),
+                None,
+                None,
+            );
             // A subclass of SelectorNotMatchedError, so existing handlers keep
             // catching it; `reason` and `element` say why and what.
             Python::attach(|py| {

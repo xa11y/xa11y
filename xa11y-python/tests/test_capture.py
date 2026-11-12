@@ -38,7 +38,14 @@ def test_the_node_limit_cuts_and_says_where():
     assert len(cap) == 3
     assert cap.truncated.by_nodes and cap.truncated.any()
     cut = [n for n in cap.nodes if n.children_truncated]
-    assert cut and all(n.children_count > len(n.children) for n in cut)
+    assert cut
+    # A node read before the capture filled keeps its real child count; one
+    # left unread once it was full has none.
+    for n in cut:
+        if n.children_count is None:
+            assert n.children == []
+        else:
+            assert n.children_count > len(n.children)
     assert "by_nodes=True" in repr(cap.truncated)
 
 

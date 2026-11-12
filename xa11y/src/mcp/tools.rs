@@ -41,6 +41,10 @@ const TREE_MAX_NODES: usize = 2_000;
 const FIND_DEFAULT_LIMIT: usize = 50;
 /// Ceiling on `find`'s `limit`, so a caller cannot ask for an unbounded dump.
 const FIND_MAX_LIMIT: usize = 500;
+/// Most targets `tree` lists per node and relation kind under
+/// `detail: ["relations"]`. Smaller than the `relations` tool's default
+/// because it applies to every node of a tree of up to [`TREE_MAX_NODES`].
+const TREE_RELATION_LIMIT: usize = 10;
 /// Longest candidate list carried in a failure's diagnosis.
 const MAX_DIAGNOSIS_CANDIDATES: usize = 20;
 /// Ceiling, in UTF-8 bytes, on each free-text field of an element node
@@ -719,12 +723,16 @@ fn tool_definition(name: &str) -> Value {
                          `text` as well, plus `text.runs`, each `start`, `end` (UTF-16, \
                          0-based, half-open) and `attributes`, within {} runs in total. \
                          `relations`: \
-                         `relations` maps each reported kind (`labelled_by`, \
-                         `controls`, ...) to its targets, each a `ref`; a target outside \
-                         the result also carries `role`, `name` and `outside: true`. \
-                         Each costs a platform read per node.",
+                         `relations` maps each kind with targets (`labelled_by`, \
+                         `controls`, ...) to `{{count, returned, truncated, elements}}`, \
+                         at most {} elements per node and kind, each a `ref`; a target \
+                         outside the result also carries `role`, `name` and \
+                         `outside: true`. `truncated.by_relations` says whether any \
+                         node's list was cut; the `relations` tool on that node reads \
+                         more. Each costs a platform read per node.",
                         crate::capture::DEFAULT_MAX_TEXT_BYTES,
-                        crate::capture::DEFAULT_MAX_RUNS
+                        crate::capture::DEFAULT_MAX_RUNS,
+                        TREE_RELATION_LIMIT,
                     ),
                 }),
             );
@@ -1301,10 +1309,10 @@ fn tool_definition(name: &str) -> Value {
                 json!({
                     "type": "array",
                     "items": { "type": "string", "enum": cli::relation_kind_names() },
-                    "description": "Relation kinds to read. Omit for every kind this \
-                                    platform reports (the `relation:*` rows of \
-                                    `capabilities`). Naming a kind the platform never \
-                                    reports fails with `unsupported`.",
+                    "description": "Relation kinds to read. Omit it, or pass an empty \
+                                    list, for every kind this platform reports (the \
+                                    `relation:*` rows of `capabilities`). Naming a kind \
+                                    the platform never reports fails with `unsupported`.",
                 }),
             );
             props.insert(
@@ -1323,7 +1331,8 @@ fn tool_definition(name: &str) -> Value {
                  message, and the reverse of each. Each kind comes back once, in \
                  request order, as `{kind, count, returned, truncated, elements}`; a \
                  kind with no targets has an empty list, never an absent entry. \
-                 Elements are in the shape `find` returns, each with a `ref`.\n\n\
+                 Elements are in the shape `find` returns, each with a `ref`, and \
+                 so is the asked `element` (its `ref` is the one passed, when one was).\n\n\
                  The kinds are reported as the platform reports them: macOS reports \
                  `aria-controls` and `aria-flowto` together as `linked`, and Windows \
                  reports `aria-details` as `details`. Reads once and does not wait.",
@@ -1380,7 +1389,8 @@ fn tool_definition(name: &str) -> Value {
                      header cells of the table or of one cell, and what a list, tree or \
                      table has selected. Elements come back in the shape `find` returns, \
                      each with a `ref`, including `cell` (`row`, `column`, `row_span`, `column_span`, \
-                     `header`), `table_row`, `table` (`row_count`, `column_count`) and \
+                     `kind`: \"data\", \"column_header\" or \"row_header\", and `header`: \
+                     \"column\" or \"row\" on a header cell), `table_row`, `table` (`row_count`, `column_count`) and \
                      `collection` (`index`, `size`, `depth`). Every index is 0-based. \
                      A count reads \"unknown\" when the platform says it does not know \
                      it, as virtualized content does.\n\n\
@@ -2025,6 +2035,15 @@ fn tool_tree(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
         truncated.insert("by_formatting".into(), json!(cap.truncated.by_formatting));
         truncated.insert("run_limit".into(), json!(cap.options.max_runs));
     }
+    if detail.relations {
+        let by_relations = cap.nodes.iter().any(|n| {
+            n.relations
+                .iter()
+                .any(|(_, targets)| targets.len() > TREE_RELATION_LIMIT)
+        });
+        truncated.insert("by_relations".into(), json!(by_relations));
+        truncated.insert("relation_limit".into(), json!(TREE_RELATION_LIMIT));
+    }
     out.insert("truncated".into(), Value::Object(truncated));
     out.insert("vanished".into(), json!(cap.vanished));
     out.insert("backend".into(), json!(cap.backend));
@@ -2129,6 +2148,9 @@ fn tree_json(
             }
             obj.insert("text".into(), t);
         }
+        // Bounded per node and kind like the `relations` tool's `limit`, and
+        // reported the same way: one node can be labelled by, or control,
+        // every row of a large list, and each outside target mints a ref.
         let relations: Map<String, Value> = node
             .relations
             .iter()
@@ -2136,17 +2158,28 @@ fn tree_json(
             .map(|(kind, targets)| {
                 let listed: Vec<Value> = targets
                     .iter()
+                    .take(TREE_RELATION_LIMIT)
                     .map(|t| match t {
                         crate::RelationTarget::Node(i) => json!({ "ref": node_refs[*i] }),
-                        crate::RelationTarget::Outside(el) => json!({
-                            "ref": capture.add(el),
-                            "role": el.role.to_snake_case(),
-                            "name": el.name,
-                            "outside": true,
-                        }),
+                        crate::RelationTarget::Outside(el) => {
+                            let mut target = Map::new();
+                            target.insert("ref".into(), json!(capture.add(el)));
+                            target.insert("role".into(), json!(el.role.to_snake_case()));
+                            insert_text(&mut target, "name", el.name.as_deref());
+                            target.insert("outside".into(), json!(true));
+                            Value::Object(target)
+                        }
                     })
                     .collect();
-                (kind.to_snake_case().to_string(), Value::Array(listed))
+                (
+                    kind.to_snake_case().to_string(),
+                    json!({
+                        "count": targets.len(),
+                        "returned": listed.len(),
+                        "truncated": targets.len() > listed.len(),
+                        "elements": listed,
+                    }),
+                )
             })
             .collect();
         if !relations.is_empty() {
@@ -2589,11 +2622,8 @@ fn tool_relations(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
                         .ok_or_else(|| usage("\"kinds\" must be an array of strings"))
                 })
                 .collect::<CliResult<Vec<&str>>>()?;
-            if names.is_empty() {
-                return Err(usage(
-                    "\"kinds\" is empty; omit it to read every kind this platform reports",
-                ));
-            }
+            // Empty reads every kind the platform reports, as an omitted
+            // `kinds` does and as `Element::relations(&[])` does in core.
             cli::parse_relation_kinds(&names)?
         }
         Some(_) => return Err(usage("\"kinds\" must be an array of strings")),
@@ -2608,7 +2638,7 @@ fn tool_relations(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
             let element = resolve_ref_for_read(refs, reference)?;
             let mut out = Map::new();
             out.insert("ref".into(), json!(reference));
-            relations_output(out, &element, &kinds, limit, refs)
+            relations_output(out, &element, Some(reference), &kinds, limit, refs)
         }
     }
 }
@@ -2628,14 +2658,17 @@ fn tool_relations_parsed(
     let mut out = Map::new();
     out.insert("selector".into(), json!(selector));
     target_fields(target, &mut out);
-    relations_output(out, &element, kinds, limit, refs)
+    relations_output(out, &element, None, kinds, limit, refs)
 }
 
 /// The `relations` result: each kind with at most `limit` targets, each
-/// target carrying a ref.
+/// target carrying a ref, and the subject `element` carrying one too.
+/// `subject_ref` is the ref the caller named the subject by, which it keeps
+/// rather than minting a second ref for the same element.
 fn relations_output(
     mut out: Map<String, Value>,
     element: &Element,
+    subject_ref: Option<&str>,
     kinds: &[crate::RelationKind],
     limit: usize,
     refs: &RefTable,
@@ -2644,7 +2677,17 @@ fn relations_output(
     note_center(&mut out, &center);
     let center = center.is_usable();
     let found = element.relations(kinds)?;
+    // `keep` holds the capture only if something in it got a ref, so a ref
+    // subject with no targets evicts nothing.
     let mut capture = refs.begin();
+    let mut subject = element_data_json(element, center);
+    let subject_ref = match subject_ref {
+        Some(reference) => reference.to_string(),
+        None => capture.add(element),
+    };
+    if let Some(obj) = subject.as_object_mut() {
+        obj.insert("ref".into(), json!(subject_ref));
+    }
     let relations: Vec<Value> = found
         .iter()
         .map(|(kind, targets)| {
@@ -2669,7 +2712,7 @@ fn relations_output(
         })
         .collect();
     refs.keep(capture);
-    out.insert("element".into(), element_data_json(element, center));
+    out.insert("element".into(), subject);
     out.insert("relations".into(), Value::Array(relations));
     Ok(ToolOutput::json(Value::Object(out)))
 }
@@ -3352,7 +3395,16 @@ pub(crate) fn element_data_json(data: &crate::ElementData, center: bool) -> Valu
     // missing span is absent, never defaulted to 1). `size`, `row_count` and
     // `column_count` are a number or the string "unknown".
     insert_position(&mut node, "table", data.table.filter(|t| !t.is_empty()));
-    insert_position(&mut node, "cell", data.cell.filter(|c| !c.is_empty()));
+    let cell = data.cell.filter(|c| !c.is_empty());
+    insert_position(&mut node, "cell", cell);
+    // `kind` is the serialized field; `header` is `CellInfo::header()`, which
+    // older clients read and which saves a model mapping `column_header` to
+    // `column` itself.
+    if let (Some(info), Some(Value::Object(obj))) = (cell, node.get_mut("cell")) {
+        if let Some(header) = info.header() {
+            obj.insert("header".into(), json!(header.to_snake_case()));
+        }
+    }
     insert_position(
         &mut node,
         "table_row",
@@ -3817,7 +3869,9 @@ mod tests {
         let window = &kids(&root)[0];
         assert!(window.get("children").is_none(), "{window}");
         assert_eq!(window["subtree_truncated"], json!(true), "{window}");
-        assert_eq!(window["children_count"], json!(window_children));
+        // A full capture reads no more children, so the count is unknown
+        // rather than bought with a read the budget exists to bound.
+        assert!(window.get("children_count").is_none(), "{window}");
 
         // Budget 2: the window keeps its first child and says how many it has.
         let (root, cut) = mock_tree(64, 2);
@@ -3829,12 +3883,14 @@ mod tests {
     }
 
     #[test]
-    fn spending_the_budget_exactly_is_not_a_cut() {
+    fn a_budget_with_room_to_spare_is_not_a_cut() {
         let (full, _) = mock_tree(64, TREE_MAX_NODES);
         fn count(node: &Value) -> usize {
             kids(node).iter().map(|c| 1 + count(c)).sum()
         }
-        let (tree, cut) = mock_tree(64, count(&full));
+        // One node of room: a budget spent exactly leaves the last nodes'
+        // children unread, which is reported as a cut.
+        let (tree, cut) = mock_tree(64, count(&full) + 1);
         assert!(!cut.by_node_limit, "every node fit: {cut:?}");
         assert_complete(&tree);
     }
@@ -6356,7 +6412,12 @@ mod tests {
         let label = find(&rich, "Email address");
         assert_eq!(
             field["relations"]["labelled_by"],
-            json!([{ "ref": label["ref"] }])
+            json!({
+                "count": 1,
+                "returned": 1,
+                "truncated": false,
+                "elements": [{ "ref": label["ref"] }],
+            })
         );
         // Kinds with no targets are left out of the map.
         assert!(field["relations"].get("controls").is_none(), "{field}");
@@ -6470,17 +6531,75 @@ mod tests {
         let label_ref = relations[0]["elements"][0]["ref"].as_str().expect("a ref");
         let label = refs.resolve(label_ref).expect("the ref resolves");
         assert_eq!(label.name.as_deref(), Some("Email address"));
+        // The subject carries a ref too, as every returned element does.
+        let subject_ref = got["element"]["ref"].as_str().expect("the subject's ref");
+        let subject = refs.resolve(subject_ref).expect("the ref resolves");
+        assert_eq!(subject.name.as_deref(), Some("Email"));
+    }
+
+    #[test]
+    fn relations_by_ref_keeps_that_ref_and_evicts_nothing_without_targets() {
+        let refs = RefTable::default();
+        let first = tool_relations_parsed(
+            &document_target(),
+            r#"text_field[name="Email"]"#,
+            &[crate::RelationKind::Controls],
+            FIND_DEFAULT_LIMIT,
+            &refs,
+        )
+        .expect("relations read")
+        .structured
+        .expect("structured");
+        let subject_ref = first["element"]["ref"].as_str().expect("a ref").to_string();
+        // Reading the same element by its ref, many times over, with no
+        // targets: nothing new is returned, so nothing ages out.
+        for _ in 0..super::super::refs::MAX_CAPTURES * 2 {
+            let got = tool_relations(
+                &args(json!({ "ref": subject_ref, "kinds": ["controls"] })),
+                &refs,
+            )
+            .expect("relations by ref")
+            .structured
+            .expect("structured");
+            assert_eq!(got["element"]["ref"], json!(subject_ref), "{got}");
+            assert_eq!(got["relations"][0]["count"], 0, "{got}");
+        }
+        refs.resolve(&subject_ref).expect("still held");
+    }
+
+    #[test]
+    fn relations_with_empty_kinds_reads_every_reported_kind() {
+        let refs = RefTable::default();
+        let element = document_target()
+            .locator(r#"text_field[name="Email"]"#)
+            .element()
+            .expect("resolves");
+        let every = element.relations(&[]).expect("core reads every kind");
+        let got = tool_relations_parsed(
+            &document_target(),
+            r#"text_field[name="Email"]"#,
+            &cli::parse_relation_kinds::<&str>(&[]).expect("empty parses"),
+            FIND_DEFAULT_LIMIT,
+            &refs,
+        )
+        .expect("relations read")
+        .structured
+        .expect("structured");
+        let kinds: Vec<&str> = got["relations"]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|r| r["kind"].as_str().expect("a kind"))
+            .collect();
+        let expected: Vec<&str> = every.iter().map(|(k, _)| k.to_snake_case()).collect();
+        assert!(!expected.is_empty());
+        assert_eq!(kinds, expected);
     }
 
     #[test]
     fn relations_refuses_bad_kinds_before_resolving() {
         let refs = RefTable::default();
-        for kinds in [
-            json!(["labeled_by"]),
-            json!([]),
-            json!("labelled_by"),
-            json!([1]),
-        ] {
+        for kinds in [json!(["labeled_by"]), json!("labelled_by"), json!([1])] {
             let err = tool_relations(
                 &args(json!({ "selector": "button", "app": "nope", "kinds": kinds })),
                 &refs,
@@ -6552,11 +6671,17 @@ mod tests {
         let price = one(r#"table_cell[name="Price"]"#);
         assert_eq!(
             price["cell"],
-            json!({ "row": 0, "column": 1, "row_span": 1, "column_span": 2, "header": "column" })
+            json!({
+                "row": 0, "column": 1, "row_span": 1, "column_span": 2,
+                "kind": "column_header", "header": "column",
+            })
         );
         // An unreported span is absent, not defaulted to 1.
         let three = one(r#"table_cell[name="3.00"]"#);
-        assert_eq!(three["cell"], json!({ "row": 2, "column": 1 }));
+        assert_eq!(
+            three["cell"],
+            json!({ "row": 2, "column": 1, "kind": "data" })
+        );
         let table = one(r#"table[name="Prices"]"#);
         assert_eq!(table["table"], json!({ "row_count": 3, "column_count": 3 }));
         let row = one(r#"table_row[row="1"]"#);
