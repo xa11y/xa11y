@@ -727,21 +727,47 @@ fn ax_string(element: AXUIElementRef, attribute: &str) -> Option<String> {
     }
 }
 
-/// The accessible name of `ax` as `build_snapshot_data` derives it: a
-/// non-empty `AXTitle`, else the static text's `AXValue`, else `AXDescription`.
-/// An empty `AXTitle` is "no title" (Chromium answers "" on text leaves).
-/// The fast-path matcher and the window-chrome filter use this so they agree
-/// with the snapshot walk.
-fn derived_ax_name(ax: AXUIElementRef, role: Option<Role>) -> Option<String> {
-    ax_string(ax, "AXTitle")
+/// The accessible name: a non-empty `AXTitle`, else a static text's non-empty
+/// `AXValue`, else `AXDescription`. An empty string is no name: Chromium
+/// answers "" on its text leaves, and a Calendar event is a static text with
+/// no `AXValue` whose title is its `AXDescription`.
+fn accessible_name(
+    role: Option<Role>,
+    title: Option<String>,
+    value: impl FnOnce() -> Option<String>,
+    description: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    title
         .filter(|t| !t.is_empty())
         .or_else(|| {
-            if role == Some(Role::StaticText) {
-                ax_value_string(ax)
-            } else {
-                ax_string(ax, "AXDescription")
-            }
+            (role == Some(Role::StaticText))
+                .then(value)
+                .flatten()
+                .filter(|v| !v.is_empty())
         })
+        .or_else(description)
+}
+
+/// The accessible description: `AXHelp`, else `AXDescription` when the name
+/// did not take it.
+fn accessible_description(
+    name: Option<&String>,
+    description: Option<String>,
+    help: Option<String>,
+) -> Option<String> {
+    help.or_else(|| description.filter(|d| name != Some(d)))
+}
+
+/// The accessible name of `ax` as `build_snapshot_data` derives it. The
+/// fast-path matcher and the window-chrome filter use this so they agree with
+/// the snapshot walk.
+fn derived_ax_name(ax: AXUIElementRef, role: Option<Role>) -> Option<String> {
+    accessible_name(
+        role,
+        ax_string(ax, "AXTitle"),
+        || ax_value_string(ax),
+        || ax_string(ax, "AXDescription"),
+    )
 }
 
 /// Whether `target` names itself from a non-empty `AXTitle`. A static text
@@ -4072,23 +4098,14 @@ fn matches_ax_with_role(
             }
             "value" => ax_value_string(ax),
             "description" => {
-                // Mirror build_element_data description logic.
-                let ax_title = ax_string(ax, "AXTitle").filter(|t| !t.is_empty());
-                let ax_description = ax_string(ax, "AXDescription");
-                let name = ax_title.or_else(|| {
-                    if role == Some(Role::StaticText) {
-                        ax_value_string(ax)
-                    } else {
-                        ax_description.clone()
-                    }
-                });
-                ax_string(ax, "AXHelp").or_else(|| {
-                    if name.as_ref() != ax_description.as_ref() {
-                        ax_description
-                    } else {
-                        None
-                    }
-                })
+                let description = ax_string(ax, "AXDescription");
+                let name = accessible_name(
+                    role,
+                    ax_string(ax, "AXTitle"),
+                    || ax_value_string(ax),
+                    || description.clone(),
+                );
+                accessible_description(name.as_ref(), description, ax_string(ax, "AXHelp"))
             }
             // Unreachable: we bailed to the full-snapshot path above for any
             // filter whose attr isn't in FAST_PATH_ATTRS.
@@ -4554,25 +4571,14 @@ fn build_snapshot_data(
             raw.insert("AXValue".into(), serde_json::Value::String(v.clone()));
         }
 
-        // Name: AXTitle when it has text; otherwise the static text's own
-        // AXValue, or AXDescription for every other role. An empty AXTitle is
-        // "no title" (Chromium answers "" on its text leaves), not a name.
-        let name = attrs.ax_title.filter(|t| !t.is_empty()).or_else(|| {
-            if role == Role::StaticText {
-                attrs.value_string.clone()
-            } else {
-                attrs.ax_description.clone()
-            }
-        });
-
-        // Description: AXHelp first, then AXDescription (if not already used as name)
-        let description = attrs.ax_help.or_else(|| {
-            if name.as_ref() != attrs.ax_description.as_ref() {
-                attrs.ax_description
-            } else {
-                None
-            }
-        });
+        let name = accessible_name(
+            Some(role),
+            attrs.ax_title,
+            || attrs.value_string.clone(),
+            || attrs.ax_description.clone(),
+        );
+        let description =
+            accessible_description(name.as_ref(), attrs.ax_description, attrs.ax_help);
 
         let value = match role {
             Role::CheckBox | Role::RadioButton => None,
@@ -7898,6 +7904,39 @@ mod tests {
         data.raw
             .insert("AXTitle".into(), serde_json::json!("Label"));
         assert!(has_title_derived_name(Some(&data)));
+    }
+
+    #[test]
+    fn a_static_text_without_a_value_is_named_by_its_ax_description() {
+        let title = "Diwali (Deepawali). 8 November 2026, All-Day".to_string();
+        let help = "This event belongs to calendar “India Holidays”.".to_string();
+        for value in [None, Some(String::new())] {
+            let name = accessible_name(
+                Some(Role::StaticText),
+                None,
+                || value,
+                || Some(title.clone()),
+            );
+            assert_eq!(name.as_ref(), Some(&title));
+            let description =
+                accessible_description(name.as_ref(), Some(title.clone()), Some(help.clone()));
+            assert_eq!(description, Some(help.clone()));
+        }
+        let name = accessible_name(
+            Some(Role::StaticText),
+            Some(String::new()),
+            || Some("Kesariya".into()),
+            || Some(title.clone()),
+        );
+        assert_eq!(
+            name.as_deref(),
+            Some("Kesariya"),
+            "a static text with a value keeps it as its name"
+        );
+        assert_eq!(
+            accessible_description(name.as_ref(), Some(title.clone()), None),
+            Some(title)
+        );
     }
 
     #[test]
