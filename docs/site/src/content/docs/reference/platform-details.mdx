@@ -585,7 +585,7 @@ MSAA provides navigation and standard role/name/state properties.
 | IA2 capability | Mapping and limits |
 | --- | --- |
 | Text length and reads | `IAccessibleText.nCharacters` / `text`, with native UTF-16 offsets and surrogate checks. A read accepts at most 1 Mi UTF-16 units |
-| Caret and selections | `caretOffset`, `nSelections`, `selection`, `addSelection`, `setSelection`, `removeSelection` and `setCaretOffset`. Changes may publish asynchronously |
+| Caret and selections | `caretOffset`, `nSelections`, `selection`, `addSelection`, `setSelection`, `removeSelection` and `setCaretOffset`. The caret is `None` unless the element has MSAA `STATE_SYSTEM_FOCUSED`, and when `caretOffset` answers `S_FALSE`. A backwards selection reads in document order. Changes may publish asynchronously |
 | Character, word and paragraph ranges | Unicode scalars for characters, `textAtOffset` for other units |
 | Lines | Native `textAtOffset(Line)` ranges, constrained at explicit line breaks. Soft wrapping remains unverified |
 | Formatting | `IAccessibleText2.attributeRange` when that interface exists. Otherwise `IAccessibleText.attributes`. Errors never switch mechanisms |

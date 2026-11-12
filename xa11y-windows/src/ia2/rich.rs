@@ -144,28 +144,29 @@ impl State {
         read(&text(&self.node(e)?, e)?, r)
     }
     pub(super) fn text_caret(&mut self, e: &ElementData) -> Result<Option<u32>> {
-        let t = text(&self.node(e)?, e)?;
+        let node = self.node(e)?;
+        let t = text(&node, e)?;
+        // Core's caret contract: a caret belongs to the focused text element,
+        // so an unfocused one has none (UIA gates on HasKeyboardFocus the
+        // same way). MSAA STATE_SYSTEM_FOCUSED.
+        let states = integer(
+            &unsafe { node.object.get_accState(&VARIANT::from(node.child)) }.map_err(native)?,
+        )?;
+        if states & 0x4 == 0 {
+            return Ok(None);
+        }
         let mut offset = 0;
-        unsafe {
-            (t.vtable().caretOffset)(t.as_raw(), &mut offset)
-                .ok()
-                .map_err(native)?;
-        }
-        if offset == -1 {
-            Ok(None)
-        } else if offset < 0 || offset as u32 > length(&t)? {
-            Err(platform("IA2 returned an invalid caret offset"))
-        } else {
-            Ok(Some(offset as u32))
-        }
+        let status = unsafe { (t.vtable().caretOffset)(t.as_raw(), &mut offset) };
+        caret_answer(status, offset, || length(&t))
     }
     pub(super) fn text_selections(&mut self, e: &ElementData) -> Result<Vec<TextRange>> {
         let t = text(&self.node(e)?, e)?;
         let mut count = 0;
-        unsafe {
-            (t.vtable().nSelections)(t.as_raw(), &mut count)
-                .ok()
-                .map_err(native)?;
+        let status = unsafe { (t.vtable().nSelections)(t.as_raw(), &mut count) };
+        status.ok().map_err(native)?;
+        // S_FALSE is IA2's "no value": no selection to report.
+        if status == windows::Win32::Foundation::S_FALSE {
+            return Ok(Vec::new());
         }
         let count = bounded(count, 1024, "text selections")?;
         let len = length(&t)?;
@@ -173,12 +174,13 @@ impl State {
         for i in 0..count {
             let mut start = 0;
             let mut end = 0;
-            unsafe {
-                (t.vtable().selection)(t.as_raw(), i as i32, &mut start, &mut end)
-                    .ok()
-                    .map_err(native)?;
+            let status =
+                unsafe { (t.vtable().selection)(t.as_raw(), i as i32, &mut start, &mut end) };
+            status.ok().map_err(native)?;
+            if status == windows::Win32::Foundation::S_FALSE {
+                continue;
             }
-            let r = checked_range(start, end, len)?;
+            let r = selection_range(start, end, len)?;
             if !r.is_empty() {
                 out.push(r);
             }
@@ -767,6 +769,33 @@ fn normalize_line(native: TextRange, offset: u32, units: &[u16]) -> Result<TextR
     Ok(range)
 }
 
+/// Interpret `IAccessibleText::caretOffset` for a focused element.
+///
+/// IA2 answers S_FALSE when the caret is not active on this object, and
+/// documents the offset as -1 then; Chromium answers S_FALSE with offset 0,
+/// so the status, not the offset, decides. A failing HRESULT keeps its code.
+fn caret_answer(
+    status: windows::core::HRESULT,
+    offset: i32,
+    length: impl FnOnce() -> Result<u32>,
+) -> Result<Option<u32>> {
+    status.ok().map_err(native)?;
+    if status == windows::Win32::Foundation::S_FALSE || offset == -1 {
+        return Ok(None);
+    }
+    if offset < 0 || offset as u32 > length()? {
+        return Err(platform(format!(
+            "IA2 returned an invalid caret offset {offset}"
+        )));
+    }
+    Ok(Some(offset as u32))
+}
+/// A selection as a range in document order. IA2 reports a backwards
+/// selection (extended towards the start) with `start > end`; core's
+/// [`TextRange`] has no direction, and the caret reports the active end.
+fn selection_range(start: i32, end: i32, len: u32) -> Result<TextRange> {
+    checked_range(start.min(end), start.max(end), len)
+}
 fn checked_range(start: i32, end: i32, len: u32) -> Result<TextRange> {
     if start < 0 || end < 0 {
         return Err(platform("IA2 returned negative text endpoints"));
@@ -939,6 +968,33 @@ mod tests {
         assert!(
             matches!(available(E_ACCESSDENIED,"IA2 line"),Err(Error::Platform{code,..})if code==E_ACCESSDENIED.0 as i64)
         );
+    }
+    #[test]
+    fn caret_is_none_on_s_false_whatever_the_offset() {
+        use windows::Win32::Foundation::{E_FAIL, S_FALSE, S_OK};
+        assert_eq!(caret_answer(S_FALSE, 0, || Ok(5)).unwrap(), None);
+        assert_eq!(caret_answer(S_FALSE, -1, || Ok(5)).unwrap(), None);
+        assert_eq!(caret_answer(S_OK, -1, || Ok(5)).unwrap(), None);
+        assert_eq!(caret_answer(S_OK, 3, || Ok(5)).unwrap(), Some(3));
+        assert_eq!(caret_answer(S_OK, 5, || Ok(5)).unwrap(), Some(5));
+        assert!(caret_answer(S_OK, 6, || Ok(5)).is_err());
+        assert!(caret_answer(S_OK, -2, || Ok(5)).is_err());
+        assert!(
+            matches!(caret_answer(E_FAIL, 0, || Ok(5)), Err(Error::Platform { code, .. }) if code == E_FAIL.0 as i64)
+        );
+    }
+    #[test]
+    fn backwards_selections_read_in_document_order() {
+        assert_eq!(
+            selection_range(4, 1, 5).unwrap(),
+            TextRange { start: 1, end: 4 }
+        );
+        assert_eq!(
+            selection_range(1, 4, 5).unwrap(),
+            TextRange { start: 1, end: 4 }
+        );
+        assert!(selection_range(6, 1, 5).is_err());
+        assert!(selection_range(-1, 1, 5).is_err());
     }
     #[test]
     fn escaped_attributes_are_split_only_at_unescaped_delimiters() {
