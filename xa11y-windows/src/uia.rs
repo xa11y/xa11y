@@ -3031,7 +3031,11 @@ fn build_snapshot_data(
     let class_name = uia_cached_bstr(element, UIA_ClassNamePropertyId);
     let framework = uia_cached_bstr(element, UIA_FrameworkIdPropertyId);
     if control_type == UIA_DocumentControlTypeId {
-        role = uia_document_role(framework.as_deref(), class_name.as_deref());
+        role = uia_document_role(framework.as_deref(), class_name.as_deref(), || {
+            cached_own_hwnd(element)?
+                .map(|hwnd| Ok(window_style(hwnd)? & ES_MULTILINE != 0))
+                .transpose()
+        })?;
     }
 
     // Refine role using AriaRole property for elements that UIA maps ambiguously
@@ -3116,7 +3120,7 @@ fn build_snapshot_data(
             }
         });
 
-    let actions = get_actions(element, role, &patterns)?;
+    let actions = get_actions(element, role, &patterns, states.editable)?;
 
     // Both are in every cache request this is built from (the batch set),
     // so a failed read is a real failure, not "the element has none": UIA
@@ -6652,10 +6656,16 @@ fn is_password_value_withheld(e: &windows::core::Error) -> bool {
 /// is absent. `ActionNotSupported`-free advertisement is reserved for a
 /// successful `FALSE` (tenet 1 — the action list must not degrade "could
 /// not read" into "does not support").
+///
+/// `text_writable` is the element's `editable` state. A text field or text
+/// area advertises `set_value` only when it is true, because `set_value` on
+/// one is `ValuePattern.SetValue` and fails on a control without a writable
+/// ValuePattern (a read-only RichEdit, say).
 fn get_actions(
     element: &IUIAutomationElement,
     role: Role,
     patterns: &ElementPatterns,
+    text_writable: bool,
 ) -> Result<Vec<String>> {
     let mut actions: Vec<String> = Vec::new();
 
@@ -6677,7 +6687,11 @@ fn get_actions(
         actions.push("collapse".to_string());
     }
 
-    if patterns.value.is_some() && !actions.iter().any(|a| a == "set_value") {
+    let is_text = matches!(role, Role::TextField | Role::TextArea);
+    if patterns.value.is_some()
+        && (!is_text || text_writable)
+        && !actions.iter().any(|a| a == "set_value")
+    {
         actions.push("set_value".to_string());
     }
 
@@ -6724,10 +6738,10 @@ fn get_actions(
         actions.push("focus".to_string());
     }
 
-    // For text fields and sliders, ensure set_value is present
-    if matches!(role, Role::TextField | Role::TextArea | Role::Slider)
-        && !actions.iter().any(|a| a == "set_value")
-    {
+    // Sliders take set_value through RangeValuePattern or ValuePattern.
+    // Text fields and areas get it from a writable ValuePattern above, and
+    // never without one: set_value on them is ValuePattern.SetValue.
+    if role == Role::Slider && !actions.iter().any(|a| a == "set_value") {
         actions.push("set_value".to_string());
     }
 
@@ -6920,13 +6934,16 @@ fn parse_states(
 
     let editable = match role {
         Role::TextField | Role::TextArea => {
+            // Editable promises writes, and xa11y writes text through
+            // ValuePattern (set_value, type_text): without one there is no
+            // write to promise.
             if let Some(ref pattern) = patterns.value {
                 !pattern_read(site, "ValuePattern.CurrentIsReadOnly", || unsafe {
                     pattern.CurrentIsReadOnly()
                 })?
                 .as_bool()
             } else {
-                true
+                false
             }
         }
         _ => false,
@@ -7186,8 +7203,21 @@ fn parent_control_type(
     unsafe { parent.CurrentControlType() }.ok()
 }
 
-/// Native multiline edit controls can report Document instead of Edit.
-fn uia_document_role(framework: Option<&str>, class: Option<&str>) -> Role {
+/// `ES_MULTILINE`, the edit-control style for a multi-line edit or RichEdit.
+const ES_MULTILINE: u32 = 0x0004;
+
+/// Native edit controls can report Document instead of Edit (RichEdit
+/// always does). One that does is a text field or a text area, by
+/// `ES_MULTILINE`; `multiline` reads that style from the element's own
+/// HWND, answering `None` when the element has none, which leaves it a text
+/// area (Document is UIA's control type for multi-line text). Only a Win32
+/// Edit or RichEdit class reads the style; any other Document is a web
+/// area. A failed style read propagates.
+fn uia_document_role(
+    framework: Option<&str>,
+    class: Option<&str>,
+    multiline: impl FnOnce() -> Result<Option<bool>>,
+) -> Result<Role> {
     if framework == Some("Win32")
         && class.is_some_and(|name| {
             name.eq_ignore_ascii_case("Edit")
@@ -7196,10 +7226,37 @@ fn uia_document_role(framework: Option<&str>, class: Option<&str>) -> Role {
                     .is_some_and(|prefix| prefix.eq_ignore_ascii_case("RichEdit"))
         })
     {
-        Role::TextArea
+        Ok(match multiline()? {
+            Some(false) => Role::TextField,
+            Some(true) | None => Role::TextArea,
+        })
     } else {
-        Role::WebArea
+        Ok(Role::WebArea)
     }
+}
+
+/// `GWL_STYLE` of `hwnd`. `GetWindowLongPtrW` answers 0 both for a window
+/// with no style bits and on failure; the last error tells them apart.
+fn window_style(hwnd: HWND) -> Result<u32> {
+    // SAFETY: sets this thread's last-error value only.
+    unsafe { SetLastError(WIN32_ERROR(0)) };
+    // SAFETY: GetWindowLongPtrW validates the handle and reports failure
+    // through the last error.
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+    if style == 0 {
+        // SAFETY: GetLastError has no arguments.
+        let error = unsafe { GetLastError() };
+        if error.0 != 0 {
+            return Err(Error::Platform {
+                code: i64::from(error.0),
+                message: format!(
+                    "GetWindowLongPtrW(GWL_STYLE) failed for HWND {:#x} (Win32 error {})",
+                    hwnd.0 as usize, error.0
+                ),
+            });
+        }
+    }
+    Ok(style as u32)
 }
 
 /// Map UIA ControlTypeId to its coarse xa11y Role.
@@ -10593,11 +10650,26 @@ mod tests {
     #[test]
     fn document_role_distinguishes_win32_edits() {
         for class in ["Edit", "RichEdit20W", "RICHEDIT50W"] {
-            assert_eq!(
-                uia_document_role(Some("Win32"), Some(class)),
-                Role::TextArea
-            );
+            for (multiline, role) in [
+                (Some(true), Role::TextArea),
+                (None, Role::TextArea),
+                (Some(false), Role::TextField),
+            ] {
+                assert_eq!(
+                    uia_document_role(Some("Win32"), Some(class), || Ok(multiline)).unwrap(),
+                    role,
+                    "{class} multiline={multiline:?}"
+                );
+            }
         }
+        // A failed style read is an error, not a guessed role.
+        assert!(uia_document_role(Some("Win32"), Some("RichEdit20W"), || {
+            Err(Error::Platform {
+                code: 5,
+                message: "denied".into(),
+            })
+        })
+        .is_err());
         for (framework, class) in [
             (Some("Chrome"), Some("Chrome_RenderWidgetHostHWND")),
             (Some("Win32"), Some("_WwG")),
@@ -10605,7 +10677,11 @@ mod tests {
             (None, Some("Edit")),
             (Some("Win32"), None),
         ] {
-            assert_eq!(uia_document_role(framework, class), Role::WebArea);
+            assert_eq!(
+                uia_document_role(framework, class, || panic!("style read for a non-edit"))
+                    .unwrap(),
+                Role::WebArea
+            );
         }
     }
 

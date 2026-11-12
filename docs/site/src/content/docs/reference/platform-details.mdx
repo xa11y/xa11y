@@ -110,8 +110,8 @@ See [Explicit IA2 source on Windows](#explicit-ia2-source-on-windows).
 | `Button` | AXButton | push button | ButtonControlType |
 | `CheckBox` | AXCheckBox | check box, check menu item | CheckBoxControlType |
 | `RadioButton` | AXRadioButton | radio button, radio menu item | RadioButtonControlType |
-| `TextField` | AXTextField, AXSecureTextField *(role or subrole)* | entry, password text | EditControlType |
-| `TextArea` | AXTextArea | text | EditControlType |
+| `TextField` | AXTextField, AXSecureTextField *(role or subrole)* | entry, password text | EditControlType; DocumentControlType on a Win32 Edit or RichEdit without `ES_MULTILINE` |
+| `TextArea` | AXTextArea | text | DocumentControlType on a Win32 Edit or RichEdit with `ES_MULTILINE` |
 | `StaticText` | AXStaticText | label, static, caption | TextControlType |
 | `ComboBox` | AXComboBox, AXPopUpButton | combo box | ComboBoxControlType |
 | `List` | AXList, AXOutline | list, list box | ListControlType, TreeControlType |
