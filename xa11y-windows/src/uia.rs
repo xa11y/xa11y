@@ -3005,6 +3005,11 @@ fn build_snapshot_data(
         parent_is_data_item,
         legacy_role,
     );
+    let class_name = uia_cached_bstr(element, UIA_ClassNamePropertyId);
+    let framework = uia_cached_bstr(element, UIA_FrameworkIdPropertyId);
+    if control_type == UIA_DocumentControlTypeId {
+        role = uia_document_role(framework.as_deref(), class_name.as_deref());
+    }
 
     // Refine role using AriaRole property for elements that UIA maps ambiguously
     // (e.g., Alert/Heading both become ControlType.Text, Dialog becomes Window)
@@ -3101,11 +3106,6 @@ fn build_snapshot_data(
     let top_level = native_handle.is_some_and(is_top_level_hwnd);
     let stable_id = uia_stable_id(native_handle, top_level, automation_id.clone());
 
-    let class_name = unsafe { element.CachedClassName() }
-        .ok()
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
-
     let raw = {
         let mut raw = std::collections::HashMap::new();
         raw.insert(
@@ -3151,7 +3151,7 @@ fn build_snapshot_data(
         if let Some(ref d) = description {
             raw.insert("uia_help_text".into(), serde_json::Value::String(d.clone()));
         }
-        if let Some(framework) = uia_cached_bstr(element, UIA_FrameworkIdPropertyId) {
+        if let Some(framework) = framework {
             raw.insert(
                 "uia_framework_id".into(),
                 serde_json::Value::String(framework),
@@ -3965,20 +3965,14 @@ fn window_text(hwnd: HWND) -> String {
 ///   characters into the document. For a collapsed caret, `n` is the caret
 ///   position. For a non-empty selection, `n` is the selection's start —
 ///   mirroring macOS/AT-SPI semantics of "insert at selection start".
-/// - `Ok(None)` if the control has no TextPattern, its selection array is
-///   empty (no caret available), or its provider does not support reading
+/// - `Ok(None)` if the selection array is empty (no caret available),
+///   or the provider does not support reading
 ///   the selection. The caller should fall back to "append at
 ///   end" — the behaviour documented in design/README.md.
 /// - `Err(..)` if TextPattern is present but a COM call to walk the range
 ///   fails. These are propagated rather than silently falling back, so
 ///   genuine platform errors surface (tenet 1).
-fn caret_char_offset(uia_element: &IUIAutomationElement) -> Result<Option<usize>> {
-    let Some(text_pattern) =
-        current_pattern::<IUIAutomationTextPattern>(uia_element, UIA_TextPatternId, "TextPattern")?
-    else {
-        return Ok(None); // TextPattern not supported on this control.
-    };
-
+fn caret_char_offset(text_pattern: &IUIAutomationTextPattern) -> Result<Option<usize>> {
     // A control with no selection answers with an empty array, handled
     // below. A provider that does not support text selection says so with
     // UIA_E_INVALIDOPERATION, or (AccessKit) with a null array and S_OK:
@@ -5908,13 +5902,38 @@ impl Provider for WindowsProvider {
             // supported on this control, or no selection exists, fall back to
             // appending at the end of the current value — matching the
             // documented behaviour in design/README.md.
-            let caret_char_offset =
-                caret_char_offset(&uia_element)?.unwrap_or_else(|| current.chars().count());
+            let text_pattern = current_pattern::<IUIAutomationTextPattern>(
+                &uia_element,
+                UIA_TextPatternId,
+                "TextPattern",
+            )?;
+            let caret_char_offset = match &text_pattern {
+                Some(pattern) => caret_char_offset(pattern)?,
+                None => None,
+            }
+            .unwrap_or_else(|| current.chars().count());
 
-            let new_value = crate::splice::splice_at_char_offset(&current, text, caret_char_offset);
+            let (new_value, caret) =
+                crate::splice::splice_at_char_offset(&current, text, caret_char_offset);
             let bstr: windows::core::BSTR = new_value.into();
             unsafe { value_pattern.SetValue(&bstr) }
                 .map_err(|e| value_set_error(e, "ValuePattern.SetValue"))?;
+
+            if let Some(pattern) = text_pattern {
+                let supported = uia_call(|| unsafe { pattern.SupportedTextSelection() })?;
+                if supported != SupportedTextSelection_None {
+                    // SetValue can reset the caret and invalidate old ranges.
+                    let doc = uia_call(|| unsafe { pattern.DocumentRange() })?;
+                    let range = rich::range(
+                        &doc,
+                        xa11y_core::text_api::TextRange {
+                            start: caret,
+                            end: caret,
+                        },
+                    )?;
+                    uia_call(|| unsafe { range.Select() })?;
+                }
+            }
             return Ok(());
         }
         Err(Error::TextValueNotSupported)
@@ -6994,6 +7013,22 @@ fn parent_control_type(
 ) -> Option<UIA_CONTROLTYPE_ID> {
     let parent = unsafe { walker.GetParentElement(element) }.ok()?;
     unsafe { parent.CurrentControlType() }.ok()
+}
+
+/// Native multiline edit controls can report Document instead of Edit.
+fn uia_document_role(framework: Option<&str>, class: Option<&str>) -> Role {
+    if framework == Some("Win32")
+        && class.is_some_and(|name| {
+            name.eq_ignore_ascii_case("Edit")
+                || name
+                    .get(.."RichEdit".len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("RichEdit"))
+        })
+    {
+        Role::TextArea
+    } else {
+        Role::WebArea
+    }
 }
 
 /// Map UIA ControlTypeId to its coarse xa11y Role.
@@ -10383,6 +10418,25 @@ mod tests {
             map_uia_role(UIA_CustomControlTypeId, false, false, None),
             Role::Unknown
         );
+    }
+
+    #[test]
+    fn document_role_distinguishes_win32_edits() {
+        for class in ["Edit", "RichEdit20W", "RICHEDIT50W"] {
+            assert_eq!(
+                uia_document_role(Some("Win32"), Some(class)),
+                Role::TextArea
+            );
+        }
+        for (framework, class) in [
+            (Some("Chrome"), Some("Chrome_RenderWidgetHostHWND")),
+            (Some("Win32"), Some("_WwG")),
+            (Some("WPF"), Some("Edit")),
+            (None, Some("Edit")),
+            (Some("Win32"), None),
+        ] {
+            assert_eq!(uia_document_role(framework, class), Role::WebArea);
+        }
     }
 
     #[test]

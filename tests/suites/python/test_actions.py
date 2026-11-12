@@ -382,6 +382,23 @@ def test_textfield_type_text_non_ascii_round_trips(app, app_name, app_config, te
         time.sleep(ACTION_SETTLE)
 
 
+def test_windows_type_text_advances_caret(app, app_name, app_config):
+    """Consecutive element actions insert after the text just written (#689)."""
+    if app_name not in ("winforms", "wpf"):
+        pytest.skip("requires a WinForms or WPF text box")
+
+    loc = app.locator(app_config["textfield_selector"])
+    initial = loc.element().value
+    try:
+        loc.focus()
+        loc.set_value("")
+        loc.type_text("a😀")
+        loc.type_text("b")
+        assert loc.element().value == "a😀b"
+    finally:
+        loc.set_value(initial)
+
+
 # ---------------------------------------------------------------------------
 # Element-bound action variants
 #

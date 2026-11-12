@@ -509,7 +509,7 @@ Windows is the most straightforward — UIA patterns map directly to normalized 
 | `increment` | `RangeValuePattern.SetValue(current + SmallChange)` |
 | `decrement` | `RangeValuePattern.SetValue(current - SmallChange)` |
 | `scroll_into_view` | `ScrollItemPattern.ScrollIntoView()` |
-| `type_text` | Read cursor position via `TextPattern.GetSelection()`, splice text into the current value at that position, then `ValuePattern.SetValue()` with the modified string. Falls back to appending if `TextPattern` is unavailable. This is a read-modify-write — not atomic with respect to concurrent user input. |
+| `type_text` | Read cursor position via `TextPattern.GetSelection()`, splice text into the current value at that position, then `ValuePattern.SetValue()` with the modified string. If the control supports text selection, collapse the selection after the inserted text. Falls back to appending if `TextPattern` is unavailable. This is a read-modify-write — not atomic with respect to concurrent user input. |
 | `set_text_selection` | `TextPattern` range operations |
 
 #### macOS (AX actions and settable attributes)
