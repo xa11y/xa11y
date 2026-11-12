@@ -4016,22 +4016,27 @@ fn value_offset_of_prefix(value: &str, prefix: &str) -> Result<usize> {
 /// The offset is in the ValuePattern value; the range is built in the
 /// TextPattern document, so the document must agree with `value` up to the
 /// caret, or the caret would land somewhere else.
+///
+/// A control that normalises what it is given (a browser `<input>` dropping
+/// newlines or truncating at `maxlength`, a masked or numeric field, a
+/// RichEdit storing `\r` for `\n`) stores something other than `value`, so
+/// the document disagrees with it. The write still landed: the control
+/// accepted it and reformatted it. Then the caret has no position that
+/// corresponds to "after the inserted text", and it is left where the
+/// control put it; this answers [`CaretPlacement::Normalised`] and the
+/// caller reports success. Only a failing COM call is an error.
 fn place_caret_after_write(
     pattern: &IUIAutomationTextPattern,
     value: &str,
     caret: u32,
-) -> Result<()> {
+) -> Result<CaretPlacement> {
     let supported = uia_call(|| unsafe { pattern.SupportedTextSelection() })?;
     if supported == SupportedTextSelection_None {
-        return Ok(());
+        return Ok(CaretPlacement::NoSelection);
     }
     // SetValue can reset the caret and invalidate old ranges.
     let doc = uia_call(|| unsafe { pattern.DocumentRange() })?;
     let document = rich::contents(&doc)?;
-    let wanted = xa11y_core::text_api::TextRange {
-        start: caret,
-        end: caret,
-    };
     let before = xa11y_core::text_api::slice_utf16(
         value,
         xa11y_core::text_api::TextRange {
@@ -4040,16 +4045,27 @@ fn place_caret_after_write(
         },
     )?;
     if !document.starts_with(before.as_str()) {
-        return Err(Error::Platform {
-            code: 0,
-            message: format!(
-                "the TextPattern document does not match the written value up to the caret \
-                 ({caret} UTF-16 units), so the caret has no position in it"
-            ),
-        });
+        return Ok(CaretPlacement::Normalised);
     }
+    let wanted = xa11y_core::text_api::TextRange {
+        start: caret,
+        end: caret,
+    };
     let range = rich::range_in(&doc, &document, wanted)?;
-    uia_call(|| unsafe { range.Select() })
+    uia_call(|| unsafe { range.Select() })?;
+    Ok(CaretPlacement::Placed)
+}
+
+/// What [`place_caret_after_write`] did with the caret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaretPlacement {
+    /// The caret is just after the inserted text.
+    Placed,
+    /// The control has no text selection to place.
+    NoSelection,
+    /// The control stored something other than the written value, so the
+    /// caret is wherever the control put it.
+    Normalised,
 }
 
 /// Locate the caret within a control's TextPattern, as the document text
@@ -6031,20 +6047,30 @@ impl Provider for WindowsProvider {
             // is reported as a platform error, whose delivery is `Unknown`,
             // so a caller does not retry and type the text twice (#702).
             if let Some(pattern) = text_pattern {
-                place_caret_after_write(&pattern, &new_value, caret).map_err(|e| {
-                    let code = match &e {
-                        Error::Platform { code, .. } => *code,
-                        _ => 0,
-                    };
-                    Error::Platform {
-                        code,
-                        message: format!(
+                let placement =
+                    place_caret_after_write(&pattern, &new_value, caret).map_err(|e| {
+                        let code = match &e {
+                            Error::Platform { code, .. } => *code,
+                            _ => 0,
+                        };
+                        Error::Platform {
+                            code,
+                            message: format!(
                             "type_text wrote the text with ValuePattern.SetValue, then placing \
                              the caret after it failed; the text is already in the control, \
                              so do not retry: {e}"
                         ),
-                    }
-                })?;
+                        }
+                    })?;
+                if placement == CaretPlacement::Normalised {
+                    // Not an error: the control accepted the write and
+                    // stored its own form of it (see place_caret_after_write).
+                    eprintln!(
+                        "xa11y: type_text wrote the value with ValuePattern.SetValue; the \
+                         control stored a different text (it normalised the input), so the \
+                         caret was left where the control put it"
+                    );
+                }
             }
             return Ok(());
         }

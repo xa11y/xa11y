@@ -11,9 +11,12 @@
 //! `TextValueNotSupported`, and a stale handle is `ElementStale`, all
 //! `NotDelivered`. Every other HRESULT from the call that performs the action,
 //! including `UIA_E_TIMEOUT`, is `Platform` and so `Unknown`. A failure after
-//! `type_text`'s `ValuePattern.SetValue` succeeded (placing the caret after
-//! the inserted text) is also `Platform`, whatever caused it, because the
-//! text is already in the control. The full table
+//! `type_text`'s `ValuePattern.SetValue` succeeded (a COM call placing the
+//! caret after the inserted text) is also `Platform`, whatever caused it,
+//! because the text is already in the control. A control that stored a
+//! normalised form of the written value (dropped newlines, truncation, a
+//! mask) is not a failure: `type_text` answers `Ok` and leaves the caret
+//! where the control put it. The full table
 //! is in the "Delivery disposition" section of the platform details
 //! reference.
 

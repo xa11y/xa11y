@@ -333,7 +333,7 @@ Text is inserted through the accessibility API. Keyboard events are never simula
 
 - **macOS** sets `AXSelectedText`, replacing the selection or inserting at the cursor.
 - **Linux** calls `EditableText.InsertText` at the current caret offset.
-- **Windows** reads the current value via `ValuePattern`. It then splices in the new text and calls `SetValue`.
+- **Windows** reads the current value via `ValuePattern`. It then splices in the new text, calls `SetValue`, and places the caret after the inserted text through `TextPattern`. A control that stores a normalised form of the value, such as a browser field that drops newlines or a masked field, still counts as a success. xa11y then leaves the caret where the control put it.
 
 ### Blur
 
