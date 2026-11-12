@@ -63,6 +63,59 @@ macro_rules! reader_writer_pair {
     };
 }
 
+// The same pair, for a reader whose fields carry an invariant the type
+// cannot express. `normalize` runs on every value a writer converts into and
+// on every value serde reads (the reader deserializes through the writer), so
+// neither a provider nor older JSON can hand a consumer a contradictory one.
+macro_rules! reader_writer_pair_normalized {
+    (
+        normalize = $normalize:path;
+        deserialize_from = $from:literal;
+
+        $(#[$reader_meta:meta])*
+        pub struct $reader:ident;
+
+        $(#[$writer_meta:meta])*
+        pub struct $writer:ident;
+
+        fields {
+            $(
+                $(#[$field_meta:meta])*
+                pub $field:ident : $ty:ty,
+            )*
+        }
+    ) => {
+        $(#[$reader_meta])*
+        #[serde(from = $from)]
+        #[non_exhaustive]
+        pub struct $reader {
+            $(
+                $(#[$field_meta])*
+                pub $field: $ty,
+            )*
+        }
+
+        $(#[$writer_meta])*
+        #[doc(hidden)]
+        #[derive(Deserialize)]
+        pub struct $writer {
+            $(
+                $(#[$field_meta])*
+                pub $field: $ty,
+            )*
+        }
+
+        impl From<$writer> for $reader {
+            fn from(parts: $writer) -> Self {
+                let $writer { $($field,)* } = parts;
+                let mut out = Self { $($field,)* };
+                $normalize(&mut out);
+                out
+            }
+        }
+    };
+}
+
 // Importable by path from sibling modules (`Event` uses it too).
 pub(crate) use reader_writer_pair;
 
@@ -225,11 +278,12 @@ reader_writer_pair! {
         /// Platform-assigned stable identifier for cross-snapshot correlation.
         /// - macOS: `AXIdentifier`, which the app sets and which survives an
         ///   app restart.
-        /// - Windows: the native window handle (`hwnd:0x…`) for a top-level
-        ///   window; for any other element, its `AutomationId`, or its own
-        ///   window handle when it has no `AutomationId`. The handle is valid
-        ///   only while the window exists, and Windows reuses it after the
-        ///   window closes. The `AutomationId` survives a restart.
+        /// - Windows: the element's own native window handle (`hwnd:0x…`)
+        ///   when it has one, otherwise its `AutomationId`. The handle is
+        ///   valid only while the window exists, and Windows reuses it after
+        ///   the window closes. The handle wins because an `AutomationId` is
+        ///   unique only when the app makes it so; it is always in
+        ///   `raw["automation_id"]`, where it survives a restart.
         /// - Linux: the D-Bus object path, valid only while the app runs. A
         ///   restarted app gives its elements new paths.
         ///
@@ -912,7 +966,10 @@ pub(crate) fn write_tree_node(node: &TreeNode, depth: usize, out: &mut String) {
     }
 }
 
-reader_writer_pair! {
+reader_writer_pair_normalized! {
+    normalize = StateSet::normalize;
+    deserialize_from = "StateParts";
+
     /// Boolean state flags for an element.
     ///
     /// **Semantics for non-applicable states:** When a state doesn't apply to
@@ -1012,6 +1069,20 @@ reader_writer_pair! {
         /// (macOS), the `PasswordText` role (AT-SPI), and `IsPassword` (UIA).
         #[serde(default)]
         pub password: bool,
+    }
+}
+
+impl StateSet {
+    /// Holds `hidden_reason` to its invariant: `None` when visible, and a
+    /// reason when hidden. A hidden element whose writer gave no reason (an
+    /// older serialized snapshot, which predates the field) reads
+    /// [`HiddenReason::Unknown`], which is what that writer knew.
+    fn normalize(&mut self) {
+        if self.visible {
+            self.hidden_reason = None;
+        } else if self.hidden_reason.is_none() {
+            self.hidden_reason = Some(HiddenReason::Unknown);
+        }
     }
 }
 
@@ -1788,6 +1859,35 @@ mod tests {
         assert_eq!(round.maximized, None);
         // Older payloads have no hidden_reason either.
         assert_eq!(states.hidden_reason, None);
+
+        // A hidden element from such a payload gets a reason, so the
+        // invariant "a reason exactly when hidden" holds for it too.
+        let hidden: StateSet = serde_json::from_str(&json.replace(
+            "\"visible\":true",
+            "\"visible\":false",
+        ))
+        .unwrap();
+        assert!(!hidden.visible);
+        assert_eq!(hidden.hidden_reason, Some(HiddenReason::Unknown));
+    }
+
+    #[test]
+    fn state_parts_hold_hidden_reason_to_visibility() {
+        let parts = StateSet {
+            visible: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&parts).unwrap();
+        let read: StateSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(read.hidden_reason, Some(HiddenReason::Unknown));
+
+        let visible = StateSet {
+            hidden_reason: Some(HiddenReason::NotShowing),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&visible).unwrap();
+        let read: StateSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(read.hidden_reason, None);
     }
 
     #[test]

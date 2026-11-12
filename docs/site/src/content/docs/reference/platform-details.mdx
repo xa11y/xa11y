@@ -379,12 +379,11 @@ Platforms use different attributes to determine an element's `name`:
 | Platform | Source | Survives an app restart |
 |---|---|---|
 | macOS | `AXIdentifier`, set by the app | Yes |
-| Windows, top-level window | Window handle, `hwnd:0x…` | No. Windows reuses a handle after its window closes. |
+| Windows, element with a window of its own | Window handle, `hwnd:0x…` | No. Windows reuses a handle after its window closes. |
 | Windows, other element with an `AutomationId` | `AutomationId`, set by the app | Yes |
-| Windows, other element with no `AutomationId` but a window of its own | Window handle, `hwnd:0x…` | No |
 | Linux | D-Bus object path | No |
 
-A top-level window keeps its handle even when it has an `AutomationId`. Every open copy of a WinForms form reports the same one, its `Name`. On Windows, `raw["native_window_handle"]` holds an element's own window handle, when it has one, whichever identifier `stable_id` uses.
+On Windows a handle wins over an `AutomationId`, because a handle is unique and an `AutomationId` is unique only when the app makes it so: repeated templates and controls share one. The `AutomationId`, which does survive a restart, is in `raw["automation_id"]` either way. `raw["native_window_handle"]` holds an element's own window handle, when it has one.
 
 An element whose platform reports none of these has no `stable_id`.
 

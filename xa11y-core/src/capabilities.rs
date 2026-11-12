@@ -174,14 +174,15 @@ impl Capabilities {
     /// The platform this build runs on, narrowed to the running OS version
     /// where one is detected (macOS and Windows).
     ///
-    /// Fails with [`Error::Unsupported`] on an OS xa11y has no backend for.
+    /// Fails with [`Error::Unsupported`] on an OS xa11y has no backend for,
+    /// and with [`Error::Platform`] when the OS version cannot be read.
     /// Reads no accessibility data and connects to no app.
     pub fn current() -> Result<Capabilities> {
         let platform = Platform::current().ok_or_else(|| Error::Unsupported {
             feature: "capabilities on this operating system: xa11y has no backend for it"
                 .to_string(),
         })?;
-        Ok(Self::build(platform, detected_os_version()))
+        Ok(Self::build(platform, detected_os_version()?))
     }
 
     /// The answers for `platform`, which need not be the one running.
@@ -385,54 +386,111 @@ fn version_lt(a: &[u32], b: &[u32]) -> bool {
     false
 }
 
-/// The running OS version, read once. `None` on Linux (no single platform
-/// version) and when the probe fails; [`Capabilities::os_version`] then
-/// reads `None`, so the caller can see no version was applied.
-fn detected_os_version() -> Option<String> {
-    static VERSION: std::sync::LazyLock<Option<String>> =
+/// The running OS version, read once: `Ok(None)` on Linux, which has no
+/// single platform version. A failed read stays an error, so `current`
+/// reports it rather than answering as if the OS were the latest.
+fn detected_os_version() -> Result<Option<String>> {
+    static VERSION: std::sync::LazyLock<std::result::Result<Option<String>, String>> =
         std::sync::LazyLock::new(probe_os_version);
-    VERSION.clone()
+    VERSION.clone().map_err(|message| Error::Platform {
+        code: 0,
+        message: format!(
+            "reading the OS version failed, so version-gated capabilities cannot be \
+             answered: {message}"
+        ),
+    })
 }
 
+/// `kern.osproductversion` through `sysctlbyname`, in process: spawning
+/// `sysctl` depended on `PATH` and cost a process per first call.
 #[cfg(target_os = "macos")]
-fn probe_os_version() -> Option<String> {
-    let out = std::process::Command::new("sysctl")
-        .args(["-n", "kern.osproductversion"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+fn probe_os_version() -> std::result::Result<Option<String>, String> {
+    use std::ffi::{c_char, c_int, c_void};
+    extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> c_int;
     }
-    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    parse_version(&v).ok().map(|_| v)
+    let name = c"kern.osproductversion";
+    let mut len = 0usize;
+    // SAFETY: a null `oldp` asks only for the size, written to `len`.
+    let rc = unsafe {
+        sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut len, std::ptr::null_mut(), 0)
+    };
+    if rc != 0 {
+        return Err(format!(
+            "sysctlbyname(kern.osproductversion) size query failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    // SAFETY: `buf` holds `len` bytes, and `len` is updated to what was written.
+    let rc = unsafe {
+        sysctlbyname(
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(format!(
+            "sysctlbyname(kern.osproductversion) failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    buf.truncate(len);
+    let v = String::from_utf8_lossy(&buf)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    parse_version(&v)
+        .map(|_| Some(v.clone()))
+        .map_err(|e| format!("kern.osproductversion is {v:?}: {e}"))
 }
 
+/// `RtlGetVersion`, which, unlike `GetVersionEx`, is not subject to the
+/// manifest-based version lie, and unlike parsing `cmd /C ver` does not
+/// depend on the display language or spawn a console.
 #[cfg(target_os = "windows")]
-fn probe_os_version() -> Option<String> {
-    // `ver` prints "Microsoft Windows [Version 10.0.22631.4317]". Unlike
-    // GetVersionEx it is not subject to the manifest-based version lie.
-    let out = std::process::Command::new("cmd")
-        .args(["/C", "ver"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+fn probe_os_version() -> std::result::Result<Option<String>, String> {
+    #[repr(C)]
+    struct OsVersionInfoW {
+        size: u32,
+        major: u32,
+        minor: u32,
+        build: u32,
+        platform_id: u32,
+        csd_version: [u16; 128],
     }
-    parse_windows_ver(&String::from_utf8_lossy(&out.stdout))
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn parse_windows_ver(text: &str) -> Option<String> {
-    let start = text.find("Version ")? + "Version ".len();
-    let rest = &text[start..];
-    let end = rest.find(']').unwrap_or(rest.len());
-    let v = rest[..end].trim().to_string();
-    parse_version(&v).ok().map(|_| v)
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    extern "system" {
+        fn RtlGetVersion(info: *mut OsVersionInfoW) -> i32;
+    }
+    let mut info = OsVersionInfoW {
+        size: std::mem::size_of::<OsVersionInfoW>() as u32,
+        major: 0,
+        minor: 0,
+        build: 0,
+        platform_id: 0,
+        csd_version: [0; 128],
+    };
+    // SAFETY: `info` is a correctly sized OSVERSIONINFOW with its size set.
+    let status = unsafe { RtlGetVersion(&mut info) };
+    if status != 0 {
+        return Err(format!("RtlGetVersion failed with NTSTATUS {status:#010x}"));
+    }
+    Ok(Some(format!("{}.{}.{}", info.major, info.minor, info.build)))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn probe_os_version() -> Option<String> {
-    None
+fn probe_os_version() -> std::result::Result<Option<String>, String> {
+    Ok(None)
 }
 
 /// The feature name of an event kind: `event:` plus [`EventKind::name`].
@@ -1185,15 +1243,6 @@ mod tests {
             resolve(gated, Platform::Windows, None).0,
             Support::Supported
         );
-    }
-
-    #[test]
-    fn windows_ver_output_parses() {
-        assert_eq!(
-            parse_windows_ver("\r\nMicrosoft Windows [Version 10.0.22631.4317]\r\n").as_deref(),
-            Some("10.0.22631.4317")
-        );
-        assert_eq!(parse_windows_ver("garbage"), None);
     }
 
     #[test]

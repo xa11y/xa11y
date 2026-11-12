@@ -906,7 +906,7 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
         // cell, the same way `expanded` matches nothing on a leaf.
         "header" => element
             .cell
-            .and_then(|c| c.header)
+            .and_then(|c| c.header())
             .map(|h| h.to_snake_case().to_string()),
         "heading_level" => element.heading_level.map(|n| n.to_string()),
         "landmark_type" => element.landmark_type.map(|l| l.to_snake_case().to_string()),
@@ -1412,7 +1412,7 @@ mod numeric_attr_tests {
                 column: Some(column),
                 row_span: None,
                 column_span: Some(2),
-                header: None,
+                kind: Some(crate::table::CellKind::Data),
             }
             .into(),
         );
@@ -1541,7 +1541,7 @@ mod numeric_attr_tests {
                 column: Some(0),
                 row_span: None,
                 column_span: None,
-                header: Some(crate::table::HeaderKind::Column),
+                kind: Some(crate::table::CellKind::ColumnHeader),
             }
             .into(),
         );

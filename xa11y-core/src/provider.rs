@@ -566,7 +566,9 @@ pub trait Provider: Send + Sync {
         Err(unsupported("text_length"))
     }
 
-    /// The caret offset, `None` when the element has no caret.
+    /// The caret offset, `None` when the element has no caret. See
+    /// [`crate::text_api::Text::caret`] for the contract every backend keeps:
+    /// `None` when unfocused, the active end of a selection.
     fn text_caret(&self, _element: &ElementData) -> Result<Option<u32>> {
         Err(unsupported("text_caret"))
     }
