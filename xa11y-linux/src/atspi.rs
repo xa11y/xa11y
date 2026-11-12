@@ -3061,6 +3061,10 @@ impl LinuxProvider {
 }
 
 impl Provider for LinuxProvider {
+    fn capabilities(&self) -> Result<xa11y_core::Capabilities> {
+        xa11y_core::Capabilities::current()
+    }
+
     fn identity(&self, element: &ElementData) -> Result<xa11y_core::NodeIdentity> {
         let aref = self.get_cached(element.handle)?;
         // A unique bus name is never reused within one bus lifetime, and the

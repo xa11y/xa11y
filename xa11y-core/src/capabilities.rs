@@ -882,7 +882,10 @@ const ROWS: &[Row] = &[
     Row {
         name: "window:activate",
         description: "Bring a window to the foreground and focus it.",
-        linux: partial(X11_SWAY),
+        linux: partial(
+            "X11 (verified through `_NET_ACTIVE_WINDOW`) and Sway; other Wayland compositors: \
+             AT-SPI `GrabFocus`, which the compositor may refuse"
+        ),
         macos: yes(),
         windows: yes(),
     },
@@ -976,7 +979,7 @@ const ROWS: &[Row] = &[
         name: "table:row_headers",
         description: "The row header cells of a table or cell.",
         linux: yes(),
-        macos: partial("AppKit tables report no row headers"),
+        macos: partial("AppKit tables have no row headers, so the answer for one is empty"),
         windows: yes(),
     },
     Row {

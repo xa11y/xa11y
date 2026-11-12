@@ -83,7 +83,8 @@ that when they do not know how many rows they hold.
     if cell.cell is not None:
         print(cell.cell.row, cell.cell.column)  # 0-based
         print(cell.cell.row_span)  # None when not reported
-        print(cell.cell.header)  # "column", "row", or None for a data cell
+        print(cell.cell.kind)  # "data", "column_header", "row_header", or None when not reported
+        print(cell.cell.header)  # "column" or "row" on a header cell, else None
     ```
   </TabItem>
   <TabItem label="JavaScript">
@@ -213,7 +214,10 @@ print([el.name for el in selected])
 
 `element.text()` and `locator.text()` return a `Text` object. Every method on
 it is a live platform read that caches nothing, so polling `caret()` sees the
-current caret without fetching the whole text.
+current caret without fetching the whole text. A caret belongs to the focused
+element: `caret()` is `None` until the element has focus, and while a range is
+selected it is the selection's active end (`None` on macOS, which does not
+say which end that is).
 
 The two differ in what they hold on to:
 

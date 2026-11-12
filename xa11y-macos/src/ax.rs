@@ -5463,6 +5463,10 @@ impl MacOSProvider {
 }
 
 impl Provider for MacOSProvider {
+    fn capabilities(&self) -> Result<xa11y_core::Capabilities> {
+        xa11y_core::Capabilities::current()
+    }
+
     fn relations(
         &self,
         element: &ElementData,

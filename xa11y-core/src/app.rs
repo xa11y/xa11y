@@ -892,6 +892,16 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_that_states_no_capabilities_does_not_borrow_the_hosts() {
+        // FocusModeProvider overrides nothing about capabilities.
+        let provider = FocusModeProvider::new(FocusMode::None);
+        assert!(matches!(
+            provider.capabilities(),
+            Err(Error::Unsupported { .. })
+        ));
+    }
+
+    #[test]
     fn a_tree_drops_a_child_that_went_stale_but_not_an_evicted_one() {
         let provider = build_provider();
         provider.fail_children(

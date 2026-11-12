@@ -4310,6 +4310,10 @@ fn uia_gate(operation: &str) -> Result<()> {
 }
 
 impl Provider for WindowsProvider {
+    fn capabilities(&self) -> Result<xa11y_core::Capabilities> {
+        xa11y_core::Capabilities::current()
+    }
+
     fn identity(&self, element: &ElementData) -> Result<xa11y_core::NodeIdentity> {
         uia_gate("identity")?;
         if let Some(app) = self.synthetic_app_identity_checked(element.handle)? {

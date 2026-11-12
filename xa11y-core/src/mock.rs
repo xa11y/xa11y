@@ -328,6 +328,10 @@ struct MockNode {
 }
 
 impl Provider for MockProvider {
+    fn capabilities(&self) -> Result<crate::Capabilities> {
+        crate::Capabilities::current()
+    }
+
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         match element {
