@@ -2381,21 +2381,29 @@ impl LinuxProvider {
     /// anything (issue #491). Its parent stops counting it at once, so that is
     /// the check, at constant cost whatever the number of siblings:
     /// `GetIndexInParent`, then the parent's `GetChildAtIndex` at that index
-    /// must be this object. An index of -1 cannot be cross-checked (Qt
-    /// reports it for live popups), so there the object's own state decides:
-    /// `DEFUNCT` or an empty state set is stale. A parent that
-    /// `MANAGES_DESCENDANTS` (large tables and tree views) does not keep its
-    /// children as live objects, so there only the object's own `DEFUNCT`
-    /// state is consulted.
+    /// must be this object. A parent that `MANAGES_DESCENDANTS` (large tables
+    /// and tree views) does not keep its children as live objects, so there
+    /// only the object's own `DEFUNCT` state is consulted.
     ///
-    /// A top-level object (a window whose parent is the application root, or
-    /// an application whose parent is the registry root) has nothing to be
-    /// detached from and passes. A *null* parent is not top-level: it is what
-    /// GTK 3 reports for a destroyed widget, window included (issue #586),
-    /// alongside `GetIndexInParent` -1 and an empty state set, while every
-    /// live object keeps a parent link up to the application root. An object
-    /// or parent that is already gone is stale too; any other failure is
-    /// returned.
+    /// Where there is nothing to cross-check, the object's own state
+    /// decides: `DEFUNCT` or an empty state set is stale, any other state set
+    /// is live. That covers two shapes:
+    ///
+    /// - an index of -1, which Qt reports for live popups;
+    /// - a *null* parent. GTK 3 reports one for a destroyed widget, window
+    ///   included (issue #586), together with an empty state set, so the
+    ///   state read still catches it. It is also the valid AT-SPI shape of a
+    ///   top-level object on some adapters (`ensure_top_level_window_target`
+    ///   accepts it), so a null parent alone is not removal.
+    ///
+    /// The application object itself (`APP_ROOT_PATH` on the application's
+    /// bus) is never detached from anything, and some adapters answer its
+    /// `Parent` with the null reference rather than the registry, so it
+    /// passes without a parent read; an application that has gone fails the
+    /// call that follows. A top-level object whose parent is a root (a
+    /// window under the application root, an application under the registry
+    /// root) passes too. An object or parent that is already gone is stale;
+    /// any other failure is returned.
     ///
     /// Every Linux path that acts on an element runs this first: `DoAction`,
     /// `GrabFocus` (`focus`, `activate`), `Value` writes, `EditableText`
@@ -2409,15 +2417,25 @@ impl LinuxProvider {
                 format!("{}{}", aref.bus_name, aref.path),
             )
         };
+        // No parent or index to cross-check against: the object's own state
+        // decides. A removed object is `DEFUNCT`, or reports the empty state
+        // set GTK 3 gives a destroyed widget.
+        let own_state_decides = || match self.scan_state_bits(aref)? {
+            Some(bits) if bits != 0 && bits & DEFUNCT == 0 => Ok(()),
+            _ => Err(stale()),
+        };
+        if aref.path == APP_ROOT_PATH {
+            return Ok(());
+        }
         let parent = match self.read_parent_ref(aref) {
             Ok(parent) => parent,
             Err(Error::ElementStale { .. }) => return Err(stale()),
             Err(e) => return Err(e),
         };
         if parent.is_null() {
-            return Err(stale());
+            return own_state_decides();
         }
-        if parent.path == "/org/a11y/atspi/accessible/root" {
+        if parent.path == APP_ROOT_PATH {
             return Ok(());
         }
         let Some(parent_state) = self.scan_state_bits(&parent)? else {
@@ -2433,16 +2451,9 @@ impl LinuxProvider {
             return Err(stale());
         };
         if index < 0 {
-            // No index to cross-check against the parent. Live objects report
-            // -1 on some toolkits (Qt's popup menus and their items), so -1
-            // alone is not removal: as under MANAGES_DESCENDANTS, the
-            // object's own state decides. A removed object is `DEFUNCT`, or
-            // reports the empty state set GTK 3 gives a destroyed widget
-            // (whose null parent is normally caught above already).
-            return match self.scan_state_bits(aref)? {
-                Some(bits) if bits != 0 && bits & DEFUNCT == 0 => Ok(()),
-                _ => Err(stale()),
-            };
+            // Live objects report -1 on some toolkits (Qt's popup menus and
+            // their items), so -1 alone is not removal.
+            return own_state_decides();
         }
         let Some((bus, path)) = self.attach_call::<(String, zbus::zvariant::OwnedObjectPath)>(
             &parent,
@@ -6772,6 +6783,33 @@ mod tests {
                 .expect("gtk3 zombie")
                 .serve_at("/gtk3_zombie", action(&server_calls))
                 .expect("gtk3 zombie action")
+                // A live top-level object whose adapter answers the null
+                // reference for its Parent: its own state set says it lives.
+                .serve_at(
+                    "/null_parent_frame",
+                    peer("/org/a11y/atspi/null", vec![], -1, VISIBLE),
+                )
+                .expect("null-parent frame")
+                .serve_at("/null_parent_frame", action(&server_calls))
+                .expect("null-parent frame action")
+                // A null parent and DEFUNCT: removed.
+                .serve_at(
+                    "/null_parent_defunct",
+                    peer("/org/a11y/atspi/null", vec![], -1, VISIBLE | DEFUNCT),
+                )
+                .expect("null-parent defunct")
+                .serve_at("/null_parent_defunct", action(&server_calls))
+                .expect("null-parent defunct action")
+                // The application object, whose Parent Qt answers with the
+                // null reference: it passes without a parent or state read
+                // (this one reports neither a parent nor any state).
+                .serve_at(
+                    "/org/a11y/atspi/accessible/root",
+                    peer("/org/a11y/atspi/null", vec![], -1, 0),
+                )
+                .expect("app root")
+                .serve_at("/org/a11y/atspi/accessible/root", action(&server_calls))
+                .expect("app root action")
                 // A top-level window: its parent is the application root.
                 .serve_at(
                     "/window",
@@ -6833,6 +6871,7 @@ mod tests {
         );
         for path in [
             "/gtk3_zombie",
+            "/null_parent_defunct",
             "/usurped",
             "/dead_cell",
             "/defunct",
@@ -6867,6 +6906,16 @@ mod tests {
             .do_atspi_action_by_index(&at("/qt_popup_item"), 0)
             .expect("a live object with index -1 acts");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        // A null parent is not removal on its own: a live state set acts.
+        provider
+            .do_atspi_action_by_index(&at("/null_parent_frame"), 0)
+            .expect("a live object with a null parent acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+        // The application object is never detached.
+        provider
+            .do_atspi_action_by_index(&at("/org/a11y/atspi/accessible/root"), 0)
+            .expect("the application object acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6);
     }
 
     /// Accessible half of the `scroll_into_view` fixture: answers `GetState`,
