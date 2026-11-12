@@ -763,11 +763,7 @@ fn read_texts(
 }
 
 /// Read `text` from offset 0, in at most `max_bytes` bytes of UTF-8.
-fn read_text(
-    text: &crate::text_api::Text,
-    length: u32,
-    max_bytes: usize,
-) -> Result<CapturedText> {
+fn read_text(text: &crate::text_api::Text, length: u32, max_bytes: usize) -> Result<CapturedText> {
     if length == 0 {
         return Ok(CapturedText {
             content: String::new(),

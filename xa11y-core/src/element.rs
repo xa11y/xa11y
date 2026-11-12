@@ -434,9 +434,12 @@ impl Element {
 
     /// Get direct children of this element.
     ///
-    /// Each call queries the provider — results are not cached.
+    /// Each call queries the provider — results are not cached. A removed
+    /// element fails with [`Error::ElementStale`] where the platform tells a
+    /// removed node from a childless one.
     pub fn children(&self) -> crate::error::Result<Vec<Element>> {
         let children = self.provider.get_children(Some(&self.data))?;
+
         Ok(children
             .into_iter()
             .map(|d| Element::new(d, Arc::clone(&self.provider)))
@@ -934,11 +937,19 @@ fn build_tree_node(
     depth: usize,
 ) -> crate::error::Result<TreeNode> {
     let children = if max_depth.is_none_or(|d| depth < d) {
-        element
-            .children()?
-            .into_iter()
-            .map(|child| build_tree_node(&child, max_depth, depth + 1))
-            .collect::<crate::error::Result<Vec<_>>>()?
+        let mut nodes = Vec::new();
+        for child in element.children()? {
+            match build_tree_node(&child, max_depth, depth + 1) {
+                Ok(node) => nodes.push(node),
+                // The child went away between being listed and being read,
+                // so it is not in the tree. An eviction is the walk's own
+                // doing, not the node's absence, and stays an error.
+                Err(Error::ElementStale { reason, .. })
+                    if reason != crate::error::StaleReason::Evicted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        nodes
     } else {
         vec![]
     };
@@ -1862,11 +1873,8 @@ mod tests {
 
         // A hidden element from such a payload gets a reason, so the
         // invariant "a reason exactly when hidden" holds for it too.
-        let hidden: StateSet = serde_json::from_str(&json.replace(
-            "\"visible\":true",
-            "\"visible\":false",
-        ))
-        .unwrap();
+        let hidden: StateSet =
+            serde_json::from_str(&json.replace("\"visible\":true", "\"visible\":false")).unwrap();
         assert!(!hidden.visible);
         assert_eq!(hidden.hidden_reason, Some(HiddenReason::Unknown));
     }

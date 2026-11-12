@@ -419,7 +419,13 @@ fn probe_os_version() -> std::result::Result<Option<String>, String> {
     let mut len = 0usize;
     // SAFETY: a null `oldp` asks only for the size, written to `len`.
     let rc = unsafe {
-        sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut len, std::ptr::null_mut(), 0)
+        sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
     };
     if rc != 0 {
         return Err(format!(
@@ -485,7 +491,10 @@ fn probe_os_version() -> std::result::Result<Option<String>, String> {
     if status != 0 {
         return Err(format!("RtlGetVersion failed with NTSTATUS {status:#010x}"));
     }
-    Ok(Some(format!("{}.{}.{}", info.major, info.minor, info.build)))
+    Ok(Some(format!(
+        "{}.{}.{}",
+        info.major, info.minor, info.build
+    )))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

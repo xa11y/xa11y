@@ -418,12 +418,13 @@ impl X11InputBackend {
         // The input-sim contract: positive dy scrolls toward the end of the
         // content, the "wheel rolled toward the user" direction, which is
         // button 5 on X11.
-        for _ in 0..delta.dy.abs() {
+        // `unsigned_abs`: `i32::MIN.abs()` overflows.
+        for _ in 0..delta.dy.unsigned_abs() {
             let btn = if delta.dy > 0 { 5 } else { 4 };
             self.button_event(btn, true)?;
             self.button_event(btn, false)?;
         }
-        for _ in 0..delta.dx.abs() {
+        for _ in 0..delta.dx.unsigned_abs() {
             let btn = if delta.dx > 0 { 7 } else { 6 };
             self.button_event(btn, true)?;
             self.button_event(btn, false)?;

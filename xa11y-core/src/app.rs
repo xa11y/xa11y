@@ -658,7 +658,14 @@ impl App {
         if max_depth != Some(0) {
             let child_depth = max_depth.map(|depth| depth - 1);
             for child in self.children()? {
-                tree.children.push(child.tree(child_depth)?);
+                match child.tree(child_depth) {
+                    Ok(node) => tree.children.push(node),
+                    // Gone since it was listed: not in the tree (as
+                    // `Element::tree` prunes it).
+                    Err(Error::ElementStale { reason, .. })
+                        if reason != crate::error::StaleReason::Evicted => {}
+                    Err(e) => return Err(e),
+                }
             }
         }
         Ok(tree)
@@ -882,6 +889,34 @@ mod tests {
         let provider: Arc<dyn Provider> = build_provider();
         App::by_name_with(provider, "TestApp", Duration::ZERO)
             .expect("TestApp must exist in mock tree")
+    }
+
+    #[test]
+    fn a_tree_drops_a_child_that_went_stale_but_not_an_evicted_one() {
+        let provider = build_provider();
+        provider.fail_children(
+            "Navigation",
+            Error::stale(crate::StaleReason::Removed, "toolbar"),
+        );
+        let dyn_provider: Arc<dyn Provider> = provider.clone();
+        let app = App::by_name_with(dyn_provider, "TestApp", Duration::ZERO).expect("app");
+        let dump = app
+            .dump(None)
+            .expect("a vanished subtree does not fail the dump");
+        assert!(!dump.contains("Navigation"), "{dump}");
+        assert!(dump.contains("Content"), "{dump}");
+
+        provider.fail_children(
+            "Navigation",
+            Error::stale(crate::StaleReason::Evicted, "toolbar"),
+        );
+        assert!(matches!(
+            app.tree(None),
+            Err(Error::ElementStale {
+                reason: crate::StaleReason::Evicted,
+                ..
+            })
+        ));
     }
 
     /// What [`FocusModeProvider`] reports from `focused_app`.

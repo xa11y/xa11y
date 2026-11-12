@@ -1821,13 +1821,14 @@ mod tests {
     fn an_action_keeps_a_deadline_the_caller_opened() {
         let loc = root_locator(r#"button[name="Back"]"#).with_timeout(Duration::from_millis(1));
         let mut seen = None;
-        crate::deadline::Deadline::after(Duration::from_millis(200)).scope(|| {
-            loc.act("press", |_| {
-                seen = crate::deadline::Deadline::current().map(|d| d.remaining());
-                Ok(())
+        crate::deadline::Deadline::after(Duration::from_millis(200))
+            .scope(|| {
+                loc.act("press", |_| {
+                    seen = crate::deadline::Deadline::current().map(|d| d.remaining());
+                    Ok(())
+                })
             })
-        })
-        .expect("act");
+            .expect("act");
         let left = seen.expect("the call runs under a deadline");
         assert!(left <= Duration::from_millis(200), "{left:?}");
     }
