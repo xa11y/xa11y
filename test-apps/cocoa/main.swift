@@ -332,6 +332,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         heading.setAccessibilityLabel("Heading Text")
         textBox.addSubview(heading)
 
+        // The shape of an event in Calendar's month grid: a static text with
+        // no AXValue, its title in AXDescription and its calendar in AXHelp.
+        let event = NSView(frame: NSRect(x: 430, y: 78, width: 200, height: 24))
+        event.setAccessibilityElement(true)
+        event.setAccessibilityRole(.staticText)
+        event.setAccessibilityLabel("Team Lunch. 13 November 2026")
+        event.setAccessibilityHelp("This event belongs to calendar “Work”.")
+        textBox.addSubview(event)
+
         let scrolledText = NSScrollView(frame: NSRect(x: 16, y: 10, width: 400, height: 60))
         let textView = NSTextView(frame: scrolledText.bounds)
         textView.string = "Line 1\nLine 2\nLine 3"
