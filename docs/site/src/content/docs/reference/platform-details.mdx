@@ -525,7 +525,7 @@ JavaScript.
 | `cell.kind` (`data`, `column_header`, `row_header`; `cell.header` derives from it) | The `table cell`, `column header` / `table column header` and `row header` / `table row header` roles | Always `None` (not reported): AX marks no cell as either | Cached ARIA header role, WPF header class, or parent Header orientation; explicit header requests label their returned cells |
 | `table_row` | Always `None`: AT-SPI has no row-index call for a row object, so read the row from a cell | `AXIndex` of an `AXRow`, including outline rows | GridItem row when the row object reports it |
 | `collection` (`index`, `size`, `depth`) | Object attributes `posinset`, `setsize`, `level`, converted from 1-based; read for list items, tree items, tabs, radio buttons and rows | `AXARIAPosInSet` / `AXARIASetSize` on rows, tabs and radio buttons, converted from 1-based. `depth` comes from `AXDisclosureLevel` on outline rows. Web list items are groups in AX, so they report none | PositionInSet, SizeOfSet and Level; indices converted from 1-based |
-| `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `AXCellForColumnAndRow`; for AppKit tables and outlines, the `AXCell` in row `AXRows[row]` whose index ranges cover the slot | Grid.GetItem; never realizes a virtual cell |
+| `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `AXCellForColumnAndRow`; for AppKit tables and outlines, the `AXCell` in row `AXRows[row]` whose index ranges cover the slot. A cell-based `NSTableView` has no `AXCell` layer and its cells report no index ranges, so `cell_at()` on one is `Unsupported` | Grid.GetItem; never realizes a virtual cell |
 | `column_headers()`, `row_headers()` | `Table.GetColumnHeader` / `GetRowHeader` per column or row, bounded by the caller's deadline | `AXColumnHeaderUIElements` / `AXRowHeaderUIElements`; for AppKit, which answers neither, the `AXHeader` of each `AXColumn` | Table header arrays |
 | `column_header_cells()`, `row_header_cells()` | `TableCell.GetColumnHeaderCells` / `GetRowHeaderCells` | The cell's header attributes; for AppKit, the `AXHeader` of the cell's `AXColumn`, and no row headers | TableItem header arrays |
 | `selected_items()` (rows or cells, whichever the platform selects) | `Selection.GetSelectedChild`: cells in a GTK table | `AXSelectedRows` on tables and outlines, `AXSelectedChildren` elsewhere | Selection.GetCurrentSelection |
@@ -534,6 +534,15 @@ JavaScript.
 | `Text.runs()` attributes | `Text.GetAttributeRun`; `script` is always `None` | `AXStyleRangeForIndex` runs, read from `AXAttributedStringForRange`; weight and italic from the run's font | TextRange format units and attributes; unsupported attributes stay `None` |
 | `Text.bounds()` | `Text.GetRangeExtents` per rendered line | `AXBoundsForRange` per rendered line | TextRange.GetBoundingRectangles in physical desktop pixels |
 | `select_text()` range check | `InvalidTextRange` past the end or inside a surrogate pair | `InvalidTextRange` past the end or inside a surrogate pair | `InvalidTextRange` past the end or inside a surrogate pair |
+
+A tree table's `row_count` counts the rows on show, not the items in its
+model. On macOS an `NSOutlineView` has no `AXRowCount`, and its `AXRows`
+holds only the top-level rows and the children of expanded items. Its
+`row_count` changes as items expand and collapse, and `cell_at()` indexes
+the same shown rows. GTK 3 on Linux counts the same way: a `GtkTreeView`'s
+`Table.NRows` covers expanded rows only. On Windows the count is the
+provider's Grid `RowCount`. A standard UIA tree view implements no Grid
+pattern and reports no `table`.
 
 Windows reads the prefix needed for a numeric `Text.read()` request,
 including a unit to check surrogate boundaries. A `find()` call shares one

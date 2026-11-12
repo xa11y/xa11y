@@ -21,7 +21,10 @@ What AX shows, and so what is pinned here:
   the ``list`` role, so selectors written against it keep matching, but an
   ``NSOutlineView`` is an ``NSTableView`` underneath: it reports ``table``
   dimensions and answers ``cell_at`` and the header queries like the users
-  table does.
+  table does. Its row count is the rows on show, which grows as items expand.
+- **A cell-based table cannot locate a cell.** The legacy ``NSCell`` "Items"
+  list has no ``AXCell`` layer, so ``cell_at`` raises rather than answering
+  ``None`` for every slot.
 
 macOS only: the widgets are AppKit's.
 """
@@ -293,6 +296,16 @@ def test_cells_carry_zero_based_positions_and_unit_spans(users):
 
     assert users.cell_at(2, 0) is None
     assert users.cell_at(0, 2) is None
+
+
+def test_a_cell_based_table_refuses_cell_at(app):
+    # The "Items" list is a legacy cell-based NSTableView: text hangs straight
+    # off each AXRow with no AXCell layer and no index ranges, so no slot can
+    # be located. That must not read as an empty cell.
+    items = app.locator('table[name="Items"]').element()
+    assert items.table is not None and items.table.row_count >= 1
+    with pytest.raises(xa11y.ActionNotSupportedError, match="cell-based"):
+        items.cell_at(0, 0)
 
 
 def test_selector_matches_cell_positions(app):

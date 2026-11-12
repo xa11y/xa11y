@@ -533,7 +533,12 @@ fn attribute_count(element: AXUIElementRef, attribute: &str) -> Result<Option<u3
         },
     );
     match err {
-        AX_ERROR_SUCCESS => Ok(u32::try_from(count).ok()),
+        // A negative or oversized count is not "no such attribute": AX
+        // answered with a length no array can have (tenet 1).
+        AX_ERROR_SUCCESS => u32::try_from(count).map(Some).map_err(|_| Error::Platform {
+            code: -1,
+            message: format!("counting {attribute} returned {count}, which is not a valid length"),
+        }),
         AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(None),
         code => Err(platform(attribute, code)),
     }
@@ -724,9 +729,12 @@ impl PositionAttrs {
     ) -> Result<Metadata> {
         let table = if has_table_api(role, ax_role) {
             // AppKit's NSTableView and NSOutlineView report no AXRowCount /
-            // AXColumnCount; their AXRows / AXColumns arrays hold every row
-            // and column (AXVisibleRows is the realized subset), so their
-            // length is the platform's total. `attribute_count` answers
+            // AXColumnCount, so the length of AXRows / AXColumns stands in.
+            // For an NSTableView that is every row (AXVisibleRows is the
+            // realized subset). For an NSOutlineView AXRows holds only the
+            // rows currently shown, the children of expanded items, so its
+            // row count changes as items expand and collapse; it is the
+            // count of rows `cell_at` can address, not of the model's items. `attribute_count` answers
             // `None` only for an attribute the element does not have or that
             // holds no value; any other failure is the read's error.
             let count = |reported: Option<i64>, array: &str| -> Result<Option<Count>> {
@@ -1069,14 +1077,24 @@ impl MacOSProvider {
         // rows are `AXRows` in row order, and a view-based table's row holds
         // one AXCell per column, each reporting its own index ranges. An
         // outline row also holds its disclosure triangle, which reports no
-        // column range and so never matches. The cell is the one
-        // whose ranges cover the slot, so a row whose cells report no ranges
-        // (a cell-based table, which has no AXCell layer) has no cell there.
+        // column range and so never matches. The cell is the one whose
+        // ranges cover the slot.
+        //
+        // A cell-based table has no AXCell layer: its row's children (text
+        // fields, images) report no ranges at all, so no slot can be located
+        // in it. That is not the same answer as "the slot is empty", and
+        // reading it as one would report every cell of such a table as
+        // missing (tenet 1), so a row with children none of which reports a
+        // column range is `Unsupported`.
         let Some(row_el) = attribute_element_at(ax.as_ptr(), "AXRows", row)? else {
             return Ok(None);
         };
-        for child in ax_element_list_strict(row_el.as_ptr(), "AXChildren")? {
+        let children = ax_element_list_strict(row_el.as_ptr(), "AXChildren")?;
+        let has_children = !children.is_empty();
+        let mut any_ranged = false;
+        for child in children {
             let column_range = read_range(child.as_ptr(), "AXColumnIndexRange")?;
+            any_ranged |= column_range.is_some();
             if !covers(column_range, column) {
                 continue;
             }
@@ -1085,6 +1103,14 @@ impl MacOSProvider {
                 continue;
             }
             return Ok(Some(self.build_element_data(&child, table.pid)?));
+        }
+        if has_children && !any_ranged {
+            return Err(Error::Unsupported {
+                feature: format!(
+                    "cell_at({row}, {column}) on a cell-based table: its cells have no index \
+                     ranges (row {row} has children, none reporting AXColumnIndexRange)"
+                ),
+            });
         }
         Ok(None)
     }
