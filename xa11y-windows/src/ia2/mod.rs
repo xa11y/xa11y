@@ -3,8 +3,8 @@ pub(super) mod abi;
 mod rich;
 mod semantics;
 use abi::*;
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use windows::core::{IUnknown, Interface, BOOL, BSTR};
@@ -25,6 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindow, IsWindowVisible, GA_ROOT,
 };
 use xa11y_core::event_provider::Subscription;
+use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
 use xa11y_core::table::*;
 use xa11y_core::text_api::*;
 use xa11y_core::{
@@ -33,9 +34,7 @@ use xa11y_core::{
 };
 
 const LIMIT: usize = 4096;
-const REGISTRY_LIMIT: usize = 8192;
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
-const RETENTION: Duration = Duration::from_secs(300);
 fn platform(message: impl Into<String>) -> Error {
     Error::Platform {
         code: -1,
@@ -420,8 +419,11 @@ enum Entry {
     Node(Node),
 }
 struct State {
-    entries: HashMap<u64, (Instant, Entry)>,
-    order: VecDeque<u64>,
+    /// Retained objects by handle. Bounded and aged like the UIA backend's
+    /// handle table: an entry stays resolvable until enough newer ones push
+    /// it out, however long that takes, and a handle is never reused, so a
+    /// lookup miss is always `Evicted`.
+    entries: BoundedHandleCache<Entry>,
     next: u64,
     dispatched: bool,
     deadline: Option<Instant>,
@@ -433,19 +435,23 @@ struct State {
 impl State {
     fn new() -> Self {
         Self {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
+            entries: BoundedHandleCache::new(MAX_CACHED_ELEMENTS),
             next: 1,
             dispatched: false,
             deadline: None,
             deadline_hit: std::cell::Cell::new(false),
         }
     }
-    fn check_deadline(&self) -> Result<()> {
-        if self
-            .deadline
+    /// Whether the request's deadline has passed. No side effect: unlike
+    /// [`check_deadline`](Self::check_deadline) it does not record a
+    /// cooperative stop, so a caller that only asks cannot turn the work's
+    /// own result into a budget timeout.
+    fn deadline_passed(&self) -> bool {
+        self.deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
-        {
+    }
+    fn check_deadline(&self) -> Result<()> {
+        if self.deadline_passed() {
             self.deadline_hit.set(true);
             return Err(platform(
                 "IA2 request deadline expired before the next native operation",
@@ -459,17 +465,9 @@ impl State {
         Ok(())
     }
     fn retain(&mut self, entry: Entry) -> u64 {
-        while self.entries.len() >= REGISTRY_LIMIT {
-            if let Some(id) = self.order.pop_front() {
-                self.entries.remove(&id);
-            } else {
-                break;
-            }
-        }
         let id = (1u64 << 62) | self.next;
         self.next += 1;
-        self.entries.insert(id, (Instant::now(), entry));
-        self.order.push_back(id);
+        self.entries.insert(id, entry);
         id
     }
     fn get(&mut self, e: &ElementData) -> Result<Entry> {
@@ -482,13 +480,7 @@ impl State {
                 format!("IA2 handle {} is no longer retained", e.handle),
             )
         };
-        let (time, entry) = self.entries.get(&e.handle).ok_or_else(evicted)?;
-        if time.elapsed() > RETENTION {
-            self.entries.remove(&e.handle);
-            self.order.retain(|id| *id != e.handle);
-            return Err(evicted());
-        }
-        let entry = entry.clone();
+        let entry = self.entries.get(&e.handle).ok_or_else(evicted)?.clone();
         match &entry {
             Entry::App(o) => {
                 if generation(o.pid)? != o.generation {
@@ -512,12 +504,15 @@ impl State {
     }
     fn classify_result<T>(&self, e: &ElementData, result: Result<T>) -> Result<T> {
         // A failed native mutation may already have taken effect. Never turn
-        // its HRESULT into a NotDelivered stale error after dispatch.
-        if self.dispatched || self.check_deadline().is_err() {
+        // its HRESULT into a NotDelivered stale error after dispatch. Past the
+        // deadline, classification (which can make native calls) is skipped,
+        // but the work's own result is returned as it is: the work finished,
+        // so a real error must not be replaced with a budget timeout.
+        if self.dispatched || self.deadline_passed() {
             return result;
         }
         result.map_err(|error| match self.entries.get(&e.handle) {
-            Some((_, Entry::Node(node) | Entry::Window(node))) => node.classify_error(error),
+            Some(Entry::Node(node) | Entry::Window(node)) => node.classify_error(error),
             _ => error,
         })
     }
@@ -962,7 +957,6 @@ impl Ticket {
 
 struct Worker {
     sender: mpsc::SyncSender<Job>,
-    stalled: Arc<AtomicBool>,
     thread: u32,
     running: Arc<Mutex<Option<Running>>>,
     next_id: std::sync::atomic::AtomicU64,
@@ -971,7 +965,6 @@ impl Worker {
     fn new(sender: mpsc::SyncSender<Job>, thread: u32) -> Self {
         Self {
             sender,
-            stalled: Arc::new(AtomicBool::new(false)),
             thread,
             running: Arc::default(),
             next_id: std::sync::atomic::AtomicU64::new(1),
@@ -980,17 +973,15 @@ impl Worker {
     fn running(&self) -> Option<Running> {
         *self.running.lock().unwrap_or_else(|e| e.into_inner())
     }
-    /// Disable the worker when the request it is running has overrun its
+    /// Whether the request the worker is running right now has overrun its
     /// budget: a native call is hung in it, and every later request would
-    /// only queue behind it. Returns whether the worker is disabled.
+    /// only queue behind it. Read from the live `running` record, which the
+    /// worker clears when the call returns, so a call that was only slow
+    /// leaves nothing behind once it finishes, and a record of a request
+    /// that has since returned can never disable the worker.
     fn check_hung(&self) -> bool {
-        if self
-            .running()
+        self.running()
             .is_some_and(|running| running.overran(Instant::now()))
-        {
-            self.stalled.store(true, Ordering::Release);
-        }
-        self.stalled.load(Ordering::Acquire)
     }
 }
 enum WorkerInit {
@@ -1004,11 +995,12 @@ static WORKER: Mutex<WorkerInit> = Mutex::new(WorkerInit::Vacant);
 /// handles are bounded. Each request's budget runs from when the worker
 /// starts it. A request that times out in the queue, or stops at its next
 /// native operation when its budget or the caller's deadline runs out, is an
-/// ordinary timeout. A native COM call still running past its budget poisons
-/// this process-wide worker: no replacement threads are spawned and
-/// subsequent calls fail explicitly, so restart the host after one. COM
-/// cancellation of the hung call is best effort, because an
-/// in-process/misbehaving server may not honor it.
+/// ordinary timeout. While a native COM call is still running past its
+/// budget, the process-wide worker is disabled: no replacement threads are
+/// spawned and other calls fail explicitly instead of queueing behind it.
+/// Once the call returns, the worker serves requests again. COM cancellation
+/// of the hung call is best effort, because an in-process/misbehaving server
+/// may not honor it.
 pub struct Ia2Provider {
     worker: Arc<Worker>,
 }
@@ -1128,8 +1120,9 @@ impl Ia2Provider {
     ///   (`State::check_deadline`). That is an ordinary timeout.
     /// - **A native call hung.** A request still running `STALL_GRACE`
     ///   after its budget is inside a native call that cannot be taken
-    ///   back. The worker is disabled for the life of the process and the
-    ///   caller's own call is cancelled (best effort) with `CoCancelCall`.
+    ///   back. The worker is disabled while that call is still running, and
+    ///   the caller's own call is cancelled (best effort) with
+    ///   `CoCancelCall`. A call that returns, however late, re-enables it.
     ///
     /// The caller's deadline, when it is shorter than the budget, is the
     /// caller choosing to stop waiting: the worker stops at its next native
@@ -1153,7 +1146,6 @@ impl Ia2Provider {
         let (tx, rx) = mpsc::sync_channel(1);
         let job: Job = {
             let ticket = Arc::clone(&ticket);
-            let stalled = Arc::clone(&self.worker.stalled);
             let running = Arc::clone(&self.worker.running);
             Box::new(move |state| {
                 let Some(started) = ticket.start() else {
@@ -1161,9 +1153,9 @@ impl Ia2Provider {
                     return;
                 };
                 let budget_end = started + timeout;
-                let result = if stalled.load(Ordering::Acquire) {
-                    Err(disabled())
-                } else if caller_at.is_some_and(|at| started >= at) {
+                // The worker is idle here (it runs one job at a time), so
+                // whatever hung before has returned and this request runs.
+                let result = if caller_at.is_some_and(|at| started >= at) {
                     Err(platform("IA2 request expired before dispatch"))
                 } else {
                     let stop_at = caller_at.map_or(budget_end, |at| at.min(budget_end));
@@ -1235,12 +1227,15 @@ impl Ia2Provider {
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            self.worker.stalled.store(true, Ordering::Release);
             if self.worker.running().is_some_and(|r| r.id == id) {
                 self.cancel_native_call();
+            } else if let Ok(result) = rx.recv_timeout(STALL_GRACE) {
+                // The call returned just after the grace (the worker clears
+                // `running` before it answers): only slow, not hung.
+                return self.finish(result, caller.as_ref());
             }
             return Err(platform(format!(
-                "IA2 native request still running {:?} after it started (budget {timeout:?}); an in-flight action may have been delivered; worker disabled",
+                "IA2 native request still running {:?} after it started (budget {timeout:?}); an in-flight action may have been delivered; the worker refuses new requests until the call returns",
                 started.elapsed()
             )));
         }
@@ -1280,7 +1275,7 @@ impl Ia2Provider {
                     .condition(format!(
                         "IA2 worker to start the request within {timeout:?}{}",
                         if hung {
-                            "; the request ahead of it is hung in a native call and the worker is disabled"
+                            "; the request ahead of it is hung in a native call and the worker is disabled until it returns"
                         } else {
                             "; it was queued behind other requests"
                         }
@@ -1324,7 +1319,7 @@ impl Ia2Provider {
 
 /// The error for a request refused because an earlier native call hung.
 fn disabled() -> Error {
-    platform("IA2 worker is disabled: an earlier native call hung past its budget; restart the host before using IA2 again")
+    platform("IA2 worker is busy with an earlier native call that has hung past its budget; requests are refused until it returns")
 }
 
 /// The error for a request that stopped at its next native operation
@@ -1444,7 +1439,7 @@ impl Provider for Ia2Provider {
                 }
                 let object=if n.child!=0 {n.object.clone()} else {unsafe{n.object.accParent()}.map_err(native)?.cast().map_err(native)?};
                 let mut parent=Node::new(object,0,n.owner,0)?;
-                if let Some((handle,_))=s.entries.iter().find(|(_,(_,entry))|matches!(entry,Entry::Window(root)if parent.identity.is_some()&&root.identity==parent.identity&&root.owner.hwnd==parent.owner.hwnd)){
+                if let Some((handle,_))=s.entries.iter().find(|(_,entry)|matches!(entry,Entry::Window(root)if parent.identity.is_some()&&root.identity==parent.identity&&root.owner.hwnd==parent.owner.hwnd)){
                     parent.root_instance=true;parent.parent = *handle;
                 }
                 Ok(Some(s.snapshot(parent)?))
@@ -1718,6 +1713,7 @@ impl Provider for Ia2Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
     #[test]
     fn validation_that_finishes_after_deadline_cannot_begin_a_write() {
         let mut state = State::new();
@@ -1780,7 +1776,7 @@ mod tests {
         assert!(matches!(error, Error::Timeout { .. }), "got {error:?}");
         assert_eq!(error.delivery(), xa11y_core::error::Delivery::NotDelivered);
         assert!(
-            !p.worker.stalled.load(Ordering::Acquire),
+            !p.worker.check_hung(),
             "a request that never started is not a stalled worker"
         );
         release.send(()).expect("release worker");
@@ -1807,7 +1803,7 @@ mod tests {
         assert!(matches!(error, Error::Timeout { .. }), "got {error:?}");
         assert_eq!(error.delivery(), xa11y_core::error::Delivery::NotDelivered);
         assert!(
-            !p.worker.stalled.load(Ordering::Acquire),
+            !p.worker.check_hung(),
             "a cooperative stop is not a stalled worker"
         );
         p.call(|_| Ok(()))
@@ -1828,15 +1824,59 @@ mod tests {
             .expect_err("the hung call outlives its budget");
         assert!(matches!(error, Error::Platform { .. }), "got {error:?}");
         assert_eq!(error.delivery(), xa11y_core::error::Delivery::Unknown);
-        assert!(p.worker.stalled.load(Ordering::Acquire));
+        assert!(p.worker.check_hung());
         let started = Instant::now();
         assert!(
             p.call(|_| Ok(())).is_err(),
-            "no replacement worker after a hung native call"
+            "no replacement worker while a native call is hung"
         );
         assert!(
             started.elapsed() < Duration::from_millis(100),
             "a disabled worker fails at once"
+        );
+        // Once the hung call returns, the worker serves requests again.
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(!p.worker.check_hung());
+        p.call(|_| Ok(()))
+            .expect("the worker serves requests once the slow call returned");
+        drop(p);
+        thread.join().expect("worker exit");
+    }
+    #[test]
+    fn a_stale_running_record_never_disables_the_worker() {
+        let (p, release, thread) = test_worker(32);
+        drop(release);
+        p.call_with_timeout(Duration::from_millis(50), |_| Ok(()))
+            .expect("fast call");
+        // Long after that request's budget, nothing is running.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!p.worker.check_hung());
+        p.call(|_| Ok(()))
+            .expect("the worker still serves requests");
+        drop(p);
+        thread.join().expect("worker exit");
+    }
+    #[test]
+    fn a_real_error_that_finishes_after_the_deadline_is_not_a_timeout() {
+        let (p, release, thread) = test_worker(32);
+        drop(release);
+        let error = p
+            .call_with_timeout::<()>(Duration::from_millis(50), |state| {
+                // Work that ends just past its budget with an error of its
+                // own; the classification must not ask `check_deadline`.
+                std::thread::sleep(Duration::from_millis(80));
+                state.classify_result(
+                    &ElementData::for_role(Role::Unknown),
+                    Err(Error::Platform {
+                        code: 0x80004005u32 as i32 as i64,
+                        message: "real".into(),
+                    }),
+                )
+            })
+            .expect_err("the work failed");
+        assert!(
+            matches!(&error, Error::Platform { message, .. } if message.contains("real")),
+            "got {error:?}"
         );
         drop(p);
         thread.join().expect("worker exit");
@@ -1867,7 +1907,7 @@ mod tests {
             .join()
             .expect("first caller")
             .expect("first request finished within budget");
-        assert!(!p.worker.stalled.load(Ordering::Acquire));
+        assert!(!p.worker.check_hung());
         drop(p);
         thread.join().expect("worker exit");
     }
@@ -1912,7 +1952,7 @@ mod tests {
         assert!(matches!(error, Error::Timeout { .. }), "got {error:?}");
         assert_eq!(probe.cut_short(), Some(PENDING));
         assert!(
-            !p.worker.stalled.load(Ordering::Acquire),
+            !p.worker.check_hung(),
             "a caller's deadline is not a stalled worker"
         );
         p.call(|_| Ok(()))
@@ -1921,23 +1961,27 @@ mod tests {
         thread.join().expect("worker stopped");
     }
     #[test]
-    fn expired_handles_do_not_grow_the_registry_order_queue() {
+    fn the_registry_is_bounded_like_the_uia_handle_table_and_never_expires_by_age() {
         let mut state = State::new();
         let owner = Owner {
             hwnd: 0,
             pid: 0,
             generation: 0,
         };
-        for _ in 0..10_000 {
-            let handle = state.retain(Entry::App(owner.clone()));
-            state.entries.get_mut(&handle).expect("retained entry").0 =
-                Instant::now() - RETENTION - Duration::from_secs(1);
-            let mut e = ElementData::for_role(Role::Application);
-            e.handle = handle;
-            e.raw.insert("accessibility_backend".into(), "ia2".into());
-            assert!(matches!(state.get(&e), Err(Error::ElementStale { .. })));
-            assert!(state.entries.is_empty());
-            assert!(state.order.is_empty());
+        let first = state.retain(Entry::App(owner.clone()));
+        for _ in 0..MAX_CACHED_ELEMENTS {
+            state.retain(Entry::App(owner.clone()));
         }
+        assert_eq!(state.entries.len(), MAX_CACHED_ELEMENTS);
+        let mut e = ElementData::for_role(Role::Application);
+        e.handle = first;
+        e.raw.insert("accessibility_backend".into(), "ia2".into());
+        assert!(matches!(
+            state.get(&e),
+            Err(Error::ElementStale {
+                reason: xa11y_core::StaleReason::Evicted,
+                ..
+            })
+        ));
     }
 }

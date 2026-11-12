@@ -1,6 +1,7 @@
 //! Windows UI Automation accessibility provider.
 
 mod rich;
+pub(crate) use rich::is_collection_role;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -554,9 +555,7 @@ impl WindowsProvider {
         hint: HostHint,
         clip: &Clip,
     ) -> Result<ElementData> {
-        let own = unsafe { element.CachedNativeWindowHandle() }
-            .ok()
-            .filter(|h| !h.0.is_null());
+        let own = cached_own_hwnd(element)?;
         let nearest = own.or(host_hwnd);
         let handle = self.cache_element(element.clone());
         let recorded = match hint {
@@ -620,9 +619,8 @@ impl WindowsProvider {
     ) -> Result<Clip> {
         let fresh =
             uia_call(|| unsafe { element.BuildUpdatedCache(self.scroll_request.get(dpi)) })?;
-        Ok(self
-            .inherited_clip_of(dpi, handle, &fresh)?
-            .below(dpi, &fresh))
+        self.inherited_clip_of(dpi, handle, &fresh)?
+            .below(dpi, &fresh)
     }
 
     /// The clip `fresh` (refreshed with [`Self::scroll_request`]) sits under.
@@ -679,7 +677,7 @@ impl WindowsProvider {
             else {
                 return Ok(false);
             };
-            if cached_viewport(dpi, &fresh) != Some(source.viewport) {
+            if cached_viewport(dpi, &fresh)? != Some(source.viewport) {
                 return Ok(false);
             }
         }
@@ -718,42 +716,38 @@ impl WindowsProvider {
             uia_call(|| unsafe { uia_root.BuildUpdatedCache(self.scroll_request.get(dpi)) })?;
         let base = self.inherited_clip_of(dpi, root_handle, &fresh_root)?;
         let len = count.max(0) as usize;
-        let elements: Vec<Option<IUIAutomationElement>> =
-            (0..count).map(|i| uia_get(subtree, i)).collect();
+        let elements: Vec<IUIAutomationElement> = (0..count)
+            .map(|i| uia_get(subtree, i))
+            .collect::<Result<_>>()?;
         let overflows: Vec<bool> = elements
             .iter()
-            .map(|el| {
-                el.as_ref()
-                    .is_some_and(|el| cached_viewport(dpi, el).is_some())
-            })
-            .collect();
+            .map(|el| Ok(cached_viewport(dpi, el)?.is_some()))
+            .collect::<Result<_>>()?;
         if base.rect.is_none() && !overflows.iter().any(|&o| o) {
             // Nothing clips, so popups have nothing to reset.
             return Ok(Some(vec![base; len]));
         }
-        let root_hwnd = cached_own_hwnd(&fresh_root);
+        let root_hwnd = cached_own_hwnd(&fresh_root)?;
         let is_popup: Vec<bool> = elements
             .iter()
             .map(|el| {
-                el.as_ref().and_then(cached_own_hwnd).is_some_and(|h| {
+                Ok(cached_own_hwnd(el)?.is_some_and(|h| {
                     // The root's own reset is already in `base`.
                     Some(h) != root_hwnd && resets_clip(h)
-                })
+                }))
             })
-            .collect();
+            .collect::<Result<_>>()?;
         let mut clips = vec![base; len];
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         for j in 0..len {
             if !overflows[j] && !is_popup[j] {
                 continue;
             }
-            let Some(element) = elements[j].as_ref() else {
-                continue;
-            };
+            let element = &elements[j];
             // The root heads the array, and everything after it is its
             // descendants: no fetch needed to say so.
-            if j == 0 && cached_own_hwnd(element).is_some() && cached_own_hwnd(element) == root_hwnd
-            {
+            let own = cached_own_hwnd(element)?;
+            if j == 0 && own.is_some() && own == root_hwnd {
                 apply_range(
                     dpi,
                     &mut clips,
@@ -762,7 +756,7 @@ impl WindowsProvider {
                     len - 1,
                     is_popup[0],
                     overflows[0],
-                );
+                )?;
                 continue;
             }
             // An element that has gone since the subtree fetch is one more
@@ -777,19 +771,15 @@ impl WindowsProvider {
             else {
                 return Ok(None);
             };
-            let m = uia_len(&descendants).max(0) as usize;
+            let m = uia_len(&descendants)?.max(0) as usize;
             if m > 0 {
                 let (first, last) = (j + 1, j + m);
                 if last >= len {
                     return Ok(None);
                 }
                 for (array_index, fetched_index) in [(first, 0), (last, m - 1)] {
-                    let Some(fetched) = uia_get(&descendants, fetched_index as i32) else {
-                        return Ok(None);
-                    };
-                    let Some(in_array) = elements[array_index].as_ref() else {
-                        return Ok(None);
-                    };
+                    let fetched = uia_get(&descendants, fetched_index as i32)?;
+                    let in_array = &elements[array_index];
                     let (Some(fetched), Some(in_array)) = (
                         live_snapshot(Self::runtime_id(&fetched, 0))?,
                         live_snapshot(Self::runtime_id(in_array, 0))?,
@@ -801,7 +791,7 @@ impl WindowsProvider {
                     }
                 }
             }
-            apply_range(dpi, &mut clips, element, j, m, is_popup[j], overflows[j]);
+            apply_range(dpi, &mut clips, element, j, m, is_popup[j], overflows[j])?;
         }
         Ok(Some(clips))
     }
@@ -825,7 +815,7 @@ impl WindowsProvider {
             .get(&child_handle)
             .cloned();
         if let Some(record) = remembered {
-            if !cached_own_hwnd(child).is_some_and(resets_clip)
+            if !cached_own_hwnd(child)?.is_some_and(resets_clip)
                 && self.clip_still_holds(dpi, &record.inherited)?
             {
                 let mut sources = record.inherited.sources;
@@ -856,7 +846,7 @@ impl WindowsProvider {
         dpi: &crate::dpi::DpiScope,
         element: &IUIAutomationElement,
     ) -> Result<Clip> {
-        if cached_own_hwnd(element).is_some_and(resets_clip) {
+        if cached_own_hwnd(element)?.is_some_and(resets_clip) {
             return Ok(Clip::default());
         }
         let mut ancestors = Vec::new();
@@ -886,7 +876,7 @@ impl WindowsProvider {
             ancestors.push(current.clone());
             // A popup's own viewport still clips its content; what is above
             // it does not.
-            if cached_own_hwnd(&current).is_some_and(resets_clip) {
+            if cached_own_hwnd(&current)?.is_some_and(resets_clip) {
                 reached_top = true;
                 break;
             }
@@ -900,10 +890,10 @@ impl WindowsProvider {
                 ),
             });
         }
-        Ok(ancestors
+        ancestors
             .iter()
             .rev()
-            .fold(Clip::default(), |clip, ancestor| clip.below(dpi, ancestor)))
+            .try_fold(Clip::default(), |clip, ancestor| clip.below(dpi, ancestor))
     }
 
     /// The nearest native window of an element this provider built, from
@@ -1183,22 +1173,25 @@ impl WindowsProvider {
         &self,
         dpi: &crate::dpi::DpiScope,
         element: &IUIAutomationElement,
-    ) -> Vec<IUIAutomationElement> {
-        let true_cond = match unsafe { self.automation.CreateTrueCondition() } {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
-        // An empty Vec here reads downstream as "this element has no children",
-        // so a transiently-busy provider would make a populated subtree look
-        // empty. Retry the classified-transient HRESULTs before degrading.
-        match retry_transient(|| unsafe {
+    ) -> Result<Vec<IUIAutomationElement>> {
+        let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
+        // An empty Vec reads downstream as "this element has no children", so
+        // every failure propagates (tenet 1) after `uia_call`'s transient
+        // retries; only UIA's "S_OK, no array" (windows-rs surfaces it as an
+        // error carrying an ok HRESULT) means there are none.
+        let arr = match retry_transient(|| unsafe {
             element.FindAllBuildCache(TreeScope_Children, &true_cond, self.batch_request.get(dpi))
         }) {
-            Ok(arr) => (0..uia_len(&arr))
-                .filter_map(|i| uia_get(&arr, i))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+            Ok(arr) => arr,
+            Err(e) if e.code().is_ok() => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("listing children (FindAllBuildCache) failed: {e}"),
+                })
+            }
+        };
+        (0..uia_len(&arr)?).map(|i| uia_get(&arr, i)).collect()
     }
 
     /// Fetch the entire subtree with all properties pre-fetched in one COM call.
@@ -1236,9 +1229,13 @@ impl WindowsProvider {
         let children = uia_call(|| unsafe {
             element.FindAllBuildCache(TreeScope_Children, &true_cond, self.batch_request.get(dpi))
         })?;
-        Ok((0..uia_len(&children))
-            .filter_map(|i| uia_get(&children, i))
-            .any(|child| uia_cached_bool(&child, UIA_IsOffscreenPropertyId) == Some(false)))
+        for i in 0..uia_len(&children)? {
+            let child = uia_get(&children, i)?;
+            if cached_bool_checked(&child, UIA_IsOffscreenPropertyId)? == Some(false) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The first descendant of `root` whose `ClassName` is `class`, with the
@@ -1565,6 +1562,32 @@ fn is_gone_code(code: i64) -> bool {
     ]
     .iter()
     .any(|hr| i64::from(*hr) == code)
+}
+
+/// Map a "the element is gone" HRESULT ([`is_gone_code`]) from a call on
+/// `element` to `ElementStale`: `ProcessExited` when its process is no longer
+/// running, `Removed` otherwise. Every other error is returned unchanged.
+fn stale_if_gone(element: &ElementData, err: Error) -> Error {
+    match err {
+        Error::Platform { code, .. } if is_gone_code(code) => {
+            let exited = element
+                .pid
+                .is_some_and(|pid| process_creation_time(pid).is_none());
+            let reason = if exited {
+                xa11y_core::StaleReason::ProcessExited
+            } else {
+                xa11y_core::StaleReason::Removed
+            };
+            Error::stale(
+                reason,
+                format!(
+                    "{} (HRESULT {code:#x})",
+                    xa11y_core::error::stale_subject(element)
+                ),
+            )
+        }
+        other => other,
+    }
 }
 
 /// A candidate invalidated during a live tree/query snapshot is no longer
@@ -3095,16 +3118,15 @@ fn build_snapshot_data(
 
     let actions = get_actions(element, role, &patterns)?;
 
-    let automation_id = unsafe { element.CachedAutomationId() }
-        .ok()
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
+    // Both are in every cache request this is built from (the batch set),
+    // so a failed read is a real failure, not "the element has none": UIA
+    // reports an absent AutomationId as an empty string and a windowless
+    // element's handle as null.
+    let automation_id = uia_call(|| unsafe { element.CachedAutomationId() })?.to_string();
+    let automation_id = (!automation_id.is_empty()).then_some(automation_id);
 
-    let native_handle = unsafe { element.CachedNativeWindowHandle() }
-        .ok()
-        .filter(|h| !h.0.is_null());
-    let top_level = native_handle.is_some_and(is_top_level_hwnd);
-    let stable_id = uia_stable_id(native_handle, top_level, automation_id.clone());
+    let native_handle = cached_own_hwnd(element)?;
+    let stable_id = uia_stable_id(native_handle, automation_id.clone());
 
     let raw = {
         let mut raw = std::collections::HashMap::new();
@@ -3128,9 +3150,8 @@ fn build_snapshot_data(
                 serde_json::Value::String(aid.clone()),
             );
         }
-        // The element's own window, when it has one. `stable_id` no longer
-        // says so for a control with an AutomationId, and the parent walk
-        // needs to know.
+        // The element's own window, when it has one. The parent walk reads
+        // this to know whether the element has a window of its own.
         if let Some(hwnd) = native_handle {
             raw.insert(
                 "native_window_handle".into(),
@@ -3231,10 +3252,17 @@ fn build_snapshot_data(
         min_value,
         max_value,
         table: rich::table_info(element)?,
-        cell: rich::cell_info(element)?,
+        cell: rich::cell_info(
+            element,
+            rich::CellSignals {
+                role,
+                control_type,
+                legacy_role,
+            },
+        )?,
         // UIA has no row-index property independent of GridItem.
         table_row: rich::row_info(element, role)?,
-        collection: rich::collection_info(element)?,
+        collection: rich::collection_info(element, role)?,
         stable_id,
         pid,
         raw,
@@ -3399,14 +3427,16 @@ const BATCH_PATTERNS: &[UIA_PATTERN_ID] = &[
     UIA_SelectionItemPatternId,
 ];
 
-/// Safe wrapper for IUIAutomationElementArray::Length.
-fn uia_len(arr: &IUIAutomationElementArray) -> i32 {
-    unsafe { arr.Length() }.unwrap_or(0)
+/// IUIAutomationElementArray::Length. A failed read propagates: an empty
+/// array would read as "no elements" (tenet 1).
+fn uia_len(arr: &IUIAutomationElementArray) -> Result<i32> {
+    uia_call(|| unsafe { arr.Length() })
 }
 
-/// Safe wrapper for IUIAutomationElementArray::GetElement.
-fn uia_get(arr: &IUIAutomationElementArray, index: i32) -> Option<IUIAutomationElement> {
-    unsafe { arr.GetElement(index) }.ok()
+/// IUIAutomationElementArray::GetElement. A failed read propagates rather
+/// than dropping the element from the result.
+fn uia_get(arr: &IUIAutomationElementArray, index: i32) -> Result<IUIAutomationElement> {
+    uia_call(|| unsafe { arr.GetElement(index) })
 }
 
 /// True when `GetCurrentPatternAs` reported that the element genuinely has no
@@ -3563,9 +3593,9 @@ impl Clip {
     /// The clip `element`'s children sit under, when `self` is the one
     /// `element` sits under: narrowed by `element`'s own viewport if its
     /// content overflows.
-    fn below(&self, dpi: &crate::dpi::DpiScope, element: &IUIAutomationElement) -> Clip {
-        let Some(viewport) = cached_viewport(dpi, element) else {
-            return self.clone();
+    fn below(&self, dpi: &crate::dpi::DpiScope, element: &IUIAutomationElement) -> Result<Clip> {
+        let Some(viewport) = cached_viewport(dpi, element)? else {
+            return Ok(self.clone());
         };
         let mut sources = Vec::with_capacity(self.sources.len() + 1);
         sources.extend(self.sources.iter().cloned());
@@ -3573,10 +3603,10 @@ impl Clip {
             element: element.clone(),
             viewport,
         });
-        Clip {
+        Ok(Clip {
             rect: intersect_clip(self.rect, Some(viewport)),
             sources,
-        }
+        })
     }
 }
 
@@ -3591,7 +3621,7 @@ fn apply_range(
     m: usize,
     is_popup: bool,
     overflows: bool,
-) {
+) -> Result<()> {
     if is_popup {
         for clip in &mut clips[j..=j + m] {
             *clip = Clip::default();
@@ -3599,9 +3629,10 @@ fn apply_range(
     }
     if overflows {
         for clip in &mut clips[j + 1..=j + m] {
-            *clip = clip.below(dpi, element);
+            *clip = clip.below(dpi, element)?;
         }
     }
+    Ok(())
 }
 
 /// The clip an element was built under, as [`WindowsProvider::clips`]
@@ -3622,11 +3653,24 @@ fn no_bounds(rect: &RECT) -> bool {
     rect.right == rect.left && rect.bottom == rect.top
 }
 
-/// The element's own native window, from its cached properties.
-fn cached_own_hwnd(element: &IUIAutomationElement) -> Option<HWND> {
-    unsafe { element.CachedNativeWindowHandle() }
-        .ok()
-        .filter(|h| !h.0.is_null())
+/// The element's own native window, from its cached properties. A
+/// windowless element reports a null handle, which is `None`; a failed read
+/// (the element has gone, or the property was not cached) is an error
+/// (tenet 1), not "no window".
+fn cached_own_hwnd(element: &IUIAutomationElement) -> Result<Option<HWND>> {
+    let hwnd = uia_call(|| unsafe { element.CachedNativeWindowHandle() })?;
+    Ok((!hwnd.0.is_null()).then_some(hwnd))
+}
+
+/// A VT_BOOL property from the element's cached snapshot. A value of another
+/// type (UIA's reserved NotSupported value) is `None`; a failed read is an
+/// error rather than `None`.
+fn cached_bool_checked(
+    element: &IUIAutomationElement,
+    prop: UIA_PROPERTY_ID,
+) -> Result<Option<bool>> {
+    let value = uia_call(|| unsafe { element.GetCachedPropertyValue(prop) })?;
+    Ok(variant_bool(&value))
 }
 
 /// Whether an element with native window `hwnd` starts a clip of its own.
@@ -3657,16 +3701,18 @@ fn resets_clip(hwnd: HWND) -> bool {
 /// overflowing element without bounds of its own, which UIA already reports
 /// off screen along with its content. A custom scroller that implements no
 /// Scroll pattern is invisible to this.
-fn cached_viewport(dpi: &crate::dpi::DpiScope, element: &IUIAutomationElement) -> Option<RECT> {
-    let overflows = uia_cached_bool(element, UIA_ScrollVerticallyScrollablePropertyId)
+fn cached_viewport(
+    dpi: &crate::dpi::DpiScope,
+    element: &IUIAutomationElement,
+) -> Result<Option<RECT>> {
+    let overflows = cached_bool_checked(element, UIA_ScrollVerticallyScrollablePropertyId)?
         == Some(true)
-        || uia_cached_bool(element, UIA_ScrollHorizontallyScrollablePropertyId) == Some(true);
+        || cached_bool_checked(element, UIA_ScrollHorizontallyScrollablePropertyId)? == Some(true);
     if !overflows {
-        return None;
+        return Ok(None);
     }
-    crate::coords::cached_bounding_rect(dpi, element)
-        .ok()
-        .filter(|r| r.right > r.left && r.bottom > r.top)
+    let rect = uia_call(|| crate::coords::cached_bounding_rect(dpi, element))?;
+    Ok((rect.right > rect.left && rect.bottom > rect.top).then_some(rect))
 }
 
 /// The intersection of two clips, where `None` clips nothing. Disjoint
@@ -3771,46 +3817,29 @@ fn is_msaa_framework(framework_id: Option<&str>) -> bool {
 
 /// The stable identity of a UIA element, or `None` when it has none.
 ///
-/// A top-level window's identity is its native window handle, which is what
-/// the provider uses to reacquire and activate windows
+/// An element with a native window of its own (a top-level window, or a
+/// classic Win32 / WinForms control) is identified by that handle, which is
+/// what the provider uses to reacquire and activate windows
 /// ([`WindowsProvider::reacquire_via_hwnd`]). UIA excludes top-level windows
 /// from the AutomationId contract, and where a framework sets one anyway (a
-/// WinForms form reports its `Name`) every instance of that form shares it,
-/// so two open windows would merge in the window-list dedup.
-///
-/// Every other element prefers its AutomationId, which the app sets and which
-/// survives a restart (#684). A classic Win32 control has both an HWND and an
-/// AutomationId (its control ID); the HWND changes with each launch. An
-/// element with neither falls back to its HWND, if it has one.
+/// WinForms form reports its `Name`) every instance shares it. A windowless
+/// framework control (WPF, WinForms-hosted UIA fragments) falls back to its
+/// AutomationId. The AutomationId is always in `raw["automation_id"]`, for a
+/// caller that wants the identifier the app chose.
 ///
 /// The handle is formatted as `hwnd:0x…` in lowercase hex, stable for the
 /// life of the window within a session (like the Linux D-Bus object path;
 /// HWNDs are reused after a window closes, so the identity is session-scoped,
 /// not launch-scoped). `native_handle` must already exclude a null HWND.
-fn uia_stable_id(
-    native_handle: Option<HWND>,
-    top_level: bool,
-    automation_id: Option<String>,
-) -> Option<String> {
-    let hwnd = native_handle.map(|h| format!("hwnd:{}", format_hwnd(h)));
-    if top_level {
-        hwnd.or(automation_id)
-    } else {
-        automation_id.or(hwnd)
-    }
+fn uia_stable_id(native_handle: Option<HWND>, automation_id: Option<String>) -> Option<String> {
+    native_handle
+        .map(|h| format!("hwnd:{}", format_hwnd(h)))
+        .or(automation_id)
 }
 
 /// `0x…` in lowercase hex.
 fn format_hwnd(hwnd: HWND) -> String {
     format!("{:#x}", hwnd.0 as usize)
-}
-
-/// Whether `hwnd` is a top-level window: its parent is the desktop, or it
-/// has none. A dead handle has no parent, so it counts as top-level and keeps
-/// the identity it had.
-fn is_top_level_hwnd(hwnd: HWND) -> bool {
-    let parent = unsafe { GetAncestor(hwnd, GA_PARENT) };
-    parent.0.is_null() || parent == unsafe { GetDesktopWindow() }
 }
 
 /// Translate a window-verb `GetCurrentPatternAs` failure. Only the two
@@ -3957,13 +3986,85 @@ fn window_text(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..usize::try_from(len).unwrap_or(0).min(buf.len())])
 }
 
-/// Locate the caret within a control's TextPattern, as a character offset
-/// from the start of the document.
+/// The insertion point in `value` (in Unicode scalar values, the unit
+/// [`crate::splice::splice_at_char_offset`] takes) for a caret that the
+/// TextPattern document puts after `prefix`.
+///
+/// Only meaningful when `value` starts with `prefix`: the two patterns can
+/// report different strings for the same control, and a count taken in one
+/// would land at the wrong place in the other. When they disagree before the
+/// caret, nothing has been written yet, so this refuses rather than guess.
+fn value_offset_of_prefix(value: &str, prefix: &str) -> Result<usize> {
+    if value.starts_with(prefix) {
+        Ok(prefix.chars().count())
+    } else {
+        Err(Error::Unsupported {
+            feature: format!(
+                "type_text at the caret: the control's TextPattern text before the caret \
+                 ({} UTF-16 units) is not a prefix of its ValuePattern value ({} UTF-16 \
+                 units), so the caret has no position in the value; nothing was written",
+                xa11y_core::text_api::utf16_len(prefix),
+                xa11y_core::text_api::utf16_len(value),
+            ),
+        })
+    }
+}
+
+/// Put the caret at `caret` (UTF-16 offset into `value`, just after the
+/// inserted text) once `value` has been written.
+///
+/// The offset is in the ValuePattern value; the range is built in the
+/// TextPattern document, so the document must agree with `value` up to the
+/// caret, or the caret would land somewhere else.
+fn place_caret_after_write(
+    pattern: &IUIAutomationTextPattern,
+    value: &str,
+    caret: u32,
+) -> Result<()> {
+    let supported = uia_call(|| unsafe { pattern.SupportedTextSelection() })?;
+    if supported == SupportedTextSelection_None {
+        return Ok(());
+    }
+    // SetValue can reset the caret and invalidate old ranges.
+    let doc = uia_call(|| unsafe { pattern.DocumentRange() })?;
+    let document = rich::contents(&doc)?;
+    let wanted = xa11y_core::text_api::TextRange {
+        start: caret,
+        end: caret,
+    };
+    let before = xa11y_core::text_api::slice_utf16(
+        value,
+        xa11y_core::text_api::TextRange {
+            start: 0,
+            end: caret,
+        },
+    )?;
+    if !document.starts_with(before.as_str()) {
+        return Err(Error::Platform {
+            code: 0,
+            message: format!(
+                "the TextPattern document does not match the written value up to the caret \
+                 ({caret} UTF-16 units), so the caret has no position in it"
+            ),
+        });
+    }
+    let range = rich::range_in(&doc, &document, wanted)?;
+    uia_call(|| unsafe { range.Select() })
+}
+
+/// Locate the caret within a control's TextPattern, as the document text
+/// before it.
+///
+/// The text, not a count, because the caller splices into the
+/// ValuePattern value, which need not be the same string as the TextPattern
+/// document (a RichEdit reports paragraph breaks as `\r` in one and `\r\n`
+/// in the other). The caller checks the value starts with this prefix
+/// before using its length as the insertion point.
 ///
 /// Returns:
-/// - `Ok(Some(n))` if TextPattern reports a selection whose start lies `n`
-///   characters into the document. For a collapsed caret, `n` is the caret
-///   position. For a non-empty selection, `n` is the selection's start —
+/// - `Ok(Some(prefix))` if TextPattern reports a selection; `prefix` is the
+///   document text before its start. For a collapsed caret that is the
+///   caret position. For a non-empty selection it is the selection's start —
 ///   mirroring macOS/AT-SPI semantics of "insert at selection start".
 /// - `Ok(None)` if the selection array is empty (no caret available),
 ///   or the provider does not support reading
@@ -3972,7 +4073,7 @@ fn window_text(hwnd: HWND) -> String {
 /// - `Err(..)` if TextPattern is present but a COM call to walk the range
 ///   fails. These are propagated rather than silently falling back, so
 ///   genuine platform errors surface (tenet 1).
-fn caret_char_offset(text_pattern: &IUIAutomationTextPattern) -> Result<Option<usize>> {
+fn caret_prefix(text_pattern: &IUIAutomationTextPattern) -> Result<Option<String>> {
     // A control with no selection answers with an empty array, handled
     // below. A provider that does not support text selection says so with
     // UIA_E_INVALIDOPERATION, or (AccessKit) with a null array and S_OK:
@@ -4032,7 +4133,7 @@ fn caret_char_offset(text_pattern: &IUIAutomationTextPattern) -> Result<Option<u
             message: format!("TextRange::GetText failed: {}", e),
         })?;
 
-    Ok(Some(prefix_text.chars().count()))
+    Ok(Some(prefix_text))
 }
 
 /// Pre-queried UIA patterns for an element, avoiding redundant COM calls
@@ -4071,11 +4172,21 @@ impl WindowsProvider {
         )?;
         let mut data = Vec::with_capacity(windows.len());
         for el in windows {
-            // The enumerated window may close during any live snapshot read.
-            // A vanished candidate contributes no subtree; all other failures,
-            // including process-generation mismatches, still abort enumeration.
-            if let Some(window) = live_snapshot(self.build_app_window(dpi, &el, app, identity))? {
-                data.push(window);
+            // The enumerated window may close during any live snapshot read,
+            // or be re-attributed to another process (a UWP frame handing
+            // its content over) between the listing and its snapshot. Either
+            // way it is no longer one of this app's windows and contributes
+            // nothing. All other failures, including the app's own
+            // process-generation mismatch (`ProcessRestarted`), still abort
+            // enumeration.
+            match live_snapshot(self.build_app_window(dpi, &el, app, identity)) {
+                Ok(Some(window)) => data.push(window),
+                Ok(None) => {}
+                Err(Error::ElementStale {
+                    reason: xa11y_core::StaleReason::IdentityChanged,
+                    ..
+                }) => {}
+                Err(e) => return Err(e),
             }
         }
         Ok(data)
@@ -4250,23 +4361,8 @@ impl Provider for WindowsProvider {
         }
         let uia = self.get_cached(element.handle)?;
         let subject = xa11y_core::error::stale_subject(element);
-        let gone = |code: i64| -> Error {
-            let exited = element
-                .pid
-                .is_some_and(|pid| process_creation_time(pid).is_none());
-            let reason = if exited {
-                xa11y_core::StaleReason::ProcessExited
-            } else {
-                xa11y_core::StaleReason::Removed
-            };
-            Error::stale(reason, format!("{subject} (HRESULT {code:#x})"))
-        };
-        let live = |result: Result<i32>| -> Result<i32> {
-            result.map_err(|e| match e {
-                Error::Platform { code, .. } if is_gone_code(code) => gone(code),
-                other => other,
-            })
-        };
+        let live =
+            |result: Result<i32>| -> Result<i32> { result.map_err(|e| stale_if_gone(element, e)) };
         // `ElementData::pid` is the owning application's, which for a
         // hosted window (a UWP frame) is not the element's own process, so
         // it is not compared: the COM element is bound to its node, and the
@@ -4333,7 +4429,11 @@ impl Provider for WindowsProvider {
                     return self.synthetic_app_windows(dpi, element_data, identity, true);
                 }
                 let uia = self.get_cached(element_data.handle)?;
-                let children = self.uia_children(dpi, &uia);
+                // The parent having gone is its own staleness, not "no
+                // children".
+                let children = self
+                    .uia_children(dpi, &uia)
+                    .map_err(|e| stale_if_gone(element_data, e))?;
                 if children.is_empty() {
                     return Ok(Vec::new());
                 }
@@ -5038,7 +5138,7 @@ impl Provider for WindowsProvider {
         let Some(subtree) = live_snapshot(self.find_all_subtree(dpi, &uia_root))? else {
             return Ok(Vec::new());
         };
-        let count = uia_len(&subtree);
+        let count = uia_len(&subtree)?;
 
         // Windowless elements below inherit the root's window, which is only
         // right while no nested window under it is minimized (an MDI child):
@@ -5050,12 +5150,15 @@ impl Provider for WindowsProvider {
         // sit inside which overflowing one, and gets it without leaving the
         // single pass: see `subtree_clips`.
         let root_minimized = root_hwnd.is_some_and(hwnd_in_minimized_window);
-        let nested_minimized = !root_minimized
-            && (0..count).any(|i| {
-                uia_get(&subtree, i)
-                    .and_then(|el| unsafe { el.CachedNativeWindowHandle() }.ok())
-                    .is_some_and(|h| !h.0.is_null() && hwnd_in_minimized_window(h))
-            });
+        let mut nested_minimized = false;
+        if !root_minimized {
+            for i in 0..count {
+                if cached_own_hwnd(&uia_get(&subtree, i)?)?.is_some_and(hwnd_in_minimized_window) {
+                    nested_minimized = true;
+                    break;
+                }
+            }
+        }
         let clips = if nested_minimized {
             None
         } else {
@@ -5095,10 +5198,7 @@ impl Provider for WindowsProvider {
             (0..group.clauses.len()).map(|_| Vec::new()).collect();
 
         'walk: for i in 0..count {
-            let el = match uia_get(&subtree, i) {
-                Some(el) => el,
-                None => continue,
-            };
+            let el = uia_get(&subtree, i)?;
             // Build ElementData once; reuse for every clause check. The
             // handle assigned here is stable for the rest of this call.
             // Windowless elements inherit the root's window for this snapshot
@@ -5899,40 +5999,48 @@ impl Provider for WindowsProvider {
 
             // If TextPattern is present, use it to locate the caret (start
             // endpoint of the first selection range). If TextPattern is not
-            // supported on this control, or no selection exists, fall back to
-            // appending at the end of the current value — matching the
-            // documented behaviour in design/README.md.
+            // supported on this control, or no selection exists, append at
+            // the end of the current value — the behaviour documented in
+            // design/README.md.
             let text_pattern = current_pattern::<IUIAutomationTextPattern>(
                 &uia_element,
                 UIA_TextPatternId,
                 "TextPattern",
             )?;
             let caret_char_offset = match &text_pattern {
-                Some(pattern) => caret_char_offset(pattern)?,
+                Some(pattern) => match caret_prefix(pattern)? {
+                    Some(prefix) => Some(value_offset_of_prefix(&current, &prefix)?),
+                    None => None,
+                },
                 None => None,
             }
             .unwrap_or_else(|| current.chars().count());
 
             let (new_value, caret) =
                 crate::splice::splice_at_char_offset(&current, text, caret_char_offset);
-            let bstr: windows::core::BSTR = new_value.into();
+            let bstr: windows::core::BSTR = new_value.as_str().into();
             unsafe { value_pattern.SetValue(&bstr) }
                 .map_err(|e| value_set_error(e, "ValuePattern.SetValue"))?;
 
+            // The text is in the control from here on. A failure placing the
+            // caret must not read as "nothing was typed": every error below
+            // is reported as a platform error, whose delivery is `Unknown`,
+            // so a caller does not retry and type the text twice (#702).
             if let Some(pattern) = text_pattern {
-                let supported = uia_call(|| unsafe { pattern.SupportedTextSelection() })?;
-                if supported != SupportedTextSelection_None {
-                    // SetValue can reset the caret and invalidate old ranges.
-                    let doc = uia_call(|| unsafe { pattern.DocumentRange() })?;
-                    let range = rich::range(
-                        &doc,
-                        xa11y_core::text_api::TextRange {
-                            start: caret,
-                            end: caret,
-                        },
-                    )?;
-                    uia_call(|| unsafe { range.Select() })?;
-                }
+                place_caret_after_write(&pattern, &new_value, caret).map_err(|e| {
+                    let code = match &e {
+                        Error::Platform { code, .. } => *code,
+                        _ => 0,
+                    };
+                    Error::Platform {
+                        code,
+                        message: format!(
+                            "type_text wrote the text with ValuePattern.SetValue, then placing \
+                             the caret after it failed; the text is already in the control, \
+                             so do not retry: {e}"
+                        ),
+                    }
+                })?;
             }
             return Ok(());
         }
@@ -5955,30 +6063,34 @@ impl Provider for WindowsProvider {
 
     fn table_cell_at(&self, e: &ElementData, row: u32, column: u32) -> Result<Option<ElementData>> {
         uia_gate("table_cell_at")?;
-        let dpi = crate::dpi::DpiScope::enter()?;
-        let p: IUIAutomationGridPattern = self.rich_pattern(e, UIA_GridPatternId, "cell_at")?;
-        let rows = uia_call(|| unsafe { p.CurrentRowCount() })?;
-        let columns = uia_call(|| unsafe { p.CurrentColumnCount() })?;
-        let (Ok(row), Ok(column)) = (i32::try_from(row), i32::try_from(column)) else {
-            return Ok(None);
-        };
-        if (rows >= 0 && row >= rows) || (columns >= 0 && column >= columns) {
-            return Ok(None);
-        }
-        match unsafe { p.GetItem(row, column) } {
-            Ok(item) => self.rich_element(&dpi, &item).map(Some),
-            Err(e)
-                if e.code() == E_INVALIDARG
-                    || e.code().0 == UIA_E_ELEMENTNOTAVAILABLE as i32
-                    || e.code().0 == 0 =>
-            {
-                Ok(None)
+        rich::read_on(e, || {
+            let dpi = crate::dpi::DpiScope::enter()?;
+            let p: IUIAutomationGridPattern = self.rich_pattern(e, UIA_GridPatternId, "table")?;
+            let rows = uia_call(|| unsafe { p.CurrentRowCount() })?;
+            let columns = uia_call(|| unsafe { p.CurrentColumnCount() })?;
+            let (Ok(row), Ok(column)) = (i32::try_from(row), i32::try_from(column)) else {
+                return Ok(None);
+            };
+            if (rows >= 0 && row >= rows) || (columns >= 0 && column >= columns) {
+                return Ok(None);
             }
-            Err(e) => Err(Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("Grid.GetItem({row}, {column}) failed: {e}"),
-            }),
-        }
+            match unsafe { p.GetItem(row, column) } {
+                // A cell that went away before its snapshot is no cell, as
+                // GetItem's own UIA_E_ELEMENTNOTAVAILABLE below.
+                Ok(item) => live_snapshot(self.rich_element(&dpi, &item)),
+                Err(e)
+                    if e.code() == E_INVALIDARG
+                        || e.code().0 == UIA_E_ELEMENTNOTAVAILABLE as i32
+                        || e.code().0 == 0 =>
+                {
+                    Ok(None)
+                }
+                Err(e) => Err(Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("Grid.GetItem({row}, {column}) failed: {e}"),
+                }),
+            }
+        })
     }
 
     fn relations(
@@ -5987,63 +6099,67 @@ impl Provider for WindowsProvider {
         kinds: &[xa11y_core::RelationKind],
     ) -> Result<Vec<(xa11y_core::RelationKind, Vec<ElementData>)>> {
         uia_gate("relations")?;
-        use xa11y_core::RelationKind as K;
-        // Refuse an unsupported kind before any COM call, naming it.
-        for kind in kinds {
-            if !matches!(
-                kind,
-                K::LabelledBy | K::Details | K::Controls | K::FlowsTo | K::FlowsFrom
-            ) {
-                return Err(Error::Unsupported {
-                    feature: format!(
-                        "relation {kind} on UIA: UIA reports labelled_by (LabeledBy), details \
-                         (DescribedBy), controls (ControllerFor), flows_to and flows_from only"
-                    ),
-                });
+        rich::read_on(e, || {
+            use xa11y_core::RelationKind as K;
+            // Refuse an unsupported kind before any COM call, naming it.
+            for kind in kinds {
+                if !matches!(
+                    kind,
+                    K::LabelledBy | K::Details | K::Controls | K::FlowsTo | K::FlowsFrom
+                ) {
+                    return Err(Error::Unsupported {
+                        feature: format!(
+                            "relation {kind} on UIA: UIA reports labelled_by (LabeledBy), details \
+                             (DescribedBy), controls (ControllerFor), flows_to and flows_from only"
+                        ),
+                    });
+                }
             }
-        }
-        let dpi = crate::dpi::DpiScope::enter()?;
-        let uia = self.get_cached(e.handle)?;
-        let mut out = Vec::with_capacity(kinds.len());
-        for kind in kinds {
-            let targets = match kind {
-                K::LabelledBy => match uia_call(|| unsafe { uia.CurrentLabeledBy() }) {
-                    Ok(label) => vec![self.rich_element(&dpi, &label)?],
-                    // No label: UIA answers a null element, which the
-                    // binding surfaces as an error with a success-class
-                    // code. Anything else is a real failure.
-                    Err(Error::Platform { code: 0, .. }) => Vec::new(),
-                    Err(err) => return Err(err),
-                },
-                K::Details => {
-                    let array = uia_call(|| unsafe { uia.CurrentDescribedBy() })?;
-                    self.rich_elements(&dpi, &array)?
-                }
-                K::Controls => {
-                    let array = uia_call(|| unsafe { uia.CurrentControllerFor() })?;
-                    self.rich_elements(&dpi, &array)?
-                }
-                K::FlowsTo => {
-                    let array = uia_call(|| unsafe { uia.CurrentFlowsTo() })?;
-                    self.rich_elements(&dpi, &array)?
-                }
-                K::FlowsFrom => {
-                    let element2: IUIAutomationElement2 = windows::core::Interface::cast(&uia)
-                        .map_err(|err| Error::Unsupported {
-                            feature: format!(
-                                "relation flows_from: this UIA element has no \
-                                 IUIAutomationElement2 ({err})"
-                            ),
-                        })?;
-                    let array = uia_call(|| unsafe { element2.CurrentFlowsFrom() })?;
-                    self.rich_elements(&dpi, &array)?
-                }
-                // Refused above.
-                _ => Vec::new(),
-            };
-            out.push((*kind, targets));
-        }
-        Ok(out)
+            let dpi = crate::dpi::DpiScope::enter()?;
+            let uia = self.get_cached(e.handle)?;
+            let mut out = Vec::with_capacity(kinds.len());
+            for kind in kinds {
+                let targets = match kind {
+                    K::LabelledBy => match uia_call(|| unsafe { uia.CurrentLabeledBy() }) {
+                        Ok(label) => live_snapshot(self.rich_element(&dpi, &label))?
+                            .into_iter()
+                            .collect(),
+                        // No label: UIA answers a null element, which the
+                        // binding surfaces as an error with a success-class
+                        // code. Anything else is a real failure.
+                        Err(Error::Platform { code: 0, .. }) => Vec::new(),
+                        Err(err) => return Err(err),
+                    },
+                    K::Details => {
+                        let array = uia_call(|| unsafe { uia.CurrentDescribedBy() })?;
+                        self.rich_elements(&dpi, &array)?
+                    }
+                    K::Controls => {
+                        let array = uia_call(|| unsafe { uia.CurrentControllerFor() })?;
+                        self.rich_elements(&dpi, &array)?
+                    }
+                    K::FlowsTo => {
+                        let array = uia_call(|| unsafe { uia.CurrentFlowsTo() })?;
+                        self.rich_elements(&dpi, &array)?
+                    }
+                    K::FlowsFrom => {
+                        let element2: IUIAutomationElement2 = windows::core::Interface::cast(&uia)
+                            .map_err(|err| Error::Unsupported {
+                                feature: format!(
+                                    "relation flows_from: this UIA element has no \
+                                     IUIAutomationElement2 ({err})"
+                                ),
+                            })?;
+                        let array = uia_call(|| unsafe { element2.CurrentFlowsFrom() })?;
+                        self.rich_elements(&dpi, &array)?
+                    }
+                    // Refused above.
+                    _ => Vec::new(),
+                };
+                out.push((*kind, targets));
+            }
+            Ok(out)
+        })
     }
 
     fn table_headers(
@@ -6052,18 +6168,19 @@ impl Provider for WindowsProvider {
         kind: xa11y_core::table::HeaderKind,
     ) -> Result<Vec<ElementData>> {
         uia_gate("table_headers")?;
-        let dpi = crate::dpi::DpiScope::enter()?;
-        let p: IUIAutomationTablePattern =
-            self.rich_pattern(e, UIA_TablePatternId, "table_headers")?;
-        let array = uia_call(|| unsafe {
-            match kind {
-                xa11y_core::table::HeaderKind::Column => p.GetCurrentColumnHeaders(),
-                xa11y_core::table::HeaderKind::Row => p.GetCurrentRowHeaders(),
-            }
-        })?;
-        let mut headers = self.rich_elements(&dpi, &array)?;
-        rich::label_headers(&mut headers, kind);
-        Ok(headers)
+        rich::read_on(e, || {
+            let dpi = crate::dpi::DpiScope::enter()?;
+            let p: IUIAutomationTablePattern = self.rich_pattern(e, UIA_TablePatternId, "table")?;
+            let array = uia_call(|| unsafe {
+                match kind {
+                    xa11y_core::table::HeaderKind::Column => p.GetCurrentColumnHeaders(),
+                    xa11y_core::table::HeaderKind::Row => p.GetCurrentRowHeaders(),
+                }
+            })?;
+            let mut headers = self.rich_elements(&dpi, &array)?;
+            rich::label_headers(&mut headers, kind);
+            Ok(headers)
+        })
     }
 
     fn cell_headers(
@@ -6072,125 +6189,140 @@ impl Provider for WindowsProvider {
         kind: xa11y_core::table::HeaderKind,
     ) -> Result<Vec<ElementData>> {
         uia_gate("cell_headers")?;
-        let dpi = crate::dpi::DpiScope::enter()?;
-        let p: IUIAutomationTableItemPattern =
-            self.rich_pattern(e, UIA_TableItemPatternId, "cell_headers")?;
-        let array = uia_call(|| unsafe {
-            match kind {
-                xa11y_core::table::HeaderKind::Column => p.GetCurrentColumnHeaderItems(),
-                xa11y_core::table::HeaderKind::Row => p.GetCurrentRowHeaderItems(),
-            }
-        })?;
-        let mut headers = self.rich_elements(&dpi, &array)?;
-        rich::label_headers(&mut headers, kind);
-        Ok(headers)
+        rich::read_on(e, || {
+            let dpi = crate::dpi::DpiScope::enter()?;
+            let p: IUIAutomationTableItemPattern =
+                self.rich_pattern(e, UIA_TableItemPatternId, "cell_headers")?;
+            let array = uia_call(|| unsafe {
+                match kind {
+                    xa11y_core::table::HeaderKind::Column => p.GetCurrentColumnHeaderItems(),
+                    xa11y_core::table::HeaderKind::Row => p.GetCurrentRowHeaderItems(),
+                }
+            })?;
+            let mut headers = self.rich_elements(&dpi, &array)?;
+            rich::label_headers(&mut headers, kind);
+            Ok(headers)
+        })
     }
 
     fn selected_items(&self, e: &ElementData) -> Result<Vec<ElementData>> {
         uia_gate("selected_items")?;
-        let dpi = crate::dpi::DpiScope::enter()?;
-        let p: IUIAutomationSelectionPattern =
-            self.rich_pattern(e, UIA_SelectionPatternId, "selected_items")?;
-        self.rich_elements(&dpi, &uia_call(|| unsafe { p.GetCurrentSelection() })?)
+        rich::read_on(e, || {
+            let dpi = crate::dpi::DpiScope::enter()?;
+            let p: IUIAutomationSelectionPattern =
+                self.rich_pattern(e, UIA_SelectionPatternId, "selected_items")?;
+            self.rich_elements(&dpi, &uia_call(|| unsafe { p.GetCurrentSelection() })?)
+        })
     }
 
     fn text_length(&self, e: &ElementData) -> Result<u32> {
         uia_gate("text_length")?;
-        Ok(xa11y_core::text_api::utf16_len(&rich::contents(
-            &self.document(e)?,
-        )?))
+        rich::read_on(e, || {
+            Ok(xa11y_core::text_api::utf16_len(&rich::contents(
+                &self.document(e)?,
+            )?))
+        })
     }
 
     fn text_caret(&self, e: &ElementData) -> Result<Option<u32>> {
         uia_gate("text_caret")?;
-        let el = self.get_cached(e.handle)?;
-        // TextPattern2 reports whether its caret is active, including the
-        // active endpoint of a backwards selection.
-        if let Some(p) =
-            current_pattern::<IUIAutomationTextPattern2>(&el, UIA_TextPattern2Id, "TextPattern2")?
-        {
-            let (active, caret) = uia_call(|| {
-                let mut active = BOOL(0);
-                let caret = unsafe { p.GetCaretRange(&mut active) }?;
-                Ok((active, caret))
-            })?;
-            if !active.as_bool() {
+        rich::read_on(e, || {
+            let el = self.get_cached(e.handle)?;
+            // TextPattern2 reports whether its caret is active, including the
+            // active endpoint of a backwards selection.
+            if let Some(p) = current_pattern::<IUIAutomationTextPattern2>(
+                &el,
+                UIA_TextPattern2Id,
+                "TextPattern2",
+            )? {
+                let (active, caret) = uia_call(|| {
+                    let mut active = BOOL(0);
+                    let caret = unsafe { p.GetCaretRange(&mut active) }?;
+                    Ok((active, caret))
+                })?;
+                if !active.as_bool() {
+                    return Ok(None);
+                }
+                return Ok(Some(rich::offsets(&self.document(e)?, &caret)?.start));
+            }
+            let p: IUIAutomationTextPattern = self.rich_pattern(e, UIA_TextPatternId, "text")?;
+            // Older providers expose the caret as a degenerate TextPattern
+            // selection. Only use this documented representation while focused;
+            // an inactive selection is not a caret.
+            if !uia_call(|| unsafe { el.CurrentHasKeyboardFocus() })?.as_bool() {
                 return Ok(None);
             }
-            return Ok(Some(rich::offsets(&self.document(e)?, &caret)?.start));
-        }
-        let p: IUIAutomationTextPattern = self.rich_pattern(e, UIA_TextPatternId, "text")?;
-        // Older providers expose the caret as a degenerate TextPattern
-        // selection. Only use this documented representation while focused;
-        // an inactive selection is not a caret.
-        if !uia_call(|| unsafe { el.CurrentHasKeyboardFocus() })?.as_bool() {
-            return Ok(None);
-        }
-        let selected = uia_call(|| unsafe { p.GetSelection() })?;
-        if uia_call(|| unsafe { selected.Length() })? == 0 {
-            return Ok(None);
-        }
-        let selection = uia_call(|| unsafe { selected.GetElement(0) })?;
-        let offsets = rich::offsets(&self.document(e)?, &selection)?;
-        if offsets.is_empty() {
-            return Ok(Some(offsets.start));
-        }
-        let active =
-            uia_call(|| unsafe { selection.GetAttributeValue(UIA_SelectionActiveEndAttributeId) })?;
-        match variant_i32(&active) {
-            Some(n) if n == ActiveEnd_Start.0 => Ok(Some(offsets.start)),
-            Some(n) if n == ActiveEnd_End.0 => Ok(Some(offsets.end)),
-            _ => Err(Error::Unsupported {
-                feature: "UIA provider reports no active end for its text selection".into(),
-            }),
-        }
+            let selected = uia_call(|| unsafe { p.GetSelection() })?;
+            if uia_call(|| unsafe { selected.Length() })? == 0 {
+                return Ok(None);
+            }
+            let selection = uia_call(|| unsafe { selected.GetElement(0) })?;
+            let offsets = rich::offsets(&self.document(e)?, &selection)?;
+            if offsets.is_empty() {
+                return Ok(Some(offsets.start));
+            }
+            let active = uia_call(|| unsafe {
+                selection.GetAttributeValue(UIA_SelectionActiveEndAttributeId)
+            })?;
+            match variant_i32(&active) {
+                Some(n) if n == ActiveEnd_Start.0 => Ok(Some(offsets.start)),
+                Some(n) if n == ActiveEnd_End.0 => Ok(Some(offsets.end)),
+                _ => Err(Error::Unsupported {
+                    feature: "UIA provider reports no active end for its text selection".into(),
+                }),
+            }
+        })
     }
 
     fn text_selections(&self, e: &ElementData) -> Result<Vec<xa11y_core::text_api::TextRange>> {
         uia_gate("text_selections")?;
-        let p: IUIAutomationTextPattern = self.rich_pattern(e, UIA_TextPatternId, "text")?;
-        let doc = uia_call(|| unsafe { p.DocumentRange() })?;
-        let array = uia_call(|| unsafe { p.GetSelection() })?;
-        let mut ranges = Vec::new();
-        for i in 0..uia_call(|| unsafe { array.Length() })? {
-            let range = rich::offsets(&doc, &uia_call(|| unsafe { array.GetElement(i) })?)?;
-            if !range.is_empty() {
-                ranges.push(range);
+        rich::read_on(e, || {
+            let p: IUIAutomationTextPattern = self.rich_pattern(e, UIA_TextPatternId, "text")?;
+            let doc = uia_call(|| unsafe { p.DocumentRange() })?;
+            let array = uia_call(|| unsafe { p.GetSelection() })?;
+            let mut ranges = Vec::new();
+            for i in 0..uia_call(|| unsafe { array.Length() })? {
+                let range = rich::offsets(&doc, &uia_call(|| unsafe { array.GetElement(i) })?)?;
+                if !range.is_empty() {
+                    ranges.push(range);
+                }
             }
-        }
-        ranges.sort_by_key(|r| (r.start, r.end));
-        Ok(ranges)
+            ranges.sort_by_key(|r| (r.start, r.end));
+            Ok(ranges)
+        })
     }
 
     fn text_read(&self, e: &ElementData, r: xa11y_core::text_api::TextRange) -> Result<String> {
         uia_gate("text_read")?;
-        // UIA has no numeric offsets. Read only the prefix needed to
-        // validate and slice the request, including a surrogate guard unit.
-        // Scalar boundaries inside CRLF/graphemes remain readable even when
-        // selection/geometry cannot address them as native endpoints.
-        let doc = self.document(e)?;
-        let max = i32::try_from(r.end.saturating_add(1)).unwrap_or(-1);
-        // -1 is UIA's whole-range sentinel when the requested limit cannot
-        // fit its i32 ABI. The resulting text still validates the range.
-        let prefix = uia_call(|| unsafe { doc.GetText(max) })?.to_string();
-        xa11y_core::text_api::slice_utf16(&prefix, r).map_err(|error| {
-            if let Error::InvalidTextRange {
-                start,
-                end,
-                length,
-                message,
-            } = error
-            {
-                Error::InvalidTextRange {
+        rich::read_on(e, || {
+            // UIA has no numeric offsets. Read only the prefix needed to
+            // validate and slice the request, including a surrogate guard unit.
+            // Scalar boundaries inside CRLF/graphemes remain readable even when
+            // selection/geometry cannot address them as native endpoints.
+            let doc = self.document(e)?;
+            let max = i32::try_from(r.end.saturating_add(1)).unwrap_or(-1);
+            // -1 is UIA's whole-range sentinel when the requested limit cannot
+            // fit its i32 ABI. The resulting text still validates the range.
+            let prefix = uia_call(|| unsafe { doc.GetText(max) })?.to_string();
+            xa11y_core::text_api::slice_utf16(&prefix, r).map_err(|error| {
+                if let Error::InvalidTextRange {
                     start,
                     end,
-                    // A capped prefix is not the document's length.
-                    length: length.filter(|n| max < 0 || *n < max as u32),
+                    length,
                     message,
+                } = error
+                {
+                    Error::InvalidTextRange {
+                        start,
+                        end,
+                        // A capped prefix is not the document's length.
+                        length: length.filter(|n| max < 0 || *n < max as u32),
+                        message,
+                    }
+                } else {
+                    error
                 }
-            } else {
-                error
-            }
+            })
         })
     }
 
@@ -6201,13 +6333,15 @@ impl Provider for WindowsProvider {
         options: xa11y_core::text_api::FindOptions,
     ) -> Result<Option<xa11y_core::text_api::TextRange>> {
         uia_gate("text_find")?;
-        // Numeric UIA reads need prefixes. Share one fresh observation for
-        // the entire search rather than re-reading it once per chunk. Use
-        // core's exact matcher, not UIA's provider-dependent FindText rules.
-        let text = rich::contents(&self.document(e)?)?;
-        let units: Vec<u16> = text.encode_utf16().collect();
-        xa11y_core::text_api::find_with_reader(needle, options, units.len() as u32, |r| {
-            xa11y_core::text_api::slice_utf16_units(&units, r)
+        rich::read_on(e, || {
+            // Numeric UIA reads need prefixes. Share one fresh observation for
+            // the entire search rather than re-reading it once per chunk. Use
+            // core's exact matcher, not UIA's provider-dependent FindText rules.
+            let text = rich::contents(&self.document(e)?)?;
+            let units: Vec<u16> = text.encode_utf16().collect();
+            xa11y_core::text_api::find_with_reader(needle, options, units.len() as u32, |r| {
+                xa11y_core::text_api::slice_utf16_units(&units, r)
+            })
         })
     }
 
@@ -6218,80 +6352,83 @@ impl Provider for WindowsProvider {
         unit: xa11y_core::text_api::TextUnit,
     ) -> Result<xa11y_core::text_api::TextRange> {
         uia_gate("text_range_at")?;
-        use xa11y_core::text_api::{slice_utf16, utf16_len, TextRange, TextUnit};
-        let doc = self.document(e)?;
-        let text = rich::contents(&doc)?;
-        let units: Vec<u16> = text.encode_utf16().collect();
-        let length = units.len() as u32;
-        xa11y_core::text_api::check_in_bounds(
-            TextRange {
-                start: offset,
-                end: offset,
-            },
-            length,
-        )?;
-        if length == 0 {
-            return Ok(TextRange { start: 0, end: 0 });
-        }
-        // At the end, answer for the unit that ends there; inside a surrogate
-        // pair, for the pair. Both as on Linux and macOS.
-        let all_at_end = offset == length;
-        let mut offset = offset.min(length - 1);
-        let is_low = |u: u16| (0xDC00..=0xDFFF).contains(&u);
-        let is_high = |u: u16| (0xD800..=0xDBFF).contains(&u);
-        if offset > 0 && is_low(units[offset as usize]) && is_high(units[offset as usize - 1]) {
-            offset -= 1;
-        }
-        if unit == TextUnit::Character {
-            let width = if is_high(units[offset as usize]) && offset + 1 < length {
-                2
-            } else {
-                1
-            };
-            return Ok(TextRange {
-                start: offset,
-                end: offset + width,
-            });
-        }
-        let include_newline = matches!(unit, TextUnit::Line | TextUnit::Paragraph);
-        let unit = match unit {
-            TextUnit::Character => TextUnit_Character,
-            TextUnit::Word => TextUnit_Word,
-            TextUnit::Line => TextUnit_Line,
-            TextUnit::Paragraph => TextUnit_Paragraph,
-        };
-        let mut r = rich::offsets(
-            &doc,
-            &rich::unit_at(&doc, &text, if all_at_end { length } else { offset }, unit)?,
-        )?;
-        // WPF excludes CR/LF from the enclosing line/paragraph. Include the
-        // reported separators so paging can resume at the next unit. A
-        // provider whose unit already ends in its terminator (RichEdit
-        // paragraphs end in CR) keeps it as it is: appending the *next*
-        // separator would swallow an empty line after it.
-        let ends_with_terminator =
-            r.end > r.start && r.end <= length && matches!(units[r.end as usize - 1], 0x0A | 0x0D);
-        if include_newline && !ends_with_terminator {
-            let tail = slice_utf16(
-                &text,
+        rich::read_on(e, || {
+            use xa11y_core::text_api::{slice_utf16, utf16_len, TextRange, TextUnit};
+            let doc = self.document(e)?;
+            let text = rich::contents(&doc)?;
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let length = units.len() as u32;
+            xa11y_core::text_api::check_in_bounds(
                 TextRange {
-                    start: r.end,
-                    end: utf16_len(&text),
+                    start: offset,
+                    end: offset,
                 },
+                length,
             )?;
-            if tail.starts_with("\r\n") {
-                r.end += 2;
-            } else if tail.starts_with(['\r', '\n']) {
-                r.end += 1;
+            if length == 0 {
+                return Ok(TextRange { start: 0, end: 0 });
             }
-        }
-        if r.end > utf16_len(&text) {
-            return Err(Error::Platform {
-                code: -1,
-                message: "UIA returned a range outside its document".into(),
-            });
-        }
-        Ok(r)
+            // At the end, answer for the unit that ends there; inside a surrogate
+            // pair, for the pair. Both as on Linux and macOS.
+            let all_at_end = offset == length;
+            let mut offset = offset.min(length - 1);
+            let is_low = |u: u16| (0xDC00..=0xDFFF).contains(&u);
+            let is_high = |u: u16| (0xD800..=0xDBFF).contains(&u);
+            if offset > 0 && is_low(units[offset as usize]) && is_high(units[offset as usize - 1]) {
+                offset -= 1;
+            }
+            if unit == TextUnit::Character {
+                let width = if is_high(units[offset as usize]) && offset + 1 < length {
+                    2
+                } else {
+                    1
+                };
+                return Ok(TextRange {
+                    start: offset,
+                    end: offset + width,
+                });
+            }
+            let include_newline = matches!(unit, TextUnit::Line | TextUnit::Paragraph);
+            let unit = match unit {
+                TextUnit::Character => TextUnit_Character,
+                TextUnit::Word => TextUnit_Word,
+                TextUnit::Line => TextUnit_Line,
+                TextUnit::Paragraph => TextUnit_Paragraph,
+            };
+            let mut r = rich::offsets(
+                &doc,
+                &rich::unit_at(&doc, &text, if all_at_end { length } else { offset }, unit)?,
+            )?;
+            // WPF excludes CR/LF from the enclosing line/paragraph. Include the
+            // reported separators so paging can resume at the next unit. A
+            // provider whose unit already ends in its terminator (RichEdit
+            // paragraphs end in CR) keeps it as it is: appending the *next*
+            // separator would swallow an empty line after it.
+            let ends_with_terminator = r.end > r.start
+                && r.end <= length
+                && matches!(units[r.end as usize - 1], 0x0A | 0x0D);
+            if include_newline && !ends_with_terminator {
+                let tail = slice_utf16(
+                    &text,
+                    TextRange {
+                        start: r.end,
+                        end: utf16_len(&text),
+                    },
+                )?;
+                if tail.starts_with("\r\n") {
+                    r.end += 2;
+                } else if tail.starts_with(['\r', '\n']) {
+                    r.end += 1;
+                }
+            }
+            if r.end > utf16_len(&text) {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: "UIA returned a range outside its document".into(),
+                });
+            }
+            Ok(r)
+        })
     }
 
     fn text_range_bounds(
@@ -6300,9 +6437,11 @@ impl Provider for WindowsProvider {
         r: xa11y_core::text_api::TextRange,
     ) -> Result<Option<xa11y_core::Rect>> {
         uia_gate("text_range_bounds")?;
-        let dpi = crate::dpi::DpiScope::enter()?;
-        let range = rich::range(&self.document(e)?, r)?;
-        crate::coords::text_range_bounds(&dpi, &range)
+        rich::read_on(e, || {
+            let dpi = crate::dpi::DpiScope::enter()?;
+            let range = rich::range(&self.document(e)?, r)?;
+            crate::coords::text_range_bounds(&dpi, &range)
+        })
     }
 
     fn text_attributes_at(
@@ -6311,17 +6450,19 @@ impl Provider for WindowsProvider {
         offset: u32,
     ) -> Result<xa11y_core::text_api::TextRun> {
         uia_gate("text_attributes_at")?;
-        let doc = self.document(e)?;
-        let sample = rich::format_sample(&doc, offset)?;
-        let range = uia_call(|| unsafe { sample.Clone() })?;
-        uia_call(|| unsafe { range.ExpandToEnclosingUnit(TextUnit_Format) })?;
-        Ok(xa11y_core::text_api::TextRun::new(
-            rich::offsets(&doc, &range)?,
-            rich::attributes(
-                &sample,
-                e.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF"),
-            )?,
-        ))
+        rich::read_on(e, || {
+            let doc = self.document(e)?;
+            let sample = rich::format_sample(&doc, offset)?;
+            let range = uia_call(|| unsafe { sample.Clone() })?;
+            uia_call(|| unsafe { range.ExpandToEnclosingUnit(TextUnit_Format) })?;
+            Ok(xa11y_core::text_api::TextRun::new(
+                rich::offsets(&doc, &range)?,
+                rich::attributes(
+                    &sample,
+                    e.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF"),
+                )?,
+            ))
+        })
     }
 
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
@@ -7977,9 +8118,8 @@ impl EventContext {
         // where a tree read of the same element would not. Nor are they
         // clipped to their scrolling ancestors (issue #502), for the same
         // reason: an item scrolled out of view can report visible here.
-        let in_minimized_window = unsafe { cached_element.CachedNativeWindowHandle() }
-            .ok()
-            .is_some_and(|h| !h.0.is_null() && hwnd_in_minimized_window(h));
+        let in_minimized_window =
+            cached_own_hwnd(&cached_element)?.is_some_and(hwnd_in_minimized_window);
         build_snapshot_data(
             dpi,
             &cached_element,
@@ -10841,35 +10981,47 @@ mod tests {
     }
 
     #[test]
-    fn uia_stable_id_prefers_hwnd_for_windows_and_automation_id_for_controls() {
+    fn type_text_insertion_point_needs_the_two_patterns_to_agree_before_the_caret() {
+        // Same text before the caret: the prefix's scalar count is the
+        // offset `splice_at_char_offset` takes, surrogate pairs included.
+        assert_eq!(
+            value_offset_of_prefix("a\u{1F600}bc", "a\u{1F600}").unwrap(),
+            2
+        );
+        assert_eq!(value_offset_of_prefix("abc", "").unwrap(), 0);
+        // A RichEdit reports a paragraph break as CR in its document and CRLF
+        // in its value: counting in one would land early in the other.
+        assert!(matches!(
+            value_offset_of_prefix("one\r\ntwo", "one\rt"),
+            Err(Error::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn uia_stable_id_prefers_hwnd_and_falls_back_to_automation_id() {
         let hwnd_of = |v: usize| Some(HWND(v as *mut _));
         // A top-level window keeps its HWND even when it has an AutomationId:
         // every instance of a WinForms form reports the same one.
         assert_eq!(
-            uia_stable_id(hwnd_of(0x1234), true, Some("MainForm".into())),
+            uia_stable_id(hwnd_of(0x1234), Some("MainForm".into())),
             Some("hwnd:0x1234".into())
         );
         assert_eq!(
-            uia_stable_id(hwnd_of(0x1A2B), true, None),
+            uia_stable_id(hwnd_of(0x1A2B), None),
             Some("hwnd:0x1a2b".into())
         );
-        // A Win32 control has its own HWND and an AutomationId; the
-        // AutomationId survives a restart and the HWND does not (#684).
+        // A Win32 / WinForms control with its own window is identified by
+        // that window too; its AutomationId stays in `raw["automation_id"]`.
         assert_eq!(
-            uia_stable_id(hwnd_of(0x2801d0), false, Some("15".into())),
-            Some("15".into())
-        );
-        // A control with an HWND and no AutomationId keeps the HWND.
-        assert_eq!(
-            uia_stable_id(hwnd_of(0x2801d0), false, None),
+            uia_stable_id(hwnd_of(0x2801d0), Some("15".into())),
             Some("hwnd:0x2801d0".into())
         );
         // A windowless framework control has only its AutomationId.
         assert_eq!(
-            uia_stable_id(None, false, Some("PanelFields".into())),
+            uia_stable_id(None, Some("PanelFields".into())),
             Some("PanelFields".into())
         );
-        assert_eq!(uia_stable_id(None, false, None), None);
+        assert_eq!(uia_stable_id(None, None), None);
     }
 
     #[test]

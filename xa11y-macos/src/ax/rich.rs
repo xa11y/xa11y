@@ -1125,10 +1125,10 @@ impl MacOSProvider {
         kind: HeaderKind,
     ) -> Result<Vec<ElementData>> {
         if cell.role != Role::TableCell {
-            // Named for the interface the element lacks, as every table read
-            // is (`require_table`), not for this one method.
+            // Named for the operation, as Linux and Windows name it: a
+            // non-cell lacks the cell interface, not the table one.
             return Err(Error::ActionNotSupported {
-                action: "table".to_string(),
+                action: "cell_headers".to_string(),
                 role: cell.role,
             });
         }
@@ -1203,9 +1203,9 @@ impl MacOSProvider {
             _ => "AXSelectedChildren",
         };
         match read(ax.as_ptr(), attribute)? {
-            // Named for the interface the element lacks.
+            // Named for the operation, as Linux and Windows name it.
             Read::Unsupported => Err(Error::ActionNotSupported {
-                action: "selection".to_string(),
+                action: "selected_items".to_string(),
                 role: container.role,
             }),
             Read::NoValue => Ok(Vec::new()),

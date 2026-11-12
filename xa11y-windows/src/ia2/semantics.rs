@@ -61,27 +61,30 @@ pub(super) fn apply(
     } else {
         Some(live)
     };
-    // Read collection position for any element that exposes it, as UIA and
-    // AT-SPI do: the attributes are already in hand, so this costs no calls.
-    let position = one_based(get("posinset"), "position in set")?;
-    let size = match get("setsize") {
-        Some(v) => {
-            Some(Count::from_signed(v.parse().map_err(|_| {
-                platform(format!("invalid IA2 set size: {v:?}"))
-            })?))
-        }
-        None => None,
-    };
-    let level = one_based(get("level"), "collection level")?;
-    if position.is_some() || size.is_some() || level.is_some() {
-        data.collection = Some(
-            CollectionParts {
-                index: position,
-                size,
-                depth: level,
+    // Read collection position for the roles every backend reports it on
+    // (`is_collection_role`); the attributes are already in hand, so this
+    // costs no calls.
+    if crate::uia::is_collection_role(data.role) {
+        let position = one_based(get("posinset"), "position in set")?;
+        let size = match get("setsize") {
+            Some(v) => {
+                Some(Count::from_signed(v.parse().map_err(|_| {
+                    platform(format!("invalid IA2 set size: {v:?}"))
+                })?))
             }
-            .into(),
-        );
+            None => None,
+        };
+        let level = one_based(get("level"), "collection level")?;
+        if position.is_some() || size.is_some() || level.is_some() {
+            data.collection = Some(
+                CollectionParts {
+                    index: position,
+                    size,
+                    depth: level,
+                }
+                .into(),
+            );
+        }
     }
     data.raw.insert(
         "ia2_attributes".into(),
@@ -247,6 +250,17 @@ mod tests {
             0x414
         )
         .is_err());
+    }
+    #[test]
+    fn collection_position_is_read_only_for_collection_roles() {
+        let mut data = ElementData::for_role(Role::Button);
+        apply(
+            &mut data,
+            &rich::parse_attributes("posinset:3;setsize:5;").unwrap(),
+            0,
+        )
+        .unwrap();
+        assert!(data.collection.is_none());
     }
     #[test]
     fn collection_position_is_zero_based_and_zero_means_unreported() {

@@ -80,7 +80,8 @@ internal sealed class TestForm : Form
         AccessibleName = WindowTitle;
         // WinForms reports a control's Name as its UIA AutomationId, so the
         // form and the "Agree to terms" check box have one. test_stable_id.py
-        // checks which one becomes stable_id.
+        // checks that stable_id stays the window handle and the AutomationId
+        // is reported in raw["automation_id"].
         Name = "TestForm";
         ClientSize = new Size(1100, 840);
         StartPosition = FormStartPosition.CenterScreen;
