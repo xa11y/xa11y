@@ -415,12 +415,20 @@ fn live_ref(bus_name: String, path: String) -> Option<AccessibleRef> {
 }
 
 impl LinuxProvider {
-    /// [`call_failed`], except that a peer that did not answer is the
+    /// A failed call of the table and text layer, classified as every other
+    /// read classifies one: a peer that did not answer is the
     /// unresponsive-peer [`Error::Timeout`] (the deadline's expiry, when the
-    /// caller's deadline cut the call), as every other read reports it.
+    /// caller's deadline cut the call), a peer that left the bus is
+    /// [`Error::ElementStale`] with `StaleReason::ProcessExited`, and
+    /// anything else is a platform error naming the object.
     fn rich_call_failed(&self, aref: &AccessibleRef, what: &str, e: zbus::Error) -> Error {
         if is_timeout(&e) {
             self.unresponsive_peer(aref, what)
+        } else if is_peer_gone(&e) {
+            Error::stale(
+                xa11y_core::StaleReason::ProcessExited,
+                format!("{}{}", aref.bus_name, aref.path),
+            )
         } else {
             Error::Platform {
                 code: -1,
@@ -430,10 +438,18 @@ impl LinuxProvider {
     }
 }
 
-fn call_failed(what: &str, e: zbus::Error) -> Error {
-    Error::Platform {
-        code: -1,
-        message: format!("{what} failed: {e}"),
+/// The live `org.a11y.atspi.Text` object behind a [`TextAccess`]: the proxy,
+/// and the object and provider a failed call is classified against
+/// ([`LinuxProvider::rich_call_failed`]).
+struct LiveText<'a> {
+    provider: &'a LinuxProvider,
+    aref: AccessibleRef,
+    proxy: Proxy<'a>,
+}
+
+impl LiveText<'_> {
+    fn failed(&self, what: &str, e: zbus::Error) -> Error {
+        self.provider.rich_call_failed(&self.aref, what, e)
     }
 }
 
@@ -451,16 +467,18 @@ trait TextSource {
     fn attribute_run(&self, offset: i32) -> Result<(HashMap<String, String>, i32, i32)>;
 }
 
-impl TextSource for Proxy<'_> {
+impl TextSource for LiveText<'_> {
     fn character_count(&self) -> Result<i32> {
-        self.get_property::<i32>("CharacterCount")
-            .map_err(|e| call_failed("Text.CharacterCount", e))
+        self.proxy
+            .get_property::<i32>("CharacterCount")
+            .map_err(|e| self.failed("Text.CharacterCount", e))
     }
 
     fn get_text(&self, start: i32, end: i32) -> Result<String> {
         let reply = self
+            .proxy
             .call_method("GetText", &(start, end))
-            .map_err(|e| call_failed("Text.GetText", e))?;
+            .map_err(|e| self.failed("Text.GetText", e))?;
         reply.body().deserialize().map_err(|e| Error::Platform {
             code: -1,
             message: format!("Text.GetText deserialize failed: {e}"),
@@ -469,6 +487,7 @@ impl TextSource for Proxy<'_> {
 
     fn string_at_offset(&self, offset: i32, granularity: u32) -> Result<(i32, i32)> {
         let reply = self
+            .proxy
             .call_method("GetStringAtOffset", &(offset, granularity))
             .map_err(|e| {
                 if is_absent_member(&e) {
@@ -478,7 +497,7 @@ impl TextSource for Proxy<'_> {
                         ),
                     }
                 } else {
-                    call_failed("Text.GetStringAtOffset", e)
+                    self.failed("Text.GetStringAtOffset", e)
                 }
             })?;
         let (_text, start, end): (String, i32, i32) =
@@ -491,6 +510,7 @@ impl TextSource for Proxy<'_> {
 
     fn attribute_run(&self, offset: i32) -> Result<(HashMap<String, String>, i32, i32)> {
         let reply = self
+            .proxy
             .call_method("GetAttributeRun", &(offset, true))
             .map_err(|e| {
                 if is_absent_member(&e) {
@@ -500,7 +520,7 @@ impl TextSource for Proxy<'_> {
                         ),
                     }
                 } else {
-                    call_failed("Text.GetAttributeRun", e)
+                    self.failed("Text.GetAttributeRun", e)
                 }
             })?;
         reply.body().deserialize().map_err(|e| Error::Platform {
@@ -1162,13 +1182,9 @@ impl LinuxProvider {
         kind: Option<CellKind>,
     ) -> Result<Option<CellInfo>> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.TableCell")?;
-        let reply = proxy.call_method("GetRowColumnSpan", &()).map_err(|e| {
-            if is_timeout(&e) {
-                self.unresponsive_peer(aref, "TableCell.GetRowColumnSpan")
-            } else {
-                call_failed("TableCell.GetRowColumnSpan", e)
-            }
-        })?;
+        let reply = proxy
+            .call_method("GetRowColumnSpan", &())
+            .map_err(|e| self.rich_call_failed(aref, "TableCell.GetRowColumnSpan", e))?;
         let (row, column, row_span, column_span): (i32, i32, i32, i32) =
             reply.body().deserialize().map_err(|e| Error::Platform {
                 code: -1,
@@ -1245,10 +1261,10 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Table")?;
         let rows: i32 = proxy
             .get_property("NRows")
-            .map_err(|e| call_failed("Table.NRows", e))?;
+            .map_err(|e| self.rich_call_failed(&aref, "Table.NRows", e))?;
         let cols: i32 = proxy
             .get_property("NColumns")
-            .map_err(|e| call_failed("Table.NColumns", e))?;
+            .map_err(|e| self.rich_call_failed(&aref, "Table.NColumns", e))?;
         // Out of range is an answer, not an error; AT-SPI toolkits disagree on
         // what GetAccessibleAt returns there, so ask only in range.
         let (Ok(r), Ok(c)) = (i32::try_from(row), i32::try_from(column)) else {
@@ -1262,7 +1278,7 @@ impl LinuxProvider {
         }
         let reply = proxy
             .call_method("GetAccessibleAt", &(r, c))
-            .map_err(|e| call_failed("Table.GetAccessibleAt", e))?;
+            .map_err(|e| self.rich_call_failed(&aref, "Table.GetAccessibleAt", e))?;
         Ok(object_ref(reply, "Table.GetAccessibleAt")?
             .map(|cell| self.build_element_data(&cell, table.pid)))
     }
@@ -1326,7 +1342,7 @@ impl LinuxProvider {
         };
         let reply = proxy
             .call_method(method, &())
-            .map_err(|e| call_failed(method, e))?;
+            .map_err(|e| self.rich_call_failed(&aref, method, e))?;
         let list: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
             reply.body().deserialize().map_err(|e| Error::Platform {
                 code: -1,
@@ -1404,10 +1420,15 @@ impl LinuxProvider {
         Ok(unit)
     }
 
-    fn text_access(&self, element: &ElementData) -> Result<TextAccess<Proxy<'_>>> {
+    fn text_access(&self, element: &ElementData) -> Result<TextAccess<LiveText<'_>>> {
         let aref = self.with_interface(element, "org.a11y.atspi.Text", "text")?;
         let unit = self.offset_unit(&aref, element)?;
-        let source = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Text")?;
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Text")?;
+        let source = LiveText {
+            provider: self,
+            aref,
+            proxy,
+        };
         Ok(TextAccess { source, unit })
     }
 
@@ -1433,6 +1454,7 @@ impl LinuxProvider {
         }
         let caret: i32 = t
             .source
+            .proxy
             .get_property("CaretOffset")
             .map_err(|e| self.rich_call_failed(&aref, "Text.CaretOffset", e))?;
         if caret < 0 {
@@ -1445,8 +1467,9 @@ impl LinuxProvider {
         let t = self.text_access(element)?;
         let n: i32 = t
             .source
+            .proxy
             .call_method("GetNSelections", &())
-            .map_err(|e| call_failed("Text.GetNSelections", e))?
+            .map_err(|e| t.source.failed("Text.GetNSelections", e))?
             .body()
             .deserialize()
             .map_err(|e| Error::Platform {
@@ -1457,8 +1480,9 @@ impl LinuxProvider {
         for i in 0..n.max(0) {
             let (start, end): (i32, i32) = t
                 .source
+                .proxy
                 .call_method("GetSelection", &(i,))
-                .map_err(|e| call_failed("Text.GetSelection", e))?
+                .map_err(|e| t.source.failed("Text.GetSelection", e))?
                 .body()
                 .deserialize()
                 .map_err(|e| Error::Platform {
@@ -1509,8 +1533,9 @@ impl LinuxProvider {
         let coord: u32 = if gtk4 { 1 } else { 0 };
         let reply = t
             .source
+            .proxy
             .call_method("GetRangeExtents", &(start, end, coord))
-            .map_err(|e| call_failed("Text.GetRangeExtents", e))?;
+            .map_err(|e| t.source.failed("Text.GetRangeExtents", e))?;
         let (x, y, w, h): (i32, i32, i32, i32) =
             reply.body().deserialize().map_err(|e| Error::Platform {
                 code: -1,
@@ -1577,8 +1602,9 @@ impl LinuxProvider {
         // call that creates one. Which applies is a state read, not a retry.
         let existing: i32 = t
             .source
+            .proxy
             .call_method("GetNSelections", &())
-            .map_err(|e| call_failed("Text.GetNSelections", e))?
+            .map_err(|e| t.source.failed("Text.GetNSelections", e))?
             .body()
             .deserialize()
             .map_err(|e| Error::Platform {
@@ -1588,14 +1614,16 @@ impl LinuxProvider {
         let (member, reply) = if existing > 0 {
             let reply = t
                 .source
+                .proxy
                 .call_method("SetSelection", &(0i32, native_start, native_end))
-                .map_err(|e| call_failed("Text.SetSelection", e))?;
+                .map_err(|e| t.source.failed("Text.SetSelection", e))?;
             ("SetSelection", reply)
         } else {
             let reply = t
                 .source
+                .proxy
                 .call_method("AddSelection", &(native_start, native_end))
-                .map_err(|e| call_failed("Text.AddSelection", e))?;
+                .map_err(|e| t.source.failed("Text.AddSelection", e))?;
             ("AddSelection", reply)
         };
         atspi_bool_reply(
