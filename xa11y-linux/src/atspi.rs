@@ -16,7 +16,7 @@ use xa11y_core::{
 use zbus::blocking::Connection;
 use zbus::DBusError;
 
-use crate::window::WindowManager;
+use crate::window::{ActiveWindow, WindowManager};
 
 mod bounded;
 mod rich;
@@ -2143,10 +2143,15 @@ impl LinuxProvider {
                         xa11y_core::StaleReason::Removed,
                         format!("{}{}", aref.bus_name, aref.path),
                     )
+                } else if is_timeout(&e) {
+                    self.unresponsive_peer(aref, "Accessible.Parent")
                 } else {
                     Error::Platform {
                         code: -1,
-                        message: format!("Get Parent property failed: {}", e),
+                        message: format!(
+                            "Get Parent property of {}{} failed: {e}",
+                            aref.bus_name, aref.path
+                        ),
                     }
                 }
             })?;
@@ -2376,21 +2381,29 @@ impl LinuxProvider {
     /// anything (issue #491). Its parent stops counting it at once, so that is
     /// the check, at constant cost whatever the number of siblings:
     /// `GetIndexInParent`, then the parent's `GetChildAtIndex` at that index
-    /// must be this object. An index of -1 cannot be cross-checked (Qt
-    /// reports it for live popups), so there the object's own state decides:
-    /// `DEFUNCT` or an empty state set is stale. A parent that
-    /// `MANAGES_DESCENDANTS` (large tables and tree views) does not keep its
-    /// children as live objects, so there only the object's own `DEFUNCT`
-    /// state is consulted.
+    /// must be this object. A parent that `MANAGES_DESCENDANTS` (large tables
+    /// and tree views) does not keep its children as live objects, so there
+    /// only the object's own `DEFUNCT` state is consulted.
     ///
-    /// A top-level object (a window whose parent is the application root, or
-    /// an application whose parent is the registry root) has nothing to be
-    /// detached from and passes. A *null* parent is not top-level: it is what
-    /// GTK 3 reports for a destroyed widget, window included (issue #586),
-    /// alongside `GetIndexInParent` -1 and an empty state set, while every
-    /// live object keeps a parent link up to the application root. An object
-    /// or parent that is already gone is stale too; any other failure is
-    /// returned.
+    /// Where there is nothing to cross-check, the object's own state
+    /// decides: `DEFUNCT` or an empty state set is stale, any other state set
+    /// is live. That covers two shapes:
+    ///
+    /// - an index of -1, which Qt reports for live popups;
+    /// - a *null* parent. GTK 3 reports one for a destroyed widget, window
+    ///   included (issue #586), together with an empty state set, so the
+    ///   state read still catches it. It is also the valid AT-SPI shape of a
+    ///   top-level object on some adapters (`ensure_top_level_window_target`
+    ///   accepts it), so a null parent alone is not removal.
+    ///
+    /// The application object itself (`APP_ROOT_PATH` on the application's
+    /// bus) is never detached from anything, and some adapters answer its
+    /// `Parent` with the null reference rather than the registry, so it
+    /// passes without a parent read; an application that has gone fails the
+    /// call that follows. A top-level object whose parent is a root (a
+    /// window under the application root, an application under the registry
+    /// root) passes too. An object or parent that is already gone is stale;
+    /// any other failure is returned.
     ///
     /// Every Linux path that acts on an element runs this first: `DoAction`,
     /// `GrabFocus` (`focus`, `activate`), `Value` writes, `EditableText`
@@ -2404,15 +2417,25 @@ impl LinuxProvider {
                 format!("{}{}", aref.bus_name, aref.path),
             )
         };
+        // No parent or index to cross-check against: the object's own state
+        // decides. A removed object is `DEFUNCT`, or reports the empty state
+        // set GTK 3 gives a destroyed widget.
+        let own_state_decides = || match self.scan_state_bits(aref)? {
+            Some(bits) if bits != 0 && bits & DEFUNCT == 0 => Ok(()),
+            _ => Err(stale()),
+        };
+        if aref.path == APP_ROOT_PATH {
+            return Ok(());
+        }
         let parent = match self.read_parent_ref(aref) {
             Ok(parent) => parent,
             Err(Error::ElementStale { .. }) => return Err(stale()),
             Err(e) => return Err(e),
         };
         if parent.is_null() {
-            return Err(stale());
+            return own_state_decides();
         }
-        if parent.path == "/org/a11y/atspi/accessible/root" {
+        if parent.path == APP_ROOT_PATH {
             return Ok(());
         }
         let Some(parent_state) = self.scan_state_bits(&parent)? else {
@@ -2428,16 +2451,9 @@ impl LinuxProvider {
             return Err(stale());
         };
         if index < 0 {
-            // No index to cross-check against the parent. Live objects report
-            // -1 on some toolkits (Qt's popup menus and their items), so -1
-            // alone is not removal: as under MANAGES_DESCENDANTS, the
-            // object's own state decides. A removed object is `DEFUNCT`, or
-            // reports the empty state set GTK 3 gives a destroyed widget
-            // (whose null parent is normally caught above already).
-            return match self.scan_state_bits(aref)? {
-                Some(bits) if bits != 0 && bits & DEFUNCT == 0 => Ok(()),
-                _ => Err(stale()),
-            };
+            // Live objects report -1 on some toolkits (Qt's popup menus and
+            // their items), so -1 alone is not removal.
+            return own_state_decides();
         }
         let Some((bus, path)) = self.attach_call::<(String, zbus::zvariant::OwnedObjectPath)>(
             &parent,
@@ -2454,6 +2470,55 @@ impl LinuxProvider {
         } else {
             Err(stale())
         }
+    }
+
+    /// The top-level windows of `app` that report `ACTIVE`, counting every
+    /// window read into `examined`. Empty when the application left the bus
+    /// mid-scan or its root has no children to give; one that does not
+    /// answer is an error naming it, since skipping it would report "nothing
+    /// focused" when the hung app may be exactly the one in the foreground.
+    fn active_windows(
+        &self,
+        app: &AccessibleRef,
+        examined: &mut usize,
+    ) -> Result<Vec<AccessibleRef>> {
+        // AtspiStateType::ACTIVE = 1 → bit position 1.
+        const ACTIVE: u64 = 1 << 1;
+        let Some(windows) = self.scan_children(app)? else {
+            return Ok(Vec::new());
+        };
+        let mut active = Vec::new();
+        for w in windows
+            .into_iter()
+            .filter(|w| w.path != "/org/a11y/atspi/null")
+        {
+            *examined += 1;
+            if self
+                .scan_state_bits(&w)?
+                .is_some_and(|bits| bits & ACTIVE != 0)
+            {
+                active.push(w);
+            }
+        }
+        Ok(active)
+    }
+
+    /// The foreground application's data, named by its `Name`; `None` when
+    /// it left the bus after its windows were read.
+    fn foreground_app_data(
+        &self,
+        app: &AccessibleRef,
+        pid: Option<u32>,
+    ) -> Result<Option<ElementData>> {
+        let Some(name) = self.read_app_name(app)? else {
+            return Ok(None);
+        };
+        let pid = pid.or_else(|| self.get_app_pid(app));
+        let mut data = self.build_element_data(app, pid);
+        if !name.is_empty() {
+            data.name = Some(name);
+        }
+        Ok(Some(data))
     }
 
     /// One `org.a11y.atspi.Accessible` call for [`Self::ensure_attached`]:
@@ -3600,91 +3665,51 @@ impl Provider for LinuxProvider {
     /// state across toolkits. The portable signal is the `ACTIVE` state
     /// (`AtspiStateType::ACTIVE`) set on the foreground *window* (frame): we
     /// enumerate each registered application's top-level children and return
-    /// the first application that owns a window reporting `ACTIVE`.
+    /// an application that owns a window reporting `ACTIVE`.
     ///
     /// More than one application can report an `ACTIVE` window: xfwm4 keeps
     /// one on an off-screen 5x5 window (#680). So when the window manager
-    /// names an active window (`_NET_ACTIVE_WINDOW` on X11), only the
-    /// applications with that window's pid are candidates: the answer is
-    /// one of them or [`Error::SelectorNotMatched`], never another
-    /// application's `ACTIVE` window. Without a window-manager answer
-    /// (Wayland, no EWMH), every application is a candidate.
+    /// names an active window (`_NET_ACTIVE_WINDOW` on X11), the answer is
+    /// the application that owns *that* window, identified by one rule,
+    /// in this order:
     ///
-    /// Returns [`Error::SelectorNotMatched`] when no candidate has an active
-    /// window (no app has the foreground — e.g. focus is on the shell or a
-    /// non-AT-SPI surface). The core reads that as "nothing focused", not a
-    /// failure.
+    /// 1. **By pid.** When the window's `_NET_WM_PID` is the bus-connection
+    ///    pid of one or more AT-SPI applications, only those are candidates,
+    ///    and the answer is the one with an `ACTIVE` window, or none.
+    ///    Another application's `ACTIVE` window is never the answer.
+    /// 2. **By title, only when no application has the pid.** The two pids
+    ///    describe different processes for a Flatpak app (its bus connection
+    ///    is `xdg-dbus-proxy`'s) and an `ssh -X` client (`_NET_WM_PID` is a
+    ///    pid on the remote host), and a window may set no `_NET_WM_PID` at
+    ///    all. Then the owner is the application with an `ACTIVE` top-level
+    ///    window whose name is exactly the window's non-empty
+    ///    `_NET_WM_NAME`, provided exactly one application has one. Zero or
+    ///    several is no answer: a guess between two same-titled windows is
+    ///    the #680 bug again.
+    ///
+    /// Rule 2 never overrides rule 1: when an application has the pid, a
+    /// same-titled `ACTIVE` window elsewhere is not consulted.
+    ///
+    /// A `_NET_ACTIVE_WINDOW` naming a destroyed window (the focused window
+    /// just closed) is no foreground yet. Without a window-manager answer
+    /// (Wayland, no EWMH, window 0), every application is a candidate.
+    ///
+    /// Returns [`Error::SelectorNotMatched`] when no application is
+    /// identified (no app has the foreground — e.g. focus is on the shell or
+    /// a non-AT-SPI surface); its diagnosis says which rule applied and what
+    /// it saw, the pids included when they do not line up. The core reads
+    /// that as "nothing focused", not a failure.
     fn focused_app(&self) -> Result<ElementData> {
-        // AtspiStateType::ACTIVE = 1 → bit position 1.
-        const ACTIVE: u64 = 1 << 1;
-
         let registry = AccessibleRef {
             bus_name: "org.a11y.atspi.Registry".to_string(),
             path: "/org/a11y/atspi/accessible/root".to_string(),
         };
-        let apps = self.get_atspi_children(&registry)?;
-        let active_pid = self.window_manager.active_window_pid()?;
-
-        let mut candidates = 0usize;
-        let mut windows_examined = 0usize;
-        for app in apps.iter().filter(|c| c.path != "/org/a11y/atspi/null") {
-            // The pid is a bus round trip; read it up front only when it
-            // decides candidacy.
-            let known_pid = match active_pid {
-                Some(active) => match self.get_app_pid(app) {
-                    Some(pid) if pid == active => Some(pid),
-                    _ => continue,
-                },
-                None => None,
-            };
-            candidates += 1;
-            // An application that left the bus mid-scan (or whose root has no
-            // children to give) is skipped. One that does not answer is an
-            // error naming it: skipping it would report "nothing focused"
-            // when the hung app may be exactly the one in the foreground.
-            let Some(windows) = self.scan_children(app)? else {
-                continue;
-            };
-            let mut has_active_window = false;
-            for w in windows.iter().filter(|w| w.path != "/org/a11y/atspi/null") {
-                windows_examined += 1;
-                if self
-                    .scan_state_bits(w)?
-                    .is_some_and(|bits| bits & ACTIVE != 0)
-                {
-                    has_active_window = true;
-                    break;
-                }
-            }
-            if has_active_window {
-                let Some(name) = self.read_app_name(app)? else {
-                    // Gone between the state read and now.
-                    continue;
-                };
-                let pid = known_pid.or_else(|| self.get_app_pid(app));
-                let mut data = self.build_element_data(app, pid);
-                if !name.is_empty() {
-                    data.name = Some(name);
-                }
-                return Ok(data);
-            }
-        }
-
-        let observed = match active_pid {
-            Some(pid) => format!(
-                "_NET_ACTIVE_WINDOW names a window of pid {pid}; {candidates} of {} AT-SPI \
-                 applications have that pid, and none of their {windows_examined} top-level \
-                 windows reports ACTIVE (an ACTIVE window of another application is not the \
-                 foreground)",
-                apps.len()
-            ),
-            None => format!(
-                "no window-manager active window; none of the {windows_examined} top-level \
-                 windows of {candidates} AT-SPI applications reports ACTIVE"
-            ),
-        };
-        Err(Error::selector_not_matched("focused application")
-            .diagnose(xa11y_core::Diagnosis::new().last_observed(observed)))
+        let apps: Vec<AccessibleRef> = self
+            .get_atspi_children(&registry)?
+            .into_iter()
+            .filter(|c| c.path != "/org/a11y/atspi/null")
+            .collect();
+        identify_foreground(self, &apps, self.window_manager.active_window()?)
     }
 
     fn press(&self, element: &ElementData) -> Result<()> {
@@ -5253,6 +5278,207 @@ fn carry_deadline<T, R>(f: impl Fn(T) -> R + Sync + Send) -> impl Fn(T) -> R + S
     move |item| xa11y_core::Deadline::scope_opt(deadline.clone(), || f(item))
 }
 
+/// The reads [`identify_foreground`] makes, so its rule can be tested
+/// without a bus or a window manager.
+trait ForegroundReads {
+    /// A registered application.
+    type App;
+    /// One of its top-level windows.
+    type Window;
+    /// The application's bus-connection pid.
+    fn app_pid(&self, app: &Self::App) -> Option<u32>;
+    /// Its top-level windows that report `ACTIVE`, counting every window
+    /// read into `examined`.
+    fn active_windows(&self, app: &Self::App, examined: &mut usize) -> Result<Vec<Self::Window>>;
+    /// A window's accessible name; `None` when it is gone.
+    fn window_name(&self, window: &Self::Window) -> Result<Option<String>>;
+    /// The application's data; `None` when it left the bus.
+    fn app_data(&self, app: &Self::App, pid: Option<u32>) -> Result<Option<ElementData>>;
+    /// The application, for a diagnosis.
+    fn describe(&self, app: &Self::App) -> String;
+}
+
+impl ForegroundReads for LinuxProvider {
+    type App = AccessibleRef;
+    type Window = AccessibleRef;
+
+    fn app_pid(&self, app: &AccessibleRef) -> Option<u32> {
+        self.get_app_pid(app)
+    }
+
+    fn active_windows(
+        &self,
+        app: &AccessibleRef,
+        examined: &mut usize,
+    ) -> Result<Vec<AccessibleRef>> {
+        LinuxProvider::active_windows(self, app, examined)
+    }
+
+    fn window_name(&self, window: &AccessibleRef) -> Result<Option<String>> {
+        self.read_app_name(window)
+    }
+
+    fn app_data(&self, app: &AccessibleRef, pid: Option<u32>) -> Result<Option<ElementData>> {
+        self.foreground_app_data(app, pid)
+    }
+
+    fn describe(&self, app: &AccessibleRef) -> String {
+        format!("{}{}", app.bus_name, app.path)
+    }
+}
+
+/// The foreground application among `apps`, given what the window manager
+/// reports as the active window. The rule is documented on
+/// `focused_app` in the `Provider` impl.
+fn identify_foreground<R: ForegroundReads>(
+    reads: &R,
+    apps: &[R::App],
+    active: ActiveWindow,
+) -> Result<ElementData> {
+    let mut windows_examined = 0usize;
+    let not_matched = |observed: String| {
+        Err(Error::selector_not_matched("focused application")
+            .diagnose(xa11y_core::Diagnosis::new().last_observed(observed)))
+    };
+
+    let (window, wm_pid, title) = match active {
+        ActiveWindow::NotReported => {
+            for app in apps {
+                if reads.active_windows(app, &mut windows_examined)?.is_empty() {
+                    continue;
+                }
+                if let Some(data) = reads.app_data(app, None)? {
+                    return Ok(data);
+                }
+            }
+            return not_matched(format!(
+                "no window-manager active window; none of the {windows_examined} top-level \
+                 windows of {} AT-SPI applications reports ACTIVE",
+                apps.len()
+            ));
+        }
+        ActiveWindow::Destroyed { window } => {
+            return not_matched(format!(
+                "_NET_ACTIVE_WINDOW names window {window:#x}, which no longer exists (the \
+                 focused window closed and the window manager has not named another yet)"
+            ));
+        }
+        ActiveWindow::Window { window, pid, title } => (window, pid, title),
+    };
+
+    // Rule 1: by pid.
+    let pids: Vec<(&R::App, Option<u32>)> =
+        apps.iter().map(|app| (app, reads.app_pid(app))).collect();
+    if let Some(wm_pid) = wm_pid {
+        let owners: Vec<_> = pids.iter().filter(|(_, p)| *p == Some(wm_pid)).collect();
+        if !owners.is_empty() {
+            for &&(app, pid) in &owners {
+                if reads.active_windows(app, &mut windows_examined)?.is_empty() {
+                    continue;
+                }
+                if let Some(data) = reads.app_data(app, pid)? {
+                    return Ok(data);
+                }
+            }
+            return not_matched(format!(
+                "_NET_ACTIVE_WINDOW names window {window:#x} of pid {wm_pid}; {} of {} \
+                 AT-SPI applications have that pid, and none of their {windows_examined} \
+                 top-level windows reports ACTIVE (an ACTIVE window of another application \
+                 is not the foreground)",
+                owners.len(),
+                apps.len()
+            ));
+        }
+    }
+
+    // Rule 2: no application has the window's pid, so match by title.
+    let pid_mismatch = format!(
+        "_NET_ACTIVE_WINDOW names window {window:#x} {}, and no AT-SPI application has \
+         that pid (their bus-connection pids: {}). A Flatpak app's bus connection is \
+         xdg-dbus-proxy's and an ssh -X client's _NET_WM_PID is a remote pid, so the pids \
+         need not line up",
+        match wm_pid {
+            Some(pid) => format!("with _NET_WM_PID {pid}"),
+            None => "without a _NET_WM_PID".to_string(),
+        },
+        describe_pids(pids.iter().map(|(_, p)| *p)),
+    );
+    let Some(title) = title else {
+        return not_matched(format!(
+            "{pid_mismatch}; the window has no _NET_WM_NAME to identify its application by \
+             instead"
+        ));
+    };
+    let mut owners = Vec::new();
+    for &(app, pid) in &pids {
+        for w in reads.active_windows(app, &mut windows_examined)? {
+            if reads.window_name(&w)?.as_deref() == Some(title.as_str()) {
+                owners.push((app, pid));
+                break;
+            }
+        }
+    }
+    match owners.as_slice() {
+        [(app, pid)] => {
+            log::debug!(
+                "foreground app identified by title {title:?}: window {window:#x}'s pid \
+                 ({wm_pid:?}) matches no AT-SPI application"
+            );
+            match reads.app_data(app, *pid)? {
+                Some(data) => Ok(data),
+                None => not_matched(format!(
+                    "{pid_mismatch}; the one application with an ACTIVE window titled \
+                     {title:?} ({}) left the bus before it could be read",
+                    reads.describe(app)
+                )),
+            }
+        }
+        [] => not_matched(format!(
+            "{pid_mismatch}; none of the {windows_examined} top-level windows of {} AT-SPI \
+             applications is ACTIVE and titled {title:?}",
+            apps.len()
+        )),
+        several => not_matched(format!(
+            "{pid_mismatch}; {} applications have an ACTIVE window titled {title:?} \
+             (bus-connection pids: {}), so the window's owner is ambiguous",
+            several.len(),
+            describe_pids(several.iter().map(|(_, p)| *p)),
+        )),
+    }
+}
+
+/// The pids of AT-SPI applications for a diagnosis: sorted, deduplicated,
+/// at most 16 listed with a count of the rest, and how many had none.
+fn describe_pids(pids: impl Iterator<Item = Option<u32>>) -> String {
+    const LISTED: usize = 16;
+    let mut known = Vec::new();
+    let mut unknown = 0usize;
+    for pid in pids {
+        match pid {
+            Some(pid) => known.push(pid),
+            None => unknown += 1,
+        }
+    }
+    known.sort_unstable();
+    known.dedup();
+    let mut out = known
+        .iter()
+        .take(LISTED)
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if known.len() > LISTED {
+        out.push_str(&format!(" and {} more", known.len() - LISTED));
+    }
+    if out.is_empty() {
+        out.push_str("none");
+    }
+    if unknown > 0 {
+        out.push_str(&format!("; {unknown} without a resolvable pid"));
+    }
+    out
+}
+
 /// Whether a failed D-Bus call is the connection's method timeout expiring
 /// (see [`ATSPI_METHOD_TIMEOUT`]): zbus reports it as an I/O error of kind
 /// `TimedOut`, distinct from a peer's own `org.freedesktop.DBus.Error.*` reply.
@@ -5513,6 +5739,218 @@ pub(crate) fn refine_menu_role(role: Role, actions: &[String]) -> Role {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── focused_app: which application owns the active window ────────────
+
+    /// One registered application: its name, bus-connection pid, and the
+    /// names of its ACTIVE top-level windows.
+    struct FakeApp {
+        name: &'static str,
+        pid: Option<u32>,
+        active: Vec<&'static str>,
+    }
+
+    struct FakeRegistry(Vec<FakeApp>);
+
+    impl ForegroundReads for FakeRegistry {
+        type App = usize;
+        type Window = &'static str;
+
+        fn app_pid(&self, app: &usize) -> Option<u32> {
+            self.0[*app].pid
+        }
+
+        fn active_windows(&self, app: &usize, examined: &mut usize) -> Result<Vec<&'static str>> {
+            *examined += self.0[*app].active.len();
+            Ok(self.0[*app].active.clone())
+        }
+
+        fn window_name(&self, window: &&'static str) -> Result<Option<String>> {
+            Ok(Some((*window).to_string()))
+        }
+
+        fn app_data(&self, app: &usize, pid: Option<u32>) -> Result<Option<ElementData>> {
+            let mut data = ElementData::for_role(Role::Application);
+            data.name = Some(self.0[*app].name.to_string());
+            data.pid = pid;
+            Ok(Some(data))
+        }
+
+        fn describe(&self, app: &usize) -> String {
+            self.0[*app].name.to_string()
+        }
+    }
+
+    fn foreground(registry: &FakeRegistry, active: ActiveWindow) -> Result<ElementData> {
+        let apps: Vec<usize> = (0..registry.0.len()).collect();
+        identify_foreground(registry, &apps, active)
+    }
+
+    fn active_x11(pid: Option<u32>, title: Option<&str>) -> ActiveWindow {
+        ActiveWindow::Window {
+            window: 0x1a00003,
+            pid,
+            title: title.map(str::to_string),
+        }
+    }
+
+    fn observed(err: &Error) -> String {
+        assert!(matches!(err, Error::SelectorNotMatched { .. }), "{err:?}");
+        err.diagnosis()
+            .and_then(|d| d.last_observed.clone())
+            .unwrap_or_default()
+    }
+
+    /// #680: xfwm4's off-screen window keeps another application ACTIVE.
+    /// When an application has the active window's pid, only it can be the
+    /// answer, and a same-titled ACTIVE window elsewhere is not consulted.
+    #[test]
+    fn foreground_by_pid_ignores_other_applications_active_windows() {
+        let registry = FakeRegistry(vec![
+            FakeApp {
+                name: "xfwm4",
+                pid: Some(10),
+                active: vec!["Editor"],
+            },
+            FakeApp {
+                name: "editor",
+                pid: Some(20),
+                active: vec!["Editor"],
+            },
+        ]);
+        let app = foreground(&registry, active_x11(Some(20), Some("Editor"))).expect("by pid");
+        assert_eq!(app.name.as_deref(), Some("editor"));
+        assert_eq!(app.pid, Some(20));
+
+        let idle = FakeRegistry(vec![
+            FakeApp {
+                name: "xfwm4",
+                pid: Some(10),
+                active: vec!["Editor"],
+            },
+            FakeApp {
+                name: "editor",
+                pid: Some(20),
+                active: vec![],
+            },
+        ]);
+        let err = foreground(&idle, active_x11(Some(20), Some("Editor")))
+            .expect_err("the pid's owner has no ACTIVE window");
+        assert!(observed(&err).contains("of pid 20"), "{err:?}");
+    }
+
+    /// A Flatpak app (bus pid is xdg-dbus-proxy's) or an ssh -X client: no
+    /// application has the window's pid, so the ACTIVE window titled like
+    /// the X window identifies the owner.
+    #[test]
+    fn foreground_by_title_when_no_application_has_the_pid() {
+        let registry = FakeRegistry(vec![
+            FakeApp {
+                name: "stray",
+                pid: Some(10),
+                active: vec!["xfwm4 helper"],
+            },
+            FakeApp {
+                name: "flatpak app",
+                pid: Some(30),
+                active: vec!["Notes"],
+            },
+        ]);
+        let app = foreground(&registry, active_x11(Some(4242), Some("Notes"))).expect("by title");
+        assert_eq!(app.name.as_deref(), Some("flatpak app"));
+        // A window without _NET_WM_PID is matched the same way.
+        let app = foreground(&registry, active_x11(None, Some("Notes"))).expect("no pid");
+        assert_eq!(app.name.as_deref(), Some("flatpak app"));
+    }
+
+    /// When the pids do not line up and the title does not single out one
+    /// application, nothing is guessed, and the diagnosis says why with the
+    /// pids involved.
+    #[test]
+    fn foreground_mismatched_pid_without_a_unique_title_is_explained() {
+        let registry = FakeRegistry(vec![
+            FakeApp {
+                name: "a",
+                pid: Some(10),
+                active: vec!["Untitled"],
+            },
+            FakeApp {
+                name: "b",
+                pid: Some(30),
+                active: vec!["Untitled"],
+            },
+            FakeApp {
+                name: "c",
+                pid: None,
+                active: vec![],
+            },
+        ]);
+        let ambiguous = observed(
+            &foreground(&registry, active_x11(Some(4242), Some("Untitled")))
+                .expect_err("two same-titled windows"),
+        );
+        for needle in [
+            "_NET_WM_PID 4242",
+            "10, 30",
+            "1 without a resolvable pid",
+            "ambiguous",
+        ] {
+            assert!(ambiguous.contains(needle), "{needle}: {ambiguous}");
+        }
+        let unmatched = observed(
+            &foreground(&registry, active_x11(Some(4242), Some("Terminal")))
+                .expect_err("no ACTIVE window has the title"),
+        );
+        assert!(
+            unmatched.contains("_NET_WM_PID 4242") && unmatched.contains("\"Terminal\""),
+            "{unmatched}"
+        );
+        let untitled =
+            observed(&foreground(&registry, active_x11(Some(4242), None)).expect_err("no title"));
+        assert!(untitled.contains("no _NET_WM_NAME"), "{untitled}");
+    }
+
+    /// A destroyed active window is no foreground yet; without a window
+    /// manager answer any application's ACTIVE window is.
+    #[test]
+    fn foreground_without_a_usable_active_window() {
+        let registry = FakeRegistry(vec![
+            FakeApp {
+                name: "idle",
+                pid: Some(10),
+                active: vec![],
+            },
+            FakeApp {
+                name: "busy",
+                pid: Some(20),
+                active: vec!["Main"],
+            },
+        ]);
+        let gone = observed(
+            &foreground(&registry, ActiveWindow::Destroyed { window: 0x1a00003 })
+                .expect_err("destroyed"),
+        );
+        assert!(
+            gone.contains("0x1a00003") && gone.contains("no longer exists"),
+            "{gone}"
+        );
+        let app = foreground(&registry, ActiveWindow::NotReported).expect("any ACTIVE window");
+        assert_eq!(app.name.as_deref(), Some("busy"));
+    }
+
+    #[test]
+    fn describe_pids_is_sorted_bounded_and_counts_unknowns() {
+        assert_eq!(
+            describe_pids([None].into_iter()),
+            "none; 1 without a resolvable pid"
+        );
+        assert_eq!(
+            describe_pids([Some(3), Some(1), Some(3)].into_iter()),
+            "1, 3"
+        );
+        let many = describe_pids((0..20).map(Some));
+        assert!(many.ends_with("15 and 4 more"), "{many}");
+    }
 
     // ── #486 / #493: EditableText writes ─────────────────────────────────
 
@@ -6767,6 +7205,33 @@ mod tests {
                 .expect("gtk3 zombie")
                 .serve_at("/gtk3_zombie", action(&server_calls))
                 .expect("gtk3 zombie action")
+                // A live top-level object whose adapter answers the null
+                // reference for its Parent: its own state set says it lives.
+                .serve_at(
+                    "/null_parent_frame",
+                    peer("/org/a11y/atspi/null", vec![], -1, VISIBLE),
+                )
+                .expect("null-parent frame")
+                .serve_at("/null_parent_frame", action(&server_calls))
+                .expect("null-parent frame action")
+                // A null parent and DEFUNCT: removed.
+                .serve_at(
+                    "/null_parent_defunct",
+                    peer("/org/a11y/atspi/null", vec![], -1, VISIBLE | DEFUNCT),
+                )
+                .expect("null-parent defunct")
+                .serve_at("/null_parent_defunct", action(&server_calls))
+                .expect("null-parent defunct action")
+                // The application object, whose Parent Qt answers with the
+                // null reference: it passes without a parent or state read
+                // (this one reports neither a parent nor any state).
+                .serve_at(
+                    "/org/a11y/atspi/accessible/root",
+                    peer("/org/a11y/atspi/null", vec![], -1, 0),
+                )
+                .expect("app root")
+                .serve_at("/org/a11y/atspi/accessible/root", action(&server_calls))
+                .expect("app root action")
                 // A top-level window: its parent is the application root.
                 .serve_at(
                     "/window",
@@ -6828,6 +7293,7 @@ mod tests {
         );
         for path in [
             "/gtk3_zombie",
+            "/null_parent_defunct",
             "/usurped",
             "/dead_cell",
             "/defunct",
@@ -6862,6 +7328,16 @@ mod tests {
             .do_atspi_action_by_index(&at("/qt_popup_item"), 0)
             .expect("a live object with index -1 acts");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        // A null parent is not removal on its own: a live state set acts.
+        provider
+            .do_atspi_action_by_index(&at("/null_parent_frame"), 0)
+            .expect("a live object with a null parent acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+        // The application object is never detached.
+        provider
+            .do_atspi_action_by_index(&at("/org/a11y/atspi/accessible/root"), 0)
+            .expect("the application object acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6);
     }
 
     /// Accessible half of the `scroll_into_view` fixture: answers `GetState`,
