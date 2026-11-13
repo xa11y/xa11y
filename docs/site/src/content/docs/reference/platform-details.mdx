@@ -375,7 +375,7 @@ Platforms use different attributes to determine an element's `name`:
 On macOS a `name_changed` event comes from AXTitleChanged, and for a static
 text without a title from AXValueChanged. AX sends no notification when an
 element's AXDescription changes. A static text named by its AXDescription
-therefore raises no `name_changed` event when only the description changes.
+raises no `name_changed` event when only the description changes.
 Read the name again to see the new one.
 
 ### Stable ID
@@ -547,7 +547,7 @@ holds only the top-level rows and the children of expanded items. Its
 `row_count` changes as items expand and collapse, and `cell_at()` indexes
 the same shown rows. GTK 3 on Linux counts the same way: a `GtkTreeView`'s
 `Table.NRows` covers expanded rows only. On Windows the count is the
-provider's Grid `RowCount`. A standard UIA tree view implements no Grid
+provider's Grid `RowCount`. A standard UIA tree view has no Grid
 pattern and reports no `table`.
 
 Windows reads the prefix needed for a numeric `Text.read()` request,
