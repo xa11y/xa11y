@@ -419,9 +419,12 @@ pub struct CapturedNode {
     pub children_truncated: bool,
     /// Reads of this node that failed.
     ///
-    /// A detail the platform does not support at all ([`Error::Unsupported`]
-    /// from its text, formatting or relation read) is recorded once, on the
-    /// first node that reported it, and not read on any later node.
+    /// Formatting the platform does not support at all
+    /// ([`Error::Unsupported`] from a run read) is recorded once, on the first
+    /// node that reported it, and not read on any later node. An
+    /// [`Error::Unsupported`] from a text or relation read is the node's own
+    /// answer (Windows gives it for its synthesized application node) and
+    /// does not stop the read of later nodes.
     pub errors: Vec<CaptureError>,
     /// The node's text, with text detail, when it has a text interface and
     /// the text budget had not run out before it was reached.
@@ -772,12 +775,9 @@ fn read_texts(
             Ok(length) => length,
             // No text interface: nothing to read, not a failure.
             Err(Error::ActionNotSupported { .. }) => continue,
-            // The platform reads no text at all: every later node would
-            // fail the same way, so say it once and stop.
-            Err(e @ Error::Unsupported { .. }) => {
-                node.fail(CaptureStep::Text, e);
-                return;
-            }
+            // Anything else, `Unsupported` included, is this node's answer:
+            // Windows refuses its synthesized application node, which has
+            // no UIA element, and still reads every window below it.
             Err(e) => {
                 node.fail(CaptureStep::Text, e);
                 continue;
@@ -787,10 +787,6 @@ fn read_texts(
         stats.text_reads += 1;
         let mut captured = match read_text(&text, length, left.bytes) {
             Ok(captured) => captured,
-            Err(e @ Error::Unsupported { .. }) => {
-                node.fail(CaptureStep::Text, e);
-                return;
-            }
             Err(e) => {
                 node.fail(CaptureStep::Text, e);
                 continue;
@@ -906,11 +902,10 @@ fn read_relations(
         stats.relation_reads += 1;
         match node.element.relations(&[]) {
             Ok(found) => node.relations = found,
-            // The platform reports no relations at all: say it once.
-            Err(e @ Error::Unsupported { .. }) => {
-                node.fail(CaptureStep::Relations, e);
-                return;
-            }
+            // A platform that reports no relation kind is asked for none
+            // (`relations(&[])` requests what `Capabilities` lists), so an
+            // `Unsupported` here is this node's answer, like any other error:
+            // Windows gives it for its synthesized application node.
             Err(e) => node.fail(CaptureStep::Relations, e),
         }
     }
@@ -1165,19 +1160,33 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_text_is_recorded_once_and_read_no_further() {
-        let provider = crate::mock::build_table_provider();
-        provider.fail_text(Error::Unsupported {
-            feature: "text on this platform".into(),
-        });
-        let cap = app(provider.clone())
-            .capture(&CaptureOptions::new().text(true))
+    fn a_node_that_refuses_text_and_relations_does_not_stop_the_rest() {
+        // Windows answers its synthesized application node (the root) with
+        // `Unsupported`, and reads every node below it.
+        let refusal = || Error::Unsupported {
+            feature: "handle 0 is a synthesized Application node".into(),
+        };
+        let full = app(build_document_provider())
+            .capture(&CaptureOptions::new().text(true).relations(true))
             .expect("capture");
-        assert_eq!(provider.text_length_reads(), 1);
-        let errors: Vec<&CaptureError> = cap.nodes.iter().flat_map(|n| &n.errors).collect();
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].step, CaptureStep::Text);
-        assert!(cap.nodes.iter().all(|n| n.text.is_none()));
+        let provider = build_document_provider();
+        provider.refuse_node("TestApp", refusal());
+        let cap = app(provider.clone())
+            .capture(&CaptureOptions::new().text(true).relations(true))
+            .expect("capture");
+        let steps: Vec<CaptureStep> = cap.root().errors.iter().map(|e| e.step).collect();
+        assert_eq!(steps, [CaptureStep::Text, CaptureStep::Relations]);
+        assert_eq!(provider.text_length_reads(), cap.nodes.len());
+        assert_eq!(cap.stats.relation_reads, cap.nodes.len());
+        for (got, want) in cap.nodes.iter().zip(&full.nodes).skip(1) {
+            assert!(got.errors.is_empty(), "{:?}", got.errors);
+            assert_eq!(
+                got.text.as_ref().map(|t| &t.content),
+                want.text.as_ref().map(|t| &t.content)
+            );
+            assert_eq!(got.relations.len(), want.relations.len());
+        }
+        assert!(cap.nodes.iter().any(|n| !n.relations.is_empty()));
     }
 
     #[test]

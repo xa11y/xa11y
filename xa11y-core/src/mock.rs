@@ -122,6 +122,9 @@ pub struct MockProvider {
     /// The error every `text_length` read returns, set by
     /// [`MockProvider::fail_text`].
     text_error: Mutex<Option<Error>>,
+    /// Errors `text_length` and `relations` return for one node index, set
+    /// by [`MockProvider::refuse_node`].
+    node_errors: Mutex<HashMap<usize, Error>>,
     /// How many `text_length` reads were made, for budget tests.
     text_length_reads: std::sync::atomic::AtomicUsize,
     /// Whether `subscribe` yields [`announcement_events`] (set by
@@ -214,6 +217,30 @@ impl MockProvider {
     /// text interface at all would.
     pub fn fail_text(&self, error: Error) {
         *self.text_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+    }
+
+    /// Make the text and relation reads of the node named `name` fail with
+    /// `error`, as Windows answers for its synthesized application node,
+    /// which has no UIA element behind it.
+    pub fn refuse_node(&self, name: &str, error: Error) {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = Self::index_named(&nodes, name);
+        self.node_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(idx, error);
+    }
+
+    fn node_error(&self, el: &ElementData) -> Result<()> {
+        match self
+            .node_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(el.handle as usize))
+        {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
     }
 
     /// How many text length reads the mock has answered (or refused).
@@ -485,6 +512,7 @@ impl Provider for MockProvider {
                 feature: format!("relation {kind} on the mock provider"),
             });
         }
+        self.node_error(el)?;
         let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         let relations = self.relations.lock().unwrap_or_else(|e| e.into_inner());
         let own = relations.get(&(el.handle as usize));
@@ -704,6 +732,7 @@ impl Provider for MockProvider {
         {
             return Err(e);
         }
+        self.node_error(el)?;
         Ok(utf16_len(&self.text_of(el)?))
     }
 
@@ -1450,6 +1479,7 @@ pub fn build_provider() -> Arc<MockProvider> {
         identity_errors: Mutex::new(HashMap::new()),
         revalidate_errors: Mutex::new(HashMap::new()),
         text_error: Mutex::new(None),
+        node_errors: Mutex::new(HashMap::new()),
         text_length_reads: std::sync::atomic::AtomicUsize::new(0),
         events: std::sync::atomic::AtomicBool::new(false),
         actions: Mutex::new(Vec::new()),
