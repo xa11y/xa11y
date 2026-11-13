@@ -831,7 +831,7 @@ impl Element {
         &self,
         py: Python<'_>,
         start: &Bound<'_, PyAny>,
-        end: Option<u32>,
+        end: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let r = select_range(start, end)?;
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
@@ -940,7 +940,13 @@ impl Element {
     }
     /// On a table: the cell at 0-based ``row`` / ``column`` (a merged cell
     /// for a slot it covers), or ``None``.
-    fn cell_at(&self, py: Python<'_>, row: u32, column: u32) -> PyResult<Option<Py<Element>>> {
+    fn cell_at(
+        &self,
+        py: Python<'_>,
+        row: &Bound<'_, PyAny>,
+        column: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Py<Element>>> {
+        let (row, column) = (rich::u32_arg(row, "row")?, rich::u32_arg(column, "column")?);
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         let found = py
             .detach(move || element.cell_at(row, column))
@@ -1289,7 +1295,7 @@ impl Locator {
         &self,
         py: Python<'_>,
         start: &Bound<'_, PyAny>,
-        end: Option<u32>,
+        end: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let r = select_range(start, end)?;
         let inner = self.inner.clone();
@@ -3592,10 +3598,14 @@ fn _cli_main(py: Python<'_>, args: Vec<String>) -> i32 {
 }
 
 /// `select_text`'s polymorphic arguments: `(start, end)` ints, or one range.
-fn select_range(start: &Bound<'_, PyAny>, end: Option<u32>) -> PyResult<xa11y::TextRange> {
+fn select_range(
+    start: &Bound<'_, PyAny>,
+    end: Option<&Bound<'_, PyAny>>,
+) -> PyResult<xa11y::TextRange> {
     match end {
         Some(end) => {
-            let start: u32 = start.extract()?;
+            let start = rich::u32_arg(start, "start")?;
+            let end = rich::u32_arg(end, "end")?;
             // Order is checked by core's `select_text`, as before.
             Ok(xa11y::TextRange { start, end })
         }
