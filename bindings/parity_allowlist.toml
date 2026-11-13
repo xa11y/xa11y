@@ -478,22 +478,22 @@ rust_only = [
     { method = "Capabilities::for_backend", reason = "Folded into capabilities backend option on both bindings." },
     { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities(platform, os_version): passing a platform or version is for_platform(). One name per operation." },
     { method = "Text::find_with", reason = "FindOptions folds into find()'s keyword-only occurrence / within parameters (AGENTS.md: options structs fold into the primary verb)." },
-    # App: explicit-provider plumbing. The binding uses the global singleton
-    # provider; `_with` variants exist for injection in Rust tests.
-    { method = "App::by_name_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::by_pid_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::foreground_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    # App: explicit-provider plumbing. The bindings take a `backend` name
+    # instead of a provider, build the provider from it, and call these.
+    { method = "App::by_name_with", reason = "Folded into the binding's App.by_name / byName with its `backend` option: the binding builds the provider (the environment default when `backend` is omitted) and calls this with it. A provider object never crosses the boundary." },
+    { method = "App::by_pid_with", reason = "Folded into the binding's App.by_pid / byPid with its `backend` option: the binding builds the provider (the environment default when `backend` is omitted) and calls this with it. A provider object never crosses the boundary." },
+    { method = "App::foreground_with", reason = "Folded into the binding's App.foreground with its `backend` option: the binding builds the provider (the environment default when `backend` is omitted) and calls this with it. A provider object never crosses the boundary." },
+    { method = "App::list_with", reason = "Folded into the binding's App.list with its `backend` option: the binding builds the provider (the environment default when `backend` is omitted) and calls this with it. A provider object never crosses the boundary." },
     { method = "App::windows_with", reason = "Explicit-provider plumbing; bindings expose the per-app `App::windows()` instance method instead." },
-    { method = "App::find_with", reason = "Binding uses the singleton provider; exposed to Python as `App.find`." },
+    { method = "App::find_with", reason = "Folded into App.find with its `backend` option (the provider is built binding-side, as for the other lookups); exposed to Python as `App.find`." },
     { method = "App::try_find_with", reason = "Fallible-predicate variant of find_with; `App.find` routes through it and re-raises predicate errors." },
     { method = "App::provider", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "App::data", reason = "Internal plumbing for provider implementors, not user API." },
 
-    # ShellSurface: same singleton fold as App. `ShellSurface.list()` /
+    # ShellSurface: the environment-default provider, no `backend`. `ShellSurface.list()` /
     # `.by_kind()` in the binding are the `xa11y::ShellSurfaceExt` methods.
-    { method = "ShellSurface::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "ShellSurface::by_kind_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "ShellSurface::list_with", reason = "Binding uses the process-wide default provider and takes no `backend`: native and uia are one Windows provider and IA2 has no shell surface discovery (the CLI refuses --backend with --shell for the same reason)." },
+    { method = "ShellSurface::by_kind_with", reason = "Binding uses the process-wide default provider and takes no `backend`: native and uia are one Windows provider and IA2 has no shell surface discovery (the CLI refuses --backend with --shell for the same reason)." },
     { method = "ShellSurface::data", reason = "Internal plumbing for provider implementors, not user API." },
 
     # Internal Rust constructors / accessors.
@@ -548,8 +548,8 @@ rust_only = [
 # Python members with no core counterpart. Dunder methods (__repr__, __eq__,
 # __iter__, ...) are filtered automatically and need no entry.
 python_only = [
-    # Convenience constructors wrapping the `_with` variants with the
-    # singleton provider. The Rust equivalents live on `xa11y::AppExt`.
+    # Convenience constructors wrapping the `_with` variants with the provider
+    # `backend` names (or the environment default). Rust: `xa11y::AppExt`.
     { method = "App::by_name", reason = "Binding-level convenience over App::by_name_with; mirrors `xa11y::AppExt::by_name`." },
     { method = "App::by_pid", reason = "Binding-level convenience over App::by_pid_with; mirrors `xa11y::AppExt::by_pid`." },
     { method = "App::foreground", reason = "Binding-level convenience over App::foreground_with; mirrors `xa11y::AppExt::foreground`." },
@@ -577,20 +577,20 @@ rust_only = [
     { method = "Capabilities::for_backend", reason = "Folded into capabilities backend option on both bindings." },
     { method = "Capabilities::for_platform", reason = "Folded into the module function capabilities({ platform, osVersion }). One name per operation." },
     { method = "Text::find_with", reason = "FindOptions folds into find()'s options object ({ occurrence, within }) (AGENTS.md: options structs fold into the primary verb)." },
-    { method = "App::by_name_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::by_pid_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::foreground_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::by_name_with", reason = "Folded into the binding's App.by_name / byName with its `backend` option: the binding builds the provider (the environment default when `backend` is omitted) and calls this with it. A provider object never crosses the boundary." },
+    { method = "App::by_pid_with", reason = "Folded into the binding's App.by_pid / byPid with its `backend` option: the binding builds the provider (the environment default when `backend` is omitted) and calls this with it. A provider object never crosses the boundary." },
+    { method = "App::foreground_with", reason = "Folded into the binding's App.foreground with its `backend` option: the binding builds the provider (the environment default when `backend` is omitted) and calls this with it. A provider object never crosses the boundary." },
+    { method = "App::list_with", reason = "Folded into the binding's App.list with its `backend` option: the binding builds the provider (the environment default when `backend` is omitted) and calls this with it. A provider object never crosses the boundary." },
     { method = "App::windows_with", reason = "Explicit-provider plumbing; bindings expose the per-app `App::windows()` instance method instead." },
-    { method = "App::find_with", reason = "Binding uses the singleton provider; exposed to JS as `App.find`, a poll loop in index.js." },
+    { method = "App::find_with", reason = "Folded into App.find with its `backend` option (the provider is built binding-side, as for the other lookups); exposed to JS as `App.find`, a poll loop in index.js." },
     { method = "App::try_find_with", reason = "Fallible-predicate variant of find_with; the JS App.find poll loop propagates predicate errors directly." },
     { method = "App::provider", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "App::data", reason = "Internal plumbing for provider implementors, not user API." },
 
-    # ShellSurface: same singleton fold as App. `ShellSurface.list()` /
+    # ShellSurface: the environment-default provider, no `backend`. `ShellSurface.list()` /
     # `.by_kind()` in the binding are the `xa11y::ShellSurfaceExt` methods.
-    { method = "ShellSurface::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "ShellSurface::by_kind_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "ShellSurface::list_with", reason = "Binding uses the process-wide default provider and takes no `backend`: native and uia are one Windows provider and IA2 has no shell surface discovery (the CLI refuses --backend with --shell for the same reason)." },
+    { method = "ShellSurface::by_kind_with", reason = "Binding uses the process-wide default provider and takes no `backend`: native and uia are one Windows provider and IA2 has no shell surface discovery (the CLI refuses --backend with --shell for the same reason)." },
     { method = "ShellSurface::data", reason = "Internal plumbing for provider implementors, not user API." },
 
     { method = "Locator::new", reason = "Internal Rust constructor; bindings build Locators via App.locator() / module-level locator()." },
