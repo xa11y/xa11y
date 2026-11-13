@@ -285,10 +285,8 @@ pub(crate) fn extract_range(obj: &Bound<'_, PyAny>) -> PyResult<xa11y::TextRange
         });
     }
     match obj.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>() {
-        Ok((start, end)) => {
-            xa11y::TextRange::new(u32_arg(&start, "start")?, u32_arg(&end, "end")?)
-                .map_err(to_py_err)
-        }
+        Ok((start, end)) => xa11y::TextRange::new(u32_arg(&start, "start")?, u32_arg(&end, "end")?)
+            .map_err(to_py_err),
         Err(_) => Err(PyTypeError::new_err(
             "expected a TextRange or a (start, end) tuple of non-negative ints",
         )),
@@ -568,7 +566,11 @@ impl Text {
         Ok(found.map(TextRange::from))
     }
     /// Live embedded object or link at a UTF-16 offset; None for plain text.
-    fn object_at(&self, py: Python<'_>, offset: &Bound<'_, PyAny>) -> PyResult<Option<Py<Element>>> {
+    fn object_at(
+        &self,
+        py: Python<'_>,
+        offset: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Py<Element>>> {
         let offset = u32_arg(offset, "offset")?;
         let t = self.inner.clone();
         let object = py.detach(move || t.object_at(offset)).map_err(to_py_err)?;
@@ -578,7 +580,12 @@ impl Text {
     }
     /// The ``unit`` (``"character"``, ``"word"``, ``"line"``,
     /// ``"paragraph"``) containing ``offset``. ``"line"`` is the rendered line.
-    fn range_at(&self, py: Python<'_>, offset: &Bound<'_, PyAny>, unit: &str) -> PyResult<TextRange> {
+    fn range_at(
+        &self,
+        py: Python<'_>,
+        offset: &Bound<'_, PyAny>,
+        unit: &str,
+    ) -> PyResult<TextRange> {
         let offset = u32_arg(offset, "offset")?;
         let unit = xa11y::TextUnit::from_snake_case(unit)
             .ok_or_else(|| {
@@ -597,12 +604,7 @@ impl Text {
     }
     /// Rendered lines covering ``range``, at most ``limit`` per page.
     #[pyo3(signature = (range, limit=200))]
-    fn lines(
-        &self,
-        py: Python<'_>,
-        range: &Bound<'_, PyAny>,
-        limit: i64,
-    ) -> PyResult<TextLines> {
+    fn lines(&self, py: Python<'_>, range: &Bound<'_, PyAny>, limit: i64) -> PyResult<TextLines> {
         let r = extract_range(range)?;
         let limit = count_arg(limit, "limit")?;
         let t = self.inner.clone();
@@ -623,12 +625,7 @@ impl Text {
     }
     /// Formatting runs covering ``range``, at most ``limit`` per page.
     #[pyo3(signature = (range, limit=200))]
-    fn runs(
-        &self,
-        py: Python<'_>,
-        range: &Bound<'_, PyAny>,
-        limit: i64,
-    ) -> PyResult<TextRuns> {
+    fn runs(&self, py: Python<'_>, range: &Bound<'_, PyAny>, limit: i64) -> PyResult<TextRuns> {
         let r = extract_range(range)?;
         let limit = count_arg(limit, "limit")?;
         let t = self.inner.clone();
