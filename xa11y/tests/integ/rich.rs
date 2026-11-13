@@ -613,7 +613,13 @@ fn capture_formatting_detail_reads_the_same_runs_as_text_runs() {
         .capture(&CaptureOptions::new().max_depth(0).formatting(true))
         .expect("capture");
     assert_eq!(cap.backend, Some("atspi"));
-    assert!(!cap.truncated.any(), "{:?}", cap.truncated);
+    // `max_depth(0)` leaves the view's children unread, so the only cut is
+    // the depth one; the text and its runs were read in full.
+    let t = &cap.truncated;
+    assert!(
+        t.by_depth && !(t.by_nodes || t.by_text || t.by_time || t.by_formatting || t.by_cancel),
+        "{t:?}"
+    );
     let text = cap.nodes[0].text.as_ref().expect("the view has text");
     assert_eq!(text.content, TEXT);
     let runs = text.runs.as_ref().expect("formatting detail reads runs");
