@@ -137,9 +137,10 @@ impl Capabilities {
             .map_err(to_py_err)
     }
 
-    /// Whether ``name`` is a feature the table knows (also ``name in caps``).
-    fn has(&self, name: &str) -> bool {
-        self.inner.has(name)
+    /// Whether ``name`` is a feature the table knows, whatever its support
+    /// (also ``name in caps``).
+    fn contains(&self, name: &str) -> bool {
+        self.inner.contains(name)
     }
 
     fn __len__(&self) -> usize {
@@ -149,7 +150,7 @@ impl Capabilities {
     fn __contains__(&self, name: &Bound<'_, PyAny>) -> bool {
         // Like `dict`: a key of another type is simply not present.
         match name.extract::<String>() {
-            Ok(name) => self.inner.has(&name),
+            Ok(name) => self.inner.contains(&name),
             Err(_) => false,
         }
     }
@@ -222,7 +223,15 @@ pub(crate) fn capabilities(
     backend: Option<&str>,
 ) -> PyResult<Capabilities> {
     let platform = platform
-        .map(xa11y::Platform::parse)
+        .map(|name| {
+            xa11y::Platform::from_snake_case(name).ok_or_else(|| {
+                xa11y::Error::unknown_name(
+                    "platform",
+                    name,
+                    xa11y::Platform::ALL.map(xa11y::Platform::to_snake_case),
+                )
+            })
+        })
         .transpose()
         .map_err(to_py_err)?;
     // The first call for the running platform reads the OS version through

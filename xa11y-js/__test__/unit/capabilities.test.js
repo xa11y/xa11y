@@ -42,8 +42,8 @@ test('answers differ by platform, spelled as in Python', () => {
   assert.equal(win.support('window:enter_fullscreen'), 'unsupported');
   assert.equal(win.get('action:blur').note, 'focuses the desktop root');
   assert.equal(win.note('event:focus_changed'), null);
-  assert.equal(win.has('action:blur'), true);
-  assert.equal(win.has('action:nope'), false);
+  assert.equal(win.contains('action:blur'), true);
+  assert.equal(win.contains('action:nope'), false);
 });
 
 test('unknown names, platforms and versions throw typed errors', () => {

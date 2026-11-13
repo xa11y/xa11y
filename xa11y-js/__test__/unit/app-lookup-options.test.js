@@ -21,6 +21,14 @@ const assert = require('node:assert/strict');
 class NativeAppStub {
   static __byNameLastArgs;
   static __byPidLastArgs;
+  static __listCalls = [];
+
+  static async list(options) {
+    NativeAppStub.__listCalls.push(options);
+    const app = new NativeAppStub();
+    app.name = 'Calc';
+    return [app];
+  }
 
   static async byName(name, options) {
     NativeAppStub.__byNameLastArgs = { name, options };
@@ -63,6 +71,7 @@ require.cache[nativePath] = {
     NativeSubscription: NativeSubscriptionStub,
     _makeTestLocator: () => {},
     _makeDisconnectedSubscription: () => new NativeSubscriptionStub(),
+    getDefaultTimeout: () => ({ timeout: 5000 }),
     locator: () => {},
   },
 };
@@ -102,6 +111,21 @@ test('App.byPid forwards options unchanged to native', async () => {
     pid: 4242,
     options: { timeout: 2500 },
   });
+});
+
+test('App.list forwards backend, and App.find passes it to every poll', async () => {
+  NativeAppStub.__listCalls = [];
+  await App.list({ backend: 'uia' });
+  await App.list();
+  const found = await App.find((a) => a.name === 'Calc', { backend: 'ia2', timeout: 0 });
+  assert.equal(found.name, 'Calc');
+  await App.find((a) => a.name === 'Calc', { timeout: 0 });
+  assert.deepEqual(NativeAppStub.__listCalls, [
+    { backend: 'uia' },
+    undefined,
+    { backend: 'ia2' },
+    undefined,
+  ]);
 });
 
 test('App.byPid forwards undefined options when caller omits them', async () => {

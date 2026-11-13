@@ -169,10 +169,10 @@ impl Provider for MockProvider {
     }
 
     fn subscribe(&self, _element: &ElementData) -> Result<Subscription> {
-        Err(Error::Platform {
-            code: -1,
-            message: "MockProvider does not support subscribe".to_string(),
-        })
+        Err(Error::platform(
+            -1,
+            "MockProvider does not support subscribe",
+        ))
     }
 }
 
@@ -1146,10 +1146,7 @@ impl Provider for MultiAppMockProvider {
     }
 
     fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
-        Err(Error::Platform {
-            code: -1,
-            message: "not supported".to_string(),
-        })
+        Err(Error::platform(-1, "not supported"))
     }
 }
 
@@ -1683,12 +1680,7 @@ fn by_pid_with_short_circuits_on_app_by_pid_platform_error() {
         app_by_pid_calls: std::sync::atomic::AtomicUsize::new(0),
         terminal_failure: None,
         terminal_failure_calls: std::sync::atomic::AtomicUsize::new(0),
-        on_app_by_pid: Box::new(|_| {
-            Err(Error::Platform {
-                code: -25211,
-                message: "accessibility API disabled".to_string(),
-            })
-        }),
+        on_app_by_pid: Box::new(|_| Err(Error::platform(-25211, "accessibility API disabled"))),
     });
     let start = std::time::Instant::now();
     let result = App::by_pid_with(

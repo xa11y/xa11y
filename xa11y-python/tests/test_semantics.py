@@ -38,12 +38,17 @@ def test_navigation_is_refused_with_its_replacement():
 def test_relations_by_kind_in_request_order():
     field = one('text_field[name="Email"]')
     rel = field.relations(["described_by", "labelled_by", "controls"])
-    assert list(rel) == ["described_by", "labelled_by", "controls"]
-    assert [e.name for e in rel["labelled_by"]] == ["Email address"]
-    assert [e.name for e in rel["described_by"]] == ["We never share it"]
-    assert rel["controls"] == []
-    label = rel["labelled_by"][0]
-    assert [e.name for e in label.relations(["label_for"])["label_for"]] == ["Email"]
+    assert all(isinstance(r, xa11y.Relation) for r in rel)
+    assert [r.kind for r in rel] == ["described_by", "labelled_by", "controls"]
+    by_kind = {r.kind: r.elements for r in rel}
+    assert [e.name for e in by_kind["labelled_by"]] == ["Email address"]
+    assert [e.name for e in by_kind["described_by"]] == ["We never share it"]
+    assert by_kind["controls"] == []
+    label = by_kind["labelled_by"][0]
+    (back,) = label.relations(["label_for"])
+    assert back.kind == "label_for"
+    assert [e.name for e in back.elements] == ["Email"]
+    assert "Relation(kind='label_for'" in repr(back)
 
 
 def test_relations_errors():
@@ -53,6 +58,7 @@ def test_relations_errors():
         with pytest.raises(xa11y.ActionNotSupportedError, match="linked"):
             field.relations(["linked"])
     else:
-        assert field.relations(["linked"]) == {"linked": []}
+        (linked,) = field.relations(["linked"])
+        assert (linked.kind, linked.elements) == ("linked", [])
     with pytest.raises(xa11y.InvalidActionDataError, match="labelled_by"):
         field.relations(["labeled_by"])

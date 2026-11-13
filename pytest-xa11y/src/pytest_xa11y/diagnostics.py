@@ -29,6 +29,10 @@ _EXTRA_COLLECTORS: list[tuple[str, Callable[[xa11y.App], str]]] = []
 # Attributes carried by xa11y's structured errors (tenet 6). Rendered as
 # their own report block rather than left inside one long message string.
 _DIAGNOSIS_FIELDS = (
+    # Set by ElementStaleError only: why the element is stale ("removed",
+    # "process_exited", ...) and what it was (`button "OK"`).
+    "reason",
+    "element",
     "condition",
     "selector",
     "elapsed",

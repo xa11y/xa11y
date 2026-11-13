@@ -274,21 +274,15 @@ impl Screenshot {
         let expected = (self.width as usize)
             .checked_mul(self.height as usize)
             .and_then(|n| n.checked_mul(4))
-            .ok_or_else(|| Error::Platform {
-                code: -1,
-                message: "annotate: screenshot dimensions overflow".into(),
-            })?;
+            .ok_or_else(|| Error::platform(-1, "annotate: screenshot dimensions overflow"))?;
         if self.pixels.len() != expected {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
+            return Err(Error::platform(-1, format!(
                     "annotate: screenshot pixel buffer size {} does not match {}x{} RGBA ({} bytes)",
                     self.pixels.len(),
                     self.width,
                     self.height,
                     expected
-                ),
-            });
+                )));
         }
 
         // `sane_scale` collapses a non-finite or non-positive scale to 1.0,

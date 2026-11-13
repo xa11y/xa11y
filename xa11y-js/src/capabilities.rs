@@ -114,10 +114,10 @@ impl Capabilities {
             .map_err(map_err)
     }
 
-    /// Whether `name` is a feature the table knows.
+    /// Whether `name` is a feature the table knows, whatever its support.
     #[napi]
-    pub fn has(&self, name: String) -> bool {
-        self.inner.has(&name)
+    pub fn contains(&self, name: String) -> bool {
+        self.inner.contains(&name)
     }
 }
 
@@ -136,7 +136,15 @@ pub fn capabilities(options: Option<CapabilitiesOptions>) -> napi::Result<Capabi
     };
     let platform = platform
         .as_deref()
-        .map(xa11y::Platform::parse)
+        .map(|name| {
+            xa11y::Platform::from_snake_case(name).ok_or_else(|| {
+                xa11y::Error::unknown_name(
+                    "platform",
+                    name,
+                    xa11y::Platform::ALL.map(xa11y::Platform::to_snake_case),
+                )
+            })
+        })
         .transpose()
         .map_err(map_err)?;
     let inner =

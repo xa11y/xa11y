@@ -197,7 +197,7 @@ fn text_and_table_reads_on_a_destroyed_gtk3_widget_are_stale() {
     let table = one(&app, TABLE);
     // Taken while the entry is live: `Text` holds the element, so its reads
     // after the rebuild go to the destroyed widget.
-    let text = entry.text().expect("the entry has Text");
+    let text = entry.text();
     assert_eq!(
         text.read_all().expect("read the live entry"),
         "doomed text",
@@ -216,7 +216,7 @@ fn text_and_table_reads_on_a_destroyed_gtk3_widget_are_stale() {
     // Inside the zombie window the destroyed widgets still answer these with
     // their last contents; each must be refused as stale instead.
     let outcomes: Vec<(&str, Result<()>)> = vec![
-        ("entry.text", entry.text().map(|_| ())),
+        ("entry.text().length", entry.text().length().map(|_| ())),
         ("text.length", text.length().map(|_| ())),
         (
             "text.read",

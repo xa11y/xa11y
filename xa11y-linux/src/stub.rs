@@ -18,10 +18,10 @@ pub struct LinuxInputProvider;
 
 impl LinuxInputProvider {
     pub fn new() -> Result<Self> {
-        Err(Error::Platform {
-            code: -1,
-            message: "Linux input backend only available on Linux".to_string(),
-        })
+        Err(Error::platform(
+            -1,
+            "Linux input backend only available on Linux",
+        ))
     }
 }
 
@@ -62,10 +62,10 @@ pub struct LinuxScreenshot;
 
 impl LinuxScreenshot {
     pub fn new() -> Result<Self> {
-        Err(Error::Platform {
-            code: -1,
-            message: "Linux screenshot backend only available on Linux".to_string(),
-        })
+        Err(Error::platform(
+            -1,
+            "Linux screenshot backend only available on Linux",
+        ))
     }
 }
 
@@ -85,13 +85,13 @@ impl ScreenshotProvider for LinuxScreenshot {
 /// their `Result`, never panic. The message names the operation and
 /// the host OS so the failure explains itself (tenet 6).
 fn unavailable(op: &str) -> Error {
-    Error::Platform {
-        code: -1,
-        message: format!(
+    Error::platform(
+        -1,
+        format!(
             "Linux backend unavailable: `{op}` called on {}",
             std::env::consts::OS
         ),
-    }
+    )
 }
 
 impl Provider for LinuxProvider {

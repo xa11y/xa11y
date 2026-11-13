@@ -78,7 +78,9 @@ def test_tree_max_depth_zero_shows_only_the_application(run_cli, app_pid):
     assert rc == 0, stderr
     lines = stdout.strip().splitlines()
     assert lines[0].startswith("application"), stdout
-    assert "more (cut by --max-depth)" in lines[1], stdout
+    # The depth frontier's children are never read, so there is no count to
+    # report: the line says they were not read rather than "N more".
+    assert "children not read (cut by --max-depth)" in lines[1], stdout
     assert lines[-1].startswith("(truncated:"), stdout
 
 

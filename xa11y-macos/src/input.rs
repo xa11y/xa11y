@@ -17,7 +17,7 @@
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use core_foundation::base::{CFRelease, CFTypeRef};
 
@@ -95,6 +95,50 @@ const MODIFIER_FLAGS: u64 = K_CG_EVENT_FLAG_MASK_SHIFT
     | K_CG_EVENT_FLAG_MASK_CONTROL
     | K_CG_EVENT_FLAG_MASK_ALTERNATE
     | K_CG_EVENT_FLAG_MASK_COMMAND;
+
+// Device-dependent modifier bits (NX_DEVICE*KEYMASK in IOKit's
+// IOLLEvent.h): which key of a left/right pair holds a modifier. An event
+// from a NULL source copies them from the session along with the generic
+// masks above, so clearing a generic mask has to clear its pair too.
+const NX_DEVICE_L_CTL_KEY_MASK: u64 = 0x0000_0001;
+const NX_DEVICE_L_SHIFT_KEY_MASK: u64 = 0x0000_0002;
+const NX_DEVICE_R_SHIFT_KEY_MASK: u64 = 0x0000_0004;
+const NX_DEVICE_L_CMD_KEY_MASK: u64 = 0x0000_0008;
+const NX_DEVICE_R_CMD_KEY_MASK: u64 = 0x0000_0010;
+const NX_DEVICE_L_ALT_KEY_MASK: u64 = 0x0000_0020;
+const NX_DEVICE_R_ALT_KEY_MASK: u64 = 0x0000_0040;
+const NX_DEVICE_R_CTL_KEY_MASK: u64 = 0x0000_2000;
+
+/// Each generic modifier mask and the device bits of its key pair.
+const DEVICE_MODIFIER_BITS: [(u64, u64); 4] = [
+    (
+        K_CG_EVENT_FLAG_MASK_SHIFT,
+        NX_DEVICE_L_SHIFT_KEY_MASK | NX_DEVICE_R_SHIFT_KEY_MASK,
+    ),
+    (
+        K_CG_EVENT_FLAG_MASK_CONTROL,
+        NX_DEVICE_L_CTL_KEY_MASK | NX_DEVICE_R_CTL_KEY_MASK,
+    ),
+    (
+        K_CG_EVENT_FLAG_MASK_ALTERNATE,
+        NX_DEVICE_L_ALT_KEY_MASK | NX_DEVICE_R_ALT_KEY_MASK,
+    ),
+    (
+        K_CG_EVENT_FLAG_MASK_COMMAND,
+        NX_DEVICE_L_CMD_KEY_MASK | NX_DEVICE_R_CMD_KEY_MASK,
+    ),
+];
+
+/// `flags` with the modifiers in `generic` cleared: their generic masks and
+/// the device bits of their keys. Every other bit is kept.
+fn without_modifiers(flags: u64, generic: u64) -> u64 {
+    let generic = generic & MODIFIER_FLAGS;
+    let device = DEVICE_MODIFIER_BITS
+        .iter()
+        .filter(|(mask, _)| generic & mask != 0)
+        .fold(0, |bits, (_, pair)| bits | pair);
+    flags & !generic & !device
+}
 
 // Flags that macOS puts on a key by its key code (arrows, Home, F-keys),
 // not modifiers that a key-down holds.
@@ -184,6 +228,11 @@ pub struct MacOSInputProvider {
     /// Modifier flags released through `key_up` that the session state may
     /// still report.
     ///
+    /// Both this and `held_flags` change only under `lock`, in the same
+    /// critical section that posts the key event they describe, so an event
+    /// posted from another thread is stamped with the modifiers of the key
+    /// events posted before it, never of one that has not gone out yet.
+    ///
     /// An event from a NULL source copies the session's modifiers when it is
     /// created, and the window server applies a synthetic key-up a moment
     /// after the post. So after `chord("u", ["Meta"])`, the next "i" copied
@@ -200,40 +249,40 @@ fn display_regions() -> Result<Vec<Rect>> {
     // SAFETY: a null display buffer with capacity zero queries the count.
     let status = unsafe { CGGetActiveDisplayList(0, std::ptr::null_mut(), &mut count) };
     if status != 0 {
-        return Err(Error::Platform {
-            code: i64::from(status),
-            message: "CGGetActiveDisplayList(count) failed".into(),
-        });
+        return Err(Error::platform(
+            i64::from(status),
+            "CGGetActiveDisplayList(count) failed",
+        ));
     }
     // One spare slot detects a growing list rather than accepting a truncated
     // geometry set. Do not bound the native set by the diagnosis's size limit.
-    let capacity = count.checked_add(1).ok_or_else(|| Error::Platform {
-        code: -1,
-        message: "CGGetActiveDisplayList count overflow".into(),
-    })?;
+    let capacity = count
+        .checked_add(1)
+        .ok_or_else(|| Error::platform(-1, "CGGetActiveDisplayList count overflow"))?;
     let mut displays = Vec::new();
     displays
         .try_reserve_exact(capacity as usize)
-        .map_err(|error| Error::Platform {
-            code: -1,
-            message: format!("allocating CGGetActiveDisplayList buffer: {error}"),
+        .map_err(|error| {
+            Error::platform(
+                -1,
+                format!("allocating CGGetActiveDisplayList buffer: {error}"),
+            )
         })?;
     displays.resize(capacity as usize, 0);
     let mut written = 0;
     // SAFETY: the vector contains capacity writable display IDs.
     let status = unsafe { CGGetActiveDisplayList(capacity, displays.as_mut_ptr(), &mut written) };
     if status != 0 {
-        return Err(Error::Platform {
-            code: i64::from(status),
-            message: "CGGetActiveDisplayList(list) failed".into(),
-        });
+        return Err(Error::platform(
+            i64::from(status),
+            "CGGetActiveDisplayList(list) failed",
+        ));
     }
     if written >= capacity {
-        return Err(Error::Platform {
-            code: -1,
-            message: "active display list changed while enumerating; geometry may be incomplete"
-                .into(),
-        });
+        return Err(Error::platform(
+            -1,
+            "active display list changed while enumerating; geometry may be incomplete",
+        ));
     }
     displays.truncate(written as usize);
     displays
@@ -252,11 +301,11 @@ fn quartz_display_rect(bounds: CGRect) -> Result<Rect> {
     let top = bounds.origin.y.ceil();
     let right = (bounds.origin.x + bounds.size.width).ceil();
     let bottom = (bounds.origin.y + bounds.size.height).ceil();
-    let invalid_geometry = || Error::Platform {
-        code: -1,
-        message: format!(
-            "CGDisplayBounds returned invalid or unrepresentable geometry: {bounds:?}"
-        ),
+    let invalid_geometry = || {
+        Error::platform(
+            -1,
+            format!("CGDisplayBounds returned invalid or unrepresentable geometry: {bounds:?}"),
+        )
     };
     if ![left, top, right, bottom]
         .iter()
@@ -349,13 +398,16 @@ impl MacOSInputProvider {
     }
 
     fn post(&self, event: CGEventRef) -> Result<()> {
+        let guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.post_locked(&guard, event)
+    }
+
+    /// [`post`](Self::post) for a caller that already holds `lock`, which
+    /// the guard argument proves.
+    fn post_locked(&self, _locked: &MutexGuard<'_, ()>, event: CGEventRef) -> Result<()> {
         if event.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreate* returned NULL".to_string(),
-            });
+            return Err(Error::platform(-1, "CGEventCreate* returned NULL"));
         }
-        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         // Stamp any modifiers held via `key_down` onto this event. See
         // `held_flags` for why the window server's own state can't be relied
         // on here. OR rather than assign, so flags the event already carries
@@ -397,7 +449,7 @@ impl MacOSInputProvider {
         };
         if held != 0 || borrowed != 0 || stale != 0 {
             // SAFETY: `event` is a valid CGEventRef we just created.
-            unsafe { CGEventSetFlags(event, (flags & !borrowed & !stale) | held) };
+            unsafe { CGEventSetFlags(event, without_modifiers(flags & !borrowed, stale) | held) };
         }
         // SAFETY: `event` is a valid CGEventRef we just created; CGEventPost
         // takes an owned +0 borrow and does not consume it.
@@ -417,10 +469,10 @@ impl MacOSInputProvider {
         // create a combined state from the pasted-in event source defaults").
         let ev = unsafe { CGEventCreateMouseEvent(std::ptr::null_mut(), ty, pt, button) };
         if ev.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("CGEventCreateMouseEvent failed (type={ty})"),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("CGEventCreateMouseEvent failed (type={ty})"),
+            ));
         }
         Ok(ev)
     }
@@ -432,10 +484,10 @@ impl MacOSInputProvider {
         // SAFETY: a null source samples the combined native event state.
         let current = unsafe { CGEventCreate(std::ptr::null_mut()) };
         if current.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreate failed while reading the current pointer position".into(),
-            });
+            return Err(Error::platform(
+                -1,
+                "CGEventCreate failed while reading the current pointer position",
+            ));
         }
         // SAFETY: current is a live event; the location is copied before release.
         let at = unsafe { CGEventGetLocation(current) };
@@ -449,10 +501,10 @@ impl MacOSInputProvider {
         let event =
             unsafe { CGEventCreateMouseEvent(std::ptr::null_mut(), kind, at, cg_button(button)) };
         if event.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreateMouseEvent failed for a button-only event".into(),
-            });
+            return Err(Error::platform(
+                -1,
+                "CGEventCreateMouseEvent failed for a button-only event",
+            ));
         }
         Ok(event)
     }
@@ -482,10 +534,7 @@ impl MacOSInputProvider {
         // SAFETY: nil source is allowed by CGEventSource contract.
         let ev = unsafe { CGEventCreateKeyboardEvent(std::ptr::null_mut(), vk, down) };
         if ev.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreateKeyboardEvent failed".to_string(),
-            });
+            return Err(Error::platform(-1, "CGEventCreateKeyboardEvent failed"));
         }
         Ok(ev)
     }
@@ -506,18 +555,18 @@ fn key_code_flags(event: CGEventRef) -> Result<u64> {
         let vk = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) as u16;
         let source = CGEventSourceCreate(K_CG_EVENT_SOURCE_STATE_PRIVATE);
         if source.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventSourceCreate(private) returned NULL".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "CGEventSourceCreate(private) returned NULL",
+            ));
         }
         let probe = CGEventCreateKeyboardEvent(source, vk, ty == K_CG_EVENT_KEY_DOWN);
         CFRelease(source as CFTypeRef);
         if probe.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("CGEventCreateKeyboardEvent failed (key code {vk})"),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("CGEventCreateKeyboardEvent failed (key code {vk})"),
+            ));
         }
         let flags = CGEventGetFlags(probe) & KEY_CODE_FLAGS;
         CFRelease(probe as CFTypeRef);
@@ -798,10 +847,7 @@ impl InputProvider for MacOSInputProvider {
             )
         };
         if ev.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreateScrollWheelEvent2 failed".to_string(),
-            });
+            return Err(Error::platform(-1, "CGEventCreateScrollWheelEvent2 failed"));
         }
         self.post(ev)
     }
@@ -813,24 +859,25 @@ impl InputProvider for MacOSInputProvider {
         // event-flags bit Cocoa inspects for "is Shift held". Record the flag
         // *before* posting so this event carries it too, matching hardware —
         // a real Shift key-down already reports shift as set. `post` stamps
-        // it onto this and every later event until `key_up` clears it.
+        // it onto this and every later event until `key_up` clears it. The
+        // records change under `lock`, with this event's post (see
+        // `released_flags`).
         let flags = modifier_flag_for(key);
-        let (was_held, was_released) = if flags != 0 {
-            (
-                self.held_flags.fetch_or(flags, Ordering::SeqCst) & flags,
-                self.released_flags.fetch_and(!flags, Ordering::SeqCst) & flags,
-            )
-        } else {
-            (0, 0)
-        };
-        let posted = self.post(ev);
-        if posted.is_err() && flags != 0 {
+        let guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let (held_before, released_before) = (
+            self.held_flags.load(Ordering::SeqCst),
+            self.released_flags.load(Ordering::SeqCst),
+        );
+        self.held_flags.store(held_before | flags, Ordering::SeqCst);
+        self.released_flags
+            .store(released_before & !flags, Ordering::SeqCst);
+        let posted = self.post_locked(&guard, ev);
+        if posted.is_err() {
             // The key-down never reached the window server, so the modifier
             // is not held: put both records back as they were, or every
             // later event would carry a modifier nobody pressed.
-            self.held_flags
-                .fetch_and(!(flags & !was_held), Ordering::SeqCst);
-            self.released_flags.fetch_or(was_released, Ordering::SeqCst);
+            self.held_flags.store(held_before, Ordering::SeqCst);
+            self.released_flags.store(released_before, Ordering::SeqCst);
         }
         posted
     }
@@ -841,39 +888,54 @@ impl InputProvider for MacOSInputProvider {
         // Clear before posting, again matching hardware: a real Shift key-up
         // reports the modifier as already released.
         let flags = modifier_flag_for(key);
-        let (mut was_held, mut was_released) = (0, 0);
+        let guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let (held_before, released_before) = (
+            self.held_flags.load(Ordering::SeqCst),
+            self.released_flags.load(Ordering::SeqCst),
+        );
         if flags != 0 {
-            let before = self.held_flags.fetch_and(!flags, Ordering::SeqCst);
-            was_held = before & flags;
-            let held = before & !flags;
-            was_released = self.released_flags.fetch_or(flags, Ordering::SeqCst) & flags;
+            let held = held_before & !flags;
+            self.held_flags.store(held, Ordering::SeqCst);
+            self.released_flags
+                .store(released_before | flags, Ordering::SeqCst);
             // The event copied the session's modifier flags when it was
             // created, and the window server has not yet seen the key-ups
             // posted just before it. After Cmd+Ctrl+R, the Ctrl key-up still
             // carried Ctrl, and the window server kept Ctrl in the session
             // state: the next "a" arrived as Ctrl+A. A modifier key-up
             // therefore carries only the modifiers still held through
-            // `key_down`. A modifier held on the physical keyboard is dropped
-            // from this one event; the next event copies it back.
+            // `key_down`, and none of the device bits (left / right key) of
+            // the ones it drops, which would still tell an app that reads
+            // them that a left or right key of the pair is down. A modifier held on
+            // the physical keyboard is dropped from this one event; the next
+            // event copies it back.
             // SAFETY: `ev` is a valid CGEventRef we just created.
             unsafe {
                 let current = CGEventGetFlags(ev);
-                CGEventSetFlags(ev, (current & !MODIFIER_FLAGS) | held);
+                CGEventSetFlags(
+                    ev,
+                    without_modifiers(current, MODIFIER_FLAGS & !held) | held,
+                );
             }
         }
-        let posted = self.post(ev);
-        if posted.is_err() && flags != 0 {
+        let posted = self.post_locked(&guard, ev);
+        if posted.is_err() {
             // The key-up never reached the window server, so the modifier is
             // still down: restore both records, or the next event would go
             // out without a modifier the session still holds.
-            self.held_flags.fetch_or(was_held, Ordering::SeqCst);
-            self.released_flags
-                .fetch_and(!(flags & !was_released), Ordering::SeqCst);
+            self.held_flags.store(held_before, Ordering::SeqCst);
+            self.released_flags.store(released_before, Ordering::SeqCst);
         }
         posted
     }
 
     fn type_text(&self, text: &str) -> Result<()> {
+        // No pacing between characters, unlike Windows. There the pause is
+        // for WPF, which reads a VK_PACKET's character when it translates the
+        // message and can take a later packet's character for an earlier one
+        // queued too closely (#620). A CGEvent carries its own Unicode string
+        // to the app's FIFO event queue, and AppKit coalesces mouse moves and
+        // drags, never key events; the X11 backend does not pace either.
         for step in plan_type_text(text) {
             match step {
                 TypeStep::Char(c) => self.type_unicode_char(c)?,
@@ -1009,6 +1071,49 @@ fn modifier_flag_for(key: &Key) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_a_modifier_clears_its_device_bits_and_keeps_the_rest() {
+        // A Ctrl key-up with Shift still held: the event copied left-Shift,
+        // left-Control and the non-coalesced bit (0x100) from the session.
+        const NON_COALESCED: u64 = 0x0000_0100;
+        let current = K_CG_EVENT_FLAG_MASK_SHIFT
+            | NX_DEVICE_L_SHIFT_KEY_MASK
+            | K_CG_EVENT_FLAG_MASK_CONTROL
+            | NX_DEVICE_L_CTL_KEY_MASK
+            | NON_COALESCED;
+        let held = K_CG_EVENT_FLAG_MASK_SHIFT;
+        assert_eq!(
+            without_modifiers(current, MODIFIER_FLAGS & !held) | held,
+            K_CG_EVENT_FLAG_MASK_SHIFT | NX_DEVICE_L_SHIFT_KEY_MASK | NON_COALESCED
+        );
+    }
+
+    #[test]
+    fn each_modifier_clears_only_its_own_key_pair() {
+        let all_device = DEVICE_MODIFIER_BITS
+            .iter()
+            .fold(0, |bits, (_, pair)| bits | pair);
+        let everything = MODIFIER_FLAGS | all_device | KEY_CODE_FLAGS;
+        for (mask, pair) in DEVICE_MODIFIER_BITS {
+            assert_eq!(
+                without_modifiers(everything, mask),
+                everything & !mask & !pair,
+                "modifier {mask:#x}"
+            );
+        }
+        // A right-hand Command bit goes with a stale Command, as `post`
+        // strips one.
+        assert_eq!(
+            without_modifiers(
+                K_CG_EVENT_FLAG_MASK_COMMAND | NX_DEVICE_R_CMD_KEY_MASK,
+                K_CG_EVENT_FLAG_MASK_COMMAND
+            ),
+            0
+        );
+        // Bits outside the four modifiers are never treated as one.
+        assert_eq!(without_modifiers(everything, KEY_CODE_FLAGS), everything);
+    }
 
     #[test]
     fn display_regions_keep_negative_logical_origins() {

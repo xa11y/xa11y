@@ -542,10 +542,10 @@ fn spawn_drainer(
             }
         })
         .map_err(|e| {
-            CliError::Xa11y(crate::Error::Platform {
-                code: e.raw_os_error().unwrap_or(0).into(),
-                message: format!("could not start the event drainer thread: {e}"),
-            })
+            CliError::Xa11y(crate::Error::platform(
+                e.raw_os_error().unwrap_or(0).into(),
+                format!("could not start the event drainer thread: {e}"),
+            ))
         })
 }
 

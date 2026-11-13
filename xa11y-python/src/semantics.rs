@@ -99,6 +99,9 @@ pub(crate) fn origin_name(o: xa11y::AnnouncementOrigin) -> &'static str {
         xa11y::AnnouncementOrigin::Request => "request",
         xa11y::AnnouncementOrigin::LiveRegion => "live_region",
         xa11y::AnnouncementOrigin::Alert => "alert",
+        // `AnnouncementOrigin` is `#[non_exhaustive]`; variant coverage in the
+        // parity check fails the build before a new one reaches this arm.
+        other => other.to_snake_case(),
     }
 }
 
@@ -136,6 +139,50 @@ impl AnnouncementInfo {
             self.origin(),
             self.inner.text,
             self.politeness()
+        )
+    }
+}
+
+/// One kind of relation and the elements it points at, as
+/// ``Element.relations`` returns it.
+#[pyclass(frozen)]
+pub(crate) struct Relation {
+    kind: &'static str,
+    elements: Vec<Py<crate::Element>>,
+}
+
+impl Relation {
+    pub(crate) fn from_core(py: Python<'_>, relation: &xa11y::Relation) -> PyResult<Self> {
+        let elements = relation
+            .elements
+            .iter()
+            .map(|t| crate::make_py_element(py, t.data(), t.provider().clone()))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(Self {
+            kind: relation.kind.to_snake_case(),
+            elements,
+        })
+    }
+}
+
+#[pymethods]
+impl Relation {
+    /// The relation kind, in snake_case (``"labelled_by"``, ``"controls"``).
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+    /// The related elements, in platform order; ``[]`` for a kind the
+    /// platform reports with no targets.
+    #[getter]
+    fn elements(&self, py: Python<'_>) -> Vec<Py<crate::Element>> {
+        self.elements.iter().map(|e| e.clone_ref(py)).collect()
+    }
+    fn __repr__(&self) -> String {
+        format!(
+            "Relation(kind='{}', elements=<{} elements>)",
+            self.kind,
+            self.elements.len()
         )
     }
 }

@@ -48,6 +48,14 @@ pub struct AppLookupOptions {
     pub timeout: Option<f64>,
 }
 
+/// Options for `App.list`.
+#[napi(object)]
+pub struct AppListOptions {
+    /// Explicit accessibility source to enumerate: native, uia or ia2;
+    /// overrides XA11Y_ACCESSIBILITY_SOURCE. `uia` and `ia2` require Windows.
+    pub backend: Option<String>,
+}
+
 /// Options for `App.enableWebAccessibility`.
 #[napi(object)]
 pub struct WebAccessibilityOptions {
@@ -113,9 +121,13 @@ impl App {
     }
 
     /// List all running applications with an accessibility tree.
+    /// `options.backend` names the accessibility source, as for
+    /// {@link App.byName}.
     #[napi(ts_return_type = "Promise<App[]>")]
-    pub fn list() -> AsyncTask<ListAppsTask> {
-        AsyncTask::new(ListAppsTask {})
+    pub fn list(options: Option<AppListOptions>) -> AsyncTask<ListAppsTask> {
+        AsyncTask::new(ListAppsTask {
+            backend: options.and_then(|o| o.backend),
+        })
     }
 
     /// The application's human-readable name (e.g. `"Safari"`).
@@ -422,14 +434,19 @@ impl Task for ForegroundTask {
     }
 }
 
-pub struct ListAppsTask {}
+pub struct ListAppsTask {
+    backend: Option<String>,
+}
 
 impl Task for ListAppsTask {
     type Output = Vec<xa11y::App>;
     type JsValue = Vec<App>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        let provider = crate::provider()?;
+        let provider = match self.backend.as_deref() {
+            Some(b) => xa11y::provider_for_backend(b).map_err(map_err)?,
+            None => crate::provider()?,
+        };
         xa11y::App::list_with(provider).map_err(map_err)
     }
 

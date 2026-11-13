@@ -110,15 +110,15 @@ impl DpiScope {
         let previous =
             unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
         if previous.0.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
+            return Err(Error::platform(
+                -1,
+                format!(
                     "SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2) failed on a thread that \
                      is {}, so bounds, input points, and captures would be read in scaled \
                      coordinates",
                     awareness_name(awareness)
                 ),
-            });
+            ));
         }
         SCOPE_SWITCHES.with(|n| n.set(n.get() + 1));
         Ok(Self {
@@ -184,10 +184,7 @@ pub fn physical_rect_to_desktop(rect: RECT) -> Rect {
 pub fn full_capture_plan(scope: &DpiScope) -> Result<(Rect, f32, CaptureMapping)> {
     let monitors = crate::coords::monitor_rects(scope)?;
     let physical = bounding_rect(monitors.iter().copied().map(physical_rect_to_desktop))
-        .ok_or_else(|| Error::Platform {
-            code: -1,
-            message: "no displays were found for screenshot capture".into(),
-        })?;
+        .ok_or_else(|| Error::platform(-1, "no displays were found for screenshot capture"))?;
     let mapping = capture_mapping(&monitors, physical)?;
     Ok((physical, 1.0, mapping))
 }
@@ -201,10 +198,10 @@ pub fn region_capture_plan(scope: &DpiScope, rect: Rect) -> Result<(Rect, f32, C
 fn capture_mapping(monitors: &[RECT], capture: Rect) -> Result<CaptureMapping> {
     let segments = capture_segments(monitors, capture);
     if segments.is_empty() {
-        return Err(Error::Platform {
-            code: -1,
-            message: "captured rectangle does not intersect any display".into(),
-        });
+        return Err(Error::platform(
+            -1,
+            "captured rectangle does not intersect any display",
+        ));
     }
     Ok(CaptureMapping::with_layout_validation(
         segments,

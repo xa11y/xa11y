@@ -150,10 +150,7 @@ impl CaptureMapping {
     fn validate(&self) -> Result<()> {
         if let (Some(token), Some(validator)) = (self.layout_token, self.validator) {
             if !validator(token)? {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: "screenshot coordinate mapping is stale because the display layout changed; capture a new screenshot".into(),
-                });
+                return Err(Error::platform(-1, "screenshot coordinate mapping is stale because the display layout changed; capture a new screenshot"));
             }
         }
         Ok(())
@@ -456,21 +453,18 @@ impl Screenshot {
         let expected = (self.width as usize)
             .checked_mul(self.height as usize)
             .and_then(|n| n.checked_mul(4))
-            .ok_or_else(|| Error::Platform {
-                code: -1,
-                message: "screenshot dimensions overflow".into(),
-            })?;
+            .ok_or_else(|| Error::platform(-1, "screenshot dimensions overflow"))?;
         if self.pixels.len() != expected {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
+            return Err(Error::platform(
+                -1,
+                format!(
                     "screenshot pixel buffer size {} does not match {}x{} RGBA ({} bytes)",
                     self.pixels.len(),
                     self.width,
                     self.height,
                     expected
                 ),
-            });
+            ));
         }
 
         let mut out = Vec::new();
@@ -487,9 +481,11 @@ impl Screenshot {
     /// Encode as PNG and write to `path`.
     pub fn save_png(&self, path: impl AsRef<Path>) -> Result<()> {
         let bytes = self.to_png()?;
-        std::fs::write(path, bytes).map_err(|e| Error::Platform {
-            code: e.raw_os_error().unwrap_or(-1) as i64,
-            message: format!("save_png: {e}"),
+        std::fs::write(path, bytes).map_err(|e| {
+            Error::platform(
+                e.raw_os_error().unwrap_or(-1) as i64,
+                format!("save_png: {e}"),
+            )
         })
     }
 }
@@ -502,22 +498,19 @@ fn expected_len(width: u32, height: u32) -> Result<usize> {
 }
 
 fn buffer_mismatch(shot: &Screenshot) -> Error {
-    Error::Platform {
-        code: -1,
-        message: format!(
+    Error::platform(
+        -1,
+        format!(
             "screenshot pixel buffer size {} does not match {}x{} RGBA",
             shot.pixels.len(),
             shot.width,
             shot.height
         ),
-    }
+    )
 }
 
 fn mapping_error(message: &str) -> Error {
-    Error::Platform {
-        code: -1,
-        message: message.into(),
-    }
+    Error::platform(-1, message)
 }
 
 fn map_point_f64(point: (f64, f64), from: Rect, to: Rect) -> Option<(f64, f64)> {
@@ -556,10 +549,7 @@ fn intersect_rect(a: Rect, b: Rect) -> Option<Rect> {
 }
 
 fn png_err(e: png::EncodingError) -> Error {
-    Error::Platform {
-        code: -1,
-        message: format!("png encode: {e}"),
-    }
+    Error::platform(-1, format!("png encode: {e}"))
 }
 
 #[cfg(test)]

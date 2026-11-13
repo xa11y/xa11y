@@ -11,6 +11,40 @@ use pyo3::prelude::*;
 
 use crate::{make_py_element, to_py_err, Element};
 
+/// An index or count argument (offset, row, column, range end, limit) as
+/// a `u32`. A negative or oversized int is `InvalidActionDataError`, the
+/// error the JS binding and the CLI give for the same value, rather than
+/// the `OverflowError` PyO3's unsigned conversion raises; a non-int is
+/// `TypeError`.
+pub(crate) fn u32_arg(obj: &Bound<'_, PyAny>, what: &str) -> PyResult<u32> {
+    if let Ok(v) = obj.extract::<u32>() {
+        return Ok(v);
+    }
+    if obj.is_instance_of::<pyo3::types::PyInt>() {
+        return Err(to_py_err(xa11y::Error::invalid_action_data(format!(
+            "{what} must be a whole number in 0..=4294967295, got {obj}"
+        ))));
+    }
+    Err(PyTypeError::new_err(format!(
+        "{what} must be an int, got {}",
+        obj.get_type().name()?
+    )))
+}
+
+/// [`u32_arg`] for a defaulted count, which PyO3 can only default as a
+/// plain integer: taken as `i64`, so a negative value still reaches here
+/// instead of failing PyO3's unsigned conversion.
+pub(crate) fn count_arg(value: i64, what: &str) -> PyResult<usize> {
+    u32::try_from(value)
+        // A u32 always fits a usize on the 32- and 64-bit targets PyO3 builds.
+        .map(|v| v as usize)
+        .map_err(|_| {
+            to_py_err(xa11y::Error::invalid_action_data(format!(
+                "{what} must be a whole number in 0..=4294967295, got {value}"
+            )))
+        })
+}
+
 /// A count as Python sees it: an `int`, or the string `"unknown"`.
 pub(crate) fn count_to_py(py: Python<'_>, count: Option<xa11y::Count>) -> PyResult<Py<PyAny>> {
     Ok(match count {
@@ -211,7 +245,8 @@ pub(crate) struct TextRange {
 impl TextRange {
     /// Raises ``InvalidTextRangeError`` when ``start > end``.
     #[new]
-    fn new(start: u32, end: u32) -> PyResult<Self> {
+    fn new(start: &Bound<'_, PyAny>, end: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let (start, end) = (u32_arg(start, "start")?, u32_arg(end, "end")?);
         xa11y::TextRange::new(start, end).map_err(to_py_err)?;
         Ok(Self { start, end })
     }
@@ -249,8 +284,9 @@ pub(crate) fn extract_range(obj: &Bound<'_, PyAny>) -> PyResult<xa11y::TextRange
             end: r.end,
         });
     }
-    match obj.extract::<(u32, u32)>() {
-        Ok((start, end)) => xa11y::TextRange::new(start, end).map_err(to_py_err),
+    match obj.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>() {
+        Ok((start, end)) => xa11y::TextRange::new(u32_arg(&start, "start")?, u32_arg(&end, "end")?)
+            .map_err(to_py_err),
         Err(_) => Err(PyTypeError::new_err(
             "expected a TextRange or a (start, end) tuple of non-negative ints",
         )),
@@ -514,9 +550,10 @@ impl Text {
         &self,
         py: Python<'_>,
         needle: &str,
-        occurrence: usize,
+        occurrence: i64,
         within: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<TextRange>> {
+        let occurrence = count_arg(occurrence, "occurrence")?;
         let mut options = xa11y::FindOptions::new().occurrence(occurrence);
         if let Some(w) = within {
             options = options.within(extract_range(w)?);
@@ -529,7 +566,12 @@ impl Text {
         Ok(found.map(TextRange::from))
     }
     /// Live embedded object or link at a UTF-16 offset; None for plain text.
-    fn object_at(&self, py: Python<'_>, offset: u32) -> PyResult<Option<Py<Element>>> {
+    fn object_at(
+        &self,
+        py: Python<'_>,
+        offset: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Py<Element>>> {
+        let offset = u32_arg(offset, "offset")?;
         let t = self.inner.clone();
         let object = py.detach(move || t.object_at(offset)).map_err(to_py_err)?;
         object
@@ -538,8 +580,22 @@ impl Text {
     }
     /// The ``unit`` (``"character"``, ``"word"``, ``"line"``,
     /// ``"paragraph"``) containing ``offset``. ``"line"`` is the rendered line.
-    fn range_at(&self, py: Python<'_>, offset: u32, unit: &str) -> PyResult<TextRange> {
-        let unit = xa11y::TextUnit::parse(unit).map_err(to_py_err)?;
+    fn range_at(
+        &self,
+        py: Python<'_>,
+        offset: &Bound<'_, PyAny>,
+        unit: &str,
+    ) -> PyResult<TextRange> {
+        let offset = u32_arg(offset, "offset")?;
+        let unit = xa11y::TextUnit::from_snake_case(unit)
+            .ok_or_else(|| {
+                xa11y::Error::unknown_name(
+                    "text unit",
+                    unit,
+                    xa11y::TextUnit::ALL.map(xa11y::TextUnit::to_snake_case),
+                )
+            })
+            .map_err(to_py_err)?;
         let t = self.inner.clone();
         let r = py
             .detach(move || t.range_at(offset, unit))
@@ -548,8 +604,9 @@ impl Text {
     }
     /// Rendered lines covering ``range``, at most ``limit`` per page.
     #[pyo3(signature = (range, limit=200))]
-    fn lines(&self, py: Python<'_>, range: &Bound<'_, PyAny>, limit: usize) -> PyResult<TextLines> {
+    fn lines(&self, py: Python<'_>, range: &Bound<'_, PyAny>, limit: i64) -> PyResult<TextLines> {
         let r = extract_range(range)?;
+        let limit = count_arg(limit, "limit")?;
         let t = self.inner.clone();
         let page = py.detach(move || t.lines(r, limit)).map_err(to_py_err)?;
         Ok(TextLines {
@@ -568,8 +625,9 @@ impl Text {
     }
     /// Formatting runs covering ``range``, at most ``limit`` per page.
     #[pyo3(signature = (range, limit=200))]
-    fn runs(&self, py: Python<'_>, range: &Bound<'_, PyAny>, limit: usize) -> PyResult<TextRuns> {
+    fn runs(&self, py: Python<'_>, range: &Bound<'_, PyAny>, limit: i64) -> PyResult<TextRuns> {
         let r = extract_range(range)?;
+        let limit = count_arg(limit, "limit")?;
         let t = self.inner.clone();
         let page = py.detach(move || t.runs(r, limit)).map_err(to_py_err)?;
         Ok(TextRuns {

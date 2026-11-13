@@ -166,10 +166,11 @@ fn pointer_move_emits_abs_x_y() {
             .collect();
         assert!(!xs.is_empty(), "expected at least one ABS_X event");
         assert!(!ys.is_empty(), "expected at least one ABS_Y event");
-        // The 1920x1080 override → COORD_MAX (32767) range:
-        //   x = 640 → 640*32767/1920 ≈ 10922
-        //   y = 360 → 360*32767/1080 ≈ 10922
-        // Allow ±50 for integer truncation across the divisor.
+        // The 1920x1080 override, aimed at the pixel centre over the
+        // device's 32768 values:
+        //   x = 640 → 1281*32768/3840 = 10931
+        //   y = 360 →  721*32768/2160 = 10937
+        // Allow ±50 so the check does not pin the rounding.
         assert!(
             (10870..=10970).contains(xs.last().unwrap()),
             "ABS_X scaled into virtual range, got {xs:?}"
@@ -197,6 +198,40 @@ fn pointer_click_emits_button_down_then_up() {
             btn,
             vec![1, 0],
             "expected BTN_LEFT press(1) then release(0), got {btn:?}"
+        );
+    });
+}
+
+/// libinput reads a pointer button once per frame and reports only a
+/// change, so a press and release in one frame is no click at all: a
+/// SYN_REPORT must separate them.
+#[test]
+#[ignore]
+fn pointer_click_ends_the_frame_between_press_and_release() {
+    drive(|sim, dev| {
+        sim.pointer_click(Point::new(100, 100), MouseButton::Left, 1)
+            .expect("pointer_click");
+        let events = collect_events(
+            dev,
+            &[EventType::KEY, EventType::SYNCHRONIZATION],
+            4,
+            Duration::from_secs(1),
+        );
+        let sequence: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.event_type() == EventType::SYNCHRONIZATION || e.code() == KeyCode::BTN_LEFT.0
+            })
+            .map(|e| match e.event_type() {
+                EventType::SYNCHRONIZATION => "syn",
+                _ if e.value() == 1 => "press",
+                _ => "release",
+            })
+            .collect();
+        assert_eq!(
+            sequence,
+            vec!["press", "syn", "release", "syn"],
+            "press and release must be separate frames"
         );
     });
 }

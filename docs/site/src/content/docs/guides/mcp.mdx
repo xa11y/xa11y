@@ -215,9 +215,10 @@ and narrowing the selectors is the way to see the rest.
 
 `tree` also marks the cut where it happened. A node that lost children to
 `max_depth` or the node cap carries `subtree_truncated: true` and
-`children_count`, so it is never mistaken for a leaf, and it tells you which
-subtree to read next. A node the cap left unread has no `children_count`:
-reading its children just to count them would cost what the cap saves.
+`children_count` when its children were read, so it is never mistaken for a
+leaf, and it tells you which subtree to read next. A node at `max_depth`, or one
+the cap left unread, has no `children_count`: reading its children just to
+count them would cost what the limit saves.
 
 With `detail: ["relations"]`, each node lists at most 10 targets per relation
 kind, as `{count, returned, truncated, elements}`, and the result's

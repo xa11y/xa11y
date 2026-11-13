@@ -227,19 +227,24 @@ impl CaptureOptions {
     }
 }
 
-/// Which limits dropped something. A depth limit that dropped nothing is not
-/// reported. The node limit is reported once the capture is full while nodes
-/// whose children were never read remain: those children are not read just
-/// to learn whether there are any, so a tree of exactly `max_nodes` nodes
-/// can report it.
+/// Which limits dropped something, or may have.
+///
+/// The depth limit is reported once the walk reaches a node at `max_depth`:
+/// the children of a node at that depth are not read, not even to count
+/// them, so a tree exactly `max_depth` deep reports it, and so does one
+/// whose nodes at that depth are all leaves. The node limit is reported
+/// once the capture is full while nodes whose children were never read
+/// remain, for the same reason. The text limit is reported once the budget
+/// is spent while nodes whose text was not read remain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Truncation {
-    /// Children below `max_depth` were left out.
+    /// The walk reached `max_depth` and did not read below it.
     pub by_depth: bool,
     /// The capture filled `max_nodes` with children left out or unread.
     pub by_nodes: bool,
-    /// Text past `max_text_bytes` was left out.
+    /// Text past `max_text_bytes` was left out: cut short on a node, or not
+    /// read on the nodes after the budget ran out.
     pub by_text: bool,
     /// The time budget ran out before the walk finished.
     pub by_time: bool,
@@ -269,7 +274,8 @@ impl Truncation {
 pub struct CaptureStats {
     /// Children reads: one per node whose children were read.
     pub children_reads: usize,
-    /// Identity reads, for cycle detection and relation resolution.
+    /// Identity reads, for cycle detection and relation resolution (one per
+    /// node, and one per relation target).
     pub identity_reads: usize,
     /// Text reads (the length, then the content), with text detail.
     pub text_reads: usize,
@@ -288,7 +294,8 @@ pub enum CaptureStep {
     /// Reading the node's children. Its subtree is missing.
     Children,
     /// Reading the node's platform identity, which cycle detection and
-    /// relation resolution use.
+    /// relation resolution use, or the identity of one of its relation
+    /// targets (which then stays outside the capture).
     Identity,
     /// Reading the node's text.
     Text,
@@ -365,6 +372,28 @@ pub enum RelationTarget {
     Outside(Box<Element>),
 }
 
+/// One kind of relation on a [`CapturedNode`] and its targets.
+///
+/// `#[non_exhaustive]`, like [`Relation`](crate::semantics::Relation), which
+/// it mirrors with targets resolved against the capture. Build one with
+/// [`CapturedRelation::new`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CapturedRelation {
+    /// The kind of relation.
+    pub kind: RelationKind,
+    /// The targets, in platform order. Empty when the platform reports the
+    /// kind but the node has none.
+    pub targets: Vec<RelationTarget>,
+}
+
+impl CapturedRelation {
+    /// A relation of `kind` to `targets`.
+    pub fn new(kind: RelationKind, targets: Vec<RelationTarget>) -> Self {
+        Self { kind, targets }
+    }
+}
+
 /// One node of a [`Capture`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -381,19 +410,28 @@ pub struct CapturedNode {
     /// Indices of the children in the capture, in platform order.
     pub children: Vec<usize>,
     /// How many children the node has, including ones the capture left
-    /// out. `None` when they were not read (a failed read, or the time or
-    /// node budget ran out first).
+    /// out. `None` when they were not read: a failed read, a node at
+    /// `max_depth` (whose children a depth-limited capture never reads), or
+    /// the time or node budget ran out first.
     pub children_count: Option<usize>,
     /// Whether children of this node are missing from the capture: cut by a
     /// limit, or not read at all.
     pub children_truncated: bool,
     /// Reads of this node that failed.
+    ///
+    /// Formatting the platform does not support at all
+    /// ([`Error::Unsupported`] from a run read) is recorded once, on the first
+    /// node that reported it, and not read on any later node. An
+    /// [`Error::Unsupported`] from a text or relation read is the node's own
+    /// answer (Windows gives it for its synthesized application node) and
+    /// does not stop the read of later nodes.
     pub errors: Vec<CaptureError>,
-    /// The node's text, with text detail, when it has a text interface.
+    /// The node's text, with text detail, when it has a text interface and
+    /// the text budget had not run out before it was reached.
     pub text: Option<CapturedText>,
     /// With relations detail: each kind the platform reports, in
     /// [`RelationKind::ALL`] order, with its targets (empty when none).
-    pub relations: Vec<(RelationKind, Vec<RelationTarget>)>,
+    pub relations: Vec<CapturedRelation>,
 }
 
 impl std::ops::Deref for CapturedNode {
@@ -463,7 +501,7 @@ struct Raw {
     identity: Option<NodeIdentity>,
     vanished: bool,
     text: Option<CapturedText>,
-    relations: Vec<(RelationKind, Vec<Element>)>,
+    relations: Vec<crate::semantics::Relation>,
 }
 
 impl Raw {
@@ -563,6 +601,14 @@ fn walk(
             }
             break;
         }
+        // A node at the depth limit keeps its children unread: reading them
+        // only to count them is a children read per frontier node, which on
+        // a wide tree is most of what the limit exists to save.
+        if options.max_depth.is_some_and(|max| raw[i].depth >= max) {
+            raw[i].children_truncated = true;
+            truncated.by_depth = true;
+            continue;
+        }
         // A full capture reads no more children: a read lists every child a
         // node has, so reading past the budget would cost the platform calls
         // the budget exists to bound (a 100k-row table under the last node
@@ -604,11 +650,6 @@ fn walk(
         if kids.is_empty() {
             continue;
         }
-        if options.max_depth.is_some_and(|max| raw[i].depth >= max) {
-            raw[i].children_truncated = true;
-            truncated.by_depth = true;
-            continue;
-        }
         let depth = raw[i].depth + 1;
         for kid in kids {
             if raw.len() >= options.max_nodes {
@@ -626,13 +667,13 @@ fn walk(
                 let subject = crate::error::stale_subject(&node.element);
                 raw[i].fail(
                     CaptureStep::Cycle,
-                    Error::Platform {
-                        code: 0,
-                        message: format!(
+                    Error::platform(
+                        0,
+                        format!(
                             "child {subject} is one of its own ancestors; the platform \
                              tree has a cycle here, so it was left out"
                         ),
-                    },
+                    ),
                 );
                 raw[i].children_truncated = true;
                 continue;
@@ -655,7 +696,7 @@ fn walk(
         read_relations(&mut raw, &mut truncated, &mut stats, &stop);
     }
 
-    let nodes = into_pre_order(raw);
+    let nodes = into_pre_order(raw, identities, &mut stats);
     Ok(Capture {
         nodes,
         truncated,
@@ -715,9 +756,17 @@ fn read_texts(
     stats: &mut CaptureStats,
     stop: &impl Fn() -> Option<Stop>,
 ) {
-    for node in raw.iter_mut().filter(|n| !n.vanished) {
+    let mut nodes = raw.iter_mut().filter(|n| !n.vanished).peekable();
+    while let Some(node) = nodes.next() {
         if let Some(why) = stop() {
             why.mark(truncated);
+            return;
+        }
+        // A spent budget reads no more text: measuring a node's text is a
+        // platform read (on GTK, of the whole text), and it could add
+        // nothing. The nodes not reached say so through the flag.
+        if left.bytes == 0 {
+            truncated.by_text = true;
             return;
         }
         // The length read proves the interface exists and is the length
@@ -726,6 +775,9 @@ fn read_texts(
             Ok(length) => length,
             // No text interface: nothing to read, not a failure.
             Err(Error::ActionNotSupported { .. }) => continue,
+            // Anything else, `Unsupported` included, is this node's answer:
+            // Windows refuses its synthesized application node, which has
+            // no UIA element, and still reads every window below it.
             Err(e) => {
                 node.fail(CaptureStep::Text, e);
                 continue;
@@ -745,20 +797,32 @@ fn read_texts(
         if captured.truncated {
             truncated.by_text = true;
         }
-        if let Some(runs_left) = left.runs.as_mut() {
-            match read_runs(&text, &captured.content, *runs_left, stats) {
+        if let Some(runs_left) = left.runs {
+            match read_runs(&text, &captured.content, runs_left, stats) {
                 Ok((runs, cut)) => {
-                    *runs_left -= runs.len();
+                    left.runs = Some(runs_left - runs.len());
                     if cut {
                         truncated.by_formatting = true;
                     }
                     captured.runs = Some(runs);
                     captured.runs_truncated = cut;
                 }
+                // No formatting on this platform: say it once, and read
+                // only text from here on.
+                Err(e @ Error::Unsupported { .. }) => {
+                    node.fail(CaptureStep::Formatting, e);
+                    left.runs = None;
+                }
                 Err(e) => node.fail(CaptureStep::Formatting, e),
             }
         }
         node.text = Some(captured);
+        // The last node read to the end of the budget: nothing is cut unless
+        // a node is left whose text was not read.
+        if left.bytes == 0 && nodes.peek().is_some() {
+            truncated.by_text = true;
+            return;
+        }
     }
 }
 
@@ -838,6 +902,10 @@ fn read_relations(
         stats.relation_reads += 1;
         match node.element.relations(&[]) {
             Ok(found) => node.relations = found,
+            // A platform that reports no relation kind is asked for none
+            // (`relations(&[])` requests what `Capabilities` lists), so an
+            // `Unsupported` here is this node's answer, like any other error:
+            // Windows gives it for its synthesized application node.
             Err(e) => node.fail(CaptureStep::Relations, e),
         }
     }
@@ -845,7 +913,17 @@ fn read_relations(
 
 /// Drop vanished nodes and lay the rest out pre-order, renumbering every
 /// index, and resolve relation targets to nodes where they are inside.
-fn into_pre_order(raw: Vec<Raw>) -> Vec<CapturedNode> {
+///
+/// `identities` is whether the walk could read identities at all; when it
+/// could not, every target is outside and none is read. Each target's
+/// identity read is counted in `stats`; one that fails for any reason but
+/// [`Error::Unsupported`] is recorded on the node that holds the relation,
+/// and the target is kept as an element outside the capture.
+fn into_pre_order(
+    raw: Vec<Raw>,
+    mut identities: bool,
+    stats: &mut CaptureStats,
+) -> Vec<CapturedNode> {
     // Pre-order walk over the read (BFS) indices.
     let mut order = Vec::with_capacity(raw.len());
     let mut stack = vec![0usize];
@@ -869,22 +947,11 @@ fn into_pre_order(raw: Vec<Raw>) -> Vec<CapturedNode> {
             by_identity.entry(id).or_insert(new_index[&old]);
         }
     }
-    let resolve = |target: Element| -> RelationTarget {
-        match target.identity() {
-            Ok(id) => match by_identity.get(&id) {
-                Some(&index) => RelationTarget::Node(index),
-                None => RelationTarget::Outside(Box::new(target)),
-            },
-            // Without an identity the target cannot be matched to a node;
-            // it is still a correct element, only not cross-referenced.
-            Err(_) => RelationTarget::Outside(Box::new(target)),
-        }
-    };
 
     let mut slots: Vec<Option<Raw>> = raw.into_iter().map(Some).collect();
     let mut nodes = Vec::with_capacity(order.len());
     for (index, &old) in order.iter().enumerate() {
-        let Some(node) = slots[old].take() else {
+        let Some(mut node) = slots[old].take() else {
             continue;
         };
         let children: Vec<usize> = node
@@ -892,11 +959,36 @@ fn into_pre_order(raw: Vec<Raw>) -> Vec<CapturedNode> {
             .iter()
             .filter_map(|c| new_index.get(c).copied())
             .collect();
-        let relations = node
-            .relations
-            .into_iter()
-            .map(|(kind, targets)| (kind, targets.into_iter().map(&resolve).collect()))
-            .collect();
+        let mut relations = Vec::with_capacity(node.relations.len());
+        for relation in std::mem::take(&mut node.relations) {
+            let mut targets = Vec::with_capacity(relation.elements.len());
+            for target in relation.elements {
+                if !identities {
+                    targets.push(RelationTarget::Outside(Box::new(target)));
+                    continue;
+                }
+                stats.identity_reads += 1;
+                match target.identity() {
+                    Ok(id) => targets.push(match by_identity.get(&id) {
+                        Some(&index) => RelationTarget::Node(index),
+                        None => RelationTarget::Outside(Box::new(target)),
+                    }),
+                    // No identities on this platform after all: no target
+                    // can be matched, so read none.
+                    Err(Error::Unsupported { .. }) => {
+                        identities = false;
+                        targets.push(RelationTarget::Outside(Box::new(target)));
+                    }
+                    // The target is still a correct element, only not
+                    // cross-referenced; why it could not be is the node's.
+                    Err(e) => {
+                        node.fail(CaptureStep::Identity, e);
+                        targets.push(RelationTarget::Outside(Box::new(target)));
+                    }
+                }
+            }
+            relations.push(CapturedRelation::new(relation.kind, targets));
+        }
         nodes.push(CapturedNode {
             index,
             parent: node.parent.and_then(|p| new_index.get(&p).copied()),
@@ -1024,16 +1116,121 @@ mod tests {
     }
 
     #[test]
-    fn the_depth_limit_cuts_with_the_child_count() {
+    fn the_depth_limit_reads_no_children_below_it() {
         let cap = app(build_provider())
             .capture(&CaptureOptions::new().max_depth(1))
             .expect("capture");
         assert!(cap.truncated.by_depth);
         assert!(cap.nodes.iter().all(|n| n.depth <= 1));
-        let window = cap.nodes.iter().find(|n| n.depth == 1).expect("a window");
-        assert!(window.children.is_empty());
-        assert!(window.children_truncated);
-        assert!(window.children_count.expect("counted") > 0);
+        // Only the nodes above the limit had their children read: a node
+        // at the limit is not read even to count its children.
+        let above = cap.nodes.iter().filter(|n| n.depth < 1).count();
+        assert_eq!(cap.stats.children_reads, above);
+        for node in cap.nodes.iter().filter(|n| n.depth == 1) {
+            assert!(node.children.is_empty());
+            assert!(node.children_truncated, "{node:?}");
+            assert_eq!(node.children_count, None);
+        }
+        // The root, above the limit, keeps its real count.
+        assert_eq!(cap.root().children_count, Some(cap.root().children.len()));
+    }
+
+    #[test]
+    fn a_spent_text_budget_measures_no_more_nodes() {
+        let full_provider = crate::mock::build_table_provider();
+        let full = app(full_provider.clone())
+            .capture(&CaptureOptions::new().text(true))
+            .expect("capture");
+        assert!(!full.truncated.by_text);
+        assert_eq!(full_provider.text_length_reads(), full.nodes.len());
+
+        let provider = crate::mock::build_table_provider();
+        let cut = app(provider.clone())
+            .capture(&CaptureOptions::new().text(true).max_text_bytes(1))
+            .expect("capture");
+        assert!(cut.truncated.by_text);
+        let with_text = cut.nodes.iter().filter(|n| n.text.is_some()).count();
+        assert_eq!(with_text, 1, "the first text read spends the budget");
+        assert!(
+            provider.text_length_reads() < cut.nodes.len(),
+            "{} length reads for {} nodes",
+            provider.text_length_reads(),
+            cut.nodes.len()
+        );
+    }
+
+    #[test]
+    fn a_node_that_refuses_text_and_relations_does_not_stop_the_rest() {
+        // Windows answers its synthesized application node (the root) with
+        // `Unsupported`, and reads every node below it.
+        let refusal = || Error::Unsupported {
+            feature: "handle 0 is a synthesized Application node".into(),
+        };
+        let full = app(build_document_provider())
+            .capture(&CaptureOptions::new().text(true).relations(true))
+            .expect("capture");
+        let provider = build_document_provider();
+        provider.refuse_node("TestApp", refusal());
+        let cap = app(provider.clone())
+            .capture(&CaptureOptions::new().text(true).relations(true))
+            .expect("capture");
+        let steps: Vec<CaptureStep> = cap.root().errors.iter().map(|e| e.step).collect();
+        assert_eq!(steps, [CaptureStep::Text, CaptureStep::Relations]);
+        assert_eq!(provider.text_length_reads(), cap.nodes.len());
+        assert_eq!(cap.stats.relation_reads, cap.nodes.len());
+        for (got, want) in cap.nodes.iter().zip(&full.nodes).skip(1) {
+            assert!(got.errors.is_empty(), "{:?}", got.errors);
+            assert_eq!(
+                got.text.as_ref().map(|t| &t.content),
+                want.text.as_ref().map(|t| &t.content)
+            );
+            assert_eq!(got.relations.len(), want.relations.len());
+        }
+        assert!(cap.nodes.iter().any(|n| !n.relations.is_empty()));
+    }
+
+    #[test]
+    fn relation_targets_count_their_identity_reads_and_keep_their_errors() {
+        let cap = app(build_document_provider())
+            .capture(&CaptureOptions::new().relations(true))
+            .expect("capture");
+        let targets: usize = cap
+            .nodes
+            .iter()
+            .flat_map(|n| &n.relations)
+            .map(|r| r.targets.len())
+            .sum();
+        assert!(targets > 0);
+        assert_eq!(cap.stats.identity_reads, cap.nodes.len() + targets);
+
+        // A target whose identity cannot be read stays outside, and the
+        // node holding the relation says why.
+        let provider = build_document_provider();
+        provider.fail_identity("Email address", Error::platform(9, "identity read failed"));
+        let cap = app(provider)
+            .capture(&CaptureOptions::new().relations(true))
+            .expect("capture");
+        let field = cap
+            .nodes
+            .iter()
+            .find(|n| n.name.as_deref() == Some("Email"))
+            .expect("the field");
+        let labels = &field
+            .relations
+            .iter()
+            .find(|r| r.kind == RelationKind::LabelledBy)
+            .expect("labelled_by")
+            .targets;
+        assert!(
+            matches!(labels.as_slice(), [RelationTarget::Outside(_)]),
+            "{labels:?}"
+        );
+        assert!(
+            field.errors.iter().any(|e| e.step == CaptureStep::Identity
+                && matches!(e.error, Error::Platform { code: 9, .. })),
+            "{:?}",
+            field.errors
+        );
     }
 
     #[test]
@@ -1072,13 +1269,7 @@ mod tests {
             "Navigation",
             Error::stale(crate::StaleReason::Removed, "toolbar"),
         );
-        provider.fail_children(
-            "Content",
-            Error::Platform {
-                code: 7,
-                message: "broken subtree".into(),
-            },
-        );
+        provider.fail_children("Content", Error::platform(7, "broken subtree"));
         let cap = app(provider)
             .capture(&CaptureOptions::new())
             .expect("capture");
@@ -1153,11 +1344,12 @@ mod tests {
             .iter()
             .find(|n| n.name.as_deref() == Some("Email"))
             .expect("the field");
-        let (_, labels) = field
+        let labels = &field
             .relations
             .iter()
-            .find(|(k, _)| *k == RelationKind::LabelledBy)
-            .expect("labelled_by is reported");
+            .find(|r| r.kind == RelationKind::LabelledBy)
+            .expect("labelled_by is reported")
+            .targets;
         match labels.as_slice() {
             [RelationTarget::Node(i)] => {
                 assert_eq!(cap.nodes[*i].name.as_deref(), Some("Email address"))
@@ -1168,21 +1360,22 @@ mod tests {
         let others: Vec<_> = field
             .relations
             .iter()
-            .filter(|(k, _)| !matches!(k, RelationKind::LabelledBy | RelationKind::DescribedBy))
+            .filter(|r| !matches!(r.kind, RelationKind::LabelledBy | RelationKind::DescribedBy))
             .collect();
         assert!(!others.is_empty(), "the platform reports more kinds");
-        assert!(others.iter().all(|(_, t)| t.is_empty()), "{others:?}");
+        assert!(others.iter().all(|r| r.targets.is_empty()), "{others:?}");
         // Outside the capture: a capture rooted at the field itself.
         let alone = field
             .element
             .capture(&CaptureOptions::new().relations(true))
             .expect("capture");
-        let (_, labels) = alone
+        let labels = &alone
             .root()
             .relations
             .iter()
-            .find(|(k, _)| *k == RelationKind::LabelledBy)
-            .expect("labelled_by");
+            .find(|r| r.kind == RelationKind::LabelledBy)
+            .expect("labelled_by")
+            .targets;
         match labels.as_slice() {
             [RelationTarget::Outside(label)] => {
                 assert_eq!(label.name.as_deref(), Some("Email address"))

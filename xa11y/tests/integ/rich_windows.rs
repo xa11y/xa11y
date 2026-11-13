@@ -105,7 +105,7 @@ fn windows_rich_collection_indices_and_depth() {
 fn windows_rich_utf16_ranges_and_selection() {
     let app = fixture();
     let edit = crate::integ::one(&app, r#"text_field[name="Edit text"]"#);
-    let text = edit.text().expect("text interface");
+    let text = edit.text();
     let all = text.read_all().expect("read all");
     assert!(all.starts_with("Hello 😀 world"), "{all:?}");
     assert_eq!(
@@ -168,7 +168,7 @@ fn windows_rich_utf16_ranges_and_selection() {
 fn windows_rich_formatting() {
     let app = fixture();
     let view = crate::integ::one(&app, r#"[name="Rich text"]"#);
-    let text = view.text().expect("rich text interface");
+    let text = view.text();
     let all = text.read_all().expect("rich text");
     assert!(all.starts_with("Hello bold italic red"), "{all:?}");
     let length = text.length().expect("length");
@@ -202,7 +202,7 @@ fn windows_rich_formatting() {
 fn windows_rich_paragraph_breaks_and_document_end() {
     let app = fixture();
     let view = crate::integ::one(&app, r#"[name="Rich text"]"#);
-    let text = view.text().expect("rich text interface");
+    let text = view.text();
     let all = text.read_all().expect("document text");
     assert!(all.contains("\r\nSecond paragraph"), "{all:?}");
     assert!(all.ends_with("\r\n"), "{all:?}");
@@ -255,7 +255,7 @@ fn windows_rich_paragraph_breaks_and_document_end() {
 fn windows_rich_large_document_offsets_and_search() {
     let app = fixture();
     let edit = crate::integ::one(&app, r#"text_field[name="Long text"]"#);
-    let text = edit.text().expect("large text interface");
+    let text = edit.text();
     let length = text.length().expect("large text length");
     assert_eq!(length, 6_014);
     assert_eq!(
@@ -310,7 +310,7 @@ fn windows_rich_button_refuses_text() {
     let app = fixture();
     let button = crate::integ::one(&app, r#"button[name="Plain button"]"#);
     assert!(matches!(
-        button.text(),
+        button.text().length(),
         Err(Error::ActionNotSupported { .. })
     ));
     assert!(button.table.is_none());

@@ -44,7 +44,7 @@ pub(super) fn apply(
     let live = LiveRegionParts {
         politeness: get("live")
             .or_else(|| get("container-live"))
-            .and_then(Politeness::parse),
+            .and_then(|v| Politeness::from_snake_case(&v.trim().to_ascii_lowercase())),
         atomic: match get("atomic").or_else(|| get("container-atomic")) {
             Some("true") => Some(true),
             Some("false") => Some(false),

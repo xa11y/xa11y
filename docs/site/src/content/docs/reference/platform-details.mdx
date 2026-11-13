@@ -110,8 +110,8 @@ See [Explicit IA2 source on Windows](#explicit-ia2-source-on-windows).
 | `Button` | AXButton | push button | ButtonControlType |
 | `CheckBox` | AXCheckBox | check box, check menu item | CheckBoxControlType |
 | `RadioButton` | AXRadioButton | radio button, radio menu item | RadioButtonControlType |
-| `TextField` | AXTextField, AXSecureTextField *(role or subrole)* | entry, password text | EditControlType |
-| `TextArea` | AXTextArea | text | EditControlType |
+| `TextField` | AXTextField, AXSecureTextField *(role or subrole)* | entry, password text | EditControlType; DocumentControlType on a Win32 Edit or RichEdit without `ES_MULTILINE` |
+| `TextArea` | AXTextArea | text | DocumentControlType on a Win32 Edit or RichEdit with `ES_MULTILINE` |
 | `StaticText` | AXStaticText | label, static, caption | TextControlType |
 | `ComboBox` | AXComboBox, AXPopUpButton | combo box | ComboBoxControlType |
 | `List` | AXList, AXOutline | list, list box | ListControlType, TreeControlType |
@@ -333,7 +333,7 @@ Text is inserted through the accessibility API. Keyboard events are never simula
 
 - **macOS** sets `AXSelectedText`, replacing the selection or inserting at the cursor.
 - **Linux** calls `EditableText.InsertText` at the current caret offset.
-- **Windows** reads the current value via `ValuePattern`. It then splices in the new text and calls `SetValue`.
+- **Windows** reads the current value via `ValuePattern`. It then splices in the new text, calls `SetValue`, and places the caret after the inserted text through `TextPattern`. A control that stores a normalised form of the value, such as a browser field that drops newlines or a masked field, still counts as a success. xa11y then leaves the caret where the control put it.
 
 ### Blur
 
@@ -368,9 +368,15 @@ Bounds use desktop coordinates with origin at the top-left of the primary displa
 
 Platforms use different attributes to determine an element's `name`:
 
-- **macOS** uses AXTitle, then AXDescription, then AXValue (for text elements).
+- **macOS** uses a non-empty AXTitle. A static text without one takes a non-empty AXValue next. Every other element, and a static text with neither, falls back to AXDescription.
 - **Linux** uses Accessible.Name, then Description. For `StaticText` with no name, the first portion of the value is used.
 - **Windows** uses the CurrentName property.
+
+On macOS a `name_changed` event comes from AXTitleChanged, and for a static
+text without a title from AXValueChanged. AX sends no notification when an
+element's AXDescription changes. A static text named by its AXDescription
+raises no `name_changed` event when only the description changes.
+Read the name again to see the new one.
 
 ### Stable ID
 
@@ -525,7 +531,7 @@ JavaScript.
 | `cell.kind` (`data`, `column_header`, `row_header`; `cell.header` derives from it) | The `table cell`, `column header` / `table column header` and `row header` / `table row header` roles | Always `None` (not reported): AX marks no cell as either | Cached ARIA header role, WPF header class, or parent Header orientation; explicit header requests label their returned cells |
 | `table_row` | Always `None`: AT-SPI has no row-index call for a row object, so read the row from a cell | `AXIndex` of an `AXRow`, including outline rows | GridItem row when the row object reports it |
 | `collection` (`index`, `size`, `depth`) | Object attributes `posinset`, `setsize`, `level`, converted from 1-based; read for list items, tree items, tabs, radio buttons and rows | `AXARIAPosInSet` / `AXARIASetSize` on rows, tabs and radio buttons, converted from 1-based. `depth` comes from `AXDisclosureLevel` on outline rows. Web list items are groups in AX, so they report none | PositionInSet, SizeOfSet and Level; indices converted from 1-based |
-| `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `AXCellForColumnAndRow`; for AppKit tables and outlines, the `AXCell` in row `AXRows[row]` whose index ranges cover the slot | Grid.GetItem; never realizes a virtual cell |
+| `cell_at()` | `Table.GetAccessibleAt`, asked only within `NRows` × `NColumns` | `AXCellForColumnAndRow`; for AppKit tables and outlines, the `AXCell` in row `AXRows[row]` whose index ranges cover the slot. A cell-based `NSTableView` has no `AXCell` layer and its cells report no index ranges, so `cell_at()` on one is `Unsupported` | Grid.GetItem; never realizes a virtual cell |
 | `column_headers()`, `row_headers()` | `Table.GetColumnHeader` / `GetRowHeader` per column or row, bounded by the caller's deadline | `AXColumnHeaderUIElements` / `AXRowHeaderUIElements`; for AppKit, which answers neither, the `AXHeader` of each `AXColumn` | Table header arrays |
 | `column_header_cells()`, `row_header_cells()` | `TableCell.GetColumnHeaderCells` / `GetRowHeaderCells` | The cell's header attributes; for AppKit, the `AXHeader` of the cell's `AXColumn`, and no row headers | TableItem header arrays |
 | `selected_items()` (rows or cells, whichever the platform selects) | `Selection.GetSelectedChild`: cells in a GTK table | `AXSelectedRows` on tables and outlines, `AXSelectedChildren` elsewhere | Selection.GetCurrentSelection |
@@ -534,6 +540,15 @@ JavaScript.
 | `Text.runs()` attributes | `Text.GetAttributeRun`; `script` is always `None` | `AXStyleRangeForIndex` runs, read from `AXAttributedStringForRange`; weight and italic from the run's font | TextRange format units and attributes; unsupported attributes stay `None` |
 | `Text.bounds()` | `Text.GetRangeExtents` per rendered line | `AXBoundsForRange` per rendered line | TextRange.GetBoundingRectangles in physical desktop pixels |
 | `select_text()` range check | `InvalidTextRange` past the end or inside a surrogate pair | `InvalidTextRange` past the end or inside a surrogate pair | `InvalidTextRange` past the end or inside a surrogate pair |
+
+A tree table's `row_count` counts the rows on show, not the items in its
+model. On macOS an `NSOutlineView` has no `AXRowCount`, and its `AXRows`
+holds only the top-level rows and the children of expanded items. Its
+`row_count` changes as items expand and collapse, and `cell_at()` indexes
+the same shown rows. GTK 3 on Linux counts the same way: a `GtkTreeView`'s
+`Table.NRows` covers expanded rows only. On Windows the count is the
+provider's Grid `RowCount`. A standard UIA tree view has no Grid
+pattern and reports no `table`.
 
 Windows reads the prefix needed for a numeric `Text.read()` request,
 including a unit to check surrogate boundaries. A `find()` call shares one
@@ -580,12 +595,15 @@ equal to an IA2 identity. Text fields report `ia2_text` and `ia2_text2`
 interface flags. The source never substitutes UIA operations. An absent
 native interface raises `ActionNotSupported`; an unmapped capability raises
 `Unsupported`. Native failures preserve their HRESULT and operation context.
-MSAA provides navigation and standard role/name/state properties.
+MSAA provides navigation and standard role/name/state properties. When
+`get_accRole` answers with a role string, as Firefox does for `paragraph`,
+the role comes from the IA2 role (`unknown` when that has no mapping), and
+`raw.msaa_role` carries the string.
 
 | IA2 capability | Mapping and limits |
 | --- | --- |
 | Text length and reads | `IAccessibleText.nCharacters` / `text`, with native UTF-16 offsets and surrogate checks. A read accepts at most 1 Mi UTF-16 units |
-| Caret and selections | `caretOffset`, `nSelections`, `selection`, `addSelection`, `setSelection`, `removeSelection` and `setCaretOffset`. Changes may publish asynchronously |
+| Caret and selections | `caretOffset`, `nSelections`, `selection`, `addSelection`, `setSelection`, `removeSelection` and `setCaretOffset`. The caret is `None` unless the element has MSAA `STATE_SYSTEM_FOCUSED`, and when `caretOffset` answers `S_FALSE`. A backwards selection reads in document order. Changes may publish asynchronously |
 | Character, word and paragraph ranges | Unicode scalars for characters, `textAtOffset` for other units |
 | Lines | Native `textAtOffset(Line)` ranges, constrained at explicit line breaks. Soft wrapping remains unverified |
 | Formatting | `IAccessibleText2.attributeRange` when that interface exists. Otherwise `IAccessibleText.attributes`. Errors never switch mechanisms |

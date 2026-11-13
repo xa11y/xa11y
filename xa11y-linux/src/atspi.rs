@@ -16,7 +16,7 @@ use xa11y_core::{
 use zbus::blocking::Connection;
 use zbus::DBusError;
 
-use crate::window::WindowManager;
+use crate::window::{ActiveWindow, WindowManager};
 
 mod bounded;
 mod rich;
@@ -156,14 +156,11 @@ impl Interfaces {
 pub(crate) fn read_interfaces(accessible: &Proxy<'_>) -> Result<Interfaces> {
     let reply = accessible
         .call_method("GetInterfaces", &())
-        .map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("GetInterfaces failed: {}", e),
-        })?;
-    let names: Vec<String> = reply.body().deserialize().map_err(|e| Error::Platform {
-        code: -1,
-        message: format!("GetInterfaces deserialize failed: {}", e),
-    })?;
+        .map_err(|e| Error::platform(-1, format!("GetInterfaces failed: {}", e)))?;
+    let names: Vec<String> = reply
+        .body()
+        .deserialize()
+        .map_err(|e| Error::platform(-1, format!("GetInterfaces deserialize failed: {}", e)))?;
     Ok(Interfaces::from_names(&names))
 }
 
@@ -401,22 +398,26 @@ impl LinuxProvider {
     /// forever (zbus has no default method timeout).
     pub(crate) fn connect_a11y_bus() -> Result<Connection> {
         let address = Self::a11y_bus_address()?;
-        let parsed = zbus::Address::try_from(address.as_str()).map_err(|e| Error::Platform {
-            code: -1,
-            message: format!(
-                "the AT-SPI bus launcher (org.a11y.Bus) published an unparsable \
+        let parsed = zbus::Address::try_from(address.as_str()).map_err(|e| {
+            Error::platform(
+                -1,
+                format!(
+                    "the AT-SPI bus launcher (org.a11y.Bus) published an unparsable \
                  accessibility bus address {address:?}: {e}"
-            ),
+                ),
+            )
         })?;
         zbus::blocking::connection::Builder::address(parsed)
             .map(|b| b.method_timeout(ATSPI_METHOD_TIMEOUT))
             .and_then(|b| b.build())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!(
-                    "could not connect to the AT-SPI accessibility bus at {address:?} \
+            .map_err(|e| {
+                Error::platform(
+                    -1,
+                    format!(
+                        "could not connect to the AT-SPI accessibility bus at {address:?} \
                      (published by org.a11y.Bus on the session bus): {e}"
-                ),
+                    ),
+                )
             })
     }
 
@@ -428,13 +429,15 @@ impl LinuxProvider {
         let session = zbus::blocking::connection::Builder::session()
             .map(|b| b.method_timeout(ATSPI_METHOD_TIMEOUT))
             .and_then(|b| b.build())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!(
-                    "could not connect to the D-Bus session bus \
+            .map_err(|e| {
+                Error::platform(
+                    -1,
+                    format!(
+                        "could not connect to the D-Bus session bus \
                      (DBUS_SESSION_BUS_ADDRESS={session_address}) to look up the AT-SPI \
                      accessibility bus: {e}"
-                ),
+                    ),
+                )
             })?;
         let reply = session
             .call_method(
@@ -446,32 +449,31 @@ impl LinuxProvider {
             )
             .map_err(|e| {
                 if is_peer_gone(&e) {
-                    Error::Platform {
-                        code: -1,
-                        message: format!(
+                    Error::platform(
+                        -1,
+                        format!(
                             "AT-SPI is not running: no org.a11y.Bus service on the session bus \
                              (DBUS_SESSION_BUS_ADDRESS={session_address}). Install at-spi2-core \
                              and start at-spi-bus-launcher, or log in to a desktop session that \
                              runs it: {e}"
                         ),
-                    }
+                    )
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!(
+                    Error::platform(
+                        -1,
+                        format!(
                             "the AT-SPI bus launcher (org.a11y.Bus on the session bus \
                              {session_address}) did not return the accessibility bus address: {e}"
                         ),
-                    }
+                    )
                 }
             })?;
-        reply
-            .body()
-            .deserialize::<String>()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("org.a11y.Bus.GetAddress returned an unexpected reply: {e}"),
-            })
+        reply.body().deserialize::<String>().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("org.a11y.Bus.GetAddress returned an unexpected reply: {e}"),
+            )
+        })
     }
 
     /// The live accessibility-bus connection, reconnecting first when the
@@ -546,27 +548,15 @@ impl LinuxProvider {
         let conn = self.connection()?;
         zbus::blocking::proxy::Builder::<zbus::blocking::Proxy>::new(&conn)
             .destination(bus_name.to_owned())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Failed to set proxy destination: {}", e),
-            })?
+            .map_err(|e| Error::platform(-1, format!("Failed to set proxy destination: {}", e)))?
             .path(path.to_owned())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Failed to set proxy path: {}", e),
-            })?
+            .map_err(|e| Error::platform(-1, format!("Failed to set proxy path: {}", e)))?
             .interface(interface.to_owned())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Failed to set proxy interface: {}", e),
-            })?
+            .map_err(|e| Error::platform(-1, format!("Failed to set proxy interface: {}", e)))?
             .cache_properties(zbus::proxy::CacheProperties::No)
             .build()
             .map(Proxy::from)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Failed to create proxy: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("Failed to create proxy: {}", e)))
     }
 
     /// Read the interfaces an accessible object reports via
@@ -581,17 +571,11 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = proxy
             .call_method("GetRole", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRole failed: {}", e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("GetRole failed: {}", e)))?;
         reply
             .body()
             .deserialize::<u32>()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRole deserialize failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("GetRole deserialize failed: {}", e)))
     }
 
     /// Get the AT-SPI role name string.
@@ -599,17 +583,11 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = proxy
             .call_method("GetRoleName", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRoleName failed: {}", e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("GetRoleName failed: {}", e)))?;
         reply
             .body()
             .deserialize::<String>()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRoleName deserialize failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("GetRoleName deserialize failed: {}", e)))
     }
 
     /// Detect Chromium/Electron's "accessibility bridge disabled" signature.
@@ -672,10 +650,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         proxy
             .get_property::<String>("Name")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Get Name property failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("Get Name property failed: {}", e)))
     }
 
     /// Read a registry entry's application name for enumeration.
@@ -693,9 +668,9 @@ impl LinuxProvider {
             Ok(name) => Ok(Some(name)),
             Err(e) if is_peer_gone(&e) || is_absent_member(&e) => Ok(None),
             Err(e) if is_timeout(&e) => Err(self.unresponsive_peer(aref, "Accessible.Name")),
-            Err(e) => Err(Error::Platform {
-                code: -1,
-                message: format!(
+            Err(e) => Err(Error::platform(
+                -1,
+                format!(
                     "reading the name of AT-SPI application {}{}{} failed: {e}",
                     aref.bus_name,
                     aref.path,
@@ -703,7 +678,7 @@ impl LinuxProvider {
                         .map(|p| format!(" (pid {p})"))
                         .unwrap_or_default(),
                 ),
-            }),
+            )),
         }
     }
 
@@ -721,9 +696,8 @@ impl LinuxProvider {
             Err(e) => return Err(children_call_error(e, aref)),
         };
         let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetChildren deserialize failed: {}", e),
+            reply.body().deserialize().map_err(|e| {
+                Error::platform(-1, format!("GetChildren deserialize failed: {}", e))
             })?;
         Ok(Some(
             children
@@ -752,18 +726,20 @@ impl LinuxProvider {
                 return Err(self.unresponsive_peer(aref, "Accessible.GetState"))
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("GetState on {}{} failed: {e}", aref.bus_name, aref.path),
-                })
+                return Err(Error::platform(
+                    -1,
+                    format!("GetState on {}{} failed: {e}", aref.bus_name, aref.path),
+                ))
             }
         };
-        let words: Vec<u32> = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!(
-                "GetState deserialize failed for {}{}: {e}",
-                aref.bus_name, aref.path
-            ),
+        let words: Vec<u32> = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!(
+                    "GetState deserialize failed for {}{}: {e}",
+                    aref.bus_name, aref.path
+                ),
+            )
         })?;
         Ok(Some(
             words
@@ -806,10 +782,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         proxy
             .get_property::<String>("Description")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Get Description property failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("Get Description property failed: {}", e)))
     }
 
     /// Get children via the GetChildren method.
@@ -825,9 +798,8 @@ impl LinuxProvider {
             }
         })?;
         let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetChildren deserialize failed: {}", e),
+            reply.body().deserialize().map_err(|e| {
+                Error::platform(-1, format!("GetChildren deserialize failed: {}", e))
             })?;
         Ok(children
             .into_iter()
@@ -857,17 +829,11 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = proxy
             .call_method("GetState", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetState failed: {}", e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("GetState failed: {}", e)))?;
         reply
             .body()
             .deserialize::<Vec<u32>>()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetState deserialize failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("GetState deserialize failed: {}", e)))
     }
 
     /// `GetRole` for the shell scan, separating "the peer left the bus" from
@@ -880,21 +846,13 @@ impl LinuxProvider {
         let reply = match proxy.call_method("GetRole", &()) {
             Ok(reply) => reply,
             Err(e) if is_peer_gone(&e) => return Ok(None),
-            Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("GetRole failed: {}", e),
-                })
-            }
+            Err(e) => return Err(Error::platform(-1, format!("GetRole failed: {}", e))),
         };
         reply
             .body()
             .deserialize::<u32>()
             .map(Some)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRole deserialize failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("GetRole deserialize failed: {}", e)))
     }
 
     /// `GetAttributes` for the shell scan.
@@ -922,23 +880,20 @@ impl LinuxProvider {
                 return Err(self.unresponsive_peer(aref, "Accessible.GetAttributes"))
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                return Err(Error::platform(
+                    -1,
+                    format!(
                         "GetAttributes on {}{} failed: {e}",
                         aref.bus_name, aref.path
                     ),
-                })
+                ))
             }
         };
         reply
             .body()
             .deserialize::<HashMap<String, String>>()
             .map(|a| Some(Some(a)))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetAttributes deserialize failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("GetAttributes deserialize failed: {}", e)))
     }
 
     /// Return true if the element reports the AT-SPI MULTI_LINE state.
@@ -1015,15 +970,11 @@ impl LinuxProvider {
         // coord_type 0 = screen coordinates
         let reply = proxy
             .call_method("GetExtents", &(0u32,))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetExtents failed: {e}"),
-            })?;
-        let (x, y, w, h): (i32, i32, i32, i32) =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetExtents deserialize failed: {e}"),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("GetExtents failed: {e}")))?;
+        let (x, y, w, h): (i32, i32, i32, i32) = reply
+            .body()
+            .deserialize()
+            .map_err(|e| Error::platform(-1, format!("GetExtents deserialize failed: {e}")))?;
         // AT-SPI screen extents are physical device pixels. Convert to logical
         // coordinates (the cross-platform contract, same space as the
         // screenshot/input layers) using the detected display scale. On the
@@ -1070,10 +1021,7 @@ impl LinuxProvider {
                         &format!("Application.{property}"),
                     )
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!("Application.{property} on {bus}: {e}"),
-                    }
+                    Error::platform(-1, format!("Application.{property} on {bus}: {e}"))
                 }
             })
         };
@@ -1126,23 +1074,24 @@ impl LinuxProvider {
                 if is_timeout(&e) {
                     self.unresponsive_peer(aref, "Component.GetExtents")
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!(
+                    Error::platform(
+                        -1,
+                        format!(
                             "GetExtents(WINDOW) on {}{} failed: {e}",
                             aref.bus_name, aref.path
                         ),
-                    }
+                    )
                 }
             })?;
-        let (x, y, w, h): (i32, i32, i32, i32) =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!(
+        let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!(
                     "GetExtents(WINDOW) deserialize failed for {}{}: {e}",
                     aref.bus_name, aref.path
                 ),
-            })?;
+            )
+        })?;
         // Sentinel extents carry no position to offset.
         let Some(window_rect) = extents_to_rect(x, y, w, h) else {
             return Ok(None);
@@ -1150,13 +1099,15 @@ impl LinuxProvider {
         let origin = self.gtk4_window_origin(aref)?;
         gtk4_window_rect_to_screen(window_rect, origin, crate::scale::coordinate_scale())
             .map(Some)
-            .ok_or_else(|| Error::Platform {
-                code: -1,
-                message: format!(
-                    "GTK 4 extents ({x}, {y}) of {}{} overflow when offset by the window \
+            .ok_or_else(|| {
+                Error::platform(
+                    -1,
+                    format!(
+                        "GTK 4 extents ({x}, {y}) of {}{} overflow when offset by the window \
                      origin {origin:?}",
-                    aref.bus_name, aref.path
-                ),
+                        aref.bus_name, aref.path
+                    ),
+                )
             })
     }
 
@@ -1164,15 +1115,16 @@ impl LinuxProvider {
     /// turning its WINDOW coordinates into screen ones. An error, saying
     /// why, when the window cannot be identified uniquely.
     fn gtk4_window_origin(&self, aref: &AccessibleRef) -> Result<(i32, i32)> {
-        self.gtk4_window_origin_or_reason(aref)
-            .map_err(|reason| Error::Platform {
-                code: -1,
-                message: format!(
+        self.gtk4_window_origin_or_reason(aref).map_err(|reason| {
+            Error::platform(
+                -1,
+                format!(
                     "no screen bounds for GTK 4 object {}{}: its window's screen origin is \
                      unknown: {reason}",
                     aref.bus_name, aref.path
                 ),
-            })
+            )
+        })
     }
 
     /// [`Self::gtk4_window_origin`], saying why when there is none.
@@ -1207,15 +1159,11 @@ impl LinuxProvider {
     /// cannot be read, so "unknown" never reads as "absent".
     fn root_exports_application(&self, bus: &str) -> Result<bool> {
         let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.freedesktop.DBus.Introspectable")?;
-        let reply = proxy
-            .call_method("Introspect", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"),
-            })?;
-        let xml: String = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"),
+        let reply = proxy.call_method("Introspect", &()).map_err(|e| {
+            Error::platform(-1, format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"))
+        })?;
+        let xml: String = reply.body().deserialize().map_err(|e| {
+            Error::platform(-1, format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"))
         })?;
         Ok(introspection_lists_interface(
             &xml,
@@ -1302,13 +1250,13 @@ impl LinuxProvider {
             if is_timeout(&e) {
                 self.unresponsive_peer(aref, "Action.NActions/GetName")
             } else {
-                Error::Platform {
-                    code: -1,
-                    message: format!(
+                Error::platform(
+                    -1,
+                    format!(
                         "reading the actions of {}{} failed: {e}",
                         aref.bus_name, aref.path
                     ),
-                }
+                )
             }
         })
     }
@@ -1330,12 +1278,10 @@ impl LinuxProvider {
                 },
                 "Application.ToolkitName",
             )),
-            Err(e) => Err(Error::Platform {
-                code: -1,
-                message: format!(
-                    "reading Application.ToolkitName of {bus} to {purpose} failed: {e}"
-                ),
-            }),
+            Err(e) => Err(Error::platform(
+                -1,
+                format!("reading Application.ToolkitName of {bus} to {purpose} failed: {e}"),
+            )),
         }
     }
 
@@ -2077,10 +2023,10 @@ impl LinuxProvider {
     fn read_ancestor_facts(&self, aref: &AccessibleRef) -> Result<AncestorFacts> {
         let (bits, read_ok) = self.state_bits(aref);
         if !read_ok {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("GetState on {}{} failed", aref.bus_name, aref.path),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("GetState on {}{} failed", aref.bus_name, aref.path),
+            ));
         }
         let iconified = bits & ATSPI_ICONIFIED != 0;
         let drawn = atspi_visible(bits);
@@ -2143,24 +2089,26 @@ impl LinuxProvider {
                         xa11y_core::StaleReason::Removed,
                         format!("{}{}", aref.bus_name, aref.path),
                     )
+                } else if is_timeout(&e) {
+                    self.unresponsive_peer(aref, "Accessible.Parent")
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!("Get Parent property failed: {}", e),
-                    }
+                    Error::platform(
+                        -1,
+                        format!(
+                            "Get Parent property of {}{} failed: {e}",
+                            aref.bus_name, aref.path
+                        ),
+                    )
                 }
             })?;
         // The reply is a Variant containing (so) — a struct of (bus_name, object_path)
-        let variant: zbus::zvariant::OwnedValue =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Parent deserialize variant failed: {}", e),
-            })?;
+        let variant: zbus::zvariant::OwnedValue = reply.body().deserialize().map_err(|e| {
+            Error::platform(-1, format!("Parent deserialize variant failed: {}", e))
+        })?;
         let (bus, path): (String, zbus::zvariant::OwnedObjectPath) =
             zbus::zvariant::Value::from(variant).try_into().map_err(
-                |e: zbus::zvariant::Error| Error::Platform {
-                    code: -1,
-                    message: format!("Parent deserialize struct failed: {}", e),
+                |e: zbus::zvariant::Error| {
+                    Error::platform(-1, format!("Parent deserialize struct failed: {}", e))
                 },
             )?;
         Ok(AccessibleRef {
@@ -2376,21 +2324,29 @@ impl LinuxProvider {
     /// anything (issue #491). Its parent stops counting it at once, so that is
     /// the check, at constant cost whatever the number of siblings:
     /// `GetIndexInParent`, then the parent's `GetChildAtIndex` at that index
-    /// must be this object. An index of -1 cannot be cross-checked (Qt
-    /// reports it for live popups), so there the object's own state decides:
-    /// `DEFUNCT` or an empty state set is stale. A parent that
-    /// `MANAGES_DESCENDANTS` (large tables and tree views) does not keep its
-    /// children as live objects, so there only the object's own `DEFUNCT`
-    /// state is consulted.
+    /// must be this object. A parent that `MANAGES_DESCENDANTS` (large tables
+    /// and tree views) does not keep its children as live objects, so there
+    /// only the object's own `DEFUNCT` state is consulted.
     ///
-    /// A top-level object (a window whose parent is the application root, or
-    /// an application whose parent is the registry root) has nothing to be
-    /// detached from and passes. A *null* parent is not top-level: it is what
-    /// GTK 3 reports for a destroyed widget, window included (issue #586),
-    /// alongside `GetIndexInParent` -1 and an empty state set, while every
-    /// live object keeps a parent link up to the application root. An object
-    /// or parent that is already gone is stale too; any other failure is
-    /// returned.
+    /// Where there is nothing to cross-check, the object's own state
+    /// decides: `DEFUNCT` or an empty state set is stale, any other state set
+    /// is live. That covers two shapes:
+    ///
+    /// - an index of -1, which Qt reports for live popups;
+    /// - a *null* parent. GTK 3 reports one for a destroyed widget, window
+    ///   included (issue #586), together with an empty state set, so the
+    ///   state read still catches it. It is also the valid AT-SPI shape of a
+    ///   top-level object on some adapters (`ensure_top_level_window_target`
+    ///   accepts it), so a null parent alone is not removal.
+    ///
+    /// The application object itself (`APP_ROOT_PATH` on the application's
+    /// bus) is never detached from anything, and some adapters answer its
+    /// `Parent` with the null reference rather than the registry, so it
+    /// passes without a parent read; an application that has gone fails the
+    /// call that follows. A top-level object whose parent is a root (a
+    /// window under the application root, an application under the registry
+    /// root) passes too. An object or parent that is already gone is stale;
+    /// any other failure is returned.
     ///
     /// Every Linux path that acts on an element runs this first: `DoAction`,
     /// `GrabFocus` (`focus`, `activate`), `Value` writes, `EditableText`
@@ -2404,15 +2360,25 @@ impl LinuxProvider {
                 format!("{}{}", aref.bus_name, aref.path),
             )
         };
+        // No parent or index to cross-check against: the object's own state
+        // decides. A removed object is `DEFUNCT`, or reports the empty state
+        // set GTK 3 gives a destroyed widget.
+        let own_state_decides = || match self.scan_state_bits(aref)? {
+            Some(bits) if bits != 0 && bits & DEFUNCT == 0 => Ok(()),
+            _ => Err(stale()),
+        };
+        if aref.path == APP_ROOT_PATH {
+            return Ok(());
+        }
         let parent = match self.read_parent_ref(aref) {
             Ok(parent) => parent,
             Err(Error::ElementStale { .. }) => return Err(stale()),
             Err(e) => return Err(e),
         };
         if parent.is_null() {
-            return Err(stale());
+            return own_state_decides();
         }
-        if parent.path == "/org/a11y/atspi/accessible/root" {
+        if parent.path == APP_ROOT_PATH {
             return Ok(());
         }
         let Some(parent_state) = self.scan_state_bits(&parent)? else {
@@ -2428,16 +2394,9 @@ impl LinuxProvider {
             return Err(stale());
         };
         if index < 0 {
-            // No index to cross-check against the parent. Live objects report
-            // -1 on some toolkits (Qt's popup menus and their items), so -1
-            // alone is not removal: as under MANAGES_DESCENDANTS, the
-            // object's own state decides. A removed object is `DEFUNCT`, or
-            // reports the empty state set GTK 3 gives a destroyed widget
-            // (whose null parent is normally caught above already).
-            return match self.scan_state_bits(aref)? {
-                Some(bits) if bits != 0 && bits & DEFUNCT == 0 => Ok(()),
-                _ => Err(stale()),
-            };
+            // Live objects report -1 on some toolkits (Qt's popup menus and
+            // their items), so -1 alone is not removal.
+            return own_state_decides();
         }
         let Some((bus, path)) = self.attach_call::<(String, zbus::zvariant::OwnedObjectPath)>(
             &parent,
@@ -2454,6 +2413,55 @@ impl LinuxProvider {
         } else {
             Err(stale())
         }
+    }
+
+    /// The top-level windows of `app` that report `ACTIVE`, counting every
+    /// window read into `examined`. Empty when the application left the bus
+    /// mid-scan or its root has no children to give; one that does not
+    /// answer is an error naming it, since skipping it would report "nothing
+    /// focused" when the hung app may be exactly the one in the foreground.
+    fn active_windows(
+        &self,
+        app: &AccessibleRef,
+        examined: &mut usize,
+    ) -> Result<Vec<AccessibleRef>> {
+        // AtspiStateType::ACTIVE = 1 → bit position 1.
+        const ACTIVE: u64 = 1 << 1;
+        let Some(windows) = self.scan_children(app)? else {
+            return Ok(Vec::new());
+        };
+        let mut active = Vec::new();
+        for w in windows
+            .into_iter()
+            .filter(|w| w.path != "/org/a11y/atspi/null")
+        {
+            *examined += 1;
+            if self
+                .scan_state_bits(&w)?
+                .is_some_and(|bits| bits & ACTIVE != 0)
+            {
+                active.push(w);
+            }
+        }
+        Ok(active)
+    }
+
+    /// The foreground application's data, named by its `Name`; `None` when
+    /// it left the bus after its windows were read.
+    fn foreground_app_data(
+        &self,
+        app: &AccessibleRef,
+        pid: Option<u32>,
+    ) -> Result<Option<ElementData>> {
+        let Some(name) = self.read_app_name(app)? else {
+            return Ok(None);
+        };
+        let pid = pid.or_else(|| self.get_app_pid(app));
+        let mut data = self.build_element_data(app, pid);
+        if !name.is_empty() {
+            data.name = Some(name);
+        }
+        Ok(Some(data))
     }
 
     /// One `org.a11y.atspi.Accessible` call for [`Self::ensure_attached`]:
@@ -2477,23 +2485,21 @@ impl LinuxProvider {
                 return Err(self.unresponsive_peer(aref, &format!("Accessible.{method}")))
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("{method} on {}{} failed: {e}", aref.bus_name, aref.path),
-                })
+                return Err(Error::platform(
+                    -1,
+                    format!("{method} on {}{} failed: {e}", aref.bus_name, aref.path),
+                ))
             }
         };
-        reply
-            .body()
-            .deserialize::<R>()
-            .map(Some)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!(
+        reply.body().deserialize::<R>().map(Some).map_err(|e| {
+            Error::platform(
+                -1,
+                format!(
                     "{method} reply from {}{} did not decode: {e}",
                     aref.bus_name, aref.path
                 ),
-            })
+            )
+        })
     }
 
     /// Whether `bus_name` still has an owner on the accessibility bus. A
@@ -2507,17 +2513,13 @@ impl LinuxProvider {
         )?;
         let reply = proxy
             .call_method("NameHasOwner", &(bus_name,))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("NameHasOwner({bus_name}) failed: {e}"),
-            })?;
-        reply
-            .body()
-            .deserialize::<bool>()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("NameHasOwner({bus_name}) reply did not decode: {e}"),
-            })
+            .map_err(|e| Error::platform(-1, format!("NameHasOwner({bus_name}) failed: {e}")))?;
+        reply.body().deserialize::<bool>().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("NameHasOwner({bus_name}) reply did not decode: {e}"),
+            )
+        })
     }
 
     /// The stale error for an object that stopped answering: its process
@@ -2608,19 +2610,18 @@ impl LinuxProvider {
             .collect::<Result<_>>()?;
         let aref = self.get_cached(element.handle)?;
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
-        let reply = proxy
-            .call_method("GetRelationSet", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!(
+        let reply = proxy.call_method("GetRelationSet", &()).map_err(|e| {
+            Error::platform(
+                -1,
+                format!(
                     "GetRelationSet on {}{} failed: {e}",
                     aref.bus_name, aref.path
                 ),
-            })?;
+            )
+        })?;
         let set: Vec<(u32, Vec<(String, zbus::zvariant::OwnedObjectPath)>)> =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRelationSet reply did not decode: {e}"),
+            reply.body().deserialize().map_err(|e| {
+                Error::platform(-1, format!("GetRelationSet reply did not decode: {e}"))
             })?;
         Ok(codes
             .into_iter()
@@ -2653,25 +2654,24 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
         let reply = proxy
             .call_method("DoAction", &(index,))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("DoAction({}) failed: {}", index, e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("DoAction({}) failed: {}", index, e)))?;
         // AT-SPI's DoAction returns a boolean: true means the action ran. A
         // false reply means the provider declined — reporting Ok would let
         // activate()/focus() claim success while the window was never activated.
-        let performed: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("DoAction({}) reply decode failed: {}", index, e),
+        let performed: bool = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("DoAction({}) reply decode failed: {}", index, e),
+            )
         })?;
         if !performed {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
+            return Err(Error::platform(
+                -1,
+                format!(
                     "DoAction({}) returned false; the accessibility provider declined the action",
                     index
                 ),
-            });
+            ));
         }
         Ok(())
     }
@@ -3600,91 +3600,51 @@ impl Provider for LinuxProvider {
     /// state across toolkits. The portable signal is the `ACTIVE` state
     /// (`AtspiStateType::ACTIVE`) set on the foreground *window* (frame): we
     /// enumerate each registered application's top-level children and return
-    /// the first application that owns a window reporting `ACTIVE`.
+    /// an application that owns a window reporting `ACTIVE`.
     ///
     /// More than one application can report an `ACTIVE` window: xfwm4 keeps
     /// one on an off-screen 5x5 window (#680). So when the window manager
-    /// names an active window (`_NET_ACTIVE_WINDOW` on X11), only the
-    /// applications with that window's pid are candidates: the answer is
-    /// one of them or [`Error::SelectorNotMatched`], never another
-    /// application's `ACTIVE` window. Without a window-manager answer
-    /// (Wayland, no EWMH), every application is a candidate.
+    /// names an active window (`_NET_ACTIVE_WINDOW` on X11), the answer is
+    /// the application that owns *that* window, identified by one rule,
+    /// in this order:
     ///
-    /// Returns [`Error::SelectorNotMatched`] when no candidate has an active
-    /// window (no app has the foreground — e.g. focus is on the shell or a
-    /// non-AT-SPI surface). The core reads that as "nothing focused", not a
-    /// failure.
+    /// 1. **By pid.** When the window's `_NET_WM_PID` is the bus-connection
+    ///    pid of one or more AT-SPI applications, only those are candidates,
+    ///    and the answer is the one with an `ACTIVE` window, or none.
+    ///    Another application's `ACTIVE` window is never the answer.
+    /// 2. **By title, only when no application has the pid.** The two pids
+    ///    describe different processes for a Flatpak app (its bus connection
+    ///    is `xdg-dbus-proxy`'s) and an `ssh -X` client (`_NET_WM_PID` is a
+    ///    pid on the remote host), and a window may set no `_NET_WM_PID` at
+    ///    all. Then the owner is the application with an `ACTIVE` top-level
+    ///    window whose name is exactly the window's non-empty
+    ///    `_NET_WM_NAME`, provided exactly one application has one. Zero or
+    ///    several is no answer: a guess between two same-titled windows is
+    ///    the #680 bug again.
+    ///
+    /// Rule 2 never overrides rule 1: when an application has the pid, a
+    /// same-titled `ACTIVE` window elsewhere is not consulted.
+    ///
+    /// A `_NET_ACTIVE_WINDOW` naming a destroyed window (the focused window
+    /// just closed) is no foreground yet. Without a window-manager answer
+    /// (Wayland, no EWMH, window 0), every application is a candidate.
+    ///
+    /// Returns [`Error::SelectorNotMatched`] when no application is
+    /// identified (no app has the foreground — e.g. focus is on the shell or
+    /// a non-AT-SPI surface); its diagnosis says which rule applied and what
+    /// it saw, the pids included when they do not line up. The core reads
+    /// that as "nothing focused", not a failure.
     fn focused_app(&self) -> Result<ElementData> {
-        // AtspiStateType::ACTIVE = 1 → bit position 1.
-        const ACTIVE: u64 = 1 << 1;
-
         let registry = AccessibleRef {
             bus_name: "org.a11y.atspi.Registry".to_string(),
             path: "/org/a11y/atspi/accessible/root".to_string(),
         };
-        let apps = self.get_atspi_children(&registry)?;
-        let active_pid = self.window_manager.active_window_pid()?;
-
-        let mut candidates = 0usize;
-        let mut windows_examined = 0usize;
-        for app in apps.iter().filter(|c| c.path != "/org/a11y/atspi/null") {
-            // The pid is a bus round trip; read it up front only when it
-            // decides candidacy.
-            let known_pid = match active_pid {
-                Some(active) => match self.get_app_pid(app) {
-                    Some(pid) if pid == active => Some(pid),
-                    _ => continue,
-                },
-                None => None,
-            };
-            candidates += 1;
-            // An application that left the bus mid-scan (or whose root has no
-            // children to give) is skipped. One that does not answer is an
-            // error naming it: skipping it would report "nothing focused"
-            // when the hung app may be exactly the one in the foreground.
-            let Some(windows) = self.scan_children(app)? else {
-                continue;
-            };
-            let mut has_active_window = false;
-            for w in windows.iter().filter(|w| w.path != "/org/a11y/atspi/null") {
-                windows_examined += 1;
-                if self
-                    .scan_state_bits(w)?
-                    .is_some_and(|bits| bits & ACTIVE != 0)
-                {
-                    has_active_window = true;
-                    break;
-                }
-            }
-            if has_active_window {
-                let Some(name) = self.read_app_name(app)? else {
-                    // Gone between the state read and now.
-                    continue;
-                };
-                let pid = known_pid.or_else(|| self.get_app_pid(app));
-                let mut data = self.build_element_data(app, pid);
-                if !name.is_empty() {
-                    data.name = Some(name);
-                }
-                return Ok(data);
-            }
-        }
-
-        let observed = match active_pid {
-            Some(pid) => format!(
-                "_NET_ACTIVE_WINDOW names a window of pid {pid}; {candidates} of {} AT-SPI \
-                 applications have that pid, and none of their {windows_examined} top-level \
-                 windows reports ACTIVE (an ACTIVE window of another application is not the \
-                 foreground)",
-                apps.len()
-            ),
-            None => format!(
-                "no window-manager active window; none of the {windows_examined} top-level \
-                 windows of {candidates} AT-SPI applications reports ACTIVE"
-            ),
-        };
-        Err(Error::selector_not_matched("focused application")
-            .diagnose(xa11y_core::Diagnosis::new().last_observed(observed)))
+        let apps: Vec<AccessibleRef> = self
+            .get_atspi_children(&registry)?
+            .into_iter()
+            .filter(|c| c.path != "/org/a11y/atspi/null")
+            .collect();
+        identify_foreground(self, &apps, self.window_manager.active_window()?)
     }
 
     fn press(&self, element: &ElementData) -> Result<()> {
@@ -3743,9 +3703,8 @@ impl Provider for LinuxProvider {
         // decision `activate` documents above (tenet 1).
         let proxy = self
             .make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Component proxy while focusing failed: {}", e),
+            .map_err(|e| {
+                Error::platform(-1, format!("Component proxy while focusing failed: {}", e))
             })?;
         let reply = grab_focus_result(
             proxy.call_method("GrabFocus", &()),
@@ -3753,9 +3712,11 @@ impl Provider for LinuxProvider {
             "focus",
             element.role,
         )?;
-        let grabbed: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Component.GrabFocus reply while focusing failed: {}", e),
+        let grabbed: bool = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("Component.GrabFocus reply while focusing failed: {}", e),
+            )
         })?;
         if grabbed {
             return Ok(());
@@ -3785,11 +3746,9 @@ impl Provider for LinuxProvider {
                     &parent_ref.path,
                     "org.a11y.atspi.Component",
                 )?;
-                p.call_method("GrabFocus", &())
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("Component.GrabFocus on parent failed: {}", e),
-                    })?;
+                p.call_method("GrabFocus", &()).map_err(|e| {
+                    Error::platform(-1, format!("Component.GrabFocus on parent failed: {}", e))
+                })?;
                 return Ok(());
             }
         }
@@ -3900,18 +3859,12 @@ impl Provider for LinuxProvider {
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
         let current: f64 = proxy
             .get_property("CurrentValue")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Value.CurrentValue failed: {}", e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("Value.CurrentValue failed: {}", e)))?;
         let step: f64 = proxy.get_property("MinimumIncrement").unwrap_or(1.0);
         let step = if step <= 0.0 { 1.0 } else { step };
         proxy
             .set_property("CurrentValue", current + step)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Value.SetCurrentValue failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("Value.SetCurrentValue failed: {}", e)))
     }
 
     fn decrement(&self, element: &ElementData) -> Result<()> {
@@ -3925,18 +3878,12 @@ impl Provider for LinuxProvider {
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
         let current: f64 = proxy
             .get_property("CurrentValue")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Value.CurrentValue failed: {}", e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("Value.CurrentValue failed: {}", e)))?;
         let step: f64 = proxy.get_property("MinimumIncrement").unwrap_or(1.0);
         let step = if step <= 0.0 { 1.0 } else { step };
         proxy
             .set_property("CurrentValue", current - step)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Value.SetCurrentValue failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("Value.SetCurrentValue failed: {}", e)))
     }
 
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
@@ -3972,13 +3919,13 @@ impl Provider for LinuxProvider {
                             "Accessible.GetState (probing after Component.ScrollTo answered: {e})"
                         ),
                     )),
-                    Err(probe) => Err(Error::Platform {
-                        code: -1,
-                        message: format!(
+                    Err(probe) => Err(Error::platform(
+                        -1,
+                        format!(
                             "Component.ScrollTo answered {e}; probing GetState to tell a live \
                              object from a destroyed one then failed: {probe}"
                         ),
-                    }),
+                    )),
                 };
             }
             Err(e) if is_timeout(&e) => {
@@ -3996,16 +3943,16 @@ impl Provider for LinuxProvider {
                 return Err(not_supported())
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("Component.ScrollTo failed: {e}"),
-                })
+                return Err(Error::platform(
+                    -1,
+                    format!("Component.ScrollTo failed: {e}"),
+                ))
             }
         };
-        let scrolled: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Component.ScrollTo reply failed: {e}"),
-        })?;
+        let scrolled: bool = reply
+            .body()
+            .deserialize()
+            .map_err(|e| Error::platform(-1, format!("Component.ScrollTo reply failed: {e}")))?;
         // ScrollTo answers false when the adapter declines (ATK's default
         // `scroll_to` does, for a component that does not implement it).
         // Reporting that as success would tell an auto-wait the element was
@@ -4067,9 +4014,11 @@ impl Provider for LinuxProvider {
         }
         let proxy = self
             .make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Component proxy while activating failed: {}", e),
+            .map_err(|e| {
+                Error::platform(
+                    -1,
+                    format!("Component proxy while activating failed: {}", e),
+                )
             })?;
         let reply = grab_focus_result(
             proxy.call_method("GrabFocus", &()),
@@ -4077,21 +4026,23 @@ impl Provider for LinuxProvider {
             "activate",
             element.role,
         )?;
-        let grabbed: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Component.GrabFocus reply while activating failed: {}", e),
+        let grabbed: bool = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("Component.GrabFocus reply while activating failed: {}", e),
+            )
         })?;
         if grabbed {
             return Ok(());
         }
-        Err(Error::Platform {
-            code: -1,
-            message: format!(
+        Err(Error::platform(
+            -1,
+            format!(
                 "activate: Component.GrabFocus on window {}{} returned false; the toolkit \
                  declined to activate it",
                 target.bus_name, target.path
             ),
-        })
+        ))
     }
 
     fn minimize(&self, element: &ElementData) -> Result<()> {
@@ -4138,15 +4089,17 @@ impl Provider for LinuxProvider {
                         role: element.role,
                     }
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!("Component.SetPosition while moving window failed: {e}"),
-                    }
+                    Error::platform(
+                        -1,
+                        format!("Component.SetPosition while moving window failed: {e}"),
+                    )
                 }
             })?;
-        let moved: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Component.SetPosition reply while moving window failed: {e}"),
+        let moved: bool = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("Component.SetPosition reply while moving window failed: {e}"),
+            )
         })?;
         if moved {
             Ok(())
@@ -4187,15 +4140,17 @@ impl Provider for LinuxProvider {
                         role: element.role,
                     }
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!("Component.SetSize while resizing window failed: {e}"),
-                    }
+                    Error::platform(
+                        -1,
+                        format!("Component.SetSize while resizing window failed: {e}"),
+                    )
                 }
             })?;
-        let resized: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Component.SetSize reply while resizing window failed: {e}"),
+        let resized: bool = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("Component.SetSize reply while resizing window failed: {e}"),
+            )
         })?;
         if resized {
             Ok(())
@@ -4260,15 +4215,15 @@ impl Provider for LinuxProvider {
             if is_timeout(&e) {
                 self.unresponsive_peer(&target, "Value.CurrentValue (set)")
             } else {
-                Error::Platform {
-                    code: -1,
-                    message: format!(
+                Error::platform(
+                    -1,
+                    format!(
                         "setting Value.CurrentValue to {value} on {} ({}{}) failed: {e}",
                         xa11y_core::error::stale_subject(element),
                         target.bus_name,
                         target.path
                     ),
-                }
+                )
             }
         })
     }
@@ -4299,13 +4254,13 @@ impl Provider for LinuxProvider {
                 return Err(self.gone(&target, xa11y_core::error::stale_subject(element)))
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                return Err(Error::platform(
+                    -1,
+                    format!(
                         "reading Text.CaretOffset of {}{} to place type_text failed: {e}",
                         target.bus_name, target.path
                     ),
-                })
+                ))
             }
         };
         // `make_proxy` only builds a local handle and never asks the object
@@ -4447,10 +4402,9 @@ impl Provider for LinuxProvider {
     }
 
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
-        let pid = element.pid.ok_or(Error::Platform {
-            code: -1,
-            message: "Element has no PID for subscribe".to_string(),
-        })?;
+        let pid = element
+            .pid
+            .ok_or(Error::platform(-1, "Element has no PID for subscribe"))?;
         let app_name = element.name.clone().unwrap_or_default();
         crate::events::subscribe_for_pid(self, pid, app_name)
     }
@@ -4530,10 +4484,10 @@ fn grab_focus_result(
         zbus::Error::MethodError(name, _, _) => {
             grab_focus_error(name.as_str().to_string(), verb, action, role)
         }
-        other => Error::Platform {
-            code: -1,
-            message: format!("Component.GrabFocus while {verb} failed: {other}"),
-        },
+        other => Error::platform(
+            -1,
+            format!("Component.GrabFocus while {verb} failed: {other}"),
+        ),
     })
 }
 
@@ -4546,10 +4500,10 @@ fn grab_focus_error(name: String, verb: &str, action: &str, role: Role) -> Error
             role,
         }
     } else {
-        Error::Platform {
-            code: -1,
-            message: format!("Component.GrabFocus while {verb} failed: {name}"),
-        }
+        Error::platform(
+            -1,
+            format!("Component.GrabFocus while {verb} failed: {name}"),
+        )
     }
 }
 
@@ -5102,10 +5056,7 @@ fn children_call_error(err: zbus::Error, aref: &AccessibleRef) -> Error {
             xa11y_core::StaleReason::ProcessExited,
             format!("{}{}", aref.bus_name, aref.path),
         ),
-        _ => Error::Platform {
-            code: -1,
-            message: format!("GetChildren failed: {err}"),
-        },
+        _ => Error::platform(-1, format!("GetChildren failed: {err}")),
     }
 }
 
@@ -5140,20 +5091,20 @@ fn atspi_bool_reply(
     target: &AccessibleRef,
     element: &ElementData,
 ) -> Result<()> {
-    let applied: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-        code: -1,
-        message: format!("{call} reply decode failed: {e}"),
-    })?;
+    let applied: bool = reply
+        .body()
+        .deserialize()
+        .map_err(|e| Error::platform(-1, format!("{call} reply decode failed: {e}")))?;
     if applied {
         Ok(())
     } else {
-        Err(Error::Platform {
-            code: -1,
-            message: format!(
+        Err(Error::platform(
+            -1,
+            format!(
                 "{call} on {} {}{} returned FALSE: the toolkit refused it",
                 element.role, target.bus_name, target.path
             ),
-        })
+        ))
     }
 }
 
@@ -5170,10 +5121,10 @@ pub(crate) fn unknown_after_mutation(e: Error, done: &str) -> Error {
     if e.delivery() == xa11y_core::Delivery::Unknown {
         return e;
     }
-    Error::Platform {
-        code: -1,
-        message: format!("{e}, after {done} had already changed the element"),
-    }
+    Error::platform(
+        -1,
+        format!("{e}, after {done} had already changed the element"),
+    )
 }
 
 /// Map a failed `EditableText` call. A missing member or interface is
@@ -5185,13 +5136,13 @@ fn editable_text_call_error(method: &str, e: zbus::Error, target: &AccessibleRef
     if is_unimplemented(&e) {
         Error::TextValueNotSupported
     } else {
-        Error::Platform {
-            code: -1,
-            message: format!(
+        Error::platform(
+            -1,
+            format!(
                 "EditableText.{method} on {}{} failed: {e}",
                 target.bus_name, target.path
             ),
-        }
+        )
     }
 }
 
@@ -5251,6 +5202,207 @@ where
 fn carry_deadline<T, R>(f: impl Fn(T) -> R + Sync + Send) -> impl Fn(T) -> R + Sync + Send {
     let deadline = xa11y_core::Deadline::current();
     move |item| xa11y_core::Deadline::scope_opt(deadline.clone(), || f(item))
+}
+
+/// The reads [`identify_foreground`] makes, so its rule can be tested
+/// without a bus or a window manager.
+trait ForegroundReads {
+    /// A registered application.
+    type App;
+    /// One of its top-level windows.
+    type Window;
+    /// The application's bus-connection pid.
+    fn app_pid(&self, app: &Self::App) -> Option<u32>;
+    /// Its top-level windows that report `ACTIVE`, counting every window
+    /// read into `examined`.
+    fn active_windows(&self, app: &Self::App, examined: &mut usize) -> Result<Vec<Self::Window>>;
+    /// A window's accessible name; `None` when it is gone.
+    fn window_name(&self, window: &Self::Window) -> Result<Option<String>>;
+    /// The application's data; `None` when it left the bus.
+    fn app_data(&self, app: &Self::App, pid: Option<u32>) -> Result<Option<ElementData>>;
+    /// The application, for a diagnosis.
+    fn describe(&self, app: &Self::App) -> String;
+}
+
+impl ForegroundReads for LinuxProvider {
+    type App = AccessibleRef;
+    type Window = AccessibleRef;
+
+    fn app_pid(&self, app: &AccessibleRef) -> Option<u32> {
+        self.get_app_pid(app)
+    }
+
+    fn active_windows(
+        &self,
+        app: &AccessibleRef,
+        examined: &mut usize,
+    ) -> Result<Vec<AccessibleRef>> {
+        LinuxProvider::active_windows(self, app, examined)
+    }
+
+    fn window_name(&self, window: &AccessibleRef) -> Result<Option<String>> {
+        self.read_app_name(window)
+    }
+
+    fn app_data(&self, app: &AccessibleRef, pid: Option<u32>) -> Result<Option<ElementData>> {
+        self.foreground_app_data(app, pid)
+    }
+
+    fn describe(&self, app: &AccessibleRef) -> String {
+        format!("{}{}", app.bus_name, app.path)
+    }
+}
+
+/// The foreground application among `apps`, given what the window manager
+/// reports as the active window. The rule is documented on
+/// `focused_app` in the `Provider` impl.
+fn identify_foreground<R: ForegroundReads>(
+    reads: &R,
+    apps: &[R::App],
+    active: ActiveWindow,
+) -> Result<ElementData> {
+    let mut windows_examined = 0usize;
+    let not_matched = |observed: String| {
+        Err(Error::selector_not_matched("focused application")
+            .diagnose(xa11y_core::Diagnosis::new().last_observed(observed)))
+    };
+
+    let (window, wm_pid, title) = match active {
+        ActiveWindow::NotReported => {
+            for app in apps {
+                if reads.active_windows(app, &mut windows_examined)?.is_empty() {
+                    continue;
+                }
+                if let Some(data) = reads.app_data(app, None)? {
+                    return Ok(data);
+                }
+            }
+            return not_matched(format!(
+                "no window-manager active window; none of the {windows_examined} top-level \
+                 windows of {} AT-SPI applications reports ACTIVE",
+                apps.len()
+            ));
+        }
+        ActiveWindow::Destroyed { window } => {
+            return not_matched(format!(
+                "_NET_ACTIVE_WINDOW names window {window:#x}, which no longer exists (the \
+                 focused window closed and the window manager has not named another yet)"
+            ));
+        }
+        ActiveWindow::Window { window, pid, title } => (window, pid, title),
+    };
+
+    // Rule 1: by pid.
+    let pids: Vec<(&R::App, Option<u32>)> =
+        apps.iter().map(|app| (app, reads.app_pid(app))).collect();
+    if let Some(wm_pid) = wm_pid {
+        let owners: Vec<_> = pids.iter().filter(|(_, p)| *p == Some(wm_pid)).collect();
+        if !owners.is_empty() {
+            for &&(app, pid) in &owners {
+                if reads.active_windows(app, &mut windows_examined)?.is_empty() {
+                    continue;
+                }
+                if let Some(data) = reads.app_data(app, pid)? {
+                    return Ok(data);
+                }
+            }
+            return not_matched(format!(
+                "_NET_ACTIVE_WINDOW names window {window:#x} of pid {wm_pid}; {} of {} \
+                 AT-SPI applications have that pid, and none of their {windows_examined} \
+                 top-level windows reports ACTIVE (an ACTIVE window of another application \
+                 is not the foreground)",
+                owners.len(),
+                apps.len()
+            ));
+        }
+    }
+
+    // Rule 2: no application has the window's pid, so match by title.
+    let pid_mismatch = format!(
+        "_NET_ACTIVE_WINDOW names window {window:#x} {}, and no AT-SPI application has \
+         that pid (their bus-connection pids: {}). A Flatpak app's bus connection is \
+         xdg-dbus-proxy's and an ssh -X client's _NET_WM_PID is a remote pid, so the pids \
+         need not line up",
+        match wm_pid {
+            Some(pid) => format!("with _NET_WM_PID {pid}"),
+            None => "without a _NET_WM_PID".to_string(),
+        },
+        describe_pids(pids.iter().map(|(_, p)| *p)),
+    );
+    let Some(title) = title else {
+        return not_matched(format!(
+            "{pid_mismatch}; the window has no _NET_WM_NAME to identify its application by \
+             instead"
+        ));
+    };
+    let mut owners = Vec::new();
+    for &(app, pid) in &pids {
+        for w in reads.active_windows(app, &mut windows_examined)? {
+            if reads.window_name(&w)?.as_deref() == Some(title.as_str()) {
+                owners.push((app, pid));
+                break;
+            }
+        }
+    }
+    match owners.as_slice() {
+        [(app, pid)] => {
+            log::debug!(
+                "foreground app identified by title {title:?}: window {window:#x}'s pid \
+                 ({wm_pid:?}) matches no AT-SPI application"
+            );
+            match reads.app_data(app, *pid)? {
+                Some(data) => Ok(data),
+                None => not_matched(format!(
+                    "{pid_mismatch}; the one application with an ACTIVE window titled \
+                     {title:?} ({}) left the bus before it could be read",
+                    reads.describe(app)
+                )),
+            }
+        }
+        [] => not_matched(format!(
+            "{pid_mismatch}; none of the {windows_examined} top-level windows of {} AT-SPI \
+             applications is ACTIVE and titled {title:?}",
+            apps.len()
+        )),
+        several => not_matched(format!(
+            "{pid_mismatch}; {} applications have an ACTIVE window titled {title:?} \
+             (bus-connection pids: {}), so the window's owner is ambiguous",
+            several.len(),
+            describe_pids(several.iter().map(|(_, p)| *p)),
+        )),
+    }
+}
+
+/// The pids of AT-SPI applications for a diagnosis: sorted, deduplicated,
+/// at most 16 listed with a count of the rest, and how many had none.
+fn describe_pids(pids: impl Iterator<Item = Option<u32>>) -> String {
+    const LISTED: usize = 16;
+    let mut known = Vec::new();
+    let mut unknown = 0usize;
+    for pid in pids {
+        match pid {
+            Some(pid) => known.push(pid),
+            None => unknown += 1,
+        }
+    }
+    known.sort_unstable();
+    known.dedup();
+    let mut out = known
+        .iter()
+        .take(LISTED)
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if known.len() > LISTED {
+        out.push_str(&format!(" and {} more", known.len() - LISTED));
+    }
+    if out.is_empty() {
+        out.push_str("none");
+    }
+    if unknown > 0 {
+        out.push_str(&format!("; {unknown} without a resolvable pid"));
+    }
+    out
 }
 
 /// Whether a failed D-Bus call is the connection's method timeout expiring
@@ -5444,17 +5596,17 @@ fn is_absent_member(err: &zbus::Error) -> bool {
 fn classify_failure(app: &ElementData, top: &AccessibleRef, err: Error) -> Error {
     let name = app.name.as_deref().unwrap_or("<unnamed>");
     let pid = app.pid.map(|p| format!(" pid={p}")).unwrap_or_default();
-    Error::Platform {
-        code: match &err {
+    Error::platform(
+        match &err {
             Error::Platform { code, .. } => *code,
             _ => -1,
         },
-        message: format!(
+        format!(
             "could not classify top-level {} of application \"{name}\"{pid} as a shell \
              surface: {err}",
             top.path
         ),
-    }
+    )
 }
 
 /// Map an AT-SPI2 action name to its canonical `snake_case` xa11y action name.
@@ -5513,6 +5665,218 @@ pub(crate) fn refine_menu_role(role: Role, actions: &[String]) -> Role {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── focused_app: which application owns the active window ────────────
+
+    /// One registered application: its name, bus-connection pid, and the
+    /// names of its ACTIVE top-level windows.
+    struct FakeApp {
+        name: &'static str,
+        pid: Option<u32>,
+        active: Vec<&'static str>,
+    }
+
+    struct FakeRegistry(Vec<FakeApp>);
+
+    impl ForegroundReads for FakeRegistry {
+        type App = usize;
+        type Window = &'static str;
+
+        fn app_pid(&self, app: &usize) -> Option<u32> {
+            self.0[*app].pid
+        }
+
+        fn active_windows(&self, app: &usize, examined: &mut usize) -> Result<Vec<&'static str>> {
+            *examined += self.0[*app].active.len();
+            Ok(self.0[*app].active.clone())
+        }
+
+        fn window_name(&self, window: &&'static str) -> Result<Option<String>> {
+            Ok(Some((*window).to_string()))
+        }
+
+        fn app_data(&self, app: &usize, pid: Option<u32>) -> Result<Option<ElementData>> {
+            let mut data = ElementData::for_role(Role::Application);
+            data.name = Some(self.0[*app].name.to_string());
+            data.pid = pid;
+            Ok(Some(data))
+        }
+
+        fn describe(&self, app: &usize) -> String {
+            self.0[*app].name.to_string()
+        }
+    }
+
+    fn foreground(registry: &FakeRegistry, active: ActiveWindow) -> Result<ElementData> {
+        let apps: Vec<usize> = (0..registry.0.len()).collect();
+        identify_foreground(registry, &apps, active)
+    }
+
+    fn active_x11(pid: Option<u32>, title: Option<&str>) -> ActiveWindow {
+        ActiveWindow::Window {
+            window: 0x1a00003,
+            pid,
+            title: title.map(str::to_string),
+        }
+    }
+
+    fn observed(err: &Error) -> String {
+        assert!(matches!(err, Error::SelectorNotMatched { .. }), "{err:?}");
+        err.diagnosis()
+            .and_then(|d| d.last_observed.clone())
+            .unwrap_or_default()
+    }
+
+    /// #680: xfwm4's off-screen window keeps another application ACTIVE.
+    /// When an application has the active window's pid, only it can be the
+    /// answer, and a same-titled ACTIVE window elsewhere is not consulted.
+    #[test]
+    fn foreground_by_pid_ignores_other_applications_active_windows() {
+        let registry = FakeRegistry(vec![
+            FakeApp {
+                name: "xfwm4",
+                pid: Some(10),
+                active: vec!["Editor"],
+            },
+            FakeApp {
+                name: "editor",
+                pid: Some(20),
+                active: vec!["Editor"],
+            },
+        ]);
+        let app = foreground(&registry, active_x11(Some(20), Some("Editor"))).expect("by pid");
+        assert_eq!(app.name.as_deref(), Some("editor"));
+        assert_eq!(app.pid, Some(20));
+
+        let idle = FakeRegistry(vec![
+            FakeApp {
+                name: "xfwm4",
+                pid: Some(10),
+                active: vec!["Editor"],
+            },
+            FakeApp {
+                name: "editor",
+                pid: Some(20),
+                active: vec![],
+            },
+        ]);
+        let err = foreground(&idle, active_x11(Some(20), Some("Editor")))
+            .expect_err("the pid's owner has no ACTIVE window");
+        assert!(observed(&err).contains("of pid 20"), "{err:?}");
+    }
+
+    /// A Flatpak app (bus pid is xdg-dbus-proxy's) or an ssh -X client: no
+    /// application has the window's pid, so the ACTIVE window titled like
+    /// the X window identifies the owner.
+    #[test]
+    fn foreground_by_title_when_no_application_has_the_pid() {
+        let registry = FakeRegistry(vec![
+            FakeApp {
+                name: "stray",
+                pid: Some(10),
+                active: vec!["xfwm4 helper"],
+            },
+            FakeApp {
+                name: "flatpak app",
+                pid: Some(30),
+                active: vec!["Notes"],
+            },
+        ]);
+        let app = foreground(&registry, active_x11(Some(4242), Some("Notes"))).expect("by title");
+        assert_eq!(app.name.as_deref(), Some("flatpak app"));
+        // A window without _NET_WM_PID is matched the same way.
+        let app = foreground(&registry, active_x11(None, Some("Notes"))).expect("no pid");
+        assert_eq!(app.name.as_deref(), Some("flatpak app"));
+    }
+
+    /// When the pids do not line up and the title does not single out one
+    /// application, nothing is guessed, and the diagnosis says why with the
+    /// pids involved.
+    #[test]
+    fn foreground_mismatched_pid_without_a_unique_title_is_explained() {
+        let registry = FakeRegistry(vec![
+            FakeApp {
+                name: "a",
+                pid: Some(10),
+                active: vec!["Untitled"],
+            },
+            FakeApp {
+                name: "b",
+                pid: Some(30),
+                active: vec!["Untitled"],
+            },
+            FakeApp {
+                name: "c",
+                pid: None,
+                active: vec![],
+            },
+        ]);
+        let ambiguous = observed(
+            &foreground(&registry, active_x11(Some(4242), Some("Untitled")))
+                .expect_err("two same-titled windows"),
+        );
+        for needle in [
+            "_NET_WM_PID 4242",
+            "10, 30",
+            "1 without a resolvable pid",
+            "ambiguous",
+        ] {
+            assert!(ambiguous.contains(needle), "{needle}: {ambiguous}");
+        }
+        let unmatched = observed(
+            &foreground(&registry, active_x11(Some(4242), Some("Terminal")))
+                .expect_err("no ACTIVE window has the title"),
+        );
+        assert!(
+            unmatched.contains("_NET_WM_PID 4242") && unmatched.contains("\"Terminal\""),
+            "{unmatched}"
+        );
+        let untitled =
+            observed(&foreground(&registry, active_x11(Some(4242), None)).expect_err("no title"));
+        assert!(untitled.contains("no _NET_WM_NAME"), "{untitled}");
+    }
+
+    /// A destroyed active window is no foreground yet; without a window
+    /// manager answer any application's ACTIVE window is.
+    #[test]
+    fn foreground_without_a_usable_active_window() {
+        let registry = FakeRegistry(vec![
+            FakeApp {
+                name: "idle",
+                pid: Some(10),
+                active: vec![],
+            },
+            FakeApp {
+                name: "busy",
+                pid: Some(20),
+                active: vec!["Main"],
+            },
+        ]);
+        let gone = observed(
+            &foreground(&registry, ActiveWindow::Destroyed { window: 0x1a00003 })
+                .expect_err("destroyed"),
+        );
+        assert!(
+            gone.contains("0x1a00003") && gone.contains("no longer exists"),
+            "{gone}"
+        );
+        let app = foreground(&registry, ActiveWindow::NotReported).expect("any ACTIVE window");
+        assert_eq!(app.name.as_deref(), Some("busy"));
+    }
+
+    #[test]
+    fn describe_pids_is_sorted_bounded_and_counts_unknowns() {
+        assert_eq!(
+            describe_pids([None].into_iter()),
+            "none; 1 without a resolvable pid"
+        );
+        assert_eq!(
+            describe_pids([Some(3), Some(1), Some(3)].into_iter()),
+            "1, 3"
+        );
+        let many = describe_pids((0..20).map(Some));
+        assert!(many.ends_with("15 and 4 more"), "{many}");
+    }
 
     // ── #486 / #493: EditableText writes ─────────────────────────────────
 
@@ -5609,10 +5973,7 @@ mod tests {
             "{e:?}"
         );
         // Already-unknown errors are untouched.
-        let platform = Error::Platform {
-            code: 7,
-            message: "x".into(),
-        };
+        let platform = Error::platform(7, "x");
         assert!(matches!(
             unknown_after_mutation(platform, "DeleteText"),
             Error::Platform { code: 7, .. }
@@ -6767,6 +7128,33 @@ mod tests {
                 .expect("gtk3 zombie")
                 .serve_at("/gtk3_zombie", action(&server_calls))
                 .expect("gtk3 zombie action")
+                // A live top-level object whose adapter answers the null
+                // reference for its Parent: its own state set says it lives.
+                .serve_at(
+                    "/null_parent_frame",
+                    peer("/org/a11y/atspi/null", vec![], -1, VISIBLE),
+                )
+                .expect("null-parent frame")
+                .serve_at("/null_parent_frame", action(&server_calls))
+                .expect("null-parent frame action")
+                // A null parent and DEFUNCT: removed.
+                .serve_at(
+                    "/null_parent_defunct",
+                    peer("/org/a11y/atspi/null", vec![], -1, VISIBLE | DEFUNCT),
+                )
+                .expect("null-parent defunct")
+                .serve_at("/null_parent_defunct", action(&server_calls))
+                .expect("null-parent defunct action")
+                // The application object, whose Parent Qt answers with the
+                // null reference: it passes without a parent or state read
+                // (this one reports neither a parent nor any state).
+                .serve_at(
+                    "/org/a11y/atspi/accessible/root",
+                    peer("/org/a11y/atspi/null", vec![], -1, 0),
+                )
+                .expect("app root")
+                .serve_at("/org/a11y/atspi/accessible/root", action(&server_calls))
+                .expect("app root action")
                 // A top-level window: its parent is the application root.
                 .serve_at(
                     "/window",
@@ -6828,6 +7216,7 @@ mod tests {
         );
         for path in [
             "/gtk3_zombie",
+            "/null_parent_defunct",
             "/usurped",
             "/dead_cell",
             "/defunct",
@@ -6862,6 +7251,16 @@ mod tests {
             .do_atspi_action_by_index(&at("/qt_popup_item"), 0)
             .expect("a live object with index -1 acts");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        // A null parent is not removal on its own: a live state set acts.
+        provider
+            .do_atspi_action_by_index(&at("/null_parent_frame"), 0)
+            .expect("a live object with a null parent acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+        // The application object is never detached.
+        provider
+            .do_atspi_action_by_index(&at("/org/a11y/atspi/accessible/root"), 0)
+            .expect("the application object acts");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6);
     }
 
     /// Accessible half of the `scroll_into_view` fixture: answers `GetState`,
@@ -7384,12 +7783,9 @@ mod tests {
         let err = classify_failure(
             &app,
             &top,
-            Error::Platform {
-                code: -1,
-                message: "GetRole failed: connection closed".to_string(),
-            },
+            Error::platform(-1, "GetRole failed: connection closed"),
         );
-        let Error::Platform { code, message } = err else {
+        let Error::Platform { code, message, .. } = err else {
             panic!("a D-Bus failure must stay a platform error");
         };
         assert_eq!(code, -1);
@@ -7412,14 +7808,7 @@ mod tests {
             bus_name: ":1.9".to_string(),
             path: "/org/a11y/atspi/accessible/3".to_string(),
         };
-        let err = classify_failure(
-            &app,
-            &top,
-            Error::Platform {
-                code: -1,
-                message: "GetAttributes failed".to_string(),
-            },
-        );
+        let err = classify_failure(&app, &top, Error::platform(-1, "GetAttributes failed"));
         let msg = err.to_string();
         assert!(msg.contains("<unnamed>"), "{msg}");
         assert!(msg.contains("/org/a11y/atspi/accessible/3"), "{msg}");
@@ -8354,12 +8743,7 @@ mod tests {
 
         // A failed reconnect is returned as-is, and the next call retries.
         let err = provider
-            .connection_with(|| {
-                Err(Error::Platform {
-                    code: -1,
-                    message: "bus still down".into(),
-                })
-            })
+            .connection_with(|| Err(Error::platform(-1, "bus still down")))
             .expect_err("reconnect failure surfaces");
         assert!(err.to_string().contains("bus still down"));
 
@@ -8620,10 +9004,7 @@ mod tests {
                 climb_peer("/org/a11y/atspi/null", ROLE_SCROLL_PANE, CLIMB_DRAWN),
             ),
         ]);
-        let unreadable = Err(Error::Platform {
-            code: -1,
-            message: "GetExtents failed".into(),
-        });
+        let unreadable = Err(Error::platform(-1, "GetExtents failed"));
         assert_eq!(climb_reason(&provider, unreadable), HiddenReason::Unknown);
 
         // A parent that is not served at all fails its reads.

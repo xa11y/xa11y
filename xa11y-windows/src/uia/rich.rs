@@ -14,10 +14,10 @@ fn property(element: &IUIAutomationElement, id: UIA_PROPERTY_ID) -> Result<Optio
     use windows::Win32::System::Variant::VT_I4;
     if unsafe { value.Anonymous.Anonymous.vt } == VT_I4 {
         Ok(Some(i32::try_from(&value).map_err(|e| {
-            Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("reading cached UIA property {id:?}: {e}"),
-            }
+            Error::platform(
+                e.code().0 as i64,
+                format!("reading cached UIA property {id:?}: {e}"),
+            )
         })?))
     } else {
         // UIA's reserved NotSupported value is VT_UNKNOWN.
@@ -32,9 +32,11 @@ fn property(element: &IUIAutomationElement, id: UIA_PROPERTY_ID) -> Result<Optio
 fn non_negative(e: &IUIAutomationElement, id: UIA_PROPERTY_ID) -> Result<Option<u32>> {
     property(e, id)?
         .map(|n| {
-            u32::try_from(n).map_err(|_| Error::Platform {
-                code: 0,
-                message: format!("UIA property {id:?} returned negative value {n}"),
+            u32::try_from(n).map_err(|_| {
+                Error::platform(
+                    0,
+                    format!("UIA property {id:?} returned negative value {n}"),
+                )
             })
         })
         .transpose()
@@ -241,9 +243,11 @@ impl WindowsProvider {
         let clip = self.walk_inherited_clip(dpi, &fresh)?;
         let host = self.walk_to_host_hwnd(&fresh)?;
         let pid = uia_call(|| unsafe { fresh.CachedProcessId() })?;
-        let pid = u32::try_from(pid).map_err(|_| Error::Platform {
-            code: 0,
-            message: format!("UIA CachedProcessId returned negative value {pid}"),
+        let pid = u32::try_from(pid).map_err(|_| {
+            Error::platform(
+                0,
+                format!("UIA CachedProcessId returned negative value {pid}"),
+            )
         })?;
         self.build_element_data_in(dpi, &fresh, Some(pid), host, HostHint::Parent, &clip)
     }
@@ -527,10 +531,7 @@ pub(super) fn attributes(
         font_family: if unsafe { font.Anonymous.Anonymous.vt } == VT_BSTR {
             Some(
                 windows::core::BSTR::try_from(&font)
-                    .map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!("UIA font name: {e}"),
-                    })?
+                    .map_err(|e| Error::platform(e.code().0 as i64, format!("UIA font name: {e}")))?
                     .to_string(),
             )
         } else {
@@ -573,10 +574,10 @@ fn spelling_error(value: &VARIANT) -> Result<Option<bool>> {
     // separately. The exact element type was checked before copying any i32.
     let array = unsafe { value.Anonymous.Anonymous.Anonymous.parray };
     if array.is_null() || unsafe { SafeArrayGetDim(array) } != 1 {
-        return Err(Error::Platform {
-            code: -1,
-            message: "UIA AnnotationTypes must be a one-dimensional i32 array".into(),
-        });
+        return Err(Error::platform(
+            -1,
+            "UIA AnnotationTypes must be a one-dimensional i32 array",
+        ));
     }
     let lower = uia_call(|| unsafe { SafeArrayGetLBound(array, 1) })?;
     let upper = uia_call(|| unsafe { SafeArrayGetUBound(array, 1) })?;

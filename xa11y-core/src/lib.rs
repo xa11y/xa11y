@@ -2,6 +2,9 @@ pub mod app;
 pub mod capabilities;
 pub mod capture;
 pub mod config;
+// Backend plumbing: core opens the deadline, backends read it to bound a
+// native call. Bindings pass a timeout and never see it.
+#[doc(hidden)]
 pub mod deadline;
 pub mod element;
 pub mod error;
@@ -34,9 +37,10 @@ pub use app::App;
 pub use capabilities::{Capabilities, Capability, Platform, Support};
 pub use capture::{
     CancelToken, Capture, CaptureError, CaptureOptions, CaptureStats, CaptureStep, CapturedNode,
-    CapturedText, RelationTarget, Truncation,
+    CapturedRelation, CapturedText, RelationTarget, Truncation,
 };
 pub use config::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
+#[doc(hidden)]
 pub use deadline::{call_timeout, CallTimeout, Deadline};
 pub use element::{
     Element, ElementData, HiddenReason, RawPlatformData, Rect, StateSet, Toggled, TreeNode,
@@ -72,7 +76,7 @@ pub use screenshot::{Screenshot, ScreenshotProvider};
 pub use selector::{Selector, SelectorGroup};
 #[doc(hidden)]
 pub use semantics::LiveRegionParts;
-pub use semantics::{Landmark, LiveRegionInfo, Politeness, RelationKind};
+pub use semantics::{Landmark, LiveRegionInfo, Politeness, Relation, RelationKind};
 pub use shell::{ShellSurface, ShellSurfaceKind};
 pub use table::{CellInfo, CellKind, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
 #[doc(hidden)]

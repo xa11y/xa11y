@@ -246,7 +246,7 @@ fn table_calls_on_a_non_table_are_refused() {
 #[ignore]
 fn text_length_and_reads_are_utf16() {
     let app = fixture();
-    let text = rich_text(&app).text().expect("a text view has Text");
+    let text = rich_text(&app).text();
     // 70 code points, two of them outside the BMP.
     assert_eq!(text.length().expect("length"), 72);
     assert_eq!(text.read_all().expect("read_all"), TEXT);
@@ -259,7 +259,7 @@ fn text_length_and_reads_are_utf16() {
 #[ignore]
 fn text_reads_reject_bad_ranges() {
     let app = fixture();
-    let text = rich_text(&app).text().expect("text");
+    let text = rich_text(&app).text();
     for range in [r(13, 14), r(0, 73)] {
         let e = text.read(range).expect_err("invalid range");
         assert!(
@@ -282,7 +282,7 @@ fn locator_text_resolves_the_element() {
 #[ignore]
 fn find_counts_utf16_and_honours_occurrence_and_within() {
     let app = fixture();
-    let text = rich_text(&app).text().expect("text");
+    let text = rich_text(&app).text();
     assert_eq!(text.find("😀").expect("find"), Some(r(12, 14)));
     assert_eq!(text.find("𝄞").expect("find"), Some(r(49, 51)));
     assert_eq!(text.find("bold").expect("find"), Some(r(15, 19)));
@@ -309,7 +309,7 @@ fn find_counts_utf16_and_honours_occurrence_and_within() {
 #[ignore]
 fn range_at_maps_words_lines_and_characters() {
     let app = fixture();
-    let text = rich_text(&app).text().expect("text");
+    let text = rich_text(&app).text();
     // Inside the surrogate pair: the whole emoji.
     assert_eq!(
         text.range_at(13, TextUnit::Character).expect("char"),
@@ -340,7 +340,7 @@ fn paragraphs_are_unsupported_by_gtk3_text_views() {
     // GtkTextView's ATK adapter answers GetStringAtOffset(PARAGRAPH) with
     // (-1, -1): it has no paragraph boundaries to report.
     let app = fixture();
-    let text = rich_text(&app).text().expect("text");
+    let text = rich_text(&app).text();
     let e = text
         .range_at(0, TextUnit::Paragraph)
         .expect_err("GTK 3 reports no paragraphs");
@@ -351,7 +351,7 @@ fn paragraphs_are_unsupported_by_gtk3_text_views() {
 #[ignore]
 fn lines_page_through_the_text() {
     let app = fixture();
-    let text = rich_text(&app).text().expect("text");
+    let text = rich_text(&app).text();
     let all = text.lines(r(0, 72), 10).expect("lines");
     assert_eq!(all.lines, [r(0, 27), r(27, 56), r(56, 57), r(57, 72)]);
     assert!(!all.truncated);
@@ -373,7 +373,7 @@ fn bounds_are_one_rect_per_line_inside_the_view() {
     let app = fixture();
     let view = rich_text(&app);
     let outer = view.bounds.expect("the text view has bounds");
-    let text = view.text().expect("text");
+    let text = view.text();
 
     let word = text.bounds(r(0, 5)).expect("bounds");
     assert_eq!(word.len(), 1, "{word:?}");
@@ -397,7 +397,7 @@ fn bounds_are_one_rect_per_line_inside_the_view() {
 #[ignore]
 fn runs_report_the_tagged_formatting() {
     let app = fixture();
-    let text = rich_text(&app).text().expect("text");
+    let text = rich_text(&app).text();
     let runs = text.runs(r(0, 72), 50).expect("runs");
     assert!(!runs.truncated);
     let ranges: Vec<TextRange> = runs.runs.iter().map(|run| run.range).collect();
@@ -453,7 +453,7 @@ fn runs_report_the_tagged_formatting() {
 fn select_text_takes_utf16_offsets() {
     let app = fixture();
     let view = rich_text(&app);
-    let text = view.text().expect("text");
+    let text = view.text();
     // A caret belongs to the focused text element (`Text::caret`).
     view.focus().expect("focus the text view");
 
@@ -552,7 +552,7 @@ fn text_edits_and_caret_moves_arrive_as_text_events() {
     let caret = wait_on_edit_view(&sub, "caret", |e| e.kind == EventKind::TextSelectionChanged);
     assert!(caret.text_change.is_none(), "{caret:?}");
     assert_eq!(
-        view.text().expect("text").caret().expect("caret"),
+        view.text().caret().expect("caret"),
         Some(0),
         "the event carries no offset; the caret is read from the element"
     );
@@ -591,12 +591,12 @@ fn text_edits_and_caret_moves_arrive_as_text_events() {
 fn text_on_a_button_is_refused() {
     let app = fixture();
     let button = one(&app, r#"button[name="Plain button"]"#);
-    match button.text() {
+    match button.text().length() {
         Err(Error::ActionNotSupported { action, role }) => {
             assert_eq!(action, "text");
             assert_eq!(role, Role::Button);
         }
-        other => panic!("text() on a button: {other:?}"),
+        other => panic!("text().length() on a button: {other:?}"),
     }
 }
 
@@ -607,13 +607,19 @@ fn text_on_a_button_is_refused() {
 fn capture_formatting_detail_reads_the_same_runs_as_text_runs() {
     let app = fixture();
     let view = rich_text(&app);
-    let direct = view.text().expect("text").runs(r(0, 72), 50).expect("runs");
+    let direct = view.text().runs(r(0, 72), 50).expect("runs");
 
     let cap = view
         .capture(&CaptureOptions::new().max_depth(0).formatting(true))
         .expect("capture");
     assert_eq!(cap.backend, Some("atspi"));
-    assert!(!cap.truncated.any(), "{:?}", cap.truncated);
+    // `max_depth(0)` leaves the view's children unread, so the only cut is
+    // the depth one; the text and its runs were read in full.
+    let t = &cap.truncated;
+    assert!(
+        t.by_depth && !(t.by_nodes || t.by_text || t.by_time || t.by_formatting || t.by_cancel),
+        "{t:?}"
+    );
     let text = cap.nodes[0].text.as_ref().expect("the view has text");
     assert_eq!(text.content, TEXT);
     let runs = text.runs.as_ref().expect("formatting detail reads runs");

@@ -180,6 +180,22 @@ def test_render_diagnosis_names_the_call_a_timeout_cut_short():
     assert "pending" not in render_diagnosis(FakeTimeout("Timeout after 5.0s"))
 
 
+def test_render_diagnosis_says_why_an_element_went_stale():
+    class Stale(xa11y.ElementStaleError):
+        reason = "removed"
+        element = 'button "Save"'
+        delivery = "not_delivered"
+
+    rendered = render_diagnosis(Stale("Element is stale"))
+    assert "Stale diagnosis:" in rendered
+    assert "reason: removed" in rendered
+    assert 'element: button "Save"' in rendered
+    assert "delivery: not_delivered" in rendered
+    # Neither appears on an error that does not set them.
+    assert "reason" not in render_diagnosis(FakeTimeout("Timeout after 5.0s"))
+    assert "element:" not in render_diagnosis(FakeTimeout("Timeout after 5.0s"))
+
+
 def test_render_diagnosis_ignores_foreign_exceptions():
     assert render_diagnosis(ValueError("not an xa11y error")) is None
 

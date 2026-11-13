@@ -39,23 +39,20 @@ mod stub {
     /// fail through their `Result`, never panic. The message names the operation and
     /// the host OS so the failure explains itself (tenet 6).
     fn unavailable(op: &str) -> Error {
-        Error::Platform {
-            code: -1,
-            message: format!(
+        Error::platform(
+            -1,
+            format!(
                 "macOS backend unavailable: `{op}` called on {}",
                 std::env::consts::OS
             ),
-        }
+        )
     }
 
     pub struct MacOSProvider;
 
     impl MacOSProvider {
         pub fn new() -> Result<Self> {
-            Err(Error::Platform {
-                code: -1,
-                message: "macOS backend only available on macOS".to_string(),
-            })
+            Err(Error::platform(-1, "macOS backend only available on macOS"))
         }
     }
 
@@ -64,10 +61,10 @@ mod stub {
 
     impl MacOSInputProvider {
         pub fn new() -> Result<Self> {
-            Err(Error::Platform {
-                code: -1,
-                message: "macOS input backend only available on macOS".to_string(),
-            })
+            Err(Error::platform(
+                -1,
+                "macOS input backend only available on macOS",
+            ))
         }
     }
 
@@ -75,10 +72,10 @@ mod stub {
 
     impl MacOSScreenshot {
         pub fn new() -> Result<Self> {
-            Err(Error::Platform {
-                code: -1,
-                message: "macOS screenshot backend only available on macOS".to_string(),
-            })
+            Err(Error::platform(
+                -1,
+                "macOS screenshot backend only available on macOS",
+            ))
         }
     }
 

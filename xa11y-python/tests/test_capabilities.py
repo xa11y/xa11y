@@ -52,8 +52,8 @@ def test_answers_differ_by_platform():
 def test_lookup_forms():
     caps = xa11y.capabilities("linux")
     assert "event:focus_changed" in caps
-    assert caps.has("event:focus_changed")
-    assert not caps.has("event:nope")
+    assert caps.contains("event:focus_changed")
+    assert not caps.contains("event:nope")
     assert "event:nope" not in caps
     assert 42 not in caps
     assert caps["action:blur"].name == "action:blur"

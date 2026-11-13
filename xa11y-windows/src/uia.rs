@@ -186,9 +186,11 @@ fn ensure_mta_usage() -> Result<()> {
     if HELD.load(Ordering::Acquire) {
         return Ok(());
     }
-    unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() }.map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("CoIncrementMTAUsage failed: {e}"),
+    unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() }.map_err(|e| {
+        Error::platform(
+            e.code().0 as i64,
+            format!("CoIncrementMTAUsage failed: {e}"),
+        )
     })?;
     HELD.store(true, Ordering::Release);
     Ok(())
@@ -246,9 +248,11 @@ impl WindowsProvider {
         // backend — see `crate::dpi` and issue #300.
         crate::dpi::ensure_process_dpi_aware();
         // COM initialization is per thread and not part of the race.
-        ensure_com_initialized().map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("COM initialization failed: {}", e),
+        ensure_com_initialized().map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("COM initialization failed: {}", e),
+            )
         })?;
         ensure_mta_usage()?;
         let automation: IUIAutomation = {
@@ -264,9 +268,11 @@ impl WindowsProvider {
                     windows::Win32::System::Com::CLSCTX_ALL,
                 )
             }
-            .map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("Failed to create IUIAutomation: {}", e),
+            .map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("Failed to create IUIAutomation: {}", e),
+                )
             })?;
             // Before the warm-up, so the first cross-process call is
             // already bounded.
@@ -274,18 +280,22 @@ impl WindowsProvider {
             // The warm-up call is part of the first touch: it is what races
             // when made concurrently, so it runs under the lock too. Its
             // failure is the provider's failure.
-            unsafe { automation.GetRootElement() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("IUIAutomation.GetRootElement warm-up failed: {e}"),
+            unsafe { automation.GetRootElement() }.map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("IUIAutomation.GetRootElement warm-up failed: {e}"),
+                )
             })?;
             UIA_WARMED.store(true, Ordering::Release);
             automation
         };
         let batch_request = create_batch_request(&automation)?;
         let scroll_request = create_scroll_request(&automation)?;
-        let raw_walker = unsafe { automation.RawViewWalker() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("Failed to get RawViewWalker: {}", e),
+        let raw_walker = unsafe { automation.RawViewWalker() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("Failed to get RawViewWalker: {}", e),
+            )
         })?;
 
         Ok(Self {
@@ -446,12 +456,10 @@ impl WindowsProvider {
                 Ok(p) => Some(p),
                 Err(e) if is_pattern_absent(&e) => None,
                 Err(e) => {
-                    return Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!(
-                            "acquiring WindowPattern while building element data failed: {e}"
-                        ),
-                    });
+                    return Err(Error::platform(
+                        e.code().0 as i64,
+                        format!("acquiring WindowPattern while building element data failed: {e}"),
+                    ));
                 }
             }
         } else {
@@ -464,12 +472,12 @@ impl WindowsProvider {
                 Ok(p) => Some(p),
                 Err(e) if is_pattern_absent(&e) => None,
                 Err(e) => {
-                    return Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!(
+                    return Err(Error::platform(
+                        e.code().0 as i64,
+                        format!(
                             "acquiring TransformPattern while building element data failed: {e}"
                         ),
-                    });
+                    ));
                 }
             }
         } else {
@@ -864,13 +872,13 @@ impl WindowsProvider {
                     break;
                 }
                 Err(e) => {
-                    return Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!(
+                    return Err(Error::platform(
+                        e.code().0 as i64,
+                        format!(
                             "walking to the scrolling ancestors \
                              (GetParentElementBuildCache) failed: {e}"
                         ),
-                    })
+                    ))
                 }
             };
             ancestors.push(current.clone());
@@ -882,13 +890,13 @@ impl WindowsProvider {
             }
         }
         if !reached_top {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
+            return Err(Error::platform(
+                -1,
+                format!(
                     "no top of the raw view within {HOST_WINDOW_WALK_LIMIT} ancestors while \
                      finding scroll viewports; the tree is deeper than any real one or cyclic"
                 ),
-            });
+            ));
         }
         ancestors
             .iter()
@@ -921,13 +929,12 @@ impl WindowsProvider {
     fn walk_to_host_hwnd(&self, element: &IUIAutomationElement) -> Result<Option<HWND>> {
         let mut current = element.clone();
         for _ in 0..HOST_WINDOW_WALK_LIMIT {
-            let hwnd =
-                unsafe { current.CurrentNativeWindowHandle() }.map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!(
-                        "CurrentNativeWindowHandle failed while finding the host window: {e}"
-                    ),
-                })?;
+            let hwnd = unsafe { current.CurrentNativeWindowHandle() }.map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("CurrentNativeWindowHandle failed while finding the host window: {e}"),
+                )
+            })?;
             if !hwnd.0.is_null() {
                 return Ok(Some(hwnd));
             }
@@ -936,22 +943,20 @@ impl WindowsProvider {
                 // S_OK with a null parent: the top of the tree.
                 Err(e) if e.code().0 == 0 => return Ok(None),
                 Err(e) => {
-                    return Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!(
-                            "walking to the host window (GetParentElement) failed: {e}"
-                        ),
-                    })
+                    return Err(Error::platform(
+                        e.code().0 as i64,
+                        format!("walking to the host window (GetParentElement) failed: {e}"),
+                    ))
                 }
             };
         }
-        Err(Error::Platform {
-            code: -1,
-            message: format!(
+        Err(Error::platform(
+            -1,
+            format!(
                 "no element with a native window handle within {HOST_WINDOW_WALK_LIMIT} \
                  ancestors; the raw view is deeper than any real tree or cyclic"
             ),
-        })
+        ))
     }
 
     /// Build the per-process Application node Windows lacks natively.
@@ -1007,12 +1012,14 @@ impl WindowsProvider {
                 // last chance for a name and its COM error is the diagnosis,
                 // not an empty title (tenet 1).
                 let title = unsafe { representative.CurrentName() }
-                    .map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!(
-                            "IUIAutomationElement.CurrentName failed for the representative \
+                    .map_err(|e| {
+                        Error::platform(
+                            e.code().0 as i64,
+                            format!(
+                                "IUIAutomationElement.CurrentName failed for the representative \
                              window (pid {pid}): {e}"
-                        ),
+                            ),
+                        )
                     })?
                     .to_string();
                 (title, "window_title", None)
@@ -1185,10 +1192,10 @@ impl WindowsProvider {
             Ok(arr) => arr,
             Err(e) if e.code().is_ok() => return Ok(Vec::new()),
             Err(e) => {
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("listing children (FindAllBuildCache) failed: {e}"),
-                })
+                return Err(Error::platform(
+                    e.code().0 as i64,
+                    format!("listing children (FindAllBuildCache) failed: {e}"),
+                ))
             }
         };
         (0..uia_len(&arr)?).map(|i| uia_get(&arr, i)).collect()
@@ -1270,10 +1277,10 @@ impl WindowsProvider {
         } {
             Ok(el) => Ok(Some(el)),
             Err(e) if e.code().is_ok() => Ok(None),
-            Err(e) => Err(Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("FindFirstBuildCache(ClassName={class}) failed: {e}"),
-            }),
+            Err(e) => Err(Error::platform(
+                e.code().0 as i64,
+                format!("FindFirstBuildCache(ClassName={class}) failed: {e}"),
+            )),
         }
     }
 
@@ -1296,10 +1303,10 @@ impl WindowsProvider {
             Ok(element) => element,
             Err(e) if e.code().is_ok() => return Ok(Vec::new()),
             Err(e) => {
-                return Err(Error::Platform {
-                    code: i64::from(e.code().0),
-                    message: format!("RawViewWalker.GetFirstChildElementBuildCache failed: {e}"),
-                });
+                return Err(Error::platform(
+                    i64::from(e.code().0),
+                    format!("RawViewWalker.GetFirstChildElementBuildCache failed: {e}"),
+                ));
             }
         };
         let mut children = Vec::new();
@@ -1313,14 +1320,14 @@ impl WindowsProvider {
                 Ok(element) => element,
                 Err(e) if e.code().is_ok() => break,
                 Err(e) => {
-                    return Err(Error::Platform {
-                        code: i64::from(e.code().0),
-                        message: format!(
+                    return Err(Error::platform(
+                        i64::from(e.code().0),
+                        format!(
                             "RawViewWalker.GetNextSiblingElementBuildCache failed after {} \
                              desktop child(ren): {e}",
                             children.len()
                         ),
-                    });
+                    ));
                 }
             };
         }
@@ -1348,10 +1355,7 @@ impl WindowsProvider {
             |message: String| format!("GetRuntimeId for element handle {handle}: {message}");
         let sa: *mut SAFEARRAY =
             uia_call(|| unsafe { element.GetRuntimeId() }).map_err(|e| match e {
-                Error::Platform { code, message } => Error::Platform {
-                    code,
-                    message: context(message),
-                },
+                Error::Platform { code, message, .. } => Error::platform(code, context(message)),
                 other => other,
             })?;
         if sa.is_null() {
@@ -1366,19 +1370,19 @@ impl WindowsProvider {
             if dims != 1 {
                 // Already failing; a failed destroy only leaks the array.
                 let _ = SafeArrayDestroy(sa);
-                return Err(Error::Platform {
-                    code: -1,
-                    message: context(format!("expected a 1-D array, got {dims} dimensions")),
-                });
+                return Err(Error::platform(
+                    -1,
+                    context(format!("expected a 1-D array, got {dims} dimensions")),
+                ));
             }
             let count = (*sa).rgsabound[0].cElements as usize;
             let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
             if let Err(e) = SafeArrayAccessData(sa, &mut data_ptr as *mut _) {
                 let _ = SafeArrayDestroy(sa);
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: context(format!("SafeArrayAccessData failed: {e}")),
-                });
+                return Err(Error::platform(
+                    e.code().0 as i64,
+                    context(format!("SafeArrayAccessData failed: {e}")),
+                ));
             }
             let v = if count == 0 || data_ptr.is_null() {
                 Vec::new()
@@ -1541,10 +1545,7 @@ fn retry_transient<T>(f: impl Fn() -> windows::core::Result<T>) -> windows::core
 ///
 /// Any other error is returned immediately.
 fn uia_call<T>(f: impl Fn() -> windows::core::Result<T>) -> Result<T> {
-    retry_transient(f).map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: e.to_string(),
-    })
+    retry_transient(f).map_err(|e| Error::platform(e.code().0 as i64, e.to_string()))
 }
 
 /// HRESULTs that mean the element, or the process serving it, is gone:
@@ -1656,12 +1657,12 @@ fn classified_so_far(surfaces: &[(u8, ShellSurfaceKind, ElementData)]) -> Vec<St
 /// UIA property conditions carry an i32: a `u32` pid above 2^31 would wrap
 /// and silently match nothing (tenet 1), so fail surfaceably instead.
 fn pid_variant(pid: u32) -> Result<VARIANT> {
-    i32::try_from(pid)
-        .map(VARIANT::from)
-        .map_err(|_| Error::Platform {
-            code: -1,
-            message: format!("PID {pid} exceeds the i32 range UIA property conditions accept"),
-        })
+    i32::try_from(pid).map(VARIANT::from).map_err(|_| {
+        Error::platform(
+            -1,
+            format!("PID {pid} exceeds the i32 range UIA property conditions accept"),
+        )
+    })
 }
 
 /// Free-function form of [`WindowsProvider::top_level_windows_of_pid`].
@@ -1698,22 +1699,23 @@ const OS_HUNG_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5)
 /// `CUIAutomation8` always implements `IUIAutomation2`, so a failed cast or
 /// setter is a real platform failure and propagates (tenet 1).
 fn set_uia_timeouts(automation: &IUIAutomation) -> Result<()> {
-    let automation2: IUIAutomation2 =
-        windows::core::Interface::cast(automation).map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("IUIAutomation does not implement IUIAutomation2: {e}"),
-        })?;
+    let automation2: IUIAutomation2 = windows::core::Interface::cast(automation).map_err(|e| {
+        Error::platform(
+            e.code().0 as i64,
+            format!("IUIAutomation does not implement IUIAutomation2: {e}"),
+        )
+    })?;
     unsafe { automation2.SetConnectionTimeout(UIA_CONNECTION_TIMEOUT_MS) }.map_err(|e| {
-        Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("IUIAutomation2.SetConnectionTimeout failed: {e}"),
-        }
+        Error::platform(
+            e.code().0 as i64,
+            format!("IUIAutomation2.SetConnectionTimeout failed: {e}"),
+        )
     })?;
     unsafe { automation2.SetTransactionTimeout(UIA_TRANSACTION_TIMEOUT_MS) }.map_err(|e| {
-        Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("IUIAutomation2.SetTransactionTimeout failed: {e}"),
-        }
+        Error::platform(
+            e.code().0 as i64,
+            format!("IUIAutomation2.SetTransactionTimeout failed: {e}"),
+        )
     })?;
     Ok(())
 }
@@ -1778,10 +1780,10 @@ fn interactive_top_level_windows_owned_by(purpose: &str, owner: Option<u32>) -> 
     }
     let mut state: (Option<u32>, Vec<HWND>) = (owner, Vec::new());
     unsafe { EnumWindows(Some(collect), LPARAM((&raw mut state) as isize)) }.map_err(|e| {
-        Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("EnumWindows failed while {purpose}: {e}"),
-        }
+        Error::platform(
+            e.code().0 as i64,
+            format!("EnumWindows failed while {purpose}: {e}"),
+        )
     })?;
     let mut interactive = Vec::new();
     for hwnd in state.1 {
@@ -1863,7 +1865,7 @@ fn timed<T>(f: impl FnOnce() -> T) -> (T, std::time::Duration) {
 /// error.
 fn uia_timeout_message(err: &Error) -> Option<&str> {
     match err {
-        Error::Platform { code, message } if *code == i64::from(UIA_E_TIMEOUT as i32) => {
+        Error::Platform { code, message, .. } if *code == i64::from(UIA_E_TIMEOUT as i32) => {
             Some(message)
         }
         _ => None,
@@ -2182,10 +2184,9 @@ struct DesktopArray<'a>(&'a IUIAutomationElementArray);
 /// Prefix a platform error's message with what was being read.
 fn reading(what: impl FnOnce() -> String) -> impl FnOnce(Error) -> Error {
     move |e| match e {
-        Error::Platform { code, message } => Error::Platform {
-            code,
-            message: format!("{} failed: {message}", what()),
-        },
+        Error::Platform { code, message, .. } => {
+            Error::platform(code, format!("{} failed: {message}", what()))
+        }
         other => other,
     }
 }
@@ -2489,12 +2490,8 @@ fn native_windows_of_pid_with(
     }
 
     let mut all: Vec<HWND> = Vec::new();
-    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut all) as isize)) }.map_err(|e| {
-        Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("EnumWindows failed: {e}"),
-        }
-    })?;
+    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut all) as isize)) }
+        .map_err(|e| Error::platform(e.code().0 as i64, format!("EnumWindows failed: {e}")))?;
     // App attribution, not raw Win32 ownership: a UWP frame belongs to the
     // app it shows, not to ApplicationFrameHost (issue #497). Non-frames are
     // decided by their native pid; frames are only examined in depth for a
@@ -2625,10 +2622,10 @@ fn has_other_root_ancestor(
             Ok(parent) => parent,
             Err(e) if e.code().is_ok() => return Ok(false),
             Err(e) => {
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("RawViewWalker.GetParentElement failed: {e}"),
-                });
+                return Err(Error::platform(
+                    e.code().0 as i64,
+                    format!("RawViewWalker.GetParentElement failed: {e}"),
+                ));
             }
         };
         for (index, candidate) in candidates.iter().enumerate() {
@@ -2640,10 +2637,10 @@ fn has_other_root_ancestor(
         }
         cursor = parent;
     }
-    Err(Error::Platform {
-        code: -1,
-        message: "UIA parent chain exceeded 256 elements while resolving app roots".into(),
-    })
+    Err(Error::platform(
+        -1,
+        "UIA parent chain exceeded 256 elements while resolving app roots",
+    ))
 }
 
 /// Whether a top-level window can hold anything to interact with: visible,
@@ -2661,17 +2658,21 @@ fn is_interactive_top_level(hwnd: HWND) -> Result<bool> {
     }
     // Cloaking and the rect are both read inside one scope.
     let dpi = &crate::dpi::DpiScope::enter()?;
-    let cloaked = crate::coords::is_cloaked(dpi, hwnd).map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("DwmGetWindowAttribute(DWMWA_CLOAKED) failed for {hwnd:?}: {e}"),
+    let cloaked = crate::coords::is_cloaked(dpi, hwnd).map_err(|e| {
+        Error::platform(
+            e.code().0 as i64,
+            format!("DwmGetWindowAttribute(DWMWA_CLOAKED) failed for {hwnd:?}: {e}"),
+        )
     })?;
     if cloaked {
         return Ok(false);
     }
     // Only emptiness is read here, but GetWindowRect is coordinate-bearing.
-    let rect = crate::coords::window_rect(dpi, hwnd).map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("GetWindowRect failed for {hwnd:?}: {e}"),
+    let rect = crate::coords::window_rect(dpi, hwnd).map_err(|e| {
+        Error::platform(
+            e.code().0 as i64,
+            format!("GetWindowRect failed for {hwnd:?}: {e}"),
+        )
     })?;
     Ok(rect.right > rect.left && rect.bottom > rect.top)
 }
@@ -3031,7 +3032,11 @@ fn build_snapshot_data(
     let class_name = uia_cached_bstr(element, UIA_ClassNamePropertyId);
     let framework = uia_cached_bstr(element, UIA_FrameworkIdPropertyId);
     if control_type == UIA_DocumentControlTypeId {
-        role = uia_document_role(framework.as_deref(), class_name.as_deref());
+        role = uia_document_role(framework.as_deref(), class_name.as_deref(), || {
+            cached_own_hwnd(element)?
+                .map(|hwnd| Ok(window_style(hwnd)? & ES_MULTILINE != 0))
+                .transpose()
+        })?;
     }
 
     // Refine role using AriaRole property for elements that UIA maps ambiguously
@@ -3116,7 +3121,7 @@ fn build_snapshot_data(
             }
         });
 
-    let actions = get_actions(element, role, &patterns)?;
+    let actions = get_actions(element, role, &patterns, states.editable)?;
 
     // Both are in every cache request this is built from (the batch set),
     // so a failed read is a real failure, not "the element has none": UIA
@@ -3276,9 +3281,11 @@ fn build_snapshot_data(
 fn create_scroll_request(automation: &IUIAutomation) -> Result<crate::coords::BoundsCacheRequest> {
     let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
     for prop in SCROLL_PROPERTIES {
-        unsafe { request.AddProperty(*prop) }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("AddProperty({:?}) failed: {e}", prop),
+        unsafe { request.AddProperty(*prop) }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("AddProperty({:?}) failed: {e}", prop),
+            )
         })?;
     }
     let raw_view = uia_call(|| unsafe { automation.CreateTrueCondition() })?;
@@ -3327,15 +3334,19 @@ fn create_cache_request(
     // UIA environment (e.g. COM state corrupted). Propagate rather than
     // silently producing a half-configured cache request (tenet 1).
     for prop in properties {
-        unsafe { request.AddProperty(*prop) }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("AddProperty({:?}) failed: {e}", prop),
+        unsafe { request.AddProperty(*prop) }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("AddProperty({:?}) failed: {e}", prop),
+            )
         })?;
     }
     for pattern in BATCH_PATTERNS {
-        unsafe { request.AddPattern(*pattern) }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("AddPattern({pattern:?}) failed: {e}"),
+        unsafe { request.AddPattern(*pattern) }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("AddPattern({pattern:?}) failed: {e}"),
+            )
         })?;
     }
 
@@ -3469,10 +3480,7 @@ fn value_set_error(e: windows::core::Error, what: &str) -> Error {
     if e.code().0 == UIA_E_INVALIDOPERATION as i32 {
         Error::TextValueNotSupported
     } else {
-        Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("{what} failed: {e}"),
-        }
+        Error::platform(e.code().0 as i64, format!("{what} failed: {e}"))
     }
 }
 
@@ -3518,10 +3526,10 @@ impl std::fmt::Display for ReadSite<'_> {
 
 /// The error [`pattern_read`] reports for a failed read of `what`.
 fn pattern_read_error(site: ReadSite<'_>, what: &str, e: &windows::core::Error) -> Error {
-    Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("reading {what} on {site} failed: {e}"),
-    }
+    Error::platform(
+        e.code().0 as i64,
+        format!("reading {what} on {site} failed: {e}"),
+    )
 }
 
 /// Upper bound on the raw-view walk in [`WindowsProvider::walk_to_host_hwnd`].
@@ -3740,10 +3748,10 @@ fn current_pattern<T: windows::core::Interface>(
     match unsafe { element.GetCurrentPatternAs::<T>(id) } {
         Ok(pattern) => Ok(Some(pattern)),
         Err(e) if is_pattern_absent(&e) => Ok(None),
-        Err(e) => Err(Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("acquiring {what} failed: {e}"),
-        }),
+        Err(e) => Err(Error::platform(
+            e.code().0 as i64,
+            format!("acquiring {what} failed: {e}"),
+        )),
     }
 }
 
@@ -3854,10 +3862,10 @@ fn pattern_acquisition_error(err: &windows::core::Error, verb: &str, role: Role)
             role,
         }
     } else {
-        Error::Platform {
-            code: err.code().0 as i64,
-            message: format!("acquiring pattern for {verb} failed: {err}"),
-        }
+        Error::platform(
+            err.code().0 as i64,
+            format!("acquiring pattern for {verb} failed: {err}"),
+        )
     }
 }
 
@@ -3880,17 +3888,17 @@ fn is_top_level_window_control(element: &IUIAutomationElement) -> Result<bool> {
         Ok(t) => Ok(t == UIA_WindowControlTypeId),
         Err(e) if is_event_subscriber_failure(&e) => {
             let t = retry_transient(|| unsafe { element.CurrentControlType() }).map_err(|e| {
-                Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("reading UIA control type failed: {e}"),
-                }
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("reading UIA control type failed: {e}"),
+                )
             })?;
             Ok(t == UIA_WindowControlTypeId)
         }
-        Err(e) => Err(Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("reading UIA control type failed: {e}"),
-        }),
+        Err(e) => Err(Error::platform(
+            e.code().0 as i64,
+            format!("reading UIA control type failed: {e}"),
+        )),
     }
 }
 
@@ -3964,9 +3972,9 @@ fn bring_to_foreground(hwnd: HWND) -> Result<()> {
     } else {
         ""
     };
-    Err(Error::Platform {
-        code: -1,
-        message: format!(
+    Err(Error::platform(
+        -1,
+        format!(
             "activate: HWND {:#x} \"{}\" did not become the foreground window after {} \
              SetForegroundWindow attempts ({refused} refused outright, the rest accepted but \
              not applied, most likely the foreground lock); in front instead: {in_front}{hung}",
@@ -3974,7 +3982,7 @@ fn bring_to_foreground(hwnd: HWND) -> Result<()> {
             window_text(hwnd),
             FOREGROUND_ATTEMPTS,
         ),
-    })
+    ))
 }
 
 /// A window's title for an error message; empty when it has none or the read fails.
@@ -4016,22 +4024,27 @@ fn value_offset_of_prefix(value: &str, prefix: &str) -> Result<usize> {
 /// The offset is in the ValuePattern value; the range is built in the
 /// TextPattern document, so the document must agree with `value` up to the
 /// caret, or the caret would land somewhere else.
+///
+/// A control that normalises what it is given (a browser `<input>` dropping
+/// newlines or truncating at `maxlength`, a masked or numeric field, a
+/// RichEdit storing `\r` for `\n`) stores something other than `value`, so
+/// the document disagrees with it. The write still landed: the control
+/// accepted it and reformatted it. Then the caret has no position that
+/// corresponds to "after the inserted text", and it is left where the
+/// control put it; this answers [`CaretPlacement::Normalised`] and the
+/// caller reports success. Only a failing COM call is an error.
 fn place_caret_after_write(
     pattern: &IUIAutomationTextPattern,
     value: &str,
     caret: u32,
-) -> Result<()> {
+) -> Result<CaretPlacement> {
     let supported = uia_call(|| unsafe { pattern.SupportedTextSelection() })?;
     if supported == SupportedTextSelection_None {
-        return Ok(());
+        return Ok(CaretPlacement::NoSelection);
     }
     // SetValue can reset the caret and invalidate old ranges.
     let doc = uia_call(|| unsafe { pattern.DocumentRange() })?;
     let document = rich::contents(&doc)?;
-    let wanted = xa11y_core::text_api::TextRange {
-        start: caret,
-        end: caret,
-    };
     let before = xa11y_core::text_api::slice_utf16(
         value,
         xa11y_core::text_api::TextRange {
@@ -4040,16 +4053,27 @@ fn place_caret_after_write(
         },
     )?;
     if !document.starts_with(before.as_str()) {
-        return Err(Error::Platform {
-            code: 0,
-            message: format!(
-                "the TextPattern document does not match the written value up to the caret \
-                 ({caret} UTF-16 units), so the caret has no position in it"
-            ),
-        });
+        return Ok(CaretPlacement::Normalised);
     }
+    let wanted = xa11y_core::text_api::TextRange {
+        start: caret,
+        end: caret,
+    };
     let range = rich::range_in(&doc, &document, wanted)?;
-    uia_call(|| unsafe { range.Select() })
+    uia_call(|| unsafe { range.Select() })?;
+    Ok(CaretPlacement::Placed)
+}
+
+/// What [`place_caret_after_write`] did with the caret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaretPlacement {
+    /// The caret is just after the inserted text.
+    Placed,
+    /// The control has no text selection to place.
+    NoSelection,
+    /// The control stored something other than the written value, so the
+    /// caret is wherever the control put it.
+    Normalised,
 }
 
 /// Locate the caret within a control's TextPattern, as the document text
@@ -4084,36 +4108,41 @@ fn caret_prefix(text_pattern: &IUIAutomationTextPattern) -> Result<Option<String
             return Ok(None)
         }
         Err(e) => {
-            return Err(Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("TextPattern::GetSelection failed: {e}"),
-            })
+            return Err(Error::platform(
+                e.code().0 as i64,
+                format!("TextPattern::GetSelection failed: {e}"),
+            ))
         }
     };
 
-    let selected = unsafe { selection.Length() }.map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("TextRangeArray::Length failed: {e}"),
+    let selected = unsafe { selection.Length() }.map_err(|e| {
+        Error::platform(
+            e.code().0 as i64,
+            format!("TextRangeArray::Length failed: {e}"),
+        )
     })?;
     if selected == 0 {
         return Ok(None);
     }
 
-    let selection_range = unsafe { selection.GetElement(0) }.map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("TextRangeArray::GetElement(0) failed: {}", e),
+    let selection_range = unsafe { selection.GetElement(0) }.map_err(|e| {
+        Error::platform(
+            e.code().0 as i64,
+            format!("TextRangeArray::GetElement(0) failed: {}", e),
+        )
     })?;
 
-    let doc_range = unsafe { text_pattern.DocumentRange() }.map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("TextPattern::DocumentRange failed: {}", e),
+    let doc_range = unsafe { text_pattern.DocumentRange() }.map_err(|e| {
+        Error::platform(
+            e.code().0 as i64,
+            format!("TextPattern::DocumentRange failed: {}", e),
+        )
     })?;
 
     // Clone the document range and clip it so it spans [doc start .. selection start].
     // The length of its text (in Unicode characters) is the caret offset.
-    let prefix = unsafe { doc_range.Clone() }.map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("TextRange::Clone failed: {}", e),
+    let prefix = unsafe { doc_range.Clone() }.map_err(|e| {
+        Error::platform(e.code().0 as i64, format!("TextRange::Clone failed: {}", e))
     })?;
     unsafe {
         prefix.MoveEndpointByRange(
@@ -4122,15 +4151,19 @@ fn caret_prefix(text_pattern: &IUIAutomationTextPattern) -> Result<Option<String
             TextPatternRangeEndpoint_Start,
         )
     }
-    .map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("TextRange::MoveEndpointByRange failed: {}", e),
+    .map_err(|e| {
+        Error::platform(
+            e.code().0 as i64,
+            format!("TextRange::MoveEndpointByRange failed: {}", e),
+        )
     })?;
     let prefix_text = unsafe { prefix.GetText(-1) }
         .map(|s| s.to_string())
-        .map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("TextRange::GetText failed: {}", e),
+        .map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("TextRange::GetText failed: {}", e),
+            )
         })?;
 
     Ok(Some(prefix_text))
@@ -4204,19 +4237,23 @@ impl WindowsProvider {
         // lookup activates AccessKit too. Reacquiring and rebuilding the
         // same cache here adds another cross-process read during UWP window
         // transitions (#670); consume the snapshot we actually enumerated.
-        let hwnd = unsafe { el.CachedNativeWindowHandle() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("reading a top-level window snapshot's native HWND failed: {e}"),
+        let hwnd = unsafe { el.CachedNativeWindowHandle() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("reading a top-level window snapshot's native HWND failed: {e}"),
+            )
         })?;
-        let snapshot_pid = unsafe { el.CachedProcessId() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("reading a top-level window snapshot's process id failed: {e}"),
+        let snapshot_pid = unsafe { el.CachedProcessId() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("reading a top-level window snapshot's process id failed: {e}"),
+            )
         })? as u32;
         if !hwnd.0.is_null() && !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-            return Err(Error::Platform {
-                code: i64::from(UIA_E_ELEMENTNOTAVAILABLE as i32),
-                message: "the enumerated top-level HWND no longer exists".into(),
-            });
+            return Err(Error::platform(
+                i64::from(UIA_E_ELEMENTNOTAVAILABLE as i32),
+                "the enumerated top-level HWND no longer exists",
+            ));
         }
         // Some virtual roots have no HWND property. They remain bound to
         // their UIA object; only an exact app PID can attribute that case.
@@ -4257,13 +4294,13 @@ impl WindowsProvider {
                     }
                 }
                 Err(e) => {
-                    return Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!(
+                    return Err(Error::platform(
+                        e.code().0 as i64,
+                        format!(
                             "CurrentName failed while listing a top-level window of pid {}: {e}",
                             identity.pid
                         ),
-                    });
+                    ));
                 }
             };
         }
@@ -4494,10 +4531,10 @@ impl Provider for WindowsProvider {
         } {
             Ok(parent) => Ok(Some(parent)),
             Err(e) if e.code().is_ok() => Ok(None),
-            Err(e) => Err(Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("GetParentElement of {what} failed: {e}"),
-            }),
+            Err(e) => Err(Error::platform(
+                e.code().0 as i64,
+                format!("GetParentElement of {what} failed: {e}"),
+            )),
         };
         let Some(parent) = parent_of(&uia, "the element")? else {
             return Ok(None);
@@ -4518,12 +4555,12 @@ impl Provider for WindowsProvider {
             return Ok(Some(self.build_synthetic_app_data(pid, &uia)?));
         }
         // Populate snapshot so build_element_data can read Cached* props
-        let parent = self
-            .populate_cache(dpi, &parent)
-            .map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("BuildUpdatedCache failed: {}", e),
-            })?;
+        let parent = self.populate_cache(dpi, &parent).map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("BuildUpdatedCache failed: {}", e),
+            )
+        })?;
         // A windowless child shares its parent's nearest window (an
         // HWND-bearing parent uses its own anyway), so the child's
         // remembered answer serves; a child with its own HWND, or one
@@ -4654,16 +4691,13 @@ impl Provider for WindowsProvider {
                                 surfaces.len()
                             ))
                             .candidates(classified_so_far(&surfaces));
-                        Error::Platform {
-                            code: match &e {
+                        Error::platform(match &e {
                                 Error::Platform { code, .. } => *code,
                                 _ => -1,
-                            },
-                            message: format!(
+                            }, format!(
                                 "probing whether Quick Settings (ControlCenterWindow) is on \
                                  screen failed{diagnosis}"
-                            ),
-                        }
+                            ))
                     })?;
                     if !on_screen {
                         continue;
@@ -4705,24 +4739,28 @@ impl Provider for WindowsProvider {
             // errored is a statement about the call, and reporting it as the
             // former would let a broken cache read look like a shell-owned
             // surface with no owner.
-            let pid = unsafe { el.CachedProcessId() }.map_err(|e| Error::Platform {
-                code: i64::from(e.code().0),
-                message: format!("CachedProcessId failed for the {kind} shell surface: {e}"),
+            let pid = unsafe { el.CachedProcessId() }.map_err(|e| {
+                Error::platform(
+                    i64::from(e.code().0),
+                    format!("CachedProcessId failed for the {kind} shell surface: {e}"),
+                )
             })? as u32;
             // Mirror build_app_window: re-acquire via HWND so the window's
             // UIA provider is activated, then repopulate the snapshot that
             // build_element_data reads. A failure is a real COM failure;
             // falling back to the un-reacquired element would hand back a
             // surface whose provider was never activated (tenet 1).
-            let el = self.reacquire_via_hwnd(&el).map_err(|e| Error::Platform {
-                code: i64::from(e.code().0),
-                message: format!("re-acquiring the {kind} shell surface via HWND failed: {e}"),
+            let el = self.reacquire_via_hwnd(&el).map_err(|e| {
+                Error::platform(
+                    i64::from(e.code().0),
+                    format!("re-acquiring the {kind} shell surface via HWND failed: {e}"),
+                )
             })?;
-            let el = self.populate_cache(dpi, &el).map_err(|e| Error::Platform {
-                code: i64::from(e.code().0),
-                message: format!(
-                    "populating the re-acquired {kind} shell surface cache failed: {e}"
-                ),
+            let el = self.populate_cache(dpi, &el).map_err(|e| {
+                Error::platform(
+                    i64::from(e.code().0),
+                    format!("populating the re-acquired {kind} shell surface cache failed: {e}"),
+                )
             })?;
             let data = self.build_element_data(dpi, &el, (pid != 0).then_some(pid))?;
             surfaces.push((rank, kind, data));
@@ -4843,13 +4881,13 @@ impl Provider for WindowsProvider {
                         self.batch_request.get(dpi),
                     )? {
                         let hwnd = unsafe { el.CachedNativeWindowHandle() }.map_err(|e| {
-                            Error::Platform {
-                                code: e.code().0 as i64,
-                                message: format!(
+                            Error::platform(
+                                e.code().0 as i64,
+                                format!(
                                     "reading the window handle of a window attributed to \
                                          pid {pid} failed: {e}"
                                 ),
-                            }
+                            )
                         })?;
                         if !hwnd.0.is_null() && crate::uwp::is_frame(hwnd) {
                             frame = Some(el);
@@ -4872,10 +4910,10 @@ impl Provider for WindowsProvider {
             }
             Err(e) => {
                 return Err(uia_timeout_as_timeout(
-                    Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!("FindFirstBuildCache(ProcessId={pid}) failed: {e}"),
-                    },
+                    Error::platform(
+                        e.code().0 as i64,
+                        format!("FindFirstBuildCache(ProcessId={pid}) failed: {e}"),
+                    ),
                     elapsed,
                     || format!("a top-level window of pid {pid}"),
                 ));
@@ -4938,10 +4976,10 @@ impl Provider for WindowsProvider {
         // A window whose owner the window manager cannot name (an honest "no
         // owning process", tenet 1 — not "no foreground app").
         if pid == 0 {
-            return Err(Error::Platform {
-                code: -1,
-                message: "foreground window returns pid 0 (no owning process)".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "foreground window returns pid 0 (no owning process)",
+            ));
         }
         // `App::list` / `App::find` tag the foreground app through here, so a
         // hung foreground app must fail fast rather than stall them in UIA.
@@ -5338,10 +5376,7 @@ impl Provider for WindowsProvider {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
                 } else {
-                    Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Invoke failed".to_string(),
-                    })
+                    Err(Error::platform(e.code().0 as i64, "Invoke failed"))
                 }
             })?;
             return Ok(());
@@ -5355,10 +5390,7 @@ impl Provider for WindowsProvider {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
                 } else {
-                    Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Toggle failed".to_string(),
-                    })
+                    Err(Error::platform(e.code().0 as i64, "Toggle failed"))
                 }
             })?;
             return Ok(());
@@ -5372,10 +5404,7 @@ impl Provider for WindowsProvider {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
                 } else {
-                    Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Select failed".to_string(),
-                    })
+                    Err(Error::platform(e.code().0 as i64, "Select failed"))
                 }
             })?;
             return Ok(());
@@ -5385,22 +5414,21 @@ impl Provider for WindowsProvider {
             UIA_ExpandCollapsePatternId,
             "ExpandCollapsePattern",
         )? {
-            let state =
-                unsafe { pattern.CurrentExpandCollapseState() }.map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("CurrentExpandCollapseState failed: {}", e),
-                })?;
+            let state = unsafe { pattern.CurrentExpandCollapseState() }.map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("CurrentExpandCollapseState failed: {}", e),
+                )
+            })?;
             match state {
                 ExpandCollapseState_Collapsed => {
-                    unsafe { pattern.Expand() }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!("Expand failed: {}", e),
+                    unsafe { pattern.Expand() }.map_err(|e| {
+                        Error::platform(e.code().0 as i64, format!("Expand failed: {}", e))
                     })?;
                 }
                 _ => {
-                    unsafe { pattern.Collapse() }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!("Collapse failed: {}", e),
+                    unsafe { pattern.Collapse() }.map_err(|e| {
+                        Error::platform(e.code().0 as i64, format!("Collapse failed: {}", e))
                     })?;
                 }
             }
@@ -5416,16 +5444,15 @@ impl Provider for WindowsProvider {
             UIA_LegacyIAccessiblePatternId,
             "LegacyIAccessiblePattern",
         )? {
-            let default_action =
-                unsafe { pattern.CurrentDefaultAction() }.map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("LegacyIAccessible.CurrentDefaultAction failed: {e}"),
-                })?;
-            let framework_id =
-                unsafe { uia_element.CurrentFrameworkId() }.map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("CurrentFrameworkId failed: {e}"),
-                })?;
+            let default_action = unsafe { pattern.CurrentDefaultAction() }.map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("LegacyIAccessible.CurrentDefaultAction failed: {e}"),
+                )
+            })?;
+            let framework_id = unsafe { uia_element.CurrentFrameworkId() }.map_err(|e| {
+                Error::platform(e.code().0 as i64, format!("CurrentFrameworkId failed: {e}"))
+            })?;
             if legacy_default_action_is_activation(
                 false,
                 Some(&default_action.to_string()),
@@ -5435,13 +5462,13 @@ impl Provider for WindowsProvider {
                     if is_event_subscriber_failure(&e) {
                         Ok(())
                     } else {
-                        Err(Error::Platform {
-                            code: e.code().0 as i64,
-                            message: format!(
+                        Err(Error::platform(
+                            e.code().0 as i64,
+                            format!(
                                 "LegacyIAccessible.DoDefaultAction (\"{default_action}\") \
                                  failed: {e}"
                             ),
-                        })
+                        ))
                     }
                 })?;
                 return Ok(());
@@ -5457,10 +5484,8 @@ impl Provider for WindowsProvider {
         uia_gate("focus")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
-        unsafe { uia_element.SetFocus() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: "SetFocus failed".to_string(),
-        })?;
+        unsafe { uia_element.SetFocus() }
+            .map_err(|e| Error::platform(e.code().0 as i64, "SetFocus failed"))?;
         Ok(())
     }
 
@@ -5468,14 +5493,10 @@ impl Provider for WindowsProvider {
         uia_gate("blur")?;
         let _dpi = &crate::dpi::DpiScope::enter()?;
         // Focus the desktop root to blur the current element
-        let root = unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: "GetRootElement failed".to_string(),
-        })?;
-        unsafe { root.SetFocus() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: "SetFocus on root failed".to_string(),
-        })?;
+        let root = unsafe { self.automation.GetRootElement() }
+            .map_err(|e| Error::platform(e.code().0 as i64, "GetRootElement failed"))?;
+        unsafe { root.SetFocus() }
+            .map_err(|e| Error::platform(e.code().0 as i64, "SetFocus on root failed"))?;
         Ok(())
     }
 
@@ -5492,10 +5513,7 @@ impl Provider for WindowsProvider {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
                 } else {
-                    Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Toggle failed".to_string(),
-                    })
+                    Err(Error::platform(e.code().0 as i64, "Toggle failed"))
                 }
             })?;
             return Ok(());
@@ -5519,10 +5537,7 @@ impl Provider for WindowsProvider {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
                 } else {
-                    Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Select failed".to_string(),
-                    })
+                    Err(Error::platform(e.code().0 as i64, "Select failed"))
                 }
             })?;
             return Ok(());
@@ -5542,10 +5557,8 @@ impl Provider for WindowsProvider {
             UIA_ExpandCollapsePatternId,
             "ExpandCollapsePattern",
         )? {
-            unsafe { pattern.Expand() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("Expand failed: {}", e),
-            })?;
+            unsafe { pattern.Expand() }
+                .map_err(|e| Error::platform(e.code().0 as i64, format!("Expand failed: {}", e)))?;
             return Ok(());
         }
         Err(Error::ActionNotSupported {
@@ -5563,9 +5576,8 @@ impl Provider for WindowsProvider {
             UIA_ExpandCollapsePatternId,
             "ExpandCollapsePattern",
         )? {
-            unsafe { pattern.Collapse() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("Collapse failed: {}", e),
+            unsafe { pattern.Collapse() }.map_err(|e| {
+                Error::platform(e.code().0 as i64, format!("Collapse failed: {}", e))
             })?;
             return Ok(());
         }
@@ -5604,23 +5616,25 @@ impl Provider for WindowsProvider {
             UIA_RangeValuePatternId,
             "RangeValuePattern",
         )? {
-            let current = unsafe { pattern.CurrentValue() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("RangeValue.CurrentValue failed: {}", e),
+            let current = unsafe { pattern.CurrentValue() }.map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("RangeValue.CurrentValue failed: {}", e),
+                )
             })?;
-            let small = unsafe { pattern.CurrentSmallChange() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("RangeValue.CurrentSmallChange failed: {e}"),
+            let small = unsafe { pattern.CurrentSmallChange() }.map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("RangeValue.CurrentSmallChange failed: {e}"),
+                )
             })?;
             // UIA's step is SmallChange. A provider reporting zero or less
             // (a continuous range has no natural step) would make the call
             // a no-op, so one unit stands in. Core promises "one step", not
             // a size.
             let step = if small <= 0.0 { 1.0 } else { small };
-            unsafe { pattern.SetValue(current + step) }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "Increment failed".to_string(),
-            })?;
+            unsafe { pattern.SetValue(current + step) }
+                .map_err(|e| Error::platform(e.code().0 as i64, "Increment failed"))?;
             return Ok(());
         }
         Err(Error::ActionNotSupported {
@@ -5638,23 +5652,25 @@ impl Provider for WindowsProvider {
             UIA_RangeValuePatternId,
             "RangeValuePattern",
         )? {
-            let current = unsafe { pattern.CurrentValue() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("RangeValue.CurrentValue failed: {}", e),
+            let current = unsafe { pattern.CurrentValue() }.map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("RangeValue.CurrentValue failed: {}", e),
+                )
             })?;
-            let small = unsafe { pattern.CurrentSmallChange() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("RangeValue.CurrentSmallChange failed: {e}"),
+            let small = unsafe { pattern.CurrentSmallChange() }.map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("RangeValue.CurrentSmallChange failed: {e}"),
+                )
             })?;
             // UIA's step is SmallChange. A provider reporting zero or less
             // (a continuous range has no natural step) would make the call
             // a no-op, so one unit stands in. Core promises "one step", not
             // a size.
             let step = if small <= 0.0 { 1.0 } else { small };
-            unsafe { pattern.SetValue(current - step) }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "Decrement failed".to_string(),
-            })?;
+            unsafe { pattern.SetValue(current - step) }
+                .map_err(|e| Error::platform(e.code().0 as i64, "Decrement failed"))?;
             return Ok(());
         }
         Err(Error::ActionNotSupported {
@@ -5675,9 +5691,8 @@ impl Provider for WindowsProvider {
                 .GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
         }
         .map_err(|e| pattern_acquisition_error(&e, "scroll_into_view", element.role))?;
-        unsafe { pattern.ScrollIntoView() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("ScrollIntoView failed: {}", e),
+        unsafe { pattern.ScrollIntoView() }.map_err(|e| {
+            Error::platform(e.code().0 as i64, format!("ScrollIntoView failed: {}", e))
         })
     }
 
@@ -5707,46 +5722,45 @@ impl Provider for WindowsProvider {
             Ok(pattern) => match unsafe { pattern.CurrentWindowVisualState() } {
                 Ok(v) if v == WindowVisualState_Minimized => {
                     unsafe { pattern.SetWindowVisualState(WindowVisualState_Normal) }.map_err(
-                        |e| Error::Platform {
-                            code: e.code().0 as i64,
-                            message: format!(
+                        |e| Error::platform(e.code().0 as i64, format!(
                                 "WindowPattern.SetWindowVisualState(Normal) while activating failed: {e}"
-                            ),
-                        },
+                            )),
                     )?;
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    return Err(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!(
-                            "WindowPattern.CurrentWindowVisualState failed while raising: {e}"
-                        ),
-                    });
+                    return Err(Error::platform(
+                        e.code().0 as i64,
+                        format!("WindowPattern.CurrentWindowVisualState failed while raising: {e}"),
+                    ));
                 }
             },
             Err(e) if is_pattern_absent(&e) => {}
             Err(e) => {
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("acquiring WindowPattern while activating failed: {e}"),
-                });
+                return Err(Error::platform(
+                    e.code().0 as i64,
+                    format!("acquiring WindowPattern while activating failed: {e}"),
+                ));
             }
         }
-        let hwnd = unsafe { uia.CurrentNativeWindowHandle() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("CurrentNativeWindowHandle failed while raising: {e}"),
+        let hwnd = unsafe { uia.CurrentNativeWindowHandle() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("CurrentNativeWindowHandle failed while raising: {e}"),
+            )
         })?;
         if hwnd.0.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "window has no native handle; cannot activate".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "window has no native handle; cannot activate",
+            ));
         }
         bring_to_foreground(hwnd)?;
-        unsafe { uia.SetFocus() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("SetFocus during activate failed: {e}"),
+        unsafe { uia.SetFocus() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("SetFocus during activate failed: {e}"),
+            )
         })?;
         Ok(())
     }
@@ -5763,9 +5777,11 @@ impl Provider for WindowsProvider {
         // capability: transient/stale-element COM errors must not masquerade
         // as ActionNotSupported (tenet 1). Only a successfully reported
         // FALSE means the window cannot be minimized.
-        if unsafe { pattern.CurrentCanMinimize() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("WindowPattern.CurrentCanMinimize failed: {e}"),
+        if unsafe { pattern.CurrentCanMinimize() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("WindowPattern.CurrentCanMinimize failed: {e}"),
+            )
         })? != TRUE
         {
             return Err(Error::ActionNotSupported {
@@ -5774,10 +5790,10 @@ impl Provider for WindowsProvider {
             });
         }
         unsafe { pattern.SetWindowVisualState(WindowVisualState_Minimized) }.map_err(|e| {
-            Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("WindowPattern.SetWindowVisualState(Minimized) failed: {e}"),
-            }
+            Error::platform(
+                e.code().0 as i64,
+                format!("WindowPattern.SetWindowVisualState(Minimized) failed: {e}"),
+            )
         })?;
         Ok(())
     }
@@ -5792,9 +5808,11 @@ impl Provider for WindowsProvider {
                 .map_err(|e| pattern_acquisition_error(&e, "maximize", element.role))?;
         // See minimize: a failed read propagates; only a successful FALSE is
         // "cannot maximize".
-        if unsafe { pattern.CurrentCanMaximize() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("WindowPattern.CurrentCanMaximize failed: {e}"),
+        if unsafe { pattern.CurrentCanMaximize() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("WindowPattern.CurrentCanMaximize failed: {e}"),
+            )
         })? != TRUE
         {
             return Err(Error::ActionNotSupported {
@@ -5803,10 +5821,10 @@ impl Provider for WindowsProvider {
             });
         }
         unsafe { pattern.SetWindowVisualState(WindowVisualState_Maximized) }.map_err(|e| {
-            Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("WindowPattern.SetWindowVisualState(Maximized) failed: {e}"),
-            }
+            Error::platform(
+                e.code().0 as i64,
+                format!("WindowPattern.SetWindowVisualState(Maximized) failed: {e}"),
+            )
         })?;
         Ok(())
     }
@@ -5845,16 +5863,18 @@ impl Provider for WindowsProvider {
         // See minimize: each capability read propagates its COM error, and
         // `ActionNotSupported` is reserved for the case where both capability
         // flags were successfully read as FALSE.
-        let can_minimize =
-            unsafe { pattern.CurrentCanMinimize() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("WindowPattern.CurrentCanMinimize failed: {e}"),
-            })? == TRUE;
-        let can_maximize =
-            unsafe { pattern.CurrentCanMaximize() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("WindowPattern.CurrentCanMaximize failed: {e}"),
-            })? == TRUE;
+        let can_minimize = unsafe { pattern.CurrentCanMinimize() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("WindowPattern.CurrentCanMinimize failed: {e}"),
+            )
+        })? == TRUE;
+        let can_maximize = unsafe { pattern.CurrentCanMaximize() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("WindowPattern.CurrentCanMaximize failed: {e}"),
+            )
+        })? == TRUE;
         if !can_minimize && !can_maximize {
             return Err(Error::ActionNotSupported {
                 action: "restore".to_string(),
@@ -5862,10 +5882,10 @@ impl Provider for WindowsProvider {
             });
         }
         unsafe { pattern.SetWindowVisualState(WindowVisualState_Normal) }.map_err(|e| {
-            Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("WindowPattern.SetWindowVisualState(Normal) failed: {e}"),
-            }
+            Error::platform(
+                e.code().0 as i64,
+                format!("WindowPattern.SetWindowVisualState(Normal) failed: {e}"),
+            )
         })?;
         Ok(())
     }
@@ -5878,9 +5898,11 @@ impl Provider for WindowsProvider {
         let pattern =
             unsafe { uia.GetCurrentPatternAs::<IUIAutomationWindowPattern>(UIA_WindowPatternId) }
                 .map_err(|e| pattern_acquisition_error(&e, "close", element.role))?;
-        unsafe { pattern.Close() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("WindowPattern.Close failed: {e}"),
+        unsafe { pattern.Close() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("WindowPattern.Close failed: {e}"),
+            )
         })?;
         Ok(())
     }
@@ -5896,9 +5918,11 @@ impl Provider for WindowsProvider {
         .map_err(|e| pattern_acquisition_error(&e, "move_to", element.role))?;
         // See minimize: a failed read propagates; only a successful FALSE is
         // "cannot move".
-        if unsafe { pattern.CurrentCanMove() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("TransformPattern.CurrentCanMove failed: {e}"),
+        if unsafe { pattern.CurrentCanMove() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("TransformPattern.CurrentCanMove failed: {e}"),
+            )
         })? != TRUE
         {
             return Err(Error::ActionNotSupported {
@@ -5908,10 +5932,10 @@ impl Provider for WindowsProvider {
         }
         // Windows desktop coordinates match TransformPattern's pixels.
         crate::coords::transform_move(dpi, &pattern, f64::from(x), f64::from(y)).map_err(|e| {
-            Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("TransformPattern.Move({x}, {y}) failed: {e}"),
-            }
+            Error::platform(
+                e.code().0 as i64,
+                format!("TransformPattern.Move({x}, {y}) failed: {e}"),
+            )
         })?;
         Ok(())
     }
@@ -5927,9 +5951,11 @@ impl Provider for WindowsProvider {
         .map_err(|e| pattern_acquisition_error(&e, "resize_to", element.role))?;
         // See minimize: a failed read propagates; only a successful FALSE is
         // "cannot resize".
-        if unsafe { pattern.CurrentCanResize() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("TransformPattern.CurrentCanResize failed: {e}"),
+        if unsafe { pattern.CurrentCanResize() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("TransformPattern.CurrentCanResize failed: {e}"),
+            )
         })? != TRUE
         {
             return Err(Error::ActionNotSupported {
@@ -5939,9 +5965,11 @@ impl Provider for WindowsProvider {
         }
         // Width and height use the same physical desktop units as bounds.
         crate::coords::transform_resize(dpi, &pattern, f64::from(width), f64::from(height))
-            .map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("TransformPattern.Resize({width}, {height}) failed: {e}"),
+            .map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("TransformPattern.Resize({width}, {height}) failed: {e}"),
+                )
             })?;
         Ok(())
     }
@@ -5976,9 +6004,11 @@ impl Provider for WindowsProvider {
             action: "set_numeric_value".to_string(),
             role: element.role,
         })?;
-        unsafe { pattern.SetValue(value) }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("RangeValue.SetValue failed: {}", e),
+        unsafe { pattern.SetValue(value) }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("RangeValue.SetValue failed: {}", e),
+            )
         })?;
         Ok(())
     }
@@ -5996,9 +6026,11 @@ impl Provider for WindowsProvider {
         )? {
             let current = unsafe { value_pattern.CurrentValue() }
                 .map(|s| s.to_string())
-                .map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("Value.CurrentValue failed: {}", e),
+                .map_err(|e| {
+                    Error::platform(
+                        e.code().0 as i64,
+                        format!("Value.CurrentValue failed: {}", e),
+                    )
                 })?;
 
             // If TextPattern is present, use it to locate the caret (start
@@ -6031,19 +6063,23 @@ impl Provider for WindowsProvider {
             // is reported as a platform error, whose delivery is `Unknown`,
             // so a caller does not retry and type the text twice (#702).
             if let Some(pattern) = text_pattern {
+                // `CaretPlacement::Normalised` is not an error: the control
+                // accepted the write and stored its own form of it, so the
+                // caret stays where the control put it (see
+                // place_caret_after_write).
                 place_caret_after_write(&pattern, &new_value, caret).map_err(|e| {
                     let code = match &e {
                         Error::Platform { code, .. } => *code,
                         _ => 0,
                     };
-                    Error::Platform {
+                    Error::platform(
                         code,
-                        message: format!(
-                            "type_text wrote the text with ValuePattern.SetValue, then placing \
-                             the caret after it failed; the text is already in the control, \
-                             so do not retry: {e}"
+                        format!(
+                            "type_text wrote the text with ValuePattern.SetValue, then \
+                                 placing the caret after it failed; the text is already in the \
+                                 control, so do not retry: {e}"
                         ),
-                    }
+                    )
                 })?;
             }
             return Ok(());
@@ -6089,10 +6125,10 @@ impl Provider for WindowsProvider {
                 {
                     Ok(None)
                 }
-                Err(e) => Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("Grid.GetItem({row}, {column}) failed: {e}"),
-                }),
+                Err(e) => Err(Error::platform(
+                    e.code().0 as i64,
+                    format!("Grid.GetItem({row}, {column}) failed: {e}"),
+                )),
             }
         })
     }
@@ -6426,10 +6462,10 @@ impl Provider for WindowsProvider {
                 }
             }
             if r.end > utf16_len(&text) {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: "UIA returned a range outside its document".into(),
-                });
+                return Err(Error::platform(
+                    -1,
+                    "UIA returned a range outside its document",
+                ));
             }
             Ok(r)
         })
@@ -6543,10 +6579,9 @@ impl Provider for WindowsProvider {
             };
         let pid = match saved_app {
             Some(saved) => saved.identity.pid,
-            None => element.pid.ok_or(Error::Platform {
-                code: -1,
-                message: "Element has no PID for subscribe".to_string(),
-            })?,
+            None => element
+                .pid
+                .ok_or(Error::platform(-1, "Element has no PID for subscribe"))?,
         };
         let app_name = element.name.clone().unwrap_or_default();
         self.subscribe_impl(dpi, pid, app_name, saved_app, &plan)
@@ -6626,10 +6661,16 @@ fn is_password_value_withheld(e: &windows::core::Error) -> bool {
 /// is absent. `ActionNotSupported`-free advertisement is reserved for a
 /// successful `FALSE` (tenet 1 — the action list must not degrade "could
 /// not read" into "does not support").
+///
+/// `text_writable` is the element's `editable` state. A text field or text
+/// area advertises `set_value` only when it is true, because `set_value` on
+/// one is `ValuePattern.SetValue` and fails on a control without a writable
+/// ValuePattern (a read-only RichEdit, say).
 fn get_actions(
     element: &IUIAutomationElement,
     role: Role,
     patterns: &ElementPatterns,
+    text_writable: bool,
 ) -> Result<Vec<String>> {
     let mut actions: Vec<String> = Vec::new();
 
@@ -6651,7 +6692,11 @@ fn get_actions(
         actions.push("collapse".to_string());
     }
 
-    if patterns.value.is_some() && !actions.iter().any(|a| a == "set_value") {
+    let is_text = matches!(role, Role::TextField | Role::TextArea);
+    if patterns.value.is_some()
+        && (!is_text || text_writable)
+        && !actions.iter().any(|a| a == "set_value")
+    {
         actions.push("set_value".to_string());
     }
 
@@ -6698,10 +6743,10 @@ fn get_actions(
         actions.push("focus".to_string());
     }
 
-    // For text fields and sliders, ensure set_value is present
-    if matches!(role, Role::TextField | Role::TextArea | Role::Slider)
-        && !actions.iter().any(|a| a == "set_value")
-    {
+    // Sliders take set_value through RangeValuePattern or ValuePattern.
+    // Text fields and areas get it from a writable ValuePattern above, and
+    // never without one: set_value on them is ValuePattern.SetValue.
+    if role == Role::Slider && !actions.iter().any(|a| a == "set_value") {
         actions.push("set_value".to_string());
     }
 
@@ -6714,20 +6759,18 @@ fn get_actions(
         // the window can actually do (CurrentCanMinimize/CurrentCanMaximize).
         // A failed read propagates — a capability unknown is not a
         // capability absent (see get_actions' doc).
-        let can_minimize =
-            unsafe { pattern.CurrentCanMinimize() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!(
-                    "WindowPattern.CurrentCanMinimize failed while advertising actions: {e}"
-                ),
-            })? == TRUE;
-        let can_maximize =
-            unsafe { pattern.CurrentCanMaximize() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!(
-                    "WindowPattern.CurrentCanMaximize failed while advertising actions: {e}"
-                ),
-            })? == TRUE;
+        let can_minimize = unsafe { pattern.CurrentCanMinimize() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("WindowPattern.CurrentCanMinimize failed while advertising actions: {e}"),
+            )
+        })? == TRUE;
+        let can_maximize = unsafe { pattern.CurrentCanMaximize() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("WindowPattern.CurrentCanMaximize failed while advertising actions: {e}"),
+            )
+        })? == TRUE;
         if can_minimize {
             actions.push("minimize".to_string());
         }
@@ -6739,20 +6782,20 @@ fn get_actions(
         }
     }
     if let Some(ref pattern) = patterns.transform {
-        if unsafe { pattern.CurrentCanMove() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!(
-                "TransformPattern.CurrentCanMove failed while advertising actions: {e}"
-            ),
+        if unsafe { pattern.CurrentCanMove() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("TransformPattern.CurrentCanMove failed while advertising actions: {e}"),
+            )
         })? == TRUE
         {
             actions.push("move_to".to_string());
         }
-        if unsafe { pattern.CurrentCanResize() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!(
-                "TransformPattern.CurrentCanResize failed while advertising actions: {e}"
-            ),
+        if unsafe { pattern.CurrentCanResize() }.map_err(|e| {
+            Error::platform(
+                e.code().0 as i64,
+                format!("TransformPattern.CurrentCanResize failed while advertising actions: {e}"),
+            )
         })? == TRUE
         {
             actions.push("resize_to".to_string());
@@ -6894,13 +6937,16 @@ fn parse_states(
 
     let editable = match role {
         Role::TextField | Role::TextArea => {
+            // Editable promises writes, and xa11y writes text through
+            // ValuePattern (set_value, type_text): without one there is no
+            // write to promise.
             if let Some(ref pattern) = patterns.value {
                 !pattern_read(site, "ValuePattern.CurrentIsReadOnly", || unsafe {
                     pattern.CurrentIsReadOnly()
                 })?
                 .as_bool()
             } else {
-                true
+                false
             }
         }
         _ => false,
@@ -7160,8 +7206,21 @@ fn parent_control_type(
     unsafe { parent.CurrentControlType() }.ok()
 }
 
-/// Native multiline edit controls can report Document instead of Edit.
-fn uia_document_role(framework: Option<&str>, class: Option<&str>) -> Role {
+/// `ES_MULTILINE`, the edit-control style for a multi-line edit or RichEdit.
+const ES_MULTILINE: u32 = 0x0004;
+
+/// Native edit controls can report Document instead of Edit (RichEdit
+/// always does). One that does is a text field or a text area, by
+/// `ES_MULTILINE`; `multiline` reads that style from the element's own
+/// HWND, answering `None` when the element has none, which leaves it a text
+/// area (Document is UIA's control type for multi-line text). Only a Win32
+/// Edit or RichEdit class reads the style; any other Document is a web
+/// area. A failed style read propagates.
+fn uia_document_role(
+    framework: Option<&str>,
+    class: Option<&str>,
+    multiline: impl FnOnce() -> Result<Option<bool>>,
+) -> Result<Role> {
     if framework == Some("Win32")
         && class.is_some_and(|name| {
             name.eq_ignore_ascii_case("Edit")
@@ -7170,10 +7229,37 @@ fn uia_document_role(framework: Option<&str>, class: Option<&str>) -> Role {
                     .is_some_and(|prefix| prefix.eq_ignore_ascii_case("RichEdit"))
         })
     {
-        Role::TextArea
+        Ok(match multiline()? {
+            Some(false) => Role::TextField,
+            Some(true) | None => Role::TextArea,
+        })
     } else {
-        Role::WebArea
+        Ok(Role::WebArea)
     }
+}
+
+/// `GWL_STYLE` of `hwnd`. `GetWindowLongPtrW` answers 0 both for a window
+/// with no style bits and on failure; the last error tells them apart.
+fn window_style(hwnd: HWND) -> Result<u32> {
+    // SAFETY: sets this thread's last-error value only.
+    unsafe { SetLastError(WIN32_ERROR(0)) };
+    // SAFETY: GetWindowLongPtrW validates the handle and reports failure
+    // through the last error.
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+    if style == 0 {
+        // SAFETY: GetLastError has no arguments.
+        let error = unsafe { GetLastError() };
+        if error.0 != 0 {
+            return Err(Error::platform(
+                i64::from(error.0),
+                format!(
+                    "GetWindowLongPtrW(GWL_STYLE) failed for HWND {:#x} (Win32 error {})",
+                    hwnd.0 as usize, error.0
+                ),
+            ));
+        }
+    }
+    Ok(style as u32)
 }
 
 /// Map UIA ControlTypeId to its coarse xa11y Role.
@@ -7308,10 +7394,7 @@ fn registration_worker() -> Result<std::sync::mpsc::Sender<RegistrationJob>> {
             Ok(jobs_tx)
         })
         .clone()
-        .map_err(|e| Error::Platform {
-            code: e.code,
-            message: e.message,
-        })
+        .map_err(|e| Error::platform(e.code, e.message))
 }
 
 /// Run one registration operation on the shared worker and wait for its
@@ -7329,23 +7412,19 @@ where
         .send(Box::new(move || {
             let _ = result_tx.send(operation());
         }))
-        .map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("UIA registration worker is unavailable: {e}"),
-        })?;
-    result_rx.recv().map_err(|e| Error::Platform {
-        code: -1,
-        message: format!("UIA registration worker stopped before completing an operation: {e}"),
+        .map_err(|e| Error::platform(-1, format!("UIA registration worker is unavailable: {e}")))?;
+    result_rx.recv().map_err(|e| {
+        Error::platform(
+            -1,
+            format!("UIA registration worker stopped before completing an operation: {e}"),
+        )
     })?
 }
 
 fn queue_registration_job(operation: impl FnOnce() + Send + 'static) -> Result<()> {
     registration_worker()?
         .send(Box::new(operation))
-        .map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("UIA registration worker is unavailable: {e}"),
-        })
+        .map_err(|e| Error::platform(-1, format!("UIA registration worker is unavailable: {e}")))
 }
 unsafe impl<T> Send for ComSend<T> {}
 
@@ -7469,10 +7548,10 @@ unsafe impl Sync for SubscriptionState {}
 fn window_handle(el: &IUIAutomationElement) -> Result<usize> {
     match unsafe { el.CurrentNativeWindowHandle() } {
         Ok(h) => Ok(h.0 as usize),
-        Err(e) => Err(Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("CurrentNativeWindowHandle failed: {e}"),
-        }),
+        Err(e) => Err(Error::platform(
+            e.code().0 as i64,
+            format!("CurrentNativeWindowHandle failed: {e}"),
+        )),
     }
 }
 
@@ -7515,10 +7594,10 @@ fn frame_event_runtime_ids(
         match result {
             Ok(element) => Ok(Some(element)),
             Err(error) if error.code().is_ok() => Ok(None),
-            Err(error) => Err(Error::Platform {
-                code: i64::from(error.code().0),
-                message: format!("reading UWP frame event-source children failed: {error}"),
-            }),
+            Err(error) => Err(Error::platform(
+                i64::from(error.code().0),
+                format!("reading UWP frame event-source children failed: {error}"),
+            )),
         }
     }
     fn visit(
@@ -7531,10 +7610,10 @@ fn frame_event_runtime_ids(
     ) -> Result<()> {
         *visited += 1;
         if *visited > 128 || depth > 8 {
-            return Err(Error::Platform {
-                code: -1,
-                message: "UWP frame event-source inspection exceeded 128 nodes or depth 8".into(),
-            }
+            return Err(Error::platform(
+                -1,
+                "UWP frame event-source inspection exceeded 128 nodes or depth 8",
+            )
             .diagnose(
                 xa11y_core::Diagnosis::new()
                     .condition("bounded inspection of frame-host event sources")
@@ -7546,10 +7625,10 @@ fn frame_event_runtime_ids(
         }
         let id = WindowsProvider::runtime_id(element, 0)?;
         if id.is_empty() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "a UWP frame event source has no RuntimeId".into(),
-            });
+            return Err(Error::platform(
+                -1,
+                "a UWP frame event source has no RuntimeId",
+            ));
         }
         ids.insert(id);
         let mut child = neighbor(unsafe { walker.GetFirstChildElement(element) })?;
@@ -7623,13 +7702,13 @@ fn register_window_handlers(
             Ok(pattern) => Some(pattern),
             Err(e) if is_pattern_absent(&e) => None,
             Err(e) => {
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!(
+                return Err(Error::platform(
+                    e.code().0 as i64,
+                    format!(
                         "GetCurrentPatternAs(WindowPattern) failed while subscribing to \
                          window {hwnd:#x}: {e}"
                     ),
-                });
+                ));
             }
         }
     } else {
@@ -7645,13 +7724,13 @@ fn register_window_handlers(
                 Some(state.0)
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!(
+                return Err(Error::platform(
+                    e.code().0 as i64,
+                    format!(
                         "CurrentWindowVisualState failed while seeding the baseline of \
                          window {hwnd:#x}: {e}"
                     ),
-                });
+                ));
             }
         },
         None => None,
@@ -7676,10 +7755,10 @@ fn register_window_handlers(
         } {
             return Err(fail(
                 &added,
-                Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("AddAutomationEventHandler({:?}) failed: {e}", eid),
-                },
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("AddAutomationEventHandler({:?}) failed: {e}", eid),
+                ),
             ));
         }
         added.automation_ids.push(*eid);
@@ -7696,10 +7775,10 @@ fn register_window_handlers(
         } {
             return Err(fail(
                 &added,
-                Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("AddPropertyChangedEventHandlerNativeArray failed: {e}"),
-                },
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("AddPropertyChangedEventHandlerNativeArray failed: {e}"),
+                ),
             ));
         }
         added.property = true;
@@ -7710,10 +7789,10 @@ fn register_window_handlers(
         } {
             return Err(fail(
                 &added,
-                Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("AddStructureChangedEventHandler failed: {e}"),
-                },
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("AddStructureChangedEventHandler failed: {e}"),
+                ),
             ));
         }
         added.structure = true;
@@ -7724,10 +7803,10 @@ fn register_window_handlers(
         } {
             return Err(fail(
                 &added,
-                Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("AddNotificationEventHandler failed: {e}"),
-                },
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("AddNotificationEventHandler failed: {e}"),
+                ),
             ));
         }
         added.notification = true;
@@ -7782,13 +7861,13 @@ fn register_window_handlers(
                 // so undo the registration and surface the failure (tenet 1).
                 let err = fail(
                     &added,
-                    Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!(
+                    Error::platform(
+                        e.code().0 as i64,
+                        format!(
                             "CurrentWindowVisualState failed while reconciling the baseline of \
                              window {hwnd:#x} after attaching handlers: {e}"
                         ),
-                    },
+                    ),
                 );
                 ctx.frame_runtime_ids
                     .lock()
@@ -8111,9 +8190,11 @@ impl EventContext {
         let cached_element = if prefetched_is_physical {
             sender.clone()
         } else {
-            unsafe { sender.BuildUpdatedCache(cache.get(dpi)) }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("BuildUpdatedCache for the event sender failed: {e}"),
+            unsafe { sender.BuildUpdatedCache(cache.get(dpi)) }.map_err(|e| {
+                Error::platform(
+                    e.code().0 as i64,
+                    format!("BuildUpdatedCache for the event sender failed: {e}"),
+                )
             })?
         };
         // Event targets are not walked to their host window: the handler
@@ -8803,10 +8884,10 @@ impl WindowsProvider {
             // Not reachable yet (or its last window just closed): surface it
             // as a selector miss so core's poll loop retries, matching
             // `find_app_by_pid`'s contract for a fresh process.
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("No top-level window found for PID {pid} while subscribing"),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("No top-level window found for PID {pid} while subscribing"),
+            ));
         }
 
         let frame_runtime_ids = Arc::new(Mutex::new(HashMap::new()));
@@ -8885,10 +8966,7 @@ impl WindowsProvider {
 
         // The desktop root anchors the open/close watch below.
         let root = uia_call(|| unsafe { self.automation.GetRootElement() }).map_err(|e| {
-            Error::Platform {
-                code: -1,
-                message: format!("GetRootElement failed while subscribing: {e}"),
-            }
+            Error::platform(-1, format!("GetRootElement failed while subscribing: {e}"))
         })?;
 
         let state = Arc::new(SubscriptionState {
@@ -8931,10 +9009,10 @@ impl WindowsProvider {
 
             if let Some(focus) = focus {
                 unsafe { autom.AddFocusChangedEventHandler(cache, focus) }.map_err(|e| {
-                    Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!("AddFocusChangedEventHandler failed: {e}"),
-                    }
+                    Error::platform(
+                        e.code().0 as i64,
+                        format!("AddFocusChangedEventHandler failed: {e}"),
+                    )
                 })?;
             }
 
@@ -8965,12 +9043,10 @@ impl WindowsProvider {
                 if let Err(e) = unsafe {
                     autom.AddAutomationEventHandler(*eid, root, TreeScope_Subtree, cache, watch)
                 } {
-                    return Err(cleanup_error(Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!(
-                            "AddAutomationEventHandler({eid:?}) on desktop root failed: {e}"
-                        ),
-                    }));
+                    return Err(cleanup_error(Error::platform(
+                        e.code().0 as i64,
+                        format!("AddAutomationEventHandler({eid:?}) on desktop root failed: {e}"),
+                    )));
                 }
             }
 
@@ -9384,10 +9460,7 @@ mod tests {
 
     #[test]
     fn uia_timeout_maps_to_timeout_and_others_pass_through() {
-        let timed_out = Error::Platform {
-            code: i64::from(UIA_E_TIMEOUT as i32),
-            message: "FindAll".into(),
-        };
+        let timed_out = Error::platform(i64::from(UIA_E_TIMEOUT as i32), "FindAll");
         let took = Duration::from_millis(2_031);
         let err = uia_timeout_as_timeout(timed_out, took, || "the desktop".into());
         let Error::Timeout { elapsed, diagnosis } = &err else {
@@ -9401,10 +9474,7 @@ mod tests {
         assert!(observed.contains("2.0s"), "{observed}");
         assert!(observed.contains("connection timeout"), "{observed}");
         assert!(observed.ends_with(": FindAll"), "{observed}");
-        let other = Error::Platform {
-            code: -1,
-            message: "x".into(),
-        };
+        let other = Error::platform(-1, "x");
         assert!(matches!(
             uia_timeout_as_timeout(other, took, || unreachable!()),
             Error::Platform { code: -1, .. }
@@ -9499,19 +9569,13 @@ mod tests {
         }
         fn hwnd(&self, el: &usize, i: i32) -> Result<usize> {
             if self.rows[*el].3 == "<fail hwnd>" {
-                return Err(Error::Platform {
-                    code: -3,
-                    message: format!("hwnd #{i}"),
-                });
+                return Err(Error::platform(-3, format!("hwnd #{i}")));
             }
             Ok(self.rows[*el].0)
         }
         fn control_type(&self, el: &usize, i: i32) -> Result<i32> {
             if self.rows[*el].3 == "<fail control type>" {
-                return Err(Error::Platform {
-                    code: -4,
-                    message: format!("control type #{i}"),
-                });
+                return Err(Error::platform(-4, format!("control type #{i}")));
             }
             Ok(self.rows[*el].1)
         }
@@ -9521,10 +9585,7 @@ mod tests {
         }
         fn name(&self, el: &usize, i: i32) -> Result<String> {
             if self.rows[*el].3 == "<fail name>" {
-                return Err(Error::Platform {
-                    code: -5,
-                    message: format!("name #{i}"),
-                });
+                return Err(Error::platform(-5, format!("name #{i}")));
             }
             Ok(self.rows[*el].3.to_string())
         }
@@ -9580,7 +9641,9 @@ mod tests {
                 detail_reads: Default::default(),
             };
             match desktop_app_windows(&desktop) {
-                Err(Error::Platform { code: c, message }) => {
+                Err(Error::Platform {
+                    code: c, message, ..
+                }) => {
                     assert_eq!(c, code, "{marker}: {message}");
                     assert!(message.ends_with("#1"), "{marker}: {message}");
                 }
@@ -9724,10 +9787,10 @@ mod tests {
 
     #[test]
     fn a_failed_window_scan_keeps_the_pid_lookup_not_found_and_records_why() {
-        let scan = Error::Platform {
-            code: -2147024891,
-            message: "EnumWindows failed while probing the windows of a pid: denied".into(),
-        };
+        let scan = Error::platform(
+            -2147024891,
+            "EnumWindows failed while probing the windows of a pid: denied",
+        );
         let err = not_found_after_failed_scan(7000, &scan);
         assert!(matches!(err, Error::SelectorNotMatched { .. }), "{err}");
         let observed = err
@@ -9740,10 +9803,7 @@ mod tests {
 
     #[test]
     fn desktop_listing_timeout_passes_other_errors_through_unprobed() {
-        let other = Error::Platform {
-            code: -7,
-            message: "x".into(),
-        };
+        let other = Error::platform(-7, "x");
         assert!(matches!(
             desktop_listing_timeout(other, Duration::from_secs(1)),
             Error::Platform { code: -7, .. }
@@ -10076,7 +10136,7 @@ mod tests {
                     Err(CoreError::from_hresult(HRESULT(hr.0)))
                 });
             match result {
-                Err(Error::Platform { code, message }) => {
+                Err(Error::Platform { code, message, .. }) => {
                     assert_eq!(code, i64::from(hr.0));
                     // The error names the read and the element (tenet 6).
                     assert!(
@@ -10567,11 +10627,23 @@ mod tests {
     #[test]
     fn document_role_distinguishes_win32_edits() {
         for class in ["Edit", "RichEdit20W", "RICHEDIT50W"] {
-            assert_eq!(
-                uia_document_role(Some("Win32"), Some(class)),
-                Role::TextArea
-            );
+            for (multiline, role) in [
+                (Some(true), Role::TextArea),
+                (None, Role::TextArea),
+                (Some(false), Role::TextField),
+            ] {
+                assert_eq!(
+                    uia_document_role(Some("Win32"), Some(class), || Ok(multiline)).unwrap(),
+                    role,
+                    "{class} multiline={multiline:?}"
+                );
+            }
         }
+        // A failed style read is an error, not a guessed role.
+        assert!(uia_document_role(Some("Win32"), Some("RichEdit20W"), || {
+            Err(Error::platform(5, "denied"))
+        })
+        .is_err());
         for (framework, class) in [
             (Some("Chrome"), Some("Chrome_RenderWidgetHostHWND")),
             (Some("Win32"), Some("_WwG")),
@@ -10579,7 +10651,11 @@ mod tests {
             (None, Some("Edit")),
             (Some("Win32"), None),
         ] {
-            assert_eq!(uia_document_role(framework, class), Role::WebArea);
+            assert_eq!(
+                uia_document_role(framework, class, || panic!("style read for a non-edit"))
+                    .unwrap(),
+                Role::WebArea
+            );
         }
     }
 
@@ -11202,9 +11278,11 @@ mod tests {
 
     #[test]
     fn live_snapshot_prunes_unavailable_candidates_and_keeps_siblings() {
-        let unavailable = || Error::Platform {
-            code: i64::from(UIA_E_ELEMENTNOTAVAILABLE as i32),
-            message: "WindowPattern acquisition: element vanished".into(),
+        let unavailable = || {
+            Error::platform(
+                i64::from(UIA_E_ELEMENTNOTAVAILABLE as i32),
+                "WindowPattern acquisition: element vanished",
+            )
         };
         let candidates = [Ok("first"), Err(unavailable()), Ok("last")];
         let mut snapshots = Vec::new();
@@ -11224,10 +11302,7 @@ mod tests {
             RPC_E_DISCONNECTED,
             RPC_E_SERVERCALL_RETRYLATER,
         ] {
-            let result: Result<()> = Err(Error::Platform {
-                code: i64::from(hr.0),
-                message: "snapshot failed".into(),
-            });
+            let result: Result<()> = Err(Error::platform(i64::from(hr.0), "snapshot failed"));
             assert!(
                 matches!(live_snapshot(result), Err(Error::Platform { code, .. })
                 if code == i64::from(hr.0))
@@ -11242,10 +11317,10 @@ mod tests {
             Err(Error::ElementStale { .. })
         ));
         // A formatted message cannot masquerade as a vanished element.
-        let result: Result<()> = Err(Error::Platform {
-            code: i64::from(E_FAIL.0),
-            message: "UIA_E_ELEMENTNOTAVAILABLE".into(),
-        });
+        let result: Result<()> = Err(Error::platform(
+            i64::from(E_FAIL.0),
+            "UIA_E_ELEMENTNOTAVAILABLE",
+        ));
         assert!(live_snapshot(result).is_err());
     }
 

@@ -96,12 +96,14 @@ struct PointerExtent {
 
 impl PointerExtent {
     fn new(outputs: Vec<Rect>, source: String) -> Result<Self> {
-        let bounds = bounding_box(&outputs).ok_or_else(|| Error::Platform {
-            code: -1,
-            message: format!(
-                "{source} describes no output, so the uinput pointer has no extent; \
+        let bounds = bounding_box(&outputs).ok_or_else(|| {
+            Error::platform(
+                -1,
+                format!(
+                    "{source} describes no output, so the uinput pointer has no extent; \
                  set {SCREEN_WIDTH_VAR} and {SCREEN_HEIGHT_VAR}"
-            ),
+                ),
+            )
         })?;
         Ok(Self {
             bounds,
@@ -111,11 +113,24 @@ impl PointerExtent {
     }
 
     /// Map a logical layout coordinate onto the device's 0..=`COORD_MAX`
-    /// range along one axis.
+    /// range along one axis, aiming at the centre of the pixel.
+    ///
+    /// libinput scales an absolute axis back by its range *including* the
+    /// maximum (`absinfo_scale_axis`: `value * size / (max - min + 1)`), and
+    /// wlroots, KWin and Mutter all take that transformed position, so
+    /// device value `v` lands at `v * size / (COORD_MAX + 1)`, a fractional
+    /// position whose pixel is its floor. The value sent is therefore the
+    /// one for pixel `p`'s centre, `(p + 0.5) * (COORD_MAX + 1) / size`,
+    /// rounded down: the rounding moves it by less than one device unit,
+    /// which is under half a pixel while `size` is at most
+    /// `(COORD_MAX + 1) / 2`, so `p` maps back to `p`. (Scaling by
+    /// `COORD_MAX / size` and flooring landed just below `p`, which the
+    /// compositor read as `p - 1`.)
     fn map_axis(value: i32, origin: i32, size: u32) -> i32 {
         let size = i64::from(size.max(1));
         let offset = i64::from(value) - i64::from(origin);
-        (offset * i64::from(COORD_MAX) / size).clamp(0, i64::from(COORD_MAX)) as i32
+        let range = i64::from(COORD_MAX) + 1;
+        ((2 * offset + 1) * range / (2 * size)).clamp(0, i64::from(COORD_MAX)) as i32
     }
 
     fn map(&self, p: Point) -> (i32, i32) {
@@ -210,10 +225,10 @@ impl WaylandInputBackend {
         match extent.as_ref() {
             Some(extent) => Ok(extent.map(p)),
             // Unreachable: populated just above.
-            None => Err(Error::Platform {
-                code: -1,
-                message: "uinput pointer extent missing after detection".into(),
-            }),
+            None => Err(Error::platform(
+                -1,
+                "uinput pointer extent missing after detection",
+            )),
         }
     }
 
@@ -231,10 +246,7 @@ impl WaylandInputBackend {
             None,
             xkb::KEYMAP_COMPILE_NO_FLAGS,
         )
-        .ok_or_else(|| Error::Platform {
-            code: -1,
-            message: "xkbcommon: failed to compile default keymap".into(),
-        })?;
+        .ok_or_else(|| Error::platform(-1, "xkbcommon: failed to compile default keymap"))?;
         let reverse = ReverseKeymap::from_xkb(&keymap);
 
         let mut keys = AttributeSet::<KeyCode>::new();
@@ -330,23 +342,31 @@ impl WaylandInputBackend {
         let mut s = self.lock();
         let press = InputEvent::new(EventType::KEY.0, key.0, 1);
         let release = InputEvent::new(EventType::KEY.0, key.0, 0);
-        // Move + first click as one frame so the compositor sees the
-        // position and the button-down on the same input report.
+        // The press and the release are separate frames. libinput reads a
+        // pointer button's state once per frame, at SYN_REPORT, and reports
+        // only a change from the previous frame (`fallback_handle_state`),
+        // so a press and release in one frame leave the button where it
+        // was and the compositor sees no click at all. (Keyboard keys are
+        // reported per event, which is why typing can share a frame.)
+        //
+        // The move rides with the first press, so the button goes down at
+        // the target: libinput flushes the motion before the buttons of the
+        // same frame.
         emit(
             &mut s.device,
             &[
                 InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_X.0, x),
                 InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_Y.0, y),
                 press,
-                release,
             ],
         )?;
-        // Each further click is its own frame, after the same gap as on X11.
-        // In one frame, every press and release shares one timestamp, and
-        // the compositor sees one report of the button's final state.
+        emit(&mut s.device, &[release])?;
+        // Each further click follows after the same gap as on X11, so it
+        // carries a later timestamp than the click before it.
         for _ in 1..count {
             std::thread::sleep(MULTI_CLICK_GAP);
-            emit(&mut s.device, &[press, release])?;
+            emit(&mut s.device, &[press])?;
+            emit(&mut s.device, &[release])?;
         }
         Ok(())
     }
@@ -468,18 +488,18 @@ fn map_open_err(e: std::io::Error) -> Error {
                       (try `sudo modprobe uinput`)"
                 .into(),
         },
-        _ => Error::Platform {
-            code: e.raw_os_error().unwrap_or(-1) as i64,
-            message: format!("uinput open: {e}"),
-        },
+        _ => Error::platform(
+            e.raw_os_error().unwrap_or(-1) as i64,
+            format!("uinput open: {e}"),
+        ),
     }
 }
 
 fn map_io(e: std::io::Error) -> Error {
-    Error::Platform {
-        code: e.raw_os_error().unwrap_or(-1) as i64,
-        message: format!("uinput: {e}"),
-    }
+    Error::platform(
+        e.raw_os_error().unwrap_or(-1) as i64,
+        format!("uinput: {e}"),
+    )
 }
 
 fn validate_extent(requested: Point, checked: Point, extent: &PointerExtent) -> Result<()> {
@@ -548,12 +568,14 @@ fn detect_extent() -> Result<PointerExtent> {
     )? {
         return Ok(extent);
     }
-    let conn = Connection::connect_to_env().map_err(|e| Error::Platform {
-        code: -1,
-        message: format!(
-            "the uinput pointer needs the screen size, and there is no Wayland compositor \
+    let conn = Connection::connect_to_env().map_err(|e| {
+        Error::platform(
+            -1,
+            format!(
+                "the uinput pointer needs the screen size, and there is no Wayland compositor \
              to read it from ({e}); set {SCREEN_WIDTH_VAR} and {SCREEN_HEIGHT_VAR}"
-        ),
+            ),
+        )
     })?;
     compositor_extent(conn)
 }
@@ -661,12 +683,14 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, usize> for LayoutQuery {
 /// the compositor does not fully describe fails the read rather than being
 /// skipped, since a missing output would refuse targets on it.
 fn compositor_extent(conn: Connection) -> Result<PointerExtent> {
-    let fail = |what: String| Error::Platform {
-        code: -1,
-        message: format!(
-            "{what}, so the uinput pointer extent is unknown; set {SCREEN_WIDTH_VAR} and \
+    let fail = |what: String| {
+        Error::platform(
+            -1,
+            format!(
+                "{what}, so the uinput pointer extent is unknown; set {SCREEN_WIDTH_VAR} and \
              {SCREEN_HEIGHT_VAR}"
-        ),
+            ),
+        )
     };
     let display = conn.display();
     let mut queue = conn.new_event_queue::<LayoutQuery>();
@@ -833,15 +857,51 @@ mod tests {
                 height: 1124,
             }
         );
-        assert_eq!(extent.map(Point::new(-1280, 0)), (0, 0));
+        // Pixel centres: (2p + 1) * 32768 / (2 * size).
+        assert_eq!(extent.map(Point::new(-1280, 0)), (5, 14));
         assert_eq!(
             extent.map(Point::new(320, 562)),
-            (1600 * COORD_MAX / 3200, 562 * COORD_MAX / 1124)
+            (3201 * 32768 / 6400, 1125 * 32768 / 2248)
         );
         let gap = Point::new(-10, 50);
         assert!(validate_extent(gap, gap, &extent).is_err());
         let left = Point::new(-10, 150);
         assert!(validate_extent(left, left, &extent).is_ok());
+    }
+
+    /// Where a compositor puts device value `v` on an axis of `size`
+    /// pixels: libinput's `absinfo_scale_axis` over the range 0..=COORD_MAX,
+    /// floored to the pixel the position falls in.
+    fn compositor_pixel(v: i32, size: u32) -> i64 {
+        (f64::from(v) * f64::from(size) / (f64::from(COORD_MAX) + 1.0)).floor() as i64
+    }
+
+    /// Every pixel of an axis lands back on itself, at both edges too, for
+    /// every size up to the device's resolution limit.
+    #[test]
+    fn every_pixel_maps_back_to_itself_through_the_compositor_scaling() {
+        for size in [
+            1u32, 2, 3, 7, 640, 1080, 1124, 1440, 1920, 2560, 3200, 7680, 16384,
+        ] {
+            for p in 0..size as i32 {
+                let v = PointerExtent::map_axis(p, 0, size);
+                assert!((0..=COORD_MAX).contains(&v), "size {size}, pixel {p}: {v}");
+                assert_eq!(
+                    compositor_pixel(v, size),
+                    i64::from(p),
+                    "size {size}: pixel {p} sent as {v}"
+                );
+            }
+        }
+        // Edges, with a non-zero origin.
+        assert_eq!(PointerExtent::map_axis(-1280, -1280, 1920), 8);
+        assert_eq!(
+            PointerExtent::map_axis(-1280 + 1919, -1280, 1920),
+            (2 * 1919 + 1) * 32768 / (2 * 1920)
+        );
+        // Off the axis clamps to the device range.
+        assert_eq!(PointerExtent::map_axis(-5, 0, 1920), 0);
+        assert_eq!(PointerExtent::map_axis(1920, 0, 1920), COORD_MAX);
     }
 
     #[test]
@@ -951,7 +1011,7 @@ mod tests {
             }]
         );
         assert_eq!(extent.bounds, extent.outputs[0]);
-        assert_eq!(extent.map(Point::new(1280, 720)), (16383, 16383));
+        assert_eq!(extent.map(Point::new(1280, 720)), (16390, 16395));
     }
 }
 

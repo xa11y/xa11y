@@ -286,8 +286,9 @@ async function tableAndTextChecks(el: Element, loc: Locator) {
   const _heads: Element[] = await el.columnHeaders();
   const _selected: Element[] = await el.selectedItems();
 
-  // Text: `Element.text()` is async, `Locator.text()` is not.
-  const text: Text = await el.text();
+  // Text: both `Element.text()` and `Locator.text()` are synchronous; the
+  // reads on the returned `Text` are what is async.
+  const text: Text = el.text();
   const live: Text = loc.text();
   const range: TextRange | null = await text.find('needle', { occurrence: 1, within: null });
   const unit: TextUnitName = 'word';

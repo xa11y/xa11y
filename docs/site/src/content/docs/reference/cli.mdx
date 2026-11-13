@@ -152,6 +152,8 @@ This is the fastest way to understand an app's structure. Every element shows it
 A node whose children were cut ends with a line such as `… 12 more (cut by
 --max-nodes)`, and a cut tree ends with a summary line,
 `(truncated: 2000 nodes shown, cut by the node limit of 2000 (--max-nodes))`.
+A node at `--max-depth` ends with `… children not read (cut by --max-depth)`
+instead, because the tree stops before reading them.
 A subtree whose children could not be read shows `<error: …>` in their place
 and the rest of the tree still prints.
 
@@ -607,7 +609,7 @@ gives it selectors to resolve.
 
 | Tool | Arguments |
 | --- | --- |
-| `apps` | none |
+| `apps` | `backend` |
 | `capabilities` | `platform`, `os_version`, `names`, `backend` |
 | `shell` | none |
 | `windows` | `app`, `pid`, `backend`, `limit` |

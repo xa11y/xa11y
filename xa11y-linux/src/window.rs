@@ -55,6 +55,26 @@ pub(crate) struct WindowFacts {
     pub(crate) protocol_version: Option<u32>,
 }
 
+/// What the window manager reports as the active window, for
+/// `focused_app`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActiveWindow {
+    /// The backend cannot say: the Wayland backend, an X11 window manager
+    /// without `_NET_ACTIVE_WINDOW`, or one that names no window (0).
+    NotReported,
+    /// `_NET_ACTIVE_WINDOW` names a window that no longer exists. It does
+    /// for a moment after the focused window closes, until the window
+    /// manager names its successor.
+    Destroyed { window: u32 },
+    /// The active window, with its `_NET_WM_PID` and its non-empty
+    /// `_NET_WM_NAME` when it sets them.
+    Window {
+        window: u32,
+        pid: Option<u32>,
+        title: Option<String>,
+    },
+}
+
 pub(crate) struct WindowManager {
     backend: WindowBackend,
 }
@@ -115,14 +135,13 @@ impl WindowManager {
         }
     }
 
-    /// The pid of the window that the window manager reports as active
-    /// (`_NET_ACTIVE_WINDOW`). `Ok(None)` when the backend cannot say: no
-    /// X11 window manager with `_NET_ACTIVE_WINDOW`, no active window, an
-    /// active window without `_NET_WM_PID`, or the Wayland backend.
-    pub(crate) fn active_window_pid(&self) -> Result<Option<u32>> {
+    /// The window that the window manager reports as active
+    /// (`_NET_ACTIVE_WINDOW`), with the identity `focused_app` matches it
+    /// by. See [`ActiveWindow`] for what each answer means.
+    pub(crate) fn active_window(&self) -> Result<ActiveWindow> {
         match &self.backend {
-            WindowBackend::X11(backend) => backend.active_window_pid(),
-            WindowBackend::Sway(_) | WindowBackend::Unavailable(_) => Ok(None),
+            WindowBackend::X11(backend) => backend.active_window_identity(),
+            WindowBackend::Sway(_) | WindowBackend::Unavailable(_) => Ok(ActiveWindow::NotReported),
         }
     }
 
@@ -240,14 +259,14 @@ enum ServerIdentity {
 }
 
 fn sway_server_identity(stream: &UnixStream) -> Result<ServerIdentity> {
-    let credentials = getsockopt(stream, PeerCredentials).map_err(|error| Error::Platform {
-        code: error as i32 as i64,
-        message: format!("read Sway IPC peer credentials: {error}"),
+    let credentials = getsockopt(stream, PeerCredentials).map_err(|error| {
+        Error::platform(
+            error as i32 as i64,
+            format!("read Sway IPC peer credentials: {error}"),
+        )
     })?;
-    let pid = u32::try_from(credentials.pid()).map_err(|_| Error::Platform {
-        code: -1,
-        message: "Sway IPC peer has an invalid process id".to_string(),
-    })?;
+    let pid = u32::try_from(credentials.pid())
+        .map_err(|_| Error::platform(-1, "Sway IPC peer has an invalid process id"))?;
     Ok(ServerIdentity::Sway {
         pid,
         process_start: process_start(pid)?,
@@ -262,17 +281,21 @@ fn process_start(pid: u32) -> Result<u64> {
             ),
         }
     })?;
-    let (_, fields) = stat.rsplit_once(") ").ok_or_else(|| Error::Platform {
-        code: -1,
-        message: format!("native window identity: invalid /proc/{pid}/stat"),
+    let (_, fields) = stat.rsplit_once(") ").ok_or_else(|| {
+        Error::platform(
+            -1,
+            format!("native window identity: invalid /proc/{pid}/stat"),
+        )
     })?;
     fields
         .split_whitespace()
         .nth(19)
         .and_then(|value| value.parse().ok())
-        .ok_or_else(|| Error::Platform {
-            code: -1,
-            message: format!("native window identity: missing start time for process {pid}"),
+        .ok_or_else(|| {
+            Error::platform(
+                -1,
+                format!("native window identity: missing start time for process {pid}"),
+            )
         })
 }
 
@@ -411,15 +434,11 @@ impl SwayWindowBackend {
             payload.as_bytes(),
             Some(binding.server_identity),
         )?;
-        let results = reply.as_array().ok_or_else(|| Error::Platform {
-            code: -1,
-            message: "Sway command reply was not an array".to_string(),
-        })?;
+        let results = reply
+            .as_array()
+            .ok_or_else(|| Error::platform(-1, "Sway command reply was not an array"))?;
         if results.is_empty() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Sway command reply was empty".to_string(),
-            });
+            return Err(Error::platform(-1, "Sway command reply was empty"));
         }
         if let Some(failure) = results
             .iter()
@@ -429,10 +448,10 @@ impl SwayWindowBackend {
                 .get("error")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("compositor refused the request");
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("Sway rejected {command:?} for con_id {id}: {diagnosis}"),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("Sway rejected {command:?} for con_id {id}: {diagnosis}"),
+            ));
         }
         Ok(())
     }
@@ -497,9 +516,11 @@ impl SwayWindowBackend {
         payload: &[u8],
         expected: Option<ServerIdentity>,
     ) -> Result<(serde_json::Value, ServerIdentity)> {
-        let mut stream = UnixStream::connect(&self.socket).map_err(|error| Error::Platform {
-            code: -1,
-            message: format!("connect Sway IPC {}: {error}", self.socket.display()),
+        let mut stream = UnixStream::connect(&self.socket).map_err(|error| {
+            Error::platform(
+                -1,
+                format!("connect Sway IPC {}: {error}", self.socket.display()),
+            )
         })?;
         let server_identity = sway_server_identity(&stream)?;
         if expected.is_some_and(|identity| identity != server_identity) {
@@ -520,10 +541,10 @@ impl SwayWindowBackend {
         let mut response_header = [0_u8; 14];
         stream.read_exact(&mut response_header).map_err(sway_io)?;
         if &response_header[..6] != SWAY_IPC_MAGIC {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Sway IPC reply had an invalid magic header".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "Sway IPC reply had an invalid magic header",
+            ));
         }
         let response_length = u32::from_le_bytes(
             response_header[6..10]
@@ -547,10 +568,8 @@ impl SwayWindowBackend {
         }
         let mut response = vec![0_u8; response_length];
         stream.read_exact(&mut response).map_err(sway_io)?;
-        let value = serde_json::from_slice(&response).map_err(|error| Error::Platform {
-            code: -1,
-            message: format!("decode Sway IPC JSON: {error}"),
-        })?;
+        let value = serde_json::from_slice(&response)
+            .map_err(|error| Error::platform(-1, format!("decode Sway IPC JSON: {error}")))?;
         Ok((value, server_identity))
     }
 }
@@ -701,35 +720,34 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandGlobals {
 }
 
 fn advertised_wlr_foreign_toplevel_version() -> Result<Option<u32>> {
-    let connection = WaylandConnection::connect_to_env().map_err(|error| Error::Platform {
-        code: -1,
-        message: format!("connect Wayland compositor for window capability detection: {error}"),
+    let connection = WaylandConnection::connect_to_env().map_err(|error| {
+        Error::platform(
+            -1,
+            format!("connect Wayland compositor for window capability detection: {error}"),
+        )
     })?;
     let display = connection.display();
     let mut queue = connection.new_event_queue::<WaylandGlobals>();
     display.get_registry(&queue.handle(), ());
     let mut globals = WaylandGlobals::default();
-    queue
-        .roundtrip(&mut globals)
-        .map_err(|error| Error::Platform {
-            code: -1,
-            message: format!("query Wayland registry for window capabilities: {error}"),
-        })?;
+    queue.roundtrip(&mut globals).map_err(|error| {
+        Error::platform(
+            -1,
+            format!("query Wayland registry for window capabilities: {error}"),
+        )
+    })?;
     Ok(globals.wlr_foreign_toplevel_version)
 }
 
 fn sway_io(error: std::io::Error) -> Error {
-    Error::Platform {
-        code: error.raw_os_error().unwrap_or(-1) as i64,
-        message: format!("Sway IPC: {error}"),
-    }
+    Error::platform(
+        error.raw_os_error().unwrap_or(-1) as i64,
+        format!("Sway IPC: {error}"),
+    )
 }
 
 fn sway_protocol(message: &str) -> Error {
-    Error::Platform {
-        code: -1,
-        message: format!("Sway IPC: {message}"),
-    }
+    Error::platform(-1, format!("Sway IPC: {message}"))
 }
 
 #[derive(Clone, Copy)]
@@ -943,10 +961,7 @@ impl X11WindowBackend {
         match (result, release) {
             (Ok(value), Ok(())) => Ok(value),
             (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-            (Err(action_error), Err(release_error)) => Err(Error::Platform {
-                code: -1,
-                message: format!("native X11 action failed: {action_error}; releasing server grab failed: {release_error}"),
-            }),
+            (Err(action_error), Err(release_error)) => Err(Error::platform(-1, format!("native X11 action failed: {action_error}; releasing server grab failed: {release_error}"))),
         }
     }
 
@@ -1418,13 +1433,13 @@ impl X11WindowBackend {
                 i32::try_from(left).map_err(platform)?,
                 i32::try_from(top).map_err(platform)?,
             )),
-            other => Err(Error::Platform {
-                code: -1,
-                message: format!(
+            other => Err(Error::platform(
+                -1,
+                format!(
                     "_GTK_FRAME_EXTENTS of window {window:#x} has {} values, not 4",
                     other.len()
                 ),
-            }),
+            )),
         }
     }
 
@@ -1506,12 +1521,12 @@ impl X11WindowBackend {
         .to_logical(crate::scale::coordinate_scale()))
     }
 
-    fn active_window_pid(&self) -> Result<Option<u32>> {
+    fn active_window_identity(&self) -> Result<ActiveWindow> {
         if !self.supports(self.atoms.net_active_window) {
-            return Ok(None);
+            return Ok(ActiveWindow::NotReported);
         }
         // Under the grab, so the active window cannot go away between the
-        // two reads.
+        // reads.
         self.with_server_grab(|conn| {
             let active = property_u32(
                 conn,
@@ -1520,16 +1535,45 @@ impl X11WindowBackend {
                 AtomEnum::WINDOW.into(),
             )?;
             let Some(&window) = active.first().filter(|&&window| window != 0) else {
-                return Ok(None);
+                return Ok(ActiveWindow::NotReported);
             };
-            Ok(property_u32(
+            // The grab cannot help with a window destroyed before it was
+            // taken: right after the focused window closes the root can
+            // still name its XID until the window manager catches up. That
+            // is BadWindow on the first read of the window, and the answer
+            // is that the window is gone, not a platform failure (as in
+            // `forget_renamed`).
+            let pid = match conn
+                .get_property(
+                    false,
+                    window,
+                    self.atoms.net_wm_pid,
+                    AtomEnum::CARDINAL,
+                    0,
+                    1,
+                )
+                .map_err(platform)?
+                .reply()
+            {
+                Ok(reply) => reply.value32().and_then(|mut values| values.next()),
+                Err(x11rb::errors::ReplyError::X11Error(error))
+                    if error.error_kind == x11rb::protocol::ErrorKind::Window =>
+                {
+                    return Ok(ActiveWindow::Destroyed { window });
+                }
+                Err(error) => return Err(platform(error)),
+            };
+            // Still under the grab, so the window that answered above cannot
+            // vanish before this read: a failure here is a real one.
+            let title = String::from_utf8(property_bytes(
                 conn,
                 window,
-                self.atoms.net_wm_pid,
-                AtomEnum::CARDINAL.into(),
-            )?
-            .first()
-            .copied())
+                self.atoms.net_wm_name,
+                self.atoms.utf8_string,
+            )?)
+            .ok()
+            .filter(|title| !title.is_empty());
+            Ok(ActiveWindow::Window { window, pid, title })
         })
     }
 
@@ -1572,15 +1616,15 @@ impl X11WindowBackend {
                     Some(other) => format!("{other:#x}"),
                     None => "no window".to_string(),
                 };
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                return Err(Error::platform(
+                    -1,
+                    format!(
                         "activate: the window manager did not make window {window:#x} active \
                          within {budget:?} of the _NET_ACTIVE_WINDOW request (it may refuse \
                          activation, e.g. focus-stealing prevention); _NET_ACTIVE_WINDOW names \
                          {now}"
                     ),
-                });
+                ));
             }
             std::thread::sleep(ACTIVATE_POLL_INTERVAL);
         }
@@ -2087,9 +2131,11 @@ fn property_u32(
     reply
         .value32()
         .map(|values| values.collect())
-        .ok_or_else(|| Error::Platform {
-            code: -1,
-            message: format!("X11 property {property} did not contain 32-bit values"),
+        .ok_or_else(|| {
+            Error::platform(
+                -1,
+                format!("X11 property {property} did not contain 32-bit values"),
+            )
         })
 }
 
@@ -2107,10 +2153,7 @@ fn property_bytes(
 }
 
 fn platform(error: impl std::fmt::Display) -> Error {
-    Error::Platform {
-        code: -1,
-        message: format!("X11 window management: {error}"),
-    }
+    Error::platform(-1, format!("X11 window management: {error}"))
 }
 
 #[cfg(test)]
@@ -2655,11 +2698,13 @@ mod tests {
         std::fs::remove_file(socket).expect("remove fake socket");
     }
 
-    /// `active_window_pid` reads the pid of `_NET_ACTIVE_WINDOW`, and says
-    /// nothing when there is no active window or the WM does not support it.
+    /// `active_window_identity` reads the pid and title of `_NET_ACTIVE_WINDOW`, says
+    /// nothing when there is no active window or the WM does not support
+    /// it, and reports a destroyed active window as destroyed rather than a
+    /// BadWindow platform error.
     #[test]
     #[ignore = "requires Xvfb; run through scripts/run_integ_tests.sh"]
-    fn x11_active_window_pid_reads_the_ewmh_active_window() {
+    fn x11_active_window_reads_the_ewmh_active_window() {
         use x11rb::connection::Connection as _;
         use x11rb::protocol::xproto::{
             AtomEnum, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass,
@@ -2733,24 +2778,61 @@ mod tests {
             .expect("PID stored");
 
         assert_eq!(
-            ewmh.active_window_pid().unwrap(),
-            None,
+            ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::NotReported,
             "no _NET_ACTIVE_WINDOW yet"
         );
         set_active(window);
-        assert_eq!(ewmh.active_window_pid().unwrap(), Some(4242));
+        assert_eq!(
+            ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::Window {
+                window,
+                pid: Some(4242),
+                title: None
+            }
+        );
+        observer
+            .change_property8(
+                PropMode::REPLACE,
+                window,
+                atoms.net_wm_name,
+                atoms.utf8_string,
+                b"Editor",
+            )
+            .expect("set title")
+            .check()
+            .expect("title stored");
+        assert_eq!(
+            ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::Window {
+                window,
+                pid: Some(4242),
+                title: Some("Editor".into())
+            }
+        );
         set_active(0);
         assert_eq!(
-            ewmh.active_window_pid().unwrap(),
-            None,
+            ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::NotReported,
             "window 0 means no active window"
         );
         set_active(window);
         let no_ewmh = backend(connect(), &[]);
         assert_eq!(
-            no_ewmh.active_window_pid().unwrap(),
-            None,
+            no_ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::NotReported,
             "a WM without _NET_ACTIVE_WINDOW support is not asked"
+        );
+        // The focused window closes before the window manager updates the
+        // root: the stale XID is a destroyed window, not a platform error.
+        observer
+            .destroy_window(window)
+            .expect("destroy window")
+            .check()
+            .expect("window destroyed");
+        assert_eq!(
+            ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::Destroyed { window }
         );
     }
 

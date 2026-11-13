@@ -179,10 +179,12 @@ Every result is bounded and reports what it dropped.
   `annotate` legend of `screenshot` carry their own `truncated` fields.
 
 `tree` also marks each place it cut. A node whose children were dropped by
-`max_depth` or the node cap carries `subtree_truncated: true` and
-`children_count`, its real number of children. Its `children`, if present, are
-only the first ones. A node without `subtree_truncated` is complete, so a node
-with no `children` is a leaf. To see a cut subtree, call `tree` or `find` on it.
+`max_depth` or the node cap carries `subtree_truncated: true`. If its children
+were read before the cut, it also carries `children_count`, its real number of
+children, and its `children` are only the first ones. A node at `max_depth` has
+no `children_count`, even when it is a leaf, because its children are never
+read. A node without `subtree_truncated` is complete, so a node with no
+`children` is a leaf. To see a cut subtree, call `tree` or `find` on it.
 
 A single element is bounded too. `name`, `value` and `description` are each cut
 to 1024 bytes. A cut field is followed by `<field>_truncated: true` and
