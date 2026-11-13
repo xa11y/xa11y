@@ -217,10 +217,7 @@ impl Provider for FuzzProvider {
     fn resize_to(&self, _: &ElementData, _: u32, _: u32) -> Result<()> { Ok(()) }
 
     fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
-        Err(Error::Platform {
-            code: -1,
-            message: "not supported".to_string(),
-        })
+        Err(Error::platform(-1, "not supported"))
     }
 }
 

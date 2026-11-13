@@ -133,7 +133,7 @@ pub fn map_err(e: xa11y::Error) -> Error {
             codes::INVALID_CONFIG,
             format!("Invalid configuration: {message}"),
         ),
-        xa11y::Error::Platform { code, message } => (
+        xa11y::Error::Platform { code, message, .. } => (
             codes::PLATFORM,
             format!("Platform error ({code}): {message}"),
         ),
@@ -160,7 +160,12 @@ pub fn map_err(e: xa11y::Error) -> Error {
             e.diagnosis(),
         )),
         xa11y::Error::ElementStale { reason, element } => {
-            let mut payload = diagnosis_json(delivery, None, None, None);
+            // `selector` carries what core says went stale, as Python's does:
+            // ElementStaleError extends SelectorNotMatchedError, and through
+            // 0.15 this failure was a plain SelectorNotMatched whose selector
+            // held this same description. A handler written against the
+            // parent class keeps reading something, not `null`.
+            let mut payload = diagnosis_json(delivery, Some(element), None, None);
             payload["reason"] = serde_json::json!(stale_reason_name(*reason));
             payload["element"] = serde_json::json!(element);
             Some(payload)

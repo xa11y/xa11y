@@ -8,8 +8,29 @@ validation — which fires before the provider is touched, so the tests work
 on CI runners that have no AT-SPI session.
 """
 
+import sys
+
 import pytest
 import xa11y
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda b: xa11y.App.list(backend=b),
+        lambda b: xa11y.App.find(lambda a: True, timeout=0, backend=b),
+        lambda b: xa11y.App.by_name("ignored", timeout=0, backend=b),
+    ],
+    ids=["list", "find", "by_name"],
+)
+def test_backend_reaches_the_lookup_and_is_validated_first(call):
+    # An unknown source is refused before any OS call, naming the argument.
+    with pytest.raises(xa11y.InvalidActionDataError, match='unknown backend "typo"'):
+        call("typo")
+    # A Windows-only source off Windows is refused the same way, not ignored.
+    if sys.platform != "win32":
+        with pytest.raises(xa11y.ActionNotSupportedError, match="ia2"):
+            call("ia2")
 
 
 def test_by_name_rejects_negative_timeout():

@@ -96,12 +96,14 @@ struct PointerExtent {
 
 impl PointerExtent {
     fn new(outputs: Vec<Rect>, source: String) -> Result<Self> {
-        let bounds = bounding_box(&outputs).ok_or_else(|| Error::Platform {
-            code: -1,
-            message: format!(
-                "{source} describes no output, so the uinput pointer has no extent; \
+        let bounds = bounding_box(&outputs).ok_or_else(|| {
+            Error::platform(
+                -1,
+                format!(
+                    "{source} describes no output, so the uinput pointer has no extent; \
                  set {SCREEN_WIDTH_VAR} and {SCREEN_HEIGHT_VAR}"
-            ),
+                ),
+            )
         })?;
         Ok(Self {
             bounds,
@@ -223,10 +225,10 @@ impl WaylandInputBackend {
         match extent.as_ref() {
             Some(extent) => Ok(extent.map(p)),
             // Unreachable: populated just above.
-            None => Err(Error::Platform {
-                code: -1,
-                message: "uinput pointer extent missing after detection".into(),
-            }),
+            None => Err(Error::platform(
+                -1,
+                "uinput pointer extent missing after detection",
+            )),
         }
     }
 
@@ -244,10 +246,7 @@ impl WaylandInputBackend {
             None,
             xkb::KEYMAP_COMPILE_NO_FLAGS,
         )
-        .ok_or_else(|| Error::Platform {
-            code: -1,
-            message: "xkbcommon: failed to compile default keymap".into(),
-        })?;
+        .ok_or_else(|| Error::platform(-1, "xkbcommon: failed to compile default keymap"))?;
         let reverse = ReverseKeymap::from_xkb(&keymap);
 
         let mut keys = AttributeSet::<KeyCode>::new();
@@ -489,18 +488,18 @@ fn map_open_err(e: std::io::Error) -> Error {
                       (try `sudo modprobe uinput`)"
                 .into(),
         },
-        _ => Error::Platform {
-            code: e.raw_os_error().unwrap_or(-1) as i64,
-            message: format!("uinput open: {e}"),
-        },
+        _ => Error::platform(
+            e.raw_os_error().unwrap_or(-1) as i64,
+            format!("uinput open: {e}"),
+        ),
     }
 }
 
 fn map_io(e: std::io::Error) -> Error {
-    Error::Platform {
-        code: e.raw_os_error().unwrap_or(-1) as i64,
-        message: format!("uinput: {e}"),
-    }
+    Error::platform(
+        e.raw_os_error().unwrap_or(-1) as i64,
+        format!("uinput: {e}"),
+    )
 }
 
 fn validate_extent(requested: Point, checked: Point, extent: &PointerExtent) -> Result<()> {
@@ -569,12 +568,14 @@ fn detect_extent() -> Result<PointerExtent> {
     )? {
         return Ok(extent);
     }
-    let conn = Connection::connect_to_env().map_err(|e| Error::Platform {
-        code: -1,
-        message: format!(
-            "the uinput pointer needs the screen size, and there is no Wayland compositor \
+    let conn = Connection::connect_to_env().map_err(|e| {
+        Error::platform(
+            -1,
+            format!(
+                "the uinput pointer needs the screen size, and there is no Wayland compositor \
              to read it from ({e}); set {SCREEN_WIDTH_VAR} and {SCREEN_HEIGHT_VAR}"
-        ),
+            ),
+        )
     })?;
     compositor_extent(conn)
 }
@@ -682,12 +683,14 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, usize> for LayoutQuery {
 /// the compositor does not fully describe fails the read rather than being
 /// skipped, since a missing output would refuse targets on it.
 fn compositor_extent(conn: Connection) -> Result<PointerExtent> {
-    let fail = |what: String| Error::Platform {
-        code: -1,
-        message: format!(
-            "{what}, so the uinput pointer extent is unknown; set {SCREEN_WIDTH_VAR} and \
+    let fail = |what: String| {
+        Error::platform(
+            -1,
+            format!(
+                "{what}, so the uinput pointer extent is unknown; set {SCREEN_WIDTH_VAR} and \
              {SCREEN_HEIGHT_VAR}"
-        ),
+            ),
+        )
     };
     let display = conn.display();
     let mut queue = conn.new_event_queue::<LayoutQuery>();

@@ -113,6 +113,17 @@ pub struct MockProvider {
     /// Errors `get_children` returns for a node index, set by
     /// [`MockProvider::fail_children`].
     children_errors: Mutex<HashMap<usize, Error>>,
+    /// Errors `identity` returns for a node index, set by
+    /// [`MockProvider::fail_identity`].
+    identity_errors: Mutex<HashMap<usize, Error>>,
+    /// Errors `revalidate` returns for a node index, set by
+    /// [`MockProvider::fail_revalidate`].
+    revalidate_errors: Mutex<HashMap<usize, Error>>,
+    /// The error every `text_length` read returns, set by
+    /// [`MockProvider::fail_text`].
+    text_error: Mutex<Option<Error>>,
+    /// How many `text_length` reads were made, for budget tests.
+    text_length_reads: std::sync::atomic::AtomicUsize,
     /// Whether `subscribe` yields [`announcement_events`] (set by
     /// [`MockProvider::enable_events`]) rather than failing.
     events: std::sync::atomic::AtomicBool,
@@ -178,6 +189,39 @@ impl MockProvider {
             .insert(idx, error);
     }
 
+    /// Make reading the identity of the node named `name` fail with `error`.
+    pub fn fail_identity(&self, name: &str, error: Error) {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = Self::index_named(&nodes, name);
+        self.identity_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(idx, error);
+    }
+
+    /// Make the liveness check of the node named `name` fail with `error`,
+    /// as a platform whose read of the node failed would.
+    pub fn fail_revalidate(&self, name: &str, error: Error) {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = Self::index_named(&nodes, name);
+        self.revalidate_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(idx, error);
+    }
+
+    /// Make every text length read fail with `error`, as a platform with no
+    /// text interface at all would.
+    pub fn fail_text(&self, error: Error) {
+        *self.text_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+    }
+
+    /// How many text length reads the mock has answered (or refused).
+    pub fn text_length_reads(&self) -> usize {
+        self.text_length_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn index_named(nodes: &[MockNode], name: &str) -> usize {
         nodes
             .iter()
@@ -240,13 +284,13 @@ impl MockProvider {
             let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(node) = nodes.get(el.handle as usize) {
                 if node.closed {
-                    return Err(Error::Platform {
-                        code: -1,
-                        message: format!(
+                    return Err(Error::platform(
+                        -1,
+                        format!(
                             "element handle {} belongs to a closed window; cannot act on it",
                             el.handle
                         ),
-                    });
+                    ));
                 }
             }
         }
@@ -297,20 +341,20 @@ impl MockProvider {
     /// `closed_window_stale_handle_is_dead` asserts).
     fn live_window(&self, el: &ElementData) -> Result<()> {
         let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        let node = nodes
-            .get(el.handle as usize)
-            .ok_or_else(|| Error::Platform {
-                code: -1,
-                message: format!("stale window handle: no live node {}", el.handle),
-            })?;
+        let node = nodes.get(el.handle as usize).ok_or_else(|| {
+            Error::platform(
+                -1,
+                format!("stale window handle: no live node {}", el.handle),
+            )
+        })?;
         if node.closed {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
+            return Err(Error::platform(
+                -1,
+                format!(
                     "window handle {} belongs to a closed window; cannot act on it",
                     el.handle
                 ),
-            });
+            ));
         }
         Ok(())
     }
@@ -460,6 +504,14 @@ impl Provider for MockProvider {
     }
 
     fn identity(&self, el: &ElementData) -> Result<crate::identity::NodeIdentity> {
+        if let Some(e) = self
+            .identity_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(el.handle as usize))
+        {
+            return Err(e.clone());
+        }
         let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         if el.handle as usize >= nodes.len() {
             return Err(Error::stale(
@@ -475,6 +527,14 @@ impl Provider for MockProvider {
     }
 
     fn revalidate(&self, el: &ElementData) -> Result<()> {
+        if let Some(e) = self
+            .revalidate_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(el.handle as usize))
+        {
+            return Err(e.clone());
+        }
         let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         let described = crate::error::stale_subject(el);
         let Some(node) = nodes.get(el.handle as usize) else {
@@ -634,6 +694,16 @@ impl Provider for MockProvider {
     }
 
     fn text_length(&self, el: &ElementData) -> Result<u32> {
+        self.text_length_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(e) = self
+            .text_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Err(e);
+        }
         Ok(utf16_len(&self.text_of(el)?))
     }
 
@@ -898,18 +968,16 @@ impl Provider for MockProvider {
     fn subscribe(&self, _el: &ElementData) -> Result<Subscription> {
         use crate::event_provider::{event_channel, CancelHandle};
         if !self.events.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(Error::Platform {
-                code: -1,
-                message: "MockProvider does not support subscribe".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "MockProvider does not support subscribe",
+            ));
         }
         let (tx, rx) = event_channel();
         for event in announcement_events() {
             // The receiver is alive in this scope, so the send cannot fail.
-            tx.send(event).map_err(|e| Error::Platform {
-                code: -1,
-                message: e.to_string(),
-            })?;
+            tx.send(event)
+                .map_err(|e| Error::platform(-1, e.to_string()))?;
         }
         drop(tx);
         Ok(Subscription::new(rx, CancelHandle::noop()))
@@ -1379,6 +1447,10 @@ pub fn build_provider() -> Arc<MockProvider> {
         nodes: Mutex::new(nodes),
         relations: Mutex::new(HashMap::new()),
         children_errors: Mutex::new(HashMap::new()),
+        identity_errors: Mutex::new(HashMap::new()),
+        revalidate_errors: Mutex::new(HashMap::new()),
+        text_error: Mutex::new(None),
+        text_length_reads: std::sync::atomic::AtomicUsize::new(0),
         events: std::sync::atomic::AtomicBool::new(false),
         actions: Mutex::new(Vec::new()),
         frames: Mutex::new(HashMap::new()),

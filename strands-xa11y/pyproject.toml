@@ -57,9 +57,12 @@ dependencies = [
     # `ScreenshotProvider` signature, `#[non_exhaustive]`) but purely additive
     # on the Python surface this package reads, so excluding it would only make
     # `pip install strands-xa11y` refuse to co-install an xa11y it works with.
-    # `check_real_surface.py` holds this line against the version actually
-    # built from the tree.
-    "xa11y>=0.13.0,<0.16.0",
+    # 0.16.0 is the same: its breaking changes (relations as objects,
+    # `Capabilities.contains`, a sync `Element.text()`) are outside what this
+    # package reads, and the exception names and diagnosis attributes it keys
+    # off are unchanged. `check_real_surface.py` holds this line against the
+    # version actually built from the tree.
+    "xa11y>=0.13.0,<0.17.0",
 ]
 
 [project.optional-dependencies]

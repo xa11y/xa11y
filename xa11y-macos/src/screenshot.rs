@@ -129,53 +129,32 @@ impl MacOSScreenshot {
                                    Security → Screen & System Audio Recording."
                         .to_string(),
                 },
-                -2 => Error::Platform {
-                    code: -2,
-                    message: "SCScreenshotManager returned no image".into(),
-                },
-                -3 => Error::Platform {
-                    code: -3,
-                    message: "pixel buffer allocation failed".into(),
-                },
-                -4 => Error::Platform {
-                    code: -4,
-                    message: "bitmap context creation failed".into(),
-                },
-                -5 => Error::Platform {
-                    code: -5,
-                    message: "requested rect has zero/negative dimensions".into(),
-                },
+                -2 => Error::platform(-2, "SCScreenshotManager returned no image"),
+                -3 => Error::platform(-3, "pixel buffer allocation failed"),
+                -4 => Error::platform(-4, "bitmap context creation failed"),
+                -5 => Error::platform(-5, "requested rect has zero/negative dimensions"),
                 -6 => sck_timeout(deadline.as_ref(), "SCShareableContent.getShareableContent"),
                 -7 => sck_timeout(
                     deadline.as_ref(),
                     "SCScreenshotManager.captureImageWithFilter",
                 ),
-                -9999 => Error::Platform {
-                    code: -9999,
-                    message: "ObjC exception during capture".into(),
-                },
-                other => Error::Platform {
-                    code: i64::from(other),
-                    message: format!("SCK capture failed with code {other}"),
-                },
+                -9999 => Error::platform(-9999, "ObjC exception during capture"),
+                other => Error::platform(
+                    i64::from(other),
+                    format!("SCK capture failed with code {other}"),
+                ),
             };
             return Err(err);
         }
         if width == 0 || height == 0 {
             unsafe { safe_cg_free_pixels(pixels) };
-            return Err(Error::Platform {
-                code: -2,
-                message: "captured image has zero dimensions".into(),
-            });
+            return Err(Error::platform(-2, "captured image has zero dimensions"));
         }
 
         let size = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(4))
-            .ok_or_else(|| Error::Platform {
-                code: -1,
-                message: "screenshot dimensions overflow".into(),
-            })?;
+            .ok_or_else(|| Error::platform(-1, "screenshot dimensions overflow"))?;
         let pixels_vec = unsafe { std::slice::from_raw_parts(pixels, size) }.to_vec();
         unsafe { safe_cg_free_pixels(pixels) };
 

@@ -21,12 +21,18 @@
 //! returned in document order. See [`SelectorGroup`].
 //!
 //! Numeric attributes (`row`, `column`, `row_span`, `column_span`, `index`,
-//! `size`, `depth`, `row_count`, `column_count`) take a quoted non-negative
-//! integer and only `=`: `table_cell[row="2"][column="0"]`. The counts also
-//! accept `"unknown"`. Each compares the value exactly as the element reports
-//! it, 0-based like every index except `:nth`, so `table_cell[row="0"]:nth(1)`
-//! is the first matching cell of the first row. `header` takes `"column"` or
-//! `"row"` and matches header cells: `table_cell[header="column"]`.
+//! `size`, `depth`, `row_count`, `column_count`, `heading_level`) take a
+//! quoted non-negative integer and only `=`: `table_cell[row="2"][column="0"]`.
+//! The counts also accept `"unknown"`. Each compares the value exactly as the
+//! element reports it: the indices are 0-based like every index except
+//! `:nth`, so `table_cell[row="0"]:nth(1)` is the first matching cell of the
+//! first row, while `heading_level` is the level itself (`"1"` is an h1).
+//! `header` takes `"column"` or `"row"` and matches header cells:
+//! `table_cell[header="column"]`.
+//!
+//! `url` matches a link's target URL and `web_role` the role a web page
+//! declared (its ARIA `role`), as the element reports them; both take every
+//! operator: `link[url^="https://"]`, `[web_role="tab"]`.
 //!
 //! Attributes with a closed set of values refuse any other value with `=`,
 //! since it could never match: the boolean states (`enabled`, `visible`,
@@ -489,6 +495,8 @@ impl Selector {
 ///
 /// [`Selector::validate`] applies the same rule to everything past segment 0;
 /// this is the entry-point check for callers holding only the tail.
+/// Backend plumbing, not public API: hidden from the docs.
+#[doc(hidden)]
 pub fn validate_tail_segments(segments: &[SelectorSegment]) -> Result<()> {
     check_tail_segments(segments, "tail segment", 0).map_err(|message| Error::InvalidSelector {
         selector: format!("{segments:?}"),
@@ -524,6 +532,8 @@ fn check_tail_segments(
 
 /// Attributes whose value is a number the element reports. See
 /// [`numeric_filter_value`].
+/// Backend plumbing, not public API: hidden from the docs.
+#[doc(hidden)]
 pub const NUMERIC_ATTRS: &[&str] = &[
     "row",
     "column",

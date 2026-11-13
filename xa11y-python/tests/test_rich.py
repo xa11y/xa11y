@@ -106,8 +106,11 @@ def test_table_queries_on_a_non_table_raise():
 
 def test_text_refused_on_an_element_without_text():
     button = _native._make_test_locator().descendant("button").first().element()
+    # Like ``Locator.text()``, nothing is read until a method is called.
+    text = button.text()
+    assert isinstance(text, xa11y.Text)
     with pytest.raises(xa11y.ActionNotSupportedError):
-        button.text()
+        text.length()
 
 
 def test_lengths_and_offsets_are_utf16():
@@ -136,6 +139,40 @@ def test_bad_ranges_raise_structured_errors():
         xa11y.TextRange(5, 4)
     with pytest.raises(TypeError):
         t.read("not a range")
+
+
+def _negative_index_calls():
+    text = lambda: one("text_area").text()  # noqa: E731 - a fresh read per case
+    return {
+        "cell_at row": lambda: one("table").cell_at(-1, 0),
+        "cell_at column": lambda: one("table").cell_at(0, -1),
+        "cell_at too big": lambda: one("table").cell_at(2**32, 0),
+        "object_at": lambda: text().object_at(-1),
+        "range_at": lambda: text().range_at(-1, "word"),
+        "read tuple": lambda: text().read((-1, 2)),
+        "TextRange": lambda: xa11y.TextRange(-1, 2),
+        "find occurrence": lambda: text().find("l", occurrence=-1),
+        "lines limit": lambda: text().lines((0, 5), limit=-1),
+        "runs limit": lambda: text().runs((0, 5), limit=-1),
+        "select_text": lambda: one("text_area").select_text(-1, 2),
+        "select_text end": lambda: one("text_area").select_text(0, -2),
+    }
+
+
+@pytest.mark.parametrize("case", sorted(_negative_index_calls()))
+def test_a_negative_index_is_invalid_action_data_not_overflow(case):
+    # PyO3's unsigned conversion raises OverflowError; the JS binding and
+    # the CLI refuse the same value as invalid action data, so Python does.
+    with pytest.raises(xa11y.InvalidActionDataError, match=r"0\.\.=4294967295") as info:
+        _negative_index_calls()[case]()
+    assert not isinstance(info.value, OverflowError)
+
+
+def test_a_non_int_index_is_still_a_type_error():
+    with pytest.raises(TypeError):
+        one("table").cell_at("1", 0)
+    with pytest.raises(TypeError):
+        one("text_area").text().object_at(1.5)
 
 
 def test_find_occurrence_and_within():

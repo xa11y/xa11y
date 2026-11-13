@@ -316,9 +316,10 @@ impl From<xa11y::Capture> for Capture {
                 relations: node
                     .relations
                     .into_iter()
-                    .map(|(kind, targets)| CapturedRelation {
-                        kind: kind.to_snake_case().to_string(),
-                        targets: targets
+                    .map(|r| CapturedRelation {
+                        kind: r.kind.to_snake_case().to_string(),
+                        targets: r
+                            .targets
                             .into_iter()
                             .map(|t| match t {
                                 xa11y::RelationTarget::Node(i) => Either::A(index(i)),

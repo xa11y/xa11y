@@ -156,10 +156,10 @@ fn range_value(range: TextRange) -> Result<Owned> {
         safe_ax_value_create_cf_range(range.start as isize, (range.end - range.start) as isize)
     };
     if v.is_null() {
-        return Err(Error::Platform {
-            code: -1,
-            message: format!("could not create a CFRange AXValue for {range}"),
-        });
+        return Err(Error::platform(
+            -1,
+            format!("could not create a CFRange AXValue for {range}"),
+        ));
     }
     Ok(Owned(v))
 }
@@ -174,10 +174,10 @@ fn element_from(value: CFTypeRef, attribute: &str) -> Result<AXElement> {
     if unsafe { safe_ax_is_element(value) } {
         Ok(AXElement::from_borrowed(value as AXUIElementRef))
     } else {
-        Err(Error::Platform {
-            code: -1,
-            message: format!("{attribute} answered a value that is not an accessibility element"),
-        })
+        Err(Error::platform(
+            -1,
+            format!("{attribute} answered a value that is not an accessibility element"),
+        ))
     }
 }
 
@@ -198,10 +198,10 @@ fn covers(range: Option<(i64, i64)>, i: u32) -> bool {
 }
 
 fn platform(attribute: &str, code: i32) -> Error {
-    Error::Platform {
-        code: code as i64,
-        message: format!("reading {attribute} failed (AXError {code})"),
-    }
+    Error::platform(
+        code as i64,
+        format!("reading {attribute} failed (AXError {code})"),
+    )
 }
 
 /// The answer to one AX read.
@@ -287,10 +287,7 @@ fn read_focused(element: AXUIElementRef) -> Result<Option<bool>> {
     // Some bridges answer an NSNumber rather than a CFBoolean.
     cf_i64(v.ptr())
         .map(|n| Some(n != 0))
-        .ok_or_else(|| Error::Platform {
-            code: -1,
-            message: "AXFocused is neither a boolean nor a number".to_string(),
-        })
+        .ok_or_else(|| Error::platform(-1, "AXFocused is neither a boolean nor a number"))
 }
 
 /// Whether `element` lists `attribute` among its attribute names.
@@ -305,12 +302,12 @@ fn advertises(element: AXUIElementRef, attribute: &str) -> Result<bool> {
         || unsafe { safe_ax_copy_attribute_names(element, &mut names) },
     );
     if err != AX_ERROR_SUCCESS {
-        return Err(Error::Platform {
-            code: err as i64,
-            message: format!(
+        return Err(Error::platform(
+            err as i64,
+            format!(
                 "reading the attribute names (to check for {attribute}) failed (AXError {err})"
             ),
-        });
+        ));
     }
     if names.is_null() {
         return Ok(false);
@@ -318,10 +315,7 @@ fn advertises(element: AXUIElementRef, attribute: &str) -> Result<bool> {
     let names = Owned(names);
     unsafe {
         if safe_cf_get_type_id(names.ptr()) != safe_cf_array_get_type_id() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "the attribute names are not an array".to_string(),
-            });
+            return Err(Error::platform(-1, "the attribute names are not an array"));
         }
         let want: Vec<u16> = attribute.encode_utf16().collect();
         for i in 0..safe_cf_array_get_count(names.ptr()) {
@@ -402,10 +396,8 @@ fn text_leaves(ax: AXUIElementRef, length: u32, until: u32) -> Result<Vec<TextLe
             continue;
         }
         let units = match read(node.as_ptr(), "AXValue")? {
-            Read::Value(v) => cf_utf16(v.ptr()).ok_or_else(|| Error::Platform {
-                code: -1,
-                message: "a static text's AXValue is not a string".to_string(),
-            })?,
+            Read::Value(v) => cf_utf16(v.ptr())
+                .ok_or_else(|| Error::platform(-1, "a static text's AXValue is not a string"))?,
             Read::NoValue | Read::Unsupported => Vec::new(),
         };
         if units.is_empty() {
@@ -426,14 +418,14 @@ fn text_leaves(ax: AXUIElementRef, length: u32, until: u32) -> Result<Vec<TextLe
             match text.get(at) {
                 Some(&u) if is_unrendered_gap(u) => at += 1,
                 _ => {
-                    return Err(Error::Platform {
-                        code: -1,
-                        message: format!(
+                    return Err(Error::platform(
+                        -1,
+                        format!(
                             "a static text descendant's text ({:?}) does not continue the \
                              element's text at offset {cursor}",
                             String::from_utf16_lossy(&units)
                         ),
-                    })
+                    ))
                 }
             }
         }
@@ -455,10 +447,10 @@ fn bounds_for_range(ax: AXUIElementRef, range: TextRange) -> Result<Option<(f64,
         return Ok(None);
     };
     let Some((x, y, w, h)) = cf_rect(v.ptr()) else {
-        return Err(Error::Platform {
-            code: -1,
-            message: format!("AXBoundsForRange({range}) is not a CGRect"),
-        });
+        return Err(Error::platform(
+            -1,
+            format!("AXBoundsForRange({range}) is not a CGRect"),
+        ));
     };
     if w <= 0.0 && h <= 0.0 {
         return Ok(None);
@@ -535,9 +527,11 @@ fn attribute_count(element: AXUIElementRef, attribute: &str) -> Result<Option<u3
     match err {
         // A negative or oversized count is not "no such attribute": AX
         // answered with a length no array can have (tenet 1).
-        AX_ERROR_SUCCESS => u32::try_from(count).map(Some).map_err(|_| Error::Platform {
-            code: -1,
-            message: format!("counting {attribute} returned {count}, which is not a valid length"),
+        AX_ERROR_SUCCESS => u32::try_from(count).map(Some).map_err(|_| {
+            Error::platform(
+                -1,
+                format!("counting {attribute} returned {count}, which is not a valid length"),
+            )
         }),
         AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(None),
         code => Err(platform(attribute, code)),
@@ -825,9 +819,8 @@ fn ax_text_length(ax: AXUIElementRef, element: &ElementData) -> Result<u32> {
     match read(ax, "AXNumberOfCharacters")? {
         Read::Value(v) => cf_i64(v.ptr())
             .and_then(|n| u32::try_from(n).ok())
-            .ok_or_else(|| Error::Platform {
-                code: -1,
-                message: "AXNumberOfCharacters is not a non-negative number".to_string(),
+            .ok_or_else(|| {
+                Error::platform(-1, "AXNumberOfCharacters is not a non-negative number")
             }),
         Read::NoValue | Read::Unsupported => Err(Error::ActionNotSupported {
             action: "text".to_string(),
@@ -843,19 +836,21 @@ fn read_units(ax: AXUIElementRef, range: TextRange) -> Result<Vec<u16>> {
     }
     let param = range_value(range)?;
     let v = require_param(ax, "AXStringForRange", param.ptr())?;
-    let units = cf_utf16(v.ptr()).ok_or_else(|| Error::Platform {
-        code: -1,
-        message: format!("AXStringForRange({range}) did not return a string"),
+    let units = cf_utf16(v.ptr()).ok_or_else(|| {
+        Error::platform(
+            -1,
+            format!("AXStringForRange({range}) did not return a string"),
+        )
     })?;
     if units.len() as u32 != range.len() {
-        return Err(Error::Platform {
-            code: -1,
-            message: format!(
+        return Err(Error::platform(
+            -1,
+            format!(
                 "AXStringForRange({range}) returned {} units, expected {}",
                 units.len(),
                 range.len()
             ),
-        });
+        ));
     }
     Ok(units)
 }
@@ -903,10 +898,7 @@ fn ranges_in(value: CFTypeRef) -> Result<Vec<TextRange>> {
     let mut out = Vec::new();
     unsafe {
         if safe_cf_get_type_id(value) != safe_cf_array_get_type_id() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "AXSelectedTextRanges is not an array".to_string(),
-            });
+            return Err(Error::platform(-1, "AXSelectedTextRanges is not an array"));
         }
         for i in 0..safe_cf_array_get_count(value) {
             out.extend(selection_from(
@@ -919,18 +911,16 @@ fn ranges_in(value: CFTypeRef) -> Result<Vec<TextRange>> {
 }
 
 fn range_from(value: CFTypeRef, attribute: &str) -> Result<TextRange> {
-    let (location, length) = cf_range(value).ok_or_else(|| Error::Platform {
-        code: -1,
-        message: format!("{attribute} is not a CFRange"),
-    })?;
+    let (location, length) = cf_range(value)
+        .ok_or_else(|| Error::platform(-1, format!("{attribute} is not a CFRange")))?;
     let start = u32::try_from(location);
     let end = location.checked_add(length).map(u32::try_from);
     match (start, end) {
         (Ok(start), Some(Ok(end))) if start <= end => Ok(TextRange { start, end }),
-        _ => Err(Error::Platform {
-            code: -1,
-            message: format!("{attribute} reported the range ({location}, {length})"),
-        }),
+        _ => Err(Error::platform(
+            -1,
+            format!("{attribute} reported the range ({location}, {length})"),
+        )),
     }
 }
 
@@ -1042,10 +1032,10 @@ impl MacOSProvider {
             Owned(safe_cf_array_create(ptrs.as_ptr(), ptrs.len() as CFIndex))
         };
         if slot.ptr().is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "could not create the AXCellForColumnAndRow parameter".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "could not create the AXCellForColumnAndRow parameter",
+            ));
         }
         let name = CFString::new("AXCellForColumnAndRow");
         let mut value: CFTypeRef = std::ptr::null();
@@ -1197,12 +1187,9 @@ impl MacOSProvider {
             if matches!(role.as_deref(), Some("AXTable" | "AXOutline" | "AXGrid")) {
                 let Some(col) = column_at(parent.as_ptr(), column)? else {
                     // The column the cell reports is not in its table.
-                    return Err(Error::Platform {
-                        code: -1,
-                        message: format!(
+                    return Err(Error::platform(-1, format!(
                             "the cell reports column {column}, which its table's AXColumns does not have"
-                        ),
-                    });
+                        )));
                 };
                 let header = match read(col.as_ptr(), "AXHeader")?.value() {
                     Some(h) => vec![element_from(h.ptr(), "AXHeader")?],
@@ -1424,13 +1411,13 @@ impl MacOSProvider {
                 // was asked for, is the platform's error, not a range to
                 // hand back (or to read past the end of).
                 if line.end > length || !(line.start <= at && at <= line.end) {
-                    return Err(Error::Platform {
-                        code: -1,
-                        message: format!(
+                    return Err(Error::platform(
+                        -1,
+                        format!(
                             "AXRangeForLine reported the line {line} for offset {at}, which \
                              does not hold that offset inside the text of length {length}"
                         ),
-                    });
+                    ));
                 }
                 self.with_line_terminator(ax.as_ptr(), line, length)
             }
@@ -1539,10 +1526,10 @@ impl MacOSProvider {
         )?;
         let run = range_from(v.ptr(), "AXStyleRangeForIndex")?;
         if !(run.start <= offset && offset < run.end) || run.end > length {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("AXStyleRangeForIndex({offset}) reported the run {run}"),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("AXStyleRangeForIndex({offset}) reported the run {run}"),
+            ));
         }
         let param = range_value(run)?;
         let attributed = require_param(ax.as_ptr(), "AXAttributedStringForRange", param.ptr())?;
@@ -1563,18 +1550,18 @@ impl MacOSProvider {
         match unsafe { safe_ax_decode_text_run(attributed.ptr(), &mut decoded) } {
             0 => {}
             1 => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                return Err(Error::platform(
+                    -1,
+                    format!(
                         "AXAttributedStringForRange({run}) did not return an attributed string"
                     ),
-                })
+                ))
             }
             code => {
-                return Err(Error::Platform {
-                    code: code as i64,
-                    message: format!("decoding AXAttributedStringForRange({run}) threw"),
-                })
+                return Err(Error::platform(
+                    code as i64,
+                    format!("decoding AXAttributedStringForRange({run}) threw"),
+                ))
             }
         }
         // `run_attributes` adopts the +1 family string.

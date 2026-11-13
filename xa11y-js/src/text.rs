@@ -271,15 +271,11 @@ impl Text {
 /// Parse a text-unit name. Arm by arm, so `[[types.variant_coverage]]` sees
 /// every `TextUnit` variant in this binding; the error lists the valid names.
 pub fn parse_text_unit(name: &str) -> napi::Result<xa11y::TextUnit> {
-    Ok(match name {
-        "character" => xa11y::TextUnit::Character,
-        "word" => xa11y::TextUnit::Word,
-        "line" => xa11y::TextUnit::Line,
-        "paragraph" => xa11y::TextUnit::Paragraph,
-        other => {
-            return Err(map_err(xa11y::Error::invalid_action_data(format!(
-                "unknown text unit {other:?}; expected one of character, word, line, paragraph"
-            ))))
-        }
+    xa11y::TextUnit::from_snake_case(name).ok_or_else(|| {
+        map_err(xa11y::Error::unknown_name(
+            "text unit",
+            name,
+            xa11y::TextUnit::ALL.map(xa11y::TextUnit::to_snake_case),
+        ))
     })
 }

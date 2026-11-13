@@ -550,7 +550,13 @@ pub enum Error {
     /// with a selector to act on whatever is there now.
     #[error("Element stale ({reason}): {element}")]
     ElementStale {
+        /// Why the element is stale: removed from the tree, its process
+        /// exited or restarted, its identity changed, or its handle was
+        /// evicted.
         reason: StaleReason,
+        /// What was captured, for the message: `role "name"`, the role
+        /// alone, or the handle (`handle:42`) when that is all the provider
+        /// still has. Descriptive only; never used to re-match.
         element: String,
     },
 
@@ -595,9 +601,16 @@ pub enum Error {
     /// the text is now.
     #[error("Invalid text range {start}..{end}{}: {message}", length.map(|l| format!(" (text length {l})")).unwrap_or_default())]
     InvalidTextRange {
+        /// Start of the rejected range, in UTF-16 code units. 0-based.
         start: u32,
+        /// End of the rejected range, exclusive, in UTF-16 code units.
+        /// 0-based.
         end: u32,
+        /// The text's length in UTF-16 code units when the check knew it,
+        /// else `None`.
         length: Option<u32>,
+        /// Which rule the range broke (past the end, reversed, splits a
+        /// surrogate pair).
         message: String,
     },
 
@@ -617,8 +630,23 @@ pub enum Error {
     Unsupported { feature: String },
 
     /// A platform-specific error occurred.
-    #[error("Platform error ({code}): {message}")]
-    Platform { code: i64, message: String },
+    ///
+    /// Construct through [`Error::platform`]: the variant is
+    /// `#[non_exhaustive]`, so it can grow context without breaking every
+    /// backend that reports one. Match it with `Error::Platform { code, .. }`.
+    #[error("Platform error ({code}): {message}{}", diagnosis_suffix(.diagnosis))]
+    #[non_exhaustive]
+    Platform {
+        /// The platform's own code (an `HRESULT`, an `AXError`, a D-Bus
+        /// error number), or a negative value xa11y chose where the platform
+        /// gave none.
+        code: i64,
+        /// What failed, in the platform's words where it gave any.
+        message: String,
+        /// Context attached where the error escapes, such as the
+        /// [`Delivery`] of a failure known to precede dispatch.
+        diagnosis: Option<Box<Diagnosis>>,
+    },
 }
 
 impl Error {
@@ -644,12 +672,53 @@ impl Error {
         }
     }
 
+    /// Construct an [`Error::Platform`] (no diagnosis).
+    pub fn platform(code: i64, message: impl Into<String>) -> Self {
+        Self::Platform {
+            code,
+            message: message.into(),
+            diagnosis: None,
+        }
+    }
+
     /// Construct a bare [`Error::InvalidActionData`] (no diagnosis).
     pub fn invalid_action_data(message: impl Into<String>) -> Self {
         Self::InvalidActionData {
             message: message.into(),
             diagnosis: None,
         }
+    }
+
+    /// The [`Error::InvalidActionData`] for a name that is not one of
+    /// `valid`: it quotes the bad `input` and lists every valid name, so a
+    /// typo is fixable from the message alone. `what` names the vocabulary
+    /// (`"relation kind"`, `"text unit"`).
+    ///
+    /// The shared spelling for every `from_snake_case` caller that has to
+    /// turn `None` into an error:
+    ///
+    /// ```
+    /// use xa11y_core::{Error, TextUnit};
+    /// let err = TextUnit::from_snake_case("sentence")
+    ///     .ok_or_else(|| Error::unknown_name("text unit", "sentence",
+    ///         TextUnit::ALL.map(TextUnit::to_snake_case)))
+    ///     .unwrap_err();
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "Invalid action data: unknown text unit \"sentence\"; expected one of \
+    ///      \"character\", \"word\", \"line\", \"paragraph\"",
+    /// );
+    /// ```
+    pub fn unknown_name<'a>(
+        what: &str,
+        input: &str,
+        valid: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        let valid: Vec<String> = valid.into_iter().map(|n| format!("{n:?}")).collect();
+        Self::invalid_action_data(format!(
+            "unknown {what} {input:?}; expected one of {}",
+            valid.join(", ")
+        ))
     }
 
     /// An [`Error::ElementStale`] for `element` (a description such as
@@ -664,11 +733,12 @@ impl Error {
     /// Attach (or replace) a [`Diagnosis`] on errors that carry one.
     ///
     /// Supported variants: [`SelectorNotMatched`](Self::SelectorNotMatched),
-    /// [`Timeout`](Self::Timeout) and
-    /// [`InvalidActionData`](Self::InvalidActionData). Other variants are returned unchanged —
-    /// their primary fields already identify the failure, and silently
-    /// growing a diagnosis field on them would not be rendered. An empty
-    /// diagnosis is normalized to `None`.
+    /// [`Timeout`](Self::Timeout), [`InvalidActionData`](Self::InvalidActionData)
+    /// and [`Platform`](Self::Platform). Other variants are returned
+    /// unchanged: their primary fields already identify the failure, and
+    /// every one of them is [`Delivery::NotDelivered`] by its variant, so
+    /// there is no disposition to override either. An empty diagnosis is
+    /// normalized to `None`.
     #[must_use]
     pub fn diagnose(mut self, diagnosis: Diagnosis) -> Self {
         let normalized = if diagnosis.is_empty() {
@@ -679,7 +749,8 @@ impl Error {
         match &mut self {
             Self::SelectorNotMatched { diagnosis: d, .. }
             | Self::Timeout { diagnosis: d, .. }
-            | Self::InvalidActionData { diagnosis: d, .. } => {
+            | Self::InvalidActionData { diagnosis: d, .. }
+            | Self::Platform { diagnosis: d, .. } => {
                 *d = normalized;
             }
             _ => {}
@@ -730,7 +801,8 @@ impl Error {
         match self {
             Self::SelectorNotMatched { diagnosis, .. }
             | Self::Timeout { diagnosis, .. }
-            | Self::InvalidActionData { diagnosis, .. } => diagnosis.as_deref(),
+            | Self::InvalidActionData { diagnosis, .. }
+            | Self::Platform { diagnosis, .. } => diagnosis.as_deref(),
             _ => None,
         }
     }
@@ -841,10 +913,7 @@ mod tests {
 
     #[test]
     fn delivery_is_unknown_for_platform_failures_and_bare_timeouts() {
-        let platform = Error::Platform {
-            code: -25204,
-            message: "cannot complete".into(),
-        };
+        let platform = Error::platform(-25204, "cannot complete");
         assert_eq!(platform.delivery(), Delivery::Unknown);
         assert!(!platform.delivery().is_safe_to_retry());
         assert_eq!(

@@ -28,8 +28,8 @@ use crate::cli::{
     ACTIONS_REQUIRING_SIZE, ACTIONS_REQUIRING_VALUE, ACTION_NAMES, TREE_DETAILS,
 };
 use crate::{
-    App, AppExt, ClickOptions, ClickTarget, DragOptions, Element, Locator, Rect, ScrollDelta,
-    ShellSurface, ShellSurfaceExt,
+    App, ClickOptions, ClickTarget, DragOptions, Element, Locator, Rect, ScrollDelta, ShellSurface,
+    ShellSurfaceExt,
 };
 
 /// Depth used by `tree` when the caller does not ask for one.
@@ -214,6 +214,36 @@ coordinate tools.";
 
 /// The per-field byte cap, as the element-returning tools state it.
 ///
+/// The capability table's areas (`event:`, `relation:`, ...) in table order,
+/// each once. Derived from the table so the `capabilities` description
+/// cannot omit an area a new row opens.
+fn capability_areas() -> Vec<&'static str> {
+    let mut areas: Vec<&'static str> = Vec::new();
+    for name in crate::Capabilities::names() {
+        let area = match name.find(':') {
+            Some(i) => &name[..=i],
+            None => name,
+        };
+        if !areas.contains(&area) {
+            areas.push(area);
+        }
+    }
+    areas
+}
+
+/// [`capability_areas`] as prose: "`event:`, `action:` and `text:`".
+fn capability_areas_prose() -> String {
+    let quoted: Vec<String> = capability_areas()
+        .iter()
+        .map(|a| format!("`{a}`"))
+        .collect();
+    match quoted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        Some((last, _)) => last.clone(),
+        None => String::new(),
+    }
+}
+
 /// Built from [`MAX_FIELD_BYTES`] so the number a model reads is the number
 /// the encoder enforces.
 fn field_cap_note() -> String {
@@ -391,7 +421,7 @@ impl ToolHost for Xa11yTools {
 
     fn call(&self, name: &str, args: &Value) -> CliResult<ToolOutput> {
         match name {
-            "apps" => tool_apps(),
+            "apps" => tool_apps(args),
             "capabilities" => tool_capabilities(args),
             "shell" => tool_shell(),
             "windows" => tool_windows(args, &self.refs),
@@ -537,13 +567,17 @@ fn held_property() -> Value {
 
 fn tool_definition(name: &str) -> Value {
     match name {
-        "apps" => tool(
-            "apps",
-            "List applications",
-            "List running applications with their process ids. Start here to find \
-             the `app` or `pid` the other tools need.",
-            json!({ "type": "object", "additionalProperties": false }),
-        ),
+        "apps" => {
+            let mut props = Map::new();
+            props.insert("backend".into(), json!({"type":"string", "enum": cli::BACKENDS, "description":"Accessibility source to enumerate; default: server environment. IA2 requires Windows."}));
+            tool(
+                "apps",
+                "List applications",
+                "List running applications with their process ids. Start here to find \
+                 the `app` or `pid` the other tools need.",
+                object_schema(props, &[]),
+            )
+        }
         "capabilities" => {
             let mut props = Map::new();
             props.insert("backend".into(), json!({"type":"string", "enum": cli::BACKENDS, "description":"Accessibility source to describe. Default: the server environment's source for the running platform, and native for another `platform`. IA2 has its own table, including unsupported events."}));
@@ -576,6 +610,7 @@ fn tool_definition(name: &str) -> Value {
             tool(
                 "capabilities",
                 "What this platform can report",
+                &format!(
                 "Say, per feature, whether this platform's accessibility backend can \
                  report it: `supported`, `partial` (some toolkits, apps or display servers \
                  only; `note` says which) or `unsupported` (never). Reads a fixed table and \
@@ -586,9 +621,10 @@ fn tool_definition(name: &str) -> Value {
                  fails as unsupported is explained here. Check an event kind before waiting \
                  on it: `event:menu_opened` is `unsupported` on Linux, so a wait for it \
                  there can only time out.\n\n\
-                 Names are `<area>:<name>`; the areas are `event:`, `action:`, `app:`, \
-                 `window:`, `state:`, `table:` and `text:`. An unknown name is an \
+                 Names are `<area>:<name>`; the areas are {areas}. An unknown name is an \
                  `invalid_arguments` failure listing the closest known names.",
+                    areas = capability_areas_prose(),
+                ),
                 object_schema(props, &[]),
             )
         }
@@ -746,9 +782,12 @@ fn tool_definition(name: &str) -> Value {
                      confirm what an action changed. Pass `shell` in place of `app` / \
                      `pid` to read an OS shell surface's tree instead.\n\n\
                      A node whose children were left out by `max_depth` or \
-                     `max_nodes` (at most {TREE_MAX_NODES}) carries `subtree_truncated: true` and \
-                     `children_count` (how many children it really has; `children`, \
-                     if present, holds only the first of them). A node without \
+                     `max_nodes` (at most {TREE_MAX_NODES}) carries `subtree_truncated: true`. \
+                     When its children were read before the cut it also carries \
+                     `children_count` (how many it really has; `children` holds only \
+                     the first of them). A node at `max_depth` has its children left \
+                     unread, so it is marked without a count even when it turns out \
+                     to be a leaf. A node without \
                      `subtree_truncated` is complete: no `children` means a leaf. To \
                      see what was cut, call `find` with a selector reaching into that \
                      node (`list[name=\"Files\"] list_item`), or `tree` again with a larger `max_depth`.\n\n\
@@ -1937,8 +1976,11 @@ fn target_fields(target: &Target, out: &mut Map<String, Value>) {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-fn tool_apps() -> CliResult<ToolOutput> {
-    let apps = App::list()?;
+fn tool_apps(args: &Value) -> CliResult<ToolOutput> {
+    let apps = App::list_with(match backend_arg(args)? {
+        Some(b) => crate::provider_for_backend(&b)?,
+        None => crate::provider()?,
+    })?;
     let listed: Vec<Value> = apps
         .iter()
         .map(|app| {
@@ -2039,7 +2081,7 @@ fn tool_tree(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
         let by_relations = cap.nodes.iter().any(|n| {
             n.relations
                 .iter()
-                .any(|(_, targets)| targets.len() > TREE_RELATION_LIMIT)
+                .any(|r| r.targets.len() > TREE_RELATION_LIMIT)
         });
         truncated.insert("by_relations".into(), json!(by_relations));
         truncated.insert("relation_limit".into(), json!(TREE_RELATION_LIMIT));
@@ -2072,8 +2114,10 @@ fn tree_detail(args: &Value) -> CliResult<TreeDetail> {
 /// Capture `target` and encode it as nested JSON, every node with a ref.
 ///
 /// A node whose children were left out by a limit carries
-/// `subtree_truncated: true` and `children_count` (how many children it
-/// has, of which `children` holds the first few or none). Without that a
+/// `subtree_truncated: true`, plus `children_count` (how many children it
+/// has, of which `children` holds the first few or none) when its children
+/// were read before the cut. A node at the depth limit has its children
+/// left unread, so it carries the marker without a count. Without that a
 /// pruned node is indistinguishable from a leaf, and the global `truncated`
 /// flags cannot say *where* to look deeper. A child-enumeration failure is
 /// recorded in the node (`children_error`) rather than failing the whole
@@ -2154,8 +2198,9 @@ fn tree_json(
         let relations: Map<String, Value> = node
             .relations
             .iter()
-            .filter(|(_, targets)| !targets.is_empty())
-            .map(|(kind, targets)| {
+            .filter(|r| !r.targets.is_empty())
+            .map(|r| {
+                let (kind, targets) = (r.kind, &r.targets);
                 let listed: Vec<Value> = targets
                     .iter()
                     .take(TREE_RELATION_LIMIT)
@@ -2553,7 +2598,7 @@ fn text_output(
     let center = matches!(op, cli::TextOp::ObjectAt { .. }).then(cli::pointer_center);
     let mut capture = None;
     let usable = center.as_ref().is_some_and(cli::PointerCenter::is_usable);
-    let result = cli::run_text_op(&element.text()?, op, &mut |found| {
+    let result = cli::run_text_op(&element.text(), op, &mut |found| {
         element_with_ref(&mut capture, refs, found, usable)
     })?;
     if let Some(capture) = capture {
@@ -2690,7 +2735,8 @@ fn relations_output(
     }
     let relations: Vec<Value> = found
         .iter()
-        .map(|(kind, targets)| {
+        .map(|r| {
+            let (kind, targets) = (r.kind, &r.elements);
             let listed: Vec<Value> = targets
                 .iter()
                 .take(limit)
@@ -3324,10 +3370,10 @@ fn capture_summary(shot: &crate::Screenshot, png: &[u8]) -> Map<String, Value> {
 /// a panic if one of them grows a field that can (tenet 4).
 fn legend_json<T: serde::Serialize>(what: &str, value: &T) -> CliResult<Value> {
     serde_json::to_value(value).map_err(|e| {
-        CliError::Xa11y(crate::Error::Platform {
-            code: -1,
-            message: format!("serialize the screenshot {what}: {e}"),
-        })
+        CliError::Xa11y(crate::Error::platform(
+            -1,
+            format!("serialize the screenshot {what}: {e}"),
+        ))
     })
 }
 
@@ -3806,7 +3852,7 @@ mod tests {
     }
 
     #[test]
-    fn a_depth_cut_marks_each_pruned_node_with_its_real_child_count() {
+    fn a_depth_cut_marks_every_frontier_node_without_reading_its_children() {
         let (full, _) = mock_tree(64, TREE_MAX_NODES);
         let (cut_tree, cut) = mock_tree(1, TREE_MAX_NODES);
         assert!(cut.by_depth, "the mock is deeper than one level");
@@ -3819,34 +3865,29 @@ mod tests {
         let full_children = kids(&full);
         let cut_children = kids(&cut_tree);
         assert_eq!(full_children.len(), cut_children.len());
-        let mut pruned = 0;
-        for (whole, shown) in full_children.iter().zip(cut_children) {
+        assert!(
+            full_children.iter().any(|c| !kids(c).is_empty()),
+            "the fixture must have a subtree to prune"
+        );
+        for shown in cut_children {
             assert!(
                 shown.get("children").is_none(),
                 "depth 1 stops here: {shown}"
             );
-            let real = kids(whole).len();
-            if real == 0 {
-                // A genuine leaf at the frontier must still read as one.
-                assert!(shown.get("subtree_truncated").is_none(), "{shown}");
-                assert!(shown.get("children_count").is_none(), "{shown}");
-            } else {
-                pruned += 1;
-                assert_eq!(shown["subtree_truncated"], json!(true), "{shown}");
-                assert_eq!(shown["children_count"], json!(real), "{shown}");
-            }
+            // The depth limit reads no children below it, not even to count
+            // them, so a leaf at the frontier is marked like any other node.
+            assert_eq!(shown["subtree_truncated"], json!(true), "{shown}");
+            assert!(shown.get("children_count").is_none(), "{shown}");
         }
-        assert!(pruned > 0, "the fixture must have a subtree to prune");
     }
 
     #[test]
     fn max_depth_zero_marks_the_root_itself() {
-        let (full, _) = mock_tree(64, TREE_MAX_NODES);
         let (root, cut) = mock_tree(0, TREE_MAX_NODES);
         assert!(cut.by_depth);
         assert!(root.get("children").is_none());
         assert_eq!(root["subtree_truncated"], json!(true));
-        assert_eq!(root["children_count"], json!(kids(&full).len()));
+        assert!(root.get("children_count").is_none(), "{root}");
     }
 
     #[test]
@@ -4320,6 +4361,7 @@ mod tests {
         for (tool, arguments) in [
             ("tree", json!({ "app": "X", "backend": "foo" })),
             ("windows", json!({ "backend": "foo" })),
+            ("apps", json!({ "backend": "foo" })),
             ("capabilities", json!({ "backend": "foo" })),
             ("events_start", json!({ "app": "X", "backend": "foo" })),
         ] {
@@ -4959,16 +5001,48 @@ mod tests {
     }
 
     #[test]
+    fn the_capabilities_description_names_every_area_of_the_table() {
+        let description = tool_definition("capabilities")["description"]
+            .as_str()
+            .expect("description")
+            .to_owned();
+        let areas = capability_areas();
+        // The areas the review found missing, and the rest of today's table.
+        for area in [
+            "event:",
+            "action:",
+            "app:",
+            "window:",
+            "state:",
+            "table:",
+            "text:",
+            "property:",
+            "relation:",
+        ] {
+            assert!(areas.contains(&area), "{area} not in {areas:?}");
+        }
+        for area in &areas {
+            assert!(
+                description.contains(&format!("`{area}`")),
+                "{area}: {description}"
+            );
+        }
+    }
+
+    #[test]
     fn the_agent_guide_names_the_per_node_cut_markers_the_encoder_sets() {
         let guide = crate::cli::AGENT_GUIDE;
-        let (root, _) = mock_tree(0, TREE_MAX_NODES);
-        let marked: Vec<&String> = root
+        // Budget 2: the window keeps one child and is cut after its children
+        // were read, so it carries both markers.
+        let (root, _) = mock_tree(64, 2);
+        let window = &kids(&root)[0];
+        let marked: Vec<&String> = window
             .as_object()
             .expect("object")
             .keys()
             .filter(|k| matches!(k.as_str(), "subtree_truncated" | "children_count"))
             .collect();
-        assert_eq!(marked.len(), 2, "{root}");
+        assert_eq!(marked.len(), 2, "{window}");
         assert!(guide.contains("`subtree_truncated: true`"));
         assert!(guide.contains("`children_count`"));
     }
@@ -5047,10 +5121,7 @@ mod tests {
                 Some("not_delivered"),
             ),
             (
-                CliError::Xa11y(crate::Error::Platform {
-                    code: -25204,
-                    message: "cannot complete".into(),
-                }),
+                CliError::Xa11y(crate::Error::platform(-25204, "cannot complete")),
                 Some("unknown"),
             ),
             (
@@ -5757,10 +5828,7 @@ mod tests {
         }
         fn press(&self, e: &crate::ElementData) -> crate::Result<()> {
             if self.press_fails.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(crate::Error::Platform {
-                    code: -25204,
-                    message: "AXPress did not complete".into(),
-                });
+                return Err(crate::Error::platform(-25204, "AXPress did not complete"));
             }
             self.inner.press(e)
         }
@@ -6591,7 +6659,7 @@ mod tests {
             .iter()
             .map(|r| r["kind"].as_str().expect("a kind"))
             .collect();
-        let expected: Vec<&str> = every.iter().map(|(k, _)| k.to_snake_case()).collect();
+        let expected: Vec<&str> = every.iter().map(|r| r.kind.to_snake_case()).collect();
         assert!(!expected.is_empty());
         assert_eq!(kinds, expected);
     }

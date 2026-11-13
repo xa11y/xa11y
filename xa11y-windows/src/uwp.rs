@@ -274,13 +274,13 @@ fn hosted_core_window_pid(frame: HWND) -> Result<Option<u32>> {
             // "No such child" is a null result with no error code set.
             Err(e) if e.code().is_ok() => return Ok(None),
             Err(e) => {
-                return Err(Error::Platform {
-                    code: i64::from(e.code().0),
-                    message: format!(
+                return Err(Error::platform(
+                    i64::from(e.code().0),
+                    format!(
                         "FindWindowExW(CoreWindow) under UWP frame HWND {:#x} failed: {e}",
                         frame.0 as usize
                     ),
-                })
+                ))
             }
         };
     let pid = native_pid(core);
@@ -289,12 +289,14 @@ fn hosted_core_window_pid(frame: HWND) -> Result<Option<u32>> {
 
 /// The frame window's AppUserModelID from its property store.
 fn frame_aumid(frame: HWND) -> Result<Option<String>> {
-    let fail = |what: &str, e: windows::core::Error| Error::Platform {
-        code: i64::from(e.code().0),
-        message: format!(
-            "{what} for UWP frame HWND {:#x} failed: {e}",
-            frame.0 as usize
-        ),
+    let fail = |what: &str, e: windows::core::Error| {
+        Error::platform(
+            i64::from(e.code().0),
+            format!(
+                "{what} for UWP frame HWND {:#x} failed: {e}",
+                frame.0 as usize
+            ),
+        )
     };
     // SAFETY: plain shell call on a window handle.
     let store: IPropertyStore = unsafe { SHGetPropertyStoreForWindow(frame) }
@@ -346,10 +348,10 @@ pub fn process_packaging(pid: u32) -> Result<Packaging> {
         Ok(process) => process,
         Err(e) if e.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(Packaging::Exited),
         Err(e) => {
-            return Err(Error::Platform {
-                code: i64::from(e.code().0),
-                message: format!("OpenProcess(pid {pid}) to read its AppUserModelID failed: {e}"),
-            })
+            return Err(Error::platform(
+                i64::from(e.code().0),
+                format!("OpenProcess(pid {pid}) to read its AppUserModelID failed: {e}"),
+            ))
         }
     };
     let result = handle_aumid(process, pid);
@@ -402,9 +404,11 @@ fn lookup_app_display_name(aumid: &str) -> Result<Option<String>> {
         FOLDERID_AppsFolder, IShellItem, SHCreateItemInKnownFolder, KF_FLAG_DEFAULT,
         SIGDN_NORMALDISPLAY,
     };
-    let fail = |what: &str, e: windows::core::Error| Error::Platform {
-        code: i64::from(e.code().0),
-        message: format!("{what} for AppUserModelID {aumid} failed: {e}"),
+    let fail = |what: &str, e: windows::core::Error| {
+        Error::platform(
+            i64::from(e.code().0),
+            format!("{what} for AppUserModelID {aumid} failed: {e}"),
+        )
     };
     let wide: Vec<u16> = aumid.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: `wide` is NUL-terminated and outlives the call.
@@ -463,13 +467,13 @@ pub fn handle_aumid(
                 &buf[..(len as usize).saturating_sub(1).min(buf.len())],
             ))),
             APPMODEL_ERROR_NO_APPLICATION => Ok(None),
-            other => Err(Error::Platform {
-                code: i64::from(other.0),
-                message: format!(
+            other => Err(Error::platform(
+                i64::from(other.0),
+                format!(
                     "GetApplicationUserModelId(pid {pid}) failed with Win32 error {}",
                     other.0
                 ),
-            }),
+            )),
         };
     }
 }
@@ -482,10 +486,10 @@ fn process_ids() -> Result<Vec<u32>> {
         let bytes = (pids.len() * 4) as u32;
         // SAFETY: `pids` holds `bytes` bytes.
         unsafe { EnumProcesses(pids.as_mut_ptr(), bytes, &mut needed) }.map_err(|e| {
-            Error::Platform {
-                code: i64::from(e.code().0),
-                message: format!("EnumProcesses failed while finding UWP apps: {e}"),
-            }
+            Error::platform(
+                i64::from(e.code().0),
+                format!("EnumProcesses failed while finding UWP apps: {e}"),
+            )
         })?;
         if needed < bytes {
             pids.truncate(needed as usize / 4);
@@ -508,10 +512,10 @@ fn top_level_core_window_owners() -> Result<HashSet<u32>> {
     // SAFETY: the callback receives the pointer unchanged and `owners`
     // outlives the call.
     unsafe { EnumWindows(Some(collect), LPARAM((&raw mut owners) as isize)) }.map_err(|e| {
-        Error::Platform {
-            code: i64::from(e.code().0),
-            message: format!("EnumWindows failed while finding core windows: {e}"),
-        }
+        Error::platform(
+            i64::from(e.code().0),
+            format!("EnumWindows failed while finding core windows: {e}"),
+        )
     })?;
     Ok(owners)
 }
@@ -597,7 +601,7 @@ mod tests {
             let (lookup, source) = match lookup_app_display_name(&aumid) {
                 Ok(Some(name)) => (format!("{name:?}"), "package"),
                 Ok(None) => ("no Apps-folder entry".to_string(), "process"),
-                Err(Error::Platform { code, message }) => (
+                Err(Error::Platform { code, message, .. }) => (
                     format!("ERROR {:#010x}: {message}", code as u32),
                     "error (list_apps would fail)",
                 ),

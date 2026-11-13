@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyList;
 
 /// Build core options from the keyword arguments. Runs before any platform
 /// call, with the GIL held.
@@ -422,9 +422,41 @@ pub(crate) struct CapturedNode {
     children_truncated: bool,
     errors: Vec<Py<CaptureError>>,
     text: Option<CapturedText>,
-    /// kind → targets: an ``int`` index for a node inside the capture, an
-    /// ``Element`` for one outside it.
-    relations: Py<PyDict>,
+    relations: Vec<Py<CapturedRelation>>,
+}
+
+/// One kind of relation on a :class:`CapturedNode` and its targets.
+#[pyclass(frozen)]
+pub(crate) struct CapturedRelation {
+    kind: &'static str,
+    /// An ``int`` index for a node inside the capture, an ``Element`` for one
+    /// outside it.
+    targets: Py<PyList>,
+}
+
+#[pymethods]
+impl CapturedRelation {
+    /// The relation kind, in snake_case (``"labelled_by"``, ``"controls"``).
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+    /// The targets, in platform order: an ``int`` index into
+    /// ``Capture.nodes`` for a node inside the capture, an ``Element`` for
+    /// one outside it. ``[]`` when the platform reports the kind but the
+    /// node has none.
+    #[getter]
+    fn targets(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        // A fresh list, so a caller mutating it cannot change the capture.
+        Ok(PyList::new(py, self.targets.bind(py).iter())?.unbind())
+    }
+    fn __repr__(&self, py: Python<'_>) -> String {
+        format!(
+            "CapturedRelation(kind='{}', targets=<{} targets>)",
+            self.kind,
+            self.targets.bind(py).len()
+        )
+    }
 }
 
 impl CapturedNode {
@@ -445,10 +477,10 @@ impl CapturedNode {
                 )
             })
             .collect::<PyResult<Vec<_>>>()?;
-        let relations = PyDict::new(py);
-        for (kind, targets) in &node.relations {
+        let mut relations = Vec::with_capacity(node.relations.len());
+        for relation in &node.relations {
             let list = PyList::empty(py);
-            for target in targets {
+            for target in &relation.targets {
                 match target {
                     xa11y::RelationTarget::Node(i) => list.append(*i)?,
                     xa11y::RelationTarget::Outside(el) => list.append(crate::make_py_element(
@@ -458,7 +490,13 @@ impl CapturedNode {
                     )?)?,
                 }
             }
-            relations.set_item(kind.to_snake_case(), list)?;
+            relations.push(Py::new(
+                py,
+                CapturedRelation {
+                    kind: relation.kind.to_snake_case(),
+                    targets: list.unbind(),
+                },
+            )?);
         }
         Ok(Self {
             index: node.index,
@@ -470,7 +508,7 @@ impl CapturedNode {
             children_truncated: node.children_truncated,
             errors,
             text: node.text.clone().map(|inner| CapturedText { inner }),
-            relations: relations.unbind(),
+            relations,
         })
     }
 }
@@ -525,13 +563,13 @@ impl CapturedNode {
     fn text(&self) -> Option<CapturedText> {
         self.text.clone()
     }
-    /// With ``detail={"relations"}``: kind → targets, each an ``int`` index
-    /// into ``Capture.nodes`` when inside the capture, or an ``Element``
-    /// when outside it. Every kind the platform reports appears, ``[]`` when
-    /// it has no targets.
+    /// With ``detail={"relations"}``: one :class:`CapturedRelation` per kind
+    /// the platform reports, in the order it reports them. Each target is an
+    /// ``int`` index into ``Capture.nodes`` when inside the capture, or an
+    /// ``Element`` when outside it.
     #[getter]
-    fn relations(&self, py: Python<'_>) -> Py<PyDict> {
-        self.relations.clone_ref(py)
+    fn relations(&self, py: Python<'_>) -> Vec<Py<CapturedRelation>> {
+        self.relations.iter().map(|r| r.clone_ref(py)).collect()
     }
     /// Shortcut for ``element.role``.
     #[getter]

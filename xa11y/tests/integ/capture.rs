@@ -89,11 +89,12 @@ mod tests {
         } else {
             RelationKind::Controls
         };
-        let (_, targets) = button
+        let targets = &button
             .relations
             .iter()
-            .find(|(k, _)| *k == kind)
-            .expect("the kind is reported");
+            .find(|r| r.kind == kind)
+            .expect("the kind is reported")
+            .targets;
         match targets.as_slice() {
             [RelationTarget::Node(i)] => {
                 assert_eq!(cap.nodes[*i].name.as_deref(), Some("Details Text"))

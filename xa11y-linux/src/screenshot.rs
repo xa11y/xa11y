@@ -53,19 +53,13 @@ impl LinuxScreenshot {
     pub fn new() -> Result<Self> {
         match select_backend("XA11Y_LINUX_SCREENSHOT_BACKEND", "screenshot capture")? {
             DesktopBackend::X11 => {
-                let (conn, screen_num) =
-                    RustConnection::connect(None).map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("X11 connect: {e}"),
-                    })?;
+                let (conn, screen_num) = RustConnection::connect(None)
+                    .map_err(|e| Error::platform(-1, format!("X11 connect: {e}")))?;
                 let screen = conn
                     .setup()
                     .roots
                     .get(screen_num)
-                    .ok_or_else(|| Error::Platform {
-                        code: -1,
-                        message: "X server reported no screens".into(),
-                    })?;
+                    .ok_or_else(|| Error::platform(-1, "X server reported no screens"))?;
                 let root = screen.root;
                 Ok(Self {
                     backend: Backend::X11(Box::new(X11Backend {
@@ -75,9 +69,11 @@ impl LinuxScreenshot {
                 })
             }
             DesktopBackend::Wayland => {
-                let conn = ZbusConnection::session().map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("session bus connect for Wayland screenshot portal: {e}"),
+                let conn = ZbusConnection::session().map_err(|e| {
+                    Error::platform(
+                        -1,
+                        format!("session bus connect for Wayland screenshot portal: {e}"),
+                    )
                 })?;
                 Ok(Self {
                     backend: Backend::Wayland { conn },
@@ -99,64 +95,45 @@ impl LinuxScreenshot {
             None => {
                 let root_geometry = guard
                     .get_geometry(root)
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("GetGeometry of the root window: {e}"),
+                    .map_err(|e| {
+                        Error::platform(-1, format!("GetGeometry of the root window: {e}"))
                     })?
                     .reply()
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("GetGeometry of the root window reply: {e}"),
+                    .map_err(|e| {
+                        Error::platform(-1, format!("GetGeometry of the root window reply: {e}"))
                     })?;
                 (0_i16, 0_i16, root_geometry.width, root_geometry.height)
             }
             Some(r) => {
-                let x = i16::try_from(r.x).map_err(|_| Error::Platform {
-                    code: -1,
-                    message: "rect x out of i16 range".into(),
-                })?;
-                let y = i16::try_from(r.y).map_err(|_| Error::Platform {
-                    code: -1,
-                    message: "rect y out of i16 range".into(),
-                })?;
-                let w = u16::try_from(r.width).map_err(|_| Error::Platform {
-                    code: -1,
-                    message: "rect width out of u16 range".into(),
-                })?;
-                let h = u16::try_from(r.height).map_err(|_| Error::Platform {
-                    code: -1,
-                    message: "rect height out of u16 range".into(),
-                })?;
+                let x = i16::try_from(r.x)
+                    .map_err(|_| Error::platform(-1, "rect x out of i16 range"))?;
+                let y = i16::try_from(r.y)
+                    .map_err(|_| Error::platform(-1, "rect y out of i16 range"))?;
+                let w = u16::try_from(r.width)
+                    .map_err(|_| Error::platform(-1, "rect width out of u16 range"))?;
+                let h = u16::try_from(r.height)
+                    .map_err(|_| Error::platform(-1, "rect height out of u16 range"))?;
                 (x, y, w, h)
             }
         };
         if w == 0 || h == 0 {
-            return Err(Error::Platform {
-                code: -1,
-                message: "zero-sized capture rect".into(),
-            });
+            return Err(Error::platform(-1, "zero-sized capture rect"));
         }
 
         let reply = guard
             .get_image(ImageFormat::Z_PIXMAP, root, x, y, w, h, !0)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetImage: {e}"),
-            })?
+            .map_err(|e| Error::platform(-1, format!("GetImage: {e}")))?
             .reply()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetImage reply: {e}"),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("GetImage reply: {e}")))?;
 
         // Most modern X servers return Z_PIXMAP at 32 bpp for 24-bit visuals,
         // with layout BGRX on little-endian. Detect and convert to RGBA.
         let bpp = (reply.data.len() / (w as usize * h as usize)) as u32;
         if bpp != 4 {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("unsupported X11 pixmap layout: {bpp} bytes/pixel (expected 4)"),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("unsupported X11 pixmap layout: {bpp} bytes/pixel (expected 4)"),
+            ));
         }
 
         let mut rgba = Vec::with_capacity(reply.data.len());
@@ -178,10 +155,7 @@ impl LinuxScreenshot {
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.Screenshot",
         )
-        .map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("portal Screenshot proxy: {e}"),
-        })?;
+        .map_err(|e| Error::platform(-1, format!("portal Screenshot proxy: {e}")))?;
 
         let mut options: HashMap<&str, Value> = HashMap::new();
         options.insert("interactive", Value::Bool(false));
@@ -197,44 +171,23 @@ impl LinuxScreenshot {
         let response_rule = MatchRule::builder()
             .msg_type(MessageType::Signal)
             .interface("org.freedesktop.portal.Request")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("portal Response match interface: {e}"),
-            })?
+            .map_err(|e| Error::platform(-1, format!("portal Response match interface: {e}")))?
             .member("Response")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("portal Response match member: {e}"),
-            })?
+            .map_err(|e| Error::platform(-1, format!("portal Response match member: {e}")))?
             .build();
-        let mut responses =
-            MessageIterator::for_match_rule(response_rule, conn, Some(8)).map_err(|e| {
-                Error::Platform {
-                    code: -1,
-                    message: format!("subscribe to portal Response: {e}"),
-                }
-            })?;
+        let mut responses = MessageIterator::for_match_rule(response_rule, conn, Some(8))
+            .map_err(|e| Error::platform(-1, format!("subscribe to portal Response: {e}")))?;
 
-        let request_path: OwnedObjectPath =
-            proxy
-                .call("Screenshot", &("", options))
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("portal Screenshot call: {e}"),
-                })?;
+        let request_path: OwnedObjectPath = proxy
+            .call("Screenshot", &("", options))
+            .map_err(|e| Error::platform(-1, format!("portal Screenshot call: {e}")))?;
 
         // Block for Response(response: u, results: a{sv}) on this request.
         let msg = loop {
             let msg = responses
                 .next()
-                .ok_or_else(|| Error::Platform {
-                    code: -1,
-                    message: "portal Response signal channel closed".into(),
-                })?
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("receive portal Response: {e}"),
-                })?;
+                .ok_or_else(|| Error::platform(-1, "portal Response signal channel closed"))?
+                .map_err(|e| Error::platform(-1, format!("receive portal Response: {e}")))?;
             if msg
                 .header()
                 .path()
@@ -243,33 +196,29 @@ impl LinuxScreenshot {
                 break msg;
             }
         };
-        let (response, results): (u32, HashMap<String, OwnedValue>) =
-            msg.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("portal Response deserialize: {e}"),
-            })?;
+        let (response, results): (u32, HashMap<String, OwnedValue>) = msg
+            .body()
+            .deserialize()
+            .map_err(|e| Error::platform(-1, format!("portal Response deserialize: {e}")))?;
         if response != 0 {
             return Err(Error::PermissionDenied {
                 instructions: format!("xdg-desktop-portal Screenshot denied (response={response})"),
             });
         }
-        let uri_val = results.get("uri").ok_or_else(|| Error::Platform {
-            code: -1,
-            message: "portal Response missing 'uri' key".into(),
-        })?;
+        let uri_val = results
+            .get("uri")
+            .ok_or_else(|| Error::platform(-1, "portal Response missing 'uri' key"))?;
         let uri: String = uri_val
             .downcast_ref::<String>()
-            .map_err(|_| Error::Platform {
-                code: -1,
-                message: "portal Response 'uri' is not a string".into(),
-            })?;
-        let path = uri.strip_prefix("file://").ok_or_else(|| Error::Platform {
-            code: -1,
-            message: format!("portal URI not file://: {uri}"),
-        })?;
-        let bytes = std::fs::read(path).map_err(|e| Error::Platform {
-            code: e.raw_os_error().unwrap_or(-1) as i64,
-            message: format!("read portal PNG: {e}"),
+            .map_err(|_| Error::platform(-1, "portal Response 'uri' is not a string"))?;
+        let path = uri
+            .strip_prefix("file://")
+            .ok_or_else(|| Error::platform(-1, format!("portal URI not file://: {uri}")))?;
+        let bytes = std::fs::read(path).map_err(|e| {
+            Error::platform(
+                e.raw_os_error().unwrap_or(-1) as i64,
+                format!("read portal PNG: {e}"),
+            )
         })?;
         // Best-effort cleanup of portal tmpfile.
         let _ = std::fs::remove_file(path);
@@ -289,9 +238,11 @@ fn portal_handle_token() -> Result<String> {
     let mut entropy = [0_u8; 16];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut entropy))
-        .map_err(|e| Error::Platform {
-            code: e.raw_os_error().unwrap_or(-1) as i64,
-            message: format!("generate portal handle token: {e}"),
+        .map_err(|e| {
+            Error::platform(
+                e.raw_os_error().unwrap_or(-1) as i64,
+                format!("generate portal handle token: {e}"),
+            )
         })?;
 
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -354,20 +305,17 @@ impl ScreenshotProvider for LinuxScreenshot {
 
 fn decode_png_to_rgba(bytes: &[u8]) -> Result<Screenshot> {
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    let mut reader = decoder.read_info().map_err(|e| Error::Platform {
-        code: -1,
-        message: format!("png decode header: {e}"),
-    })?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| Error::platform(-1, format!("png decode header: {e}")))?;
     let info = reader.info().clone();
-    let buf_size = reader.output_buffer_size().ok_or_else(|| Error::Platform {
-        code: -1,
-        message: "png decode: output buffer size overflowed usize".to_string(),
-    })?;
+    let buf_size = reader
+        .output_buffer_size()
+        .ok_or_else(|| Error::platform(-1, "png decode: output buffer size overflowed usize"))?;
     let mut buf = vec![0u8; buf_size];
-    let frame = reader.next_frame(&mut buf).map_err(|e| Error::Platform {
-        code: -1,
-        message: format!("png decode frame: {e}"),
-    })?;
+    let frame = reader
+        .next_frame(&mut buf)
+        .map_err(|e| Error::platform(-1, format!("png decode frame: {e}")))?;
     buf.truncate(frame.buffer_size());
 
     let rgba = match (info.color_type, info.bit_depth) {
@@ -380,10 +328,10 @@ fn decode_png_to_rgba(bytes: &[u8]) -> Result<Screenshot> {
             out
         }
         (ct, bd) => {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("unsupported portal PNG format: {ct:?} @ {bd:?}"),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("unsupported portal PNG format: {ct:?} @ {bd:?}"),
+            ));
         }
     };
 
@@ -395,18 +343,12 @@ fn crop_rgba(shot: Screenshot, rect: Rect) -> Result<Screenshot> {
     let x = rect.x.max(0) as u32;
     let y = rect.y.max(0) as u32;
     if x >= sw || y >= sh {
-        return Err(Error::Platform {
-            code: -1,
-            message: "crop rect outside captured image".into(),
-        });
+        return Err(Error::platform(-1, "crop rect outside captured image"));
     }
     let w = rect.width.min(sw - x);
     let h = rect.height.min(sh - y);
     if w == 0 || h == 0 {
-        return Err(Error::Platform {
-            code: -1,
-            message: "crop rect has zero size".into(),
-        });
+        return Err(Error::platform(-1, "crop rect has zero size"));
     }
     let mut out = Vec::with_capacity((w * h * 4) as usize);
     for row in 0..h {

@@ -61,14 +61,14 @@ pub use xa11y_core::{NativeObject, NodeIdentity};
 pub use xa11y_core::capture;
 pub use xa11y_core::{
     CancelToken, Capture, CaptureError, CaptureOptions, CaptureStats, CaptureStep, CapturedNode,
-    CapturedText, RelationTarget, Truncation,
+    CapturedRelation, CapturedText, RelationTarget, Truncation,
 };
 
 // Document semantics (see `xa11y_core::semantics`).
 pub use xa11y_core::semantics;
 #[doc(hidden)]
 pub use xa11y_core::LiveRegionParts;
-pub use xa11y_core::{Landmark, LiveRegionInfo, Politeness, RelationKind};
+pub use xa11y_core::{Landmark, LiveRegionInfo, Politeness, Relation, RelationKind};
 
 // Re-export input simulation surface.
 pub use xa11y_core::input;
@@ -151,9 +151,9 @@ pub fn capabilities_for_backend(
         },
     };
     let source = match backend {
-        Some(b) => parse_accessibility_source(Some(b.into()))?,
+        Some(b) => parse_accessibility_source(Some(b.into()), "backend")?,
         None if platform.is_none() => {
-            parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"))?
+            parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"), SOURCE_ENV)?
         }
         None => "native".into(),
     };
@@ -260,13 +260,13 @@ pub fn input_sim() -> Result<InputSim> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(Error::Platform {
-            code: -1,
-            message: format!(
+        Err(Error::platform(
+            -1,
+            format!(
                 "Input simulation not available on platform: {}",
                 std::env::consts::OS
             ),
-        })
+        ))
     }
 }
 
@@ -305,13 +305,13 @@ fn create_screenshot_backend() -> std::result::Result<Arc<dyn ScreenshotProvider
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(Error::Platform {
-            code: -1,
-            message: format!(
+        Err(Error::platform(
+            -1,
+            format!(
                 "Screenshot not available on platform: {}",
                 std::env::consts::OS
             ),
-        })
+        ))
     }
 }
 
@@ -770,21 +770,23 @@ fn plan_annotations(
     (annotations, legend, omitted)
 }
 
-fn parse_accessibility_source(value: Option<std::ffi::OsString>) -> Result<String> {
+const SOURCE_ENV: &str = "XA11Y_ACCESSIBILITY_SOURCE";
+const SOURCES: [&str; 3] = ["native", "uia", "ia2"];
+
+/// Validate an accessibility source. `what` is how the caller supplied it
+/// (`"backend"` for an argument, [`SOURCE_ENV`] for the environment), so
+/// the error names what the caller actually set.
+fn parse_accessibility_source(value: Option<std::ffi::OsString>, what: &str) -> Result<String> {
     let source = value.map_or_else(
         || Ok("native".to_string()),
         |value| {
             value.into_string().map_err(|_| {
-                Error::invalid_action_data(
-                    "XA11Y_ACCESSIBILITY_SOURCE must be UTF-8: native, uia, or ia2",
-                )
+                Error::invalid_action_data(format!("{what} must be UTF-8: native, uia, or ia2"))
             })
         },
     )?;
-    if !matches!(source.as_str(), "native" | "uia" | "ia2") {
-        return Err(Error::invalid_action_data(format!(
-            "unknown XA11Y_ACCESSIBILITY_SOURCE {source:?}; choose native, uia, or ia2"
-        )));
+    if !SOURCES.contains(&source.as_str()) {
+        return Err(Error::unknown_name(what, &source, SOURCES));
     }
     Ok(source)
 }
@@ -795,26 +797,41 @@ mod accessibility_source_tests {
     #[test]
     fn source_selection_is_explicit_and_rejects_unknown_values() {
         assert_eq!(
-            parse_accessibility_source(None).expect("default source"),
+            parse_accessibility_source(None, SOURCE_ENV).expect("default source"),
             "native"
         );
         for source in ["native", "uia", "ia2"] {
             assert_eq!(
-                parse_accessibility_source(Some(source.into())).expect("known source"),
+                parse_accessibility_source(Some(source.into()), SOURCE_ENV).expect("known source"),
                 source
             );
         }
         for source in ["", "IA2", "atspi", "typo"] {
             assert!(matches!(
-                parse_accessibility_source(Some(source.into())),
+                parse_accessibility_source(Some(source.into()), SOURCE_ENV),
                 Err(Error::InvalidActionData { .. })
             ));
         }
     }
+
+    #[test]
+    fn an_explicit_backend_error_names_the_argument_not_the_variable() {
+        let Err(err) = provider_for_backend("typo") else {
+            panic!("typo is not a source");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("unknown backend \"typo\""), "{msg}");
+        assert!(!msg.contains(SOURCE_ENV), "{msg}");
+        let msg = capabilities_for_backend(None, None, Some("typo"))
+            .expect_err("typo is not a source")
+            .to_string();
+        assert!(msg.contains("unknown backend"), "{msg}");
+    }
 }
 
 fn create_provider_boxed() -> Result<Box<dyn Provider>> {
-    let source = parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"))?;
+    let source =
+        parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"), SOURCE_ENV)?;
     create_provider_for_backend(&source)
 }
 
@@ -823,7 +840,7 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
 /// Windows-only; unsupported selections fail before attaching to any app.
 /// Use with `App::by_pid_with` or `App::by_name_with`.
 pub fn provider_for_backend(backend: &str) -> Result<Arc<dyn Provider>> {
-    let source = parse_accessibility_source(Some(backend.into()))?;
+    let source = parse_accessibility_source(Some(backend.into()), "backend")?;
     create_provider_for_backend(&source).map(Arc::from)
 }
 
@@ -858,10 +875,10 @@ fn create_provider_for_backend(source: &str) -> Result<Box<dyn Provider>> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(Error::Platform {
-            code: -1,
-            message: format!("Unsupported platform: {}", std::env::consts::OS),
-        })
+        Err(Error::platform(
+            -1,
+            format!("Unsupported platform: {}", std::env::consts::OS),
+        ))
     }
 }
 
@@ -1839,10 +1856,10 @@ mod cached_error_tests {
     fn a_platform_error_renders_its_prefix_once() {
         let cell: Mutex<Option<()>> = Mutex::new(None);
         let err = cached(&cell, || {
-            Err(Error::Platform {
-                code: -1,
-                message: "Failed to connect to D-Bus session bus".to_string(),
-            })
+            Err(Error::platform(
+                -1,
+                "Failed to connect to D-Bus session bus",
+            ))
         })
         .expect_err("the cached construction error must come back out");
         let rendered = err.to_string();

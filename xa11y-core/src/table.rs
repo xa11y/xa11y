@@ -359,6 +359,8 @@ impl CollectionInfo {
 /// UIA reports an unset `PositionInSet` / `Level` as `0`, and AT-SPI reports
 /// an unparsable or missing attribute as no value at all, so `0` and anything
 /// negative mean "not reported" here, not "index -1".
+/// Backend plumbing, not public API: hidden from the docs.
+#[doc(hidden)]
 pub fn index_from_one_based(n: i64) -> Option<u32> {
     if n >= 1 {
         u32::try_from(n - 1).ok()

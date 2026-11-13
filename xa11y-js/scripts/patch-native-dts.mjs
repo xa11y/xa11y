@@ -167,6 +167,9 @@ export type CaptureStepName =
 /** Extra reads a capture can make (\`CaptureOptions.detail\`). */
 export type CaptureDetailName = 'text' | 'formatting' | 'relations';
 
+/** An accessibility source (\`backend\` options). \`uia\` and \`ia2\` are Windows only. */
+export type BackendName = 'native' | 'uia' | 'ia2';
+
 /** A platform xa11y has a backend for. */
 export type PlatformName = 'linux' | 'macos' | 'windows';
 
@@ -331,6 +334,27 @@ const REPLACEMENTS = [
     name: 'Capabilities.platform -> PlatformName',
     from: '  get platform(): string\n',
     to: '  get platform(): PlatformName\n',
+    all: 1,
+  },
+  // Three option fields take a source name; `CaptureOptions`-adjacent
+  // `backend` (the API that read a capture: 'atspi', 'ax', ...) is a
+  // different vocabulary, so each is matched with its doc line.
+  {
+    name: 'AppListOptions.backend -> BackendName',
+    from: '`ia2` require Windows.\n   */\n  backend?: string\n',
+    to: '`ia2` require Windows.\n   */\n  backend?: BackendName\n',
+    all: 1,
+  },
+  {
+    name: 'AppLookupOptions.backend -> BackendName',
+    from: 'overrides XA11Y_ACCESSIBILITY_SOURCE. */\n  backend?: string\n',
+    to: 'overrides XA11Y_ACCESSIBILITY_SOURCE. */\n  backend?: BackendName\n',
+    all: 1,
+  },
+  {
+    name: 'CapabilitiesOptions.backend -> BackendName',
+    from: '/** Explicit source: native, uia or ia2. */\n  backend?: string\n',
+    to: '/** Explicit source: native, uia or ia2. */\n  backend?: BackendName\n',
     all: 1,
   },
   {

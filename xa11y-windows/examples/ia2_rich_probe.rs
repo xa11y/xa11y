@@ -10,15 +10,12 @@ fn main() {
     fn one(p: &dyn Provider, root: &ElementData, selector: &str) -> Result<ElementData, Error> {
         let matches = p
             .find_elements(root, &Selector::parse(selector)?, Some(2), Some(32))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("find {selector}: {e}"),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("find {selector}: {e}")))?;
         if matches.len() != 1 {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("IA2 fixture expected one {selector}, got {}", matches.len()),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("IA2 fixture expected one {selector}, got {}", matches.len()),
+            ));
         }
         Ok(matches[0].clone())
     }
@@ -142,10 +139,13 @@ fn main() {
             xa11y_core::RelationKind::LabelledBy,
             xa11y_core::RelationKind::DescribedBy,
         ])?;
-        assert_eq!(relations[0].1.len(), 1);
-        assert_eq!(relations[0].1[0].name.as_deref(), Some("IA2 label target"));
+        assert_eq!(relations[0].elements.len(), 1);
         assert_eq!(
-            relations[1].1[0].name.as_deref(),
+            relations[0].elements[0].name.as_deref(),
+            Some("IA2 label target")
+        );
+        assert_eq!(
+            relations[1].elements[0].name.as_deref(),
             Some("IA2 description target")
         );
         assert!(
@@ -157,7 +157,7 @@ fn main() {
             Arc::clone(&provider),
         );
         eprintln!("IA2 phase: embedded objects");
-        let mixed_text = mixed.text()?;
+        let mixed_text = mixed.text();
         let mixed_value = mixed_text.read_all()?;
         let mut found_link = false;
         let mut found_button = false;
@@ -191,7 +191,7 @@ fn main() {
             edit.states.required,
             "IA2 required state maps to the shared state set"
         );
-        let text = edit.text()?;
+        let text = edit.text();
         eprintln!("IA2 phase: text ranges and selections");
         let all = text.read_all()?;
         assert_eq!(
@@ -260,7 +260,7 @@ fn main() {
             )?,
             Arc::clone(&provider),
         );
-        let rich_text = rich.text()?;
+        let rich_text = rich.text();
         let value = rich_text.read_all()?;
         assert!(value.starts_with("Hello bold italic red"), "{value:?}");
         let runs = rich_text.runs(

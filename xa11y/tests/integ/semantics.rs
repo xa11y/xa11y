@@ -127,8 +127,8 @@ mod tests {
         };
         let relations = button.relations(&[kind]).expect("read the relation");
         assert_eq!(relations.len(), 1, "one entry per kind asked for");
-        let (got_kind, targets) = &relations[0];
-        assert_eq!(*got_kind, kind);
+        let targets = &relations[0].elements;
+        assert_eq!(relations[0].kind, kind);
         assert_eq!(targets.len(), 1, "{targets:?}");
         assert!(
             targets[0].same_as(&controlled).expect("compare"),
@@ -139,8 +139,8 @@ mod tests {
         // A supported kind with no targets is an empty list, not absent.
         let none = controlled.relations(&[kind]).expect("read the relation");
         assert_eq!(none.len(), 1);
-        assert_eq!(none[0].0, kind);
-        assert!(none[0].1.is_empty(), "{:?}", none[0].1);
+        assert_eq!(none[0].kind, kind);
+        assert!(none[0].elements.is_empty(), "{:?}", none[0].elements);
 
         // The kind this platform does not report is refused, never empty.
         let other = if cfg!(target_os = "macos") {

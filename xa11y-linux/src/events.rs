@@ -74,10 +74,10 @@ pub(crate) fn subscribe_for_pid(
         .map(|app| app.bus_name)
         .collect();
     if sender_buses.is_empty() {
-        return Err(Error::Platform {
-            code: -1,
-            message: format!("No application found with PID {pid}"),
-        });
+        return Err(Error::platform(
+            -1,
+            format!("No application found with PID {pid}"),
+        ));
     }
 
     // Dedicated Connection per subscription. Dropping it (after we've
@@ -87,10 +87,7 @@ pub(crate) fn subscribe_for_pid(
 
     // Match-rule management goes through the DBusProxy — the blocking
     // Connection itself doesn't expose AddMatch/RemoveMatch.
-    let dbus = DBusProxy::new(&conn).map_err(|e| Error::Platform {
-        code: -1,
-        message: format!("DBusProxy: {e}"),
-    })?;
+    let dbus = DBusProxy::new(&conn).map_err(|e| Error::platform(-1, format!("DBusProxy: {e}")))?;
 
     // Activate the message receiver *before* the first match rule, and start
     // draining it at once. A signal the daemon routes to this connection
@@ -143,10 +140,11 @@ pub(crate) fn subscribe_for_pid(
     // the next signal.
     let handed = ctx_tx
         .send(ctx)
-        .map_err(|_| Error::Platform {
-            code: -1,
-            message: "the AT-SPI event worker stopped before the subscription was set up"
-                .to_string(),
+        .map_err(|_| {
+            Error::platform(
+                -1,
+                "the AT-SPI event worker stopped before the subscription was set up".to_string(),
+            )
         })
         .and_then(|()| ping_daemon(&conn));
     if let Err(e) = handed {
@@ -190,21 +188,13 @@ fn add_match_rules(
             let rule = MatchRule::builder()
                 .msg_type(MessageType::Signal)
                 .sender(sender_bus.clone())
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("sender match rule: {e}"),
-                })?
+                .map_err(|e| Error::platform(-1, format!("sender match rule: {e}")))?
                 .interface((*iface).to_string())
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("interface match rule: {e}"),
-                })?
+                .map_err(|e| Error::platform(-1, format!("interface match rule: {e}")))?
                 .build();
-            dbus.add_match_rule(rule.clone())
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("add_match_rule({iface}) for {sender_bus}: {e}"),
-                })?;
+            dbus.add_match_rule(rule.clone()).map_err(|e| {
+                Error::platform(-1, format!("add_match_rule({iface}) for {sender_bus}: {e}"))
+            })?;
             rules.push(rule);
         }
     }
@@ -327,10 +317,7 @@ fn ping_daemon(conn: &Connection) -> Result<()> {
         &(),
     )
     .map(drop)
-    .map_err(|e| Error::Platform {
-        code: -1,
-        message: format!("Ping to the accessibility bus daemon: {e}"),
-    })
+    .map_err(|e| Error::platform(-1, format!("Ping to the accessibility bus daemon: {e}")))
 }
 
 /// Stop the worker: set `stop`, remove `rules` so the daemon routes nothing
@@ -800,10 +787,7 @@ fn application_offset_unit(conn: &Connection, bus: &str) -> Result<Option<Offset
         .and_then(|b| b.interface("org.a11y.atspi.Application"))
         .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No))
         .and_then(|b| b.build())
-        .map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Application proxy for {bus}: {e}"),
-        })?;
+        .map_err(|e| Error::platform(-1, format!("Application proxy for {bus}: {e}")))?;
     read_offset_unit_unless_gone(&proxy.into(), bus, || {
         unresponsive_peer_error(
             &AccessibleRef {
@@ -1085,27 +1069,23 @@ fn seed_top_level_windows(
             path.to_owned(),
             "org.a11y.atspi.Accessible",
         )
-        .map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("proxy for {bus}{path}: {e}"),
-        })?;
+        .map_err(|e| Error::platform(-1, format!("proxy for {bus}{path}: {e}")))?;
         match proxy.call_method(method, &()) {
             Ok(reply) => Ok(Some(reply)),
             Err(e) if crate::atspi::is_gone(&e) => Ok(None),
-            Err(e) => Err(Error::Platform {
-                code: -1,
-                message: format!("{method} on {bus}{path} while seeding window states: {e}"),
-            }),
+            Err(e) => Err(Error::platform(
+                -1,
+                format!("{method} on {bus}{path} while seeding window states: {e}"),
+            )),
         }
     };
     let Some(reply) = call(bus, APP_ROOT_PATH, "GetChildren")? else {
         return Ok(());
     };
-    let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
-        reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("GetChildren deserialize for {bus}: {e}"),
-        })?;
+    let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> = reply
+        .body()
+        .deserialize()
+        .map_err(|e| Error::platform(-1, format!("GetChildren deserialize for {bus}: {e}")))?;
     for (child_bus, path) in children {
         let aref = AccessibleRef {
             bus_name: if child_bus.is_empty() {
@@ -1125,9 +1105,11 @@ fn seed_top_level_windows(
         let Some(role) = call(&aref.bus_name, &aref.path, "GetRole")? else {
             continue;
         };
-        let role: u32 = role.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("GetRole deserialize for {}: {e}", window_key(&aref)),
+        let role: u32 = role.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("GetRole deserialize for {}: {e}", window_key(&aref)),
+            )
         })?;
         if !is_window_role_number(role) {
             continue;
@@ -1135,9 +1117,11 @@ fn seed_top_level_windows(
         let Some(state) = call(&aref.bus_name, &aref.path, "GetState")? else {
             continue;
         };
-        let words: Vec<u32> = state.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("GetState deserialize for {}: {e}", window_key(&aref)),
+        let words: Vec<u32> = state.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("GetState deserialize for {}: {e}", window_key(&aref)),
+            )
         })?;
         windows.insert(
             window_key(&aref),
@@ -1169,10 +1153,7 @@ fn registry_proxy(conn: &Connection, iface: &str) -> Result<Proxy<'static>> {
         "/org/a11y/atspi/registry",
         iface.to_owned(),
     )
-    .map_err(|e| Error::Platform {
-        code: -1,
-        message: format!("AT-SPI registry proxy: {e}"),
-    })
+    .map_err(|e| Error::platform(-1, format!("AT-SPI registry proxy: {e}")))
 }
 
 /// The registry's `RegisterEvent` and `DeregisterEvent` signatures.
@@ -1191,19 +1172,18 @@ struct RegistrySignature {
 fn register_signature(conn: &Connection) -> Result<RegistrySignature> {
     let xml: String = registry_proxy(conn, "org.freedesktop.DBus.Introspectable")?
         .call("Introspect", &())
-        .map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("introspecting the AT-SPI registry: {e}"),
-        })?;
+        .map_err(|e| Error::platform(-1, format!("introspecting the AT-SPI registry: {e}")))?;
     register_signature_from_xml(&xml)
 }
 
 fn register_signature_from_xml(xml: &str) -> Result<RegistrySignature> {
-    let register_args = in_arg_count(xml, "RegisterEvent").ok_or_else(|| Error::Platform {
-        code: -1,
-        message: "the AT-SPI registry has no RegisterEvent method, so toolkits that \
+    let register_args = in_arg_count(xml, "RegisterEvent").ok_or_else(|| {
+        Error::platform(
+            -1,
+            "the AT-SPI registry has no RegisterEvent method, so toolkits that \
                   emit only for registered listeners (Qt, GTK 3) would stay silent"
-            .to_string(),
+                .to_string(),
+        )
     })?;
     Ok(RegistrySignature {
         register: if register_args >= 3 {
@@ -1280,12 +1260,10 @@ fn register_events(conn: &Connection, app_buses: &[String]) -> Result<Registrati
             };
             if let Err(e) = reply {
                 deregister_events(conn, &done);
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
-                        "RegisterEvent({event}) for {app:?} with the AT-SPI registry: {e}"
-                    ),
-                });
+                return Err(Error::platform(
+                    -1,
+                    format!("RegisterEvent({event}) for {app:?} with the AT-SPI registry: {e}"),
+                ));
             }
             done.entries.push(Registration {
                 event,

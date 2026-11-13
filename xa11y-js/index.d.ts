@@ -47,6 +47,8 @@ export {
 export type {
   AnchorName,
   AnnouncementInfo,
+  AppListOptions,
+  BackendName,
   AnnouncementOriginName,
   Capability,
   CapabilitiesOptions,
@@ -102,7 +104,9 @@ export type {
 } from './native.js';
 import type {
   AnchorName,
+  AppListOptions,
   AutoScrollOutcomeName,
+  BackendName,
   DefaultTimeout,
   Capture,
   CaptureOptions,
@@ -138,7 +142,11 @@ export interface SubscribeOptions {
 }
 
 export interface AppLookupOptions {
-  backend?: "native" | "uia" | "ia2";
+  /**
+   * Explicit accessibility source; overrides `XA11Y_ACCESSIBILITY_SOURCE`.
+   * `uia` and `ia2` require Windows.
+   */
+  backend?: BackendName;
   /**
    * Poll the accessibility API until the app appears, up to this many
    * milliseconds. Defaults to the process-wide default timeout (see
@@ -205,6 +213,8 @@ export interface FindOptions {
   condition?: string;
   /** Abort signal for cancellation. Rejects with `AbortError`. */
   signal?: AbortSignal;
+  /** Accessibility source to enumerate, as for {@link App.list}. */
+  backend?: BackendName;
 }
 
 // Add `waitUntil` to the napi-generated `Locator` class via interface merging.
@@ -305,8 +315,11 @@ export declare class App {
    * `isForeground === true`.
    */
   static foreground(options?: AppLookupOptions): Promise<App>;
-  /** List all running applications with an accessibility tree. */
-  static list(): Promise<App[]>;
+  /**
+   * List all running applications with an accessibility tree.
+   * `options.backend` names the accessibility source, as for `byName`.
+   */
+  static list(options?: AppListOptions): Promise<App[]>;
   /**
    * Find an application matching `predicate`, polling until one appears or
    * the timeout elapses.

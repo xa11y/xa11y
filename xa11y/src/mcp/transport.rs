@@ -20,10 +20,10 @@ use crate::cli::{CliError, CliResult};
 /// is no longer trustworthy, and continuing would mean guessing where the
 /// next message starts.
 fn io_err(context: &str, e: std::io::Error) -> CliError {
-    CliError::Xa11y(crate::Error::Platform {
-        code: e.raw_os_error().unwrap_or(-1) as i64,
-        message: format!("mcp stdio transport: {context}: {e}"),
-    })
+    CliError::Xa11y(crate::Error::platform(
+        e.raw_os_error().unwrap_or(-1) as i64,
+        format!("mcp stdio transport: {context}: {e}"),
+    ))
 }
 
 /// Read one message from `input`.
@@ -67,10 +67,10 @@ pub(crate) fn read_message<R: BufRead>(input: &mut R) -> CliResult<Option<Value>
 /// reading this line, and a buffered response is a hung session.
 pub(crate) fn write_message<W: Write>(output: &mut W, message: &Value) -> CliResult<()> {
     let encoded = serde_json::to_string(message).map_err(|e| {
-        CliError::Xa11y(crate::Error::Platform {
-            code: -1,
-            message: format!("mcp stdio transport: encode response: {e}"),
-        })
+        CliError::Xa11y(crate::Error::platform(
+            -1,
+            format!("mcp stdio transport: encode response: {e}"),
+        ))
     })?;
     debug_assert!(
         !encoded.contains('\n'),

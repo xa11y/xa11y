@@ -690,7 +690,7 @@ pub trait Provider: Send + Sync {
     fn subscribe(&self, element: &ElementData) -> Result<Subscription>;
 
     /// Subscribe to only these event kinds, by
-    /// [`EventKind::name`](crate::EventKind::name); `None` is every kind.
+    /// [`EventKind::to_snake_case`](crate::EventKind::to_snake_case); `None` is every kind.
     ///
     /// A backend whose native subscription is per kind (UIA handlers) skips
     /// registering the ones no requested kind needs. Delivery is filtered in

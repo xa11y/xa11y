@@ -22,6 +22,18 @@ fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
     xa11y::provider().map_err(to_py_err)
 }
 
+/// The provider for an optional ``backend=`` argument: the named
+/// accessibility source, or the environment default when omitted. Built
+/// with the GIL released, since connecting can block.
+fn provider_for(py: Python<'_>, backend: Option<&str>) -> PyResult<Arc<dyn xa11y::Provider>> {
+    match backend {
+        Some(b) => py
+            .detach(|| xa11y::provider_for_backend(b))
+            .map_err(to_py_err),
+        None => get_provider(),
+    }
+}
+
 // ── Exceptions ──────────────────────────────────────────────────────────────
 
 // Exception class names are kept identical to the public `xa11y` package
@@ -303,7 +315,7 @@ fn map_to_py_err(e: xa11y::Error) -> PyErr {
         xa11y::Error::InvalidConfig { message } => {
             PyValueError::new_err(format!("Invalid configuration: {message}"))
         }
-        xa11y::Error::Platform { code, message } => {
+        xa11y::Error::Platform { code, message, .. } => {
             PlatformError::new_err(format!("Platform error ({code}): {message}"))
         }
         xa11y::Error::NoElementBounds => {
@@ -637,10 +649,7 @@ impl Element {
         let sub = py
             .detach(move || xa11y::subscribe_with(&*provider, &data, &options))
             .map_err(to_py_err)?;
-        Ok(Subscription {
-            inner: std::sync::Mutex::new(Some(sub)),
-            provider: self.provider.clone(),
-        })
+        Ok(Subscription::new(sub, self.provider.clone()))
     }
 
     /// Read the subtree into a bounded :class:`Capture`: every node read,
@@ -822,7 +831,7 @@ impl Element {
         &self,
         py: Python<'_>,
         start: &Bound<'_, PyAny>,
-        end: Option<u32>,
+        end: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let r = select_range(start, end)?;
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
@@ -886,48 +895,58 @@ impl Element {
             .clone()
             .map(semantics::LiveRegionInfo::new)
     }
-    /// The elements this one is related to, as a ``dict`` from relation
-    /// kind (``"labelled_by"``, ``"controls"``, ...) to a list of elements,
-    /// in the order asked for. ``kinds=None`` asks for every kind this
-    /// platform reports. A kind it never reports raises
+    /// The elements this one is related to, as a list of :class:`Relation`
+    /// (``kind`` such as ``"labelled_by"`` or ``"controls"``, and its
+    /// ``elements``), in the order asked for. ``kinds=None`` asks for every
+    /// kind this platform reports. A kind it never reports raises
     /// :class:`ActionNotSupportedError` (``Unsupported``) naming it; a
-    /// reported kind with no targets maps to ``[]``.
+    /// reported kind with no targets has ``elements == []``.
     #[pyo3(signature = (kinds=None))]
     fn relations(
         &self,
         py: Python<'_>,
         kinds: Option<Vec<String>>,
-    ) -> PyResult<Py<pyo3::types::PyDict>> {
+    ) -> PyResult<Vec<Py<semantics::Relation>>> {
         let kinds: Vec<xa11y::RelationKind> = kinds
             .unwrap_or_default()
             .iter()
-            .map(|k| xa11y::RelationKind::parse(k))
+            .map(|k| {
+                xa11y::RelationKind::from_snake_case(k).ok_or_else(|| {
+                    xa11y::Error::unknown_name(
+                        "relation kind",
+                        k,
+                        xa11y::RelationKind::ALL.map(xa11y::RelationKind::to_snake_case),
+                    )
+                })
+            })
             .collect::<xa11y::Result<_>>()
             .map_err(to_py_err)?;
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         let found = py
             .detach(move || element.relations(&kinds))
             .map_err(to_py_err)?;
-        let out = pyo3::types::PyDict::new(py);
-        for (kind, targets) in found {
-            let list = targets
-                .iter()
-                .map(|t| make_py_element(py, t.data(), t.provider().clone()))
-                .collect::<PyResult<Vec<_>>>()?;
-            out.set_item(kind.to_snake_case(), list)?;
-        }
-        Ok(out.unbind())
+        found
+            .iter()
+            .map(|r| Py::new(py, semantics::Relation::from_core(py, r)?))
+            .collect()
     }
-    /// This element's text, read by range (UTF-16 offsets). Raises
+    /// This element's text, read by range (UTF-16 offsets). Reads nothing
+    /// yet: every read first checks the element is still live (raising
+    /// :class:`ElementStaleError` if not), and raises
     /// ``ActionNotSupportedError`` when the element has no text interface.
-    fn text(&self, py: Python<'_>) -> PyResult<rich::Text> {
+    fn text(&self) -> rich::Text {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        let text = py.detach(move || element.text()).map_err(to_py_err)?;
-        Ok(rich::Text::new(text))
+        rich::Text::new(element.text())
     }
     /// On a table: the cell at 0-based ``row`` / ``column`` (a merged cell
     /// for a slot it covers), or ``None``.
-    fn cell_at(&self, py: Python<'_>, row: u32, column: u32) -> PyResult<Option<Py<Element>>> {
+    fn cell_at(
+        &self,
+        py: Python<'_>,
+        row: &Bound<'_, PyAny>,
+        column: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Py<Element>>> {
+        let (row, column) = (rich::u32_arg(row, "row")?, rich::u32_arg(column, "column")?);
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         let found = py
             .detach(move || element.cell_at(row, column))
@@ -1276,7 +1295,7 @@ impl Locator {
         &self,
         py: Python<'_>,
         start: &Bound<'_, PyAny>,
-        end: Option<u32>,
+        end: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let r = select_range(start, end)?;
         let inner = self.inner.clone();
@@ -1706,6 +1725,12 @@ fn epoch_seconds(t: std::time::SystemTime) -> f64 {
 #[pyclass]
 struct Subscription {
     inner: std::sync::Mutex<Option<xa11y::Subscription>>,
+    /// The drop count as last read under `inner`. `dropped` answers from
+    /// here when a `recv` holds the lock, and after `close`, so the getter
+    /// never waits and keeps answering once the subscription is gone.
+    /// A `recv` blocks only on an empty buffer, and an empty buffer drops
+    /// nothing, so the count cannot move while the lock is held that way.
+    dropped: std::sync::atomic::AtomicU64,
     provider: Arc<dyn xa11y::Provider>,
 }
 
@@ -1720,29 +1745,60 @@ fn subscribe_options(kinds: Option<Vec<String>>, buffer: Option<usize>) -> xa11y
 }
 
 impl Subscription {
+    fn new(sub: xa11y::Subscription, provider: Arc<dyn xa11y::Provider>) -> Self {
+        Self {
+            dropped: std::sync::atomic::AtomicU64::new(sub.dropped()),
+            inner: std::sync::Mutex::new(Some(sub)),
+            provider,
+        }
+    }
+
+    fn record_dropped(&self, sub: &xa11y::Subscription) {
+        self.dropped
+            .store(sub.dropped(), std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Run `f` on the open subscription. `recv` holds this lock for its
     /// whole timeout, so every caller must already have released the GIL
     /// (`py.detach`); a thread waiting here with the GIL held would freeze
     /// the interpreter for as long as another thread's `recv` blocks.
     fn with_sub<T>(&self, f: impl FnOnce(&xa11y::Subscription) -> T) -> PyResult<T> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let sub = guard.as_ref().ok_or_else(|| {
-            to_py_err(xa11y::Error::Platform {
-                code: -1,
-                message: "Subscription is closed".to_string(),
-            })
-        })?;
-        Ok(f(sub))
+        let sub = guard
+            .as_ref()
+            .ok_or_else(|| to_py_err(xa11y::Error::platform(-1, "Subscription is closed")))?;
+        let out = f(sub);
+        self.record_dropped(sub);
+        Ok(out)
     }
 }
 
 #[pymethods]
 impl Subscription {
     /// How many events the buffer has dropped, in total, because it was full.
-    /// A dropped event leaves a gap in ``Event.sequence``.
+    /// A dropped event leaves a gap in ``Event.sequence``. Never blocks,
+    /// even while another thread waits in ``recv``, and still answers after
+    /// ``close`` with the final count.
     #[getter]
-    fn dropped(&self, py: Python<'_>) -> PyResult<u64> {
-        py.detach(|| self.with_sub(|sub| sub.dropped()))
+    fn dropped(&self) -> u64 {
+        // `try_lock`, not `lock`: a `recv` on another thread holds `inner`
+        // for its whole timeout, and the cached count is exact meanwhile
+        // (see the field).
+        match self.inner.try_lock() {
+            Ok(guard) => {
+                if let Some(sub) = guard.as_ref() {
+                    self.record_dropped(sub);
+                }
+            }
+            Err(std::sync::TryLockError::Poisoned(e)) => {
+                if let Some(sub) = e.into_inner().as_ref() {
+                    self.record_dropped(sub);
+                }
+            }
+            // A `recv` holds the lock; the cached count is current.
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn try_recv(&self, py: Python<'_>) -> PyResult<Option<Event>> {
@@ -1791,11 +1847,11 @@ impl Subscription {
                     // Event source is gone — no further events can match the
                     // predicate. Surface this as a platform error rather than
                     // hanging until the overall timeout elapses.
-                    return Err(to_py_err(xa11y::Error::Platform {
-                        code: -1,
-                        message: "Subscription event source disconnected before predicate matched"
+                    return Err(to_py_err(xa11y::Error::platform(
+                        -1,
+                        "Subscription event source disconnected before predicate matched"
                             .to_string(),
-                    }));
+                    )));
                 }
             };
             let matched = {
@@ -1812,7 +1868,14 @@ impl Subscription {
 
     fn close(&self, py: Python<'_>) {
         // Released GIL: a concurrent `recv` holds this lock until it returns.
-        let sub = py.detach(|| self.inner.lock().unwrap_or_else(|e| e.into_inner()).take());
+        let sub = py.detach(|| {
+            let sub = self.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(sub) = &sub {
+                // `dropped` keeps answering with the final count.
+                self.record_dropped(sub);
+            }
+            sub
+        });
         // Dropping cancels the platform subscription, which can block too.
         py.detach(move || drop(sub));
     }
@@ -1866,7 +1929,12 @@ impl Subscription {
     }
 
     fn __repr__(&self) -> String {
-        if self.inner.lock().unwrap().is_some() {
+        if self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
             "Subscription(active)".to_string()
         } else {
             "Subscription(closed)".to_string()
@@ -1934,12 +2002,7 @@ impl App {
         // Validate `timeout` before touching the provider so callers get a
         // crisp `ValueError` regardless of whether accessibility is set up.
         let timeout = effective_timeout(timeout)?;
-        let provider = match backend {
-            Some(b) => py
-                .detach(|| xa11y::provider_for_backend(b))
-                .map_err(to_py_err)?,
-            None => get_provider()?,
-        };
+        let provider = provider_for(py, backend)?;
         let app = py
             .detach(move || xa11y::App::by_name_with(provider, name, timeout))
             .map_err(to_py_err)?;
@@ -1971,12 +2034,7 @@ impl App {
         backend: Option<&str>,
     ) -> PyResult<Self> {
         let timeout = effective_timeout(timeout)?;
-        let provider = match backend {
-            Some(b) => py
-                .detach(|| xa11y::provider_for_backend(b))
-                .map_err(to_py_err)?,
-            None => get_provider()?,
-        };
+        let provider = provider_for(py, backend)?;
         let app = py
             .detach(move || xa11y::App::by_pid_with(provider, pid, timeout))
             .map_err(to_py_err)?;
@@ -1999,12 +2057,7 @@ impl App {
     #[pyo3(signature = (*, timeout=None, backend=None))]
     fn foreground(py: Python<'_>, timeout: Option<f64>, backend: Option<&str>) -> PyResult<Self> {
         let timeout = effective_timeout(timeout)?;
-        let provider = match backend {
-            Some(b) => py
-                .detach(|| xa11y::provider_for_backend(b))
-                .map_err(to_py_err)?,
-            None => get_provider()?,
-        };
+        let provider = provider_for(py, backend)?;
         let app = py
             .detach(move || xa11y::App::foreground_with(provider, timeout))
             .map_err(to_py_err)?;
@@ -2016,9 +2069,13 @@ impl App {
     /// Single enumeration, no polling. To wait for an app that is still
     /// starting up, use `by_pid` / `by_name` / `find` with a `timeout`
     /// instead of polling this in a loop.
+    ///
+    /// ``backend`` names the accessibility source to enumerate, as for
+    /// ``by_name``; omitted, the environment default.
     #[staticmethod]
-    fn list(py: Python<'_>) -> PyResult<Vec<Self>> {
-        let provider = get_provider()?;
+    #[pyo3(signature = (*, backend=None))]
+    fn list(py: Python<'_>, backend: Option<&str>) -> PyResult<Vec<Self>> {
+        let provider = provider_for(py, backend)?;
         let apps = py
             .detach(move || xa11y::App::list_with(provider))
             .map_err(to_py_err)?;
@@ -2042,11 +2099,18 @@ impl App {
     ///     timeout=30.0,
     /// )
     /// ```
+    ///
+    /// ``backend`` names the accessibility source, as for ``by_name``.
     #[staticmethod]
-    #[pyo3(signature = (predicate, *, timeout=None))]
-    fn find(py: Python<'_>, predicate: Py<PyAny>, timeout: Option<f64>) -> PyResult<Self> {
+    #[pyo3(signature = (predicate, *, timeout=None, backend=None))]
+    fn find(
+        py: Python<'_>,
+        predicate: Py<PyAny>,
+        timeout: Option<f64>,
+        backend: Option<&str>,
+    ) -> PyResult<Self> {
         let timeout = effective_timeout(timeout)?;
-        let provider = get_provider()?;
+        let provider = provider_for(py, backend)?;
         // The poll loop runs with the GIL released (tenet 5); the predicate
         // closure reacquires it per call. This mirrors `Locator.wait_until`.
         // Holding the GIL for the loop would freeze every other thread in the
@@ -2078,10 +2142,7 @@ impl App {
                             // Poisoning cannot lose anything that matters here:
                             // the stashed error is write-once and read once.
                             *pred_err.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
-                            Err(xa11y::Error::Platform {
-                                code: -1,
-                                message: "find() predicate raised".to_string(),
-                            })
+                            Err(xa11y::Error::platform(-1, "find() predicate raised"))
                         }
                     }
                 })
@@ -2158,10 +2219,7 @@ impl App {
         let sub = py
             .detach(move || app.subscribe_with(&options))
             .map_err(to_py_err)?;
-        Ok(Subscription {
-            inner: std::sync::Mutex::new(Some(sub)),
-            provider: self.provider.clone(),
-        })
+        Ok(Subscription::new(sub, self.provider.clone()))
     }
 
     /// Get direct children (typically windows) of this application.
@@ -3451,8 +3509,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<capabilities::Capability>()?;
     m.add_class::<semantics::LiveRegionInfo>()?;
     m.add_class::<semantics::AnnouncementInfo>()?;
+    m.add_class::<semantics::Relation>()?;
     m.add_class::<capture::Capture>()?;
     m.add_class::<capture::CapturedNode>()?;
+    m.add_class::<capture::CapturedRelation>()?;
     m.add_class::<capture::CapturedText>()?;
     m.add_class::<capture::CaptureError>()?;
     m.add_class::<capture::Truncation>()?;
@@ -3510,6 +3570,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_find_test_shell_surface, m)?)?;
     m.add_function(wrap_pyfunction!(_make_disconnected_subscription, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_text_event_subscription, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_open_subscription, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_action_probe, m)?)?;
 
     Ok(())
@@ -3537,10 +3598,14 @@ fn _cli_main(py: Python<'_>, args: Vec<String>) -> i32 {
 }
 
 /// `select_text`'s polymorphic arguments: `(start, end)` ints, or one range.
-fn select_range(start: &Bound<'_, PyAny>, end: Option<u32>) -> PyResult<xa11y::TextRange> {
+fn select_range(
+    start: &Bound<'_, PyAny>,
+    end: Option<&Bound<'_, PyAny>>,
+) -> PyResult<xa11y::TextRange> {
     match end {
         Some(end) => {
-            let start: u32 = start.extract()?;
+            let start = rich::u32_arg(start, "start")?;
+            let end = rich::u32_arg(end, "end")?;
             // Order is checked by core's `select_text`, as before.
             Ok(xa11y::TextRange { start, end })
         }
@@ -3693,22 +3758,35 @@ fn _find_test_shell_surface(
 /// needing a live platform event source.
 #[pyfunction]
 fn _make_disconnected_subscription() -> Subscription {
-    Subscription {
-        inner: std::sync::Mutex::new(Some(xa11y::mock::disconnected_subscription())),
-        provider: xa11y::mock::build_provider(),
-    }
+    Subscription::new(
+        xa11y::mock::disconnected_subscription(),
+        xa11y::mock::build_provider(),
+    )
 }
 
 /// Create a Subscription that yields the mock's text events
 /// (`xa11y::mock::text_edit_events`) and then disconnects.
 #[pyfunction]
 fn _make_test_text_event_subscription() -> Subscription {
-    Subscription {
-        inner: std::sync::Mutex::new(Some(xa11y::mock::scripted_subscription(
-            xa11y::mock::text_edit_events(),
-        ))),
-        provider: xa11y::mock::build_provider(),
-    }
+    Subscription::new(
+        xa11y::mock::scripted_subscription(xa11y::mock::text_edit_events()),
+        xa11y::mock::build_provider(),
+    )
+}
+
+/// Create a Subscription that stays open with nothing to deliver, so a
+/// `recv` on it blocks for its whole timeout. The sender lives in the cancel
+/// handle and goes away on `close`.
+#[pyfunction]
+fn _make_test_open_subscription() -> Subscription {
+    let (tx, rx) = std::sync::mpsc::channel::<xa11y::Event>();
+    Subscription::new(
+        xa11y::Subscription::new(
+            xa11y::EventReceiver::new(rx),
+            xa11y::CancelHandle::new(move || drop(tx)),
+        ),
+        xa11y::mock::build_provider(),
+    )
 }
 
 /// Probe wrapping a single shared mock provider so tests can drive actions

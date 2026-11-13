@@ -108,13 +108,13 @@ pub(crate) fn read_offset_unit_unless_gone(
         Err(e) if crate::atspi::is_gone(&e) => return Ok(None),
         Err(e) if is_timeout(&e) => return Err(on_timeout()),
         Err(e) => {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
+            return Err(Error::platform(
+                -1,
+                format!(
                     "reading Application.ToolkitName of {bus} to choose the text offset \
                      unit failed: {e}"
                 ),
-            })
+            ))
         }
     };
     Ok(Some(offset_unit_for(toolkit.as_deref())))
@@ -224,7 +224,8 @@ pub(crate) fn semantics_from_attributes(role: Role, attrs: &HashMap<String, Stri
     });
     let own_or_container = |k: &str| get(k).or_else(|| get(&format!("container-{k}")));
     let live: xa11y_core::LiveRegionInfo = xa11y_core::LiveRegionParts {
-        politeness: own_or_container("live").and_then(xa11y_core::Politeness::parse),
+        politeness: own_or_container("live")
+            .and_then(|v| xa11y_core::Politeness::from_snake_case(&v.trim().to_ascii_lowercase())),
         atomic: own_or_container("atomic").and_then(|v| match v {
             "true" => Some(true),
             "false" => Some(false),
@@ -398,11 +399,10 @@ fn terminate_line(line: TextRange, last: Option<u16>, after: &[u16]) -> TextRang
 
 /// An `(so)` object reference reply, or `None` for AT-SPI's null object.
 fn object_ref(reply: zbus::Message, what: &str) -> Result<Option<AccessibleRef>> {
-    let (bus_name, path): (String, zbus::zvariant::OwnedObjectPath) =
-        reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("{what} deserialize failed: {e}"),
-        })?;
+    let (bus_name, path): (String, zbus::zvariant::OwnedObjectPath) = reply
+        .body()
+        .deserialize()
+        .map_err(|e| Error::platform(-1, format!("{what} deserialize failed: {e}")))?;
     Ok(live_ref(bus_name, path.to_string()))
 }
 
@@ -430,10 +430,10 @@ impl LinuxProvider {
                 format!("{}{}", aref.bus_name, aref.path),
             )
         } else {
-            Error::Platform {
-                code: -1,
-                message: format!("{what} on {}{} failed: {e}", aref.bus_name, aref.path),
-            }
+            Error::platform(
+                -1,
+                format!("{what} on {}{} failed: {e}", aref.bus_name, aref.path),
+            )
         }
     }
 }
@@ -479,10 +479,10 @@ impl TextSource for LiveText<'_> {
             .proxy
             .call_method("GetText", &(start, end))
             .map_err(|e| self.failed("Text.GetText", e))?;
-        reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Text.GetText deserialize failed: {e}"),
-        })
+        reply
+            .body()
+            .deserialize()
+            .map_err(|e| Error::platform(-1, format!("Text.GetText deserialize failed: {e}")))
     }
 
     fn string_at_offset(&self, offset: i32, granularity: u32) -> Result<(i32, i32)> {
@@ -500,11 +500,12 @@ impl TextSource for LiveText<'_> {
                     self.failed("Text.GetStringAtOffset", e)
                 }
             })?;
-        let (_text, start, end): (String, i32, i32) =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Text.GetStringAtOffset deserialize failed: {e}"),
-            })?;
+        let (_text, start, end): (String, i32, i32) = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("Text.GetStringAtOffset deserialize failed: {e}"),
+            )
+        })?;
         Ok((start, end))
     }
 
@@ -523,9 +524,8 @@ impl TextSource for LiveText<'_> {
                     self.failed("Text.GetAttributeRun", e)
                 }
             })?;
-        reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Text.GetAttributeRun deserialize failed: {e}"),
+        reply.body().deserialize().map_err(|e| {
+            Error::platform(-1, format!("Text.GetAttributeRun deserialize failed: {e}"))
         })
     }
 }
@@ -584,10 +584,8 @@ impl Prefix {
 
 /// A native offset the toolkit reported, refused when negative.
 fn non_negative(n: i32, what: &str) -> Result<u32> {
-    u32::try_from(n).map_err(|_| Error::Platform {
-        code: -1,
-        message: format!("{what} reported a negative text offset {n}"),
-    })
+    u32::try_from(n)
+        .map_err(|_| Error::platform(-1, format!("{what} reported a negative text offset {n}")))
 }
 
 /// A UTF-16 offset as the platform's 32-bit offset.
@@ -738,15 +736,15 @@ impl<S: TextSource> TextAccess<S> {
                 )?;
                 let got = utf16_len(&text);
                 if got != range.end - range.start {
-                    return Err(Error::Platform {
-                        code: -1,
-                        message: format!(
+                    return Err(Error::platform(
+                        -1,
+                        format!(
                             "Text.GetText({}, {}) returned {got} UTF-16 units, expected {}",
                             range.start,
                             range.end,
                             range.end - range.start
                         ),
-                    });
+                    ));
                 }
                 Ok(text)
             }
@@ -986,19 +984,17 @@ impl<S: TextSource> TextAccess<S> {
         };
         let (attrs, start, end) = self.source.attribute_run(native)?;
         if start < 0 || end < start {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
-                    "Text.GetAttributeRun at {native} reported the run {start}..{end}"
-                ),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("Text.GetAttributeRun at {native} reported the run {start}..{end}"),
+            ));
         }
         let ends = self.to_utf16(&[start, end], prefix.as_ref().map(|p| p.text.as_str()))?;
         let [start16, end16] = ends[..] else {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Text.GetAttributeRun range did not convert".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "Text.GetAttributeRun range did not convert",
+            ));
         };
         Ok(TextRun::new(
             TextRange {
@@ -1118,14 +1114,11 @@ impl LinuxProvider {
             let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Hyperlink")?;
             let reply = proxy
                 .call_method("GetURI", &(0i32,))
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("Hyperlink.GetURI: {e}"),
-                })?;
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Hyperlink.GetURI reply: {e}"),
-            })
+                .map_err(|e| Error::platform(-1, format!("Hyperlink.GetURI: {e}")))?;
+            reply
+                .body()
+                .deserialize()
+                .map_err(|e| Error::platform(-1, format!("Hyperlink.GetURI reply: {e}")))
         };
         match read() {
             Ok(uri) => Some(uri).filter(|u| !u.is_empty()),
@@ -1186,9 +1179,11 @@ impl LinuxProvider {
             .call_method("GetRowColumnSpan", &())
             .map_err(|e| self.rich_call_failed(aref, "TableCell.GetRowColumnSpan", e))?;
         let (row, column, row_span, column_span): (i32, i32, i32, i32) =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("TableCell.GetRowColumnSpan deserialize failed: {e}"),
+            reply.body().deserialize().map_err(|e| {
+                Error::platform(
+                    -1,
+                    format!("TableCell.GetRowColumnSpan deserialize failed: {e}"),
+                )
             })?;
         let index = |n: i32| u32::try_from(n).ok();
         let span = |n: i32| u32::try_from(n).ok().filter(|&s| s >= 1);
@@ -1229,10 +1224,10 @@ impl LinuxProvider {
             "org.a11y.atspi.Selection" => ifaces.selection,
             "org.a11y.atspi.Text" => ifaces.text,
             other => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("no interface gate for {other}"),
-                })
+                return Err(Error::platform(
+                    -1,
+                    format!("no interface gate for {other}"),
+                ))
             }
         };
         if has {
@@ -1343,11 +1338,10 @@ impl LinuxProvider {
         let reply = proxy
             .call_method(method, &())
             .map_err(|e| self.rich_call_failed(&aref, method, e))?;
-        let list: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("{method} deserialize failed: {e}"),
-            })?;
+        let list: Vec<(String, zbus::zvariant::OwnedObjectPath)> = reply
+            .body()
+            .deserialize()
+            .map_err(|e| Error::platform(-1, format!("{method} deserialize failed: {e}")))?;
         let refs = list
             .into_iter()
             .filter_map(|(b, p)| live_ref(b, p.to_string()))
@@ -1472,9 +1466,8 @@ impl LinuxProvider {
             .map_err(|e| t.source.failed("Text.GetNSelections", e))?
             .body()
             .deserialize()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Text.GetNSelections deserialize failed: {e}"),
+            .map_err(|e| {
+                Error::platform(-1, format!("Text.GetNSelections deserialize failed: {e}"))
             })?;
         let mut native = Vec::new();
         for i in 0..n.max(0) {
@@ -1485,9 +1478,8 @@ impl LinuxProvider {
                 .map_err(|e| t.source.failed("Text.GetSelection", e))?
                 .body()
                 .deserialize()
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("Text.GetSelection deserialize failed: {e}"),
+                .map_err(|e| {
+                    Error::platform(-1, format!("Text.GetSelection deserialize failed: {e}"))
                 })?;
             if start != end {
                 native.push(start.min(end));
@@ -1536,24 +1528,22 @@ impl LinuxProvider {
             .proxy
             .call_method("GetRangeExtents", &(start, end, coord))
             .map_err(|e| t.source.failed("Text.GetRangeExtents", e))?;
-        let (x, y, w, h): (i32, i32, i32, i32) =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Text.GetRangeExtents deserialize failed: {e}"),
-            })?;
+        let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().map_err(|e| {
+            Error::platform(-1, format!("Text.GetRangeExtents deserialize failed: {e}"))
+        })?;
         let rect = if gtk4 {
             // Element bounds go absent here; a text range's bounds fail,
             // because `Text::bounds` would otherwise drop the line from its
             // answer without a word (issue #650).
-            let (ox, oy) =
-                self.gtk4_window_origin_or_reason(&aref)
-                    .map_err(|reason| Error::Platform {
-                        code: -1,
-                        message: format!(
-                            "GTK 4 reports text extents relative to the window, and the \
+            let (ox, oy) = self.gtk4_window_origin_or_reason(&aref).map_err(|reason| {
+                Error::platform(
+                    -1,
+                    format!(
+                        "GTK 4 reports text extents relative to the window, and the \
                          window's screen origin is unknown: {reason}"
-                        ),
-                    })?;
+                    ),
+                )
+            })?;
             // Logical window-relative extents onto a device-pixel origin;
             // see `gtk4_window_rect_to_screen`.
             match extents_to_rect(x, y, w, h) {
@@ -1563,12 +1553,14 @@ impl LinuxProvider {
                         (ox, oy),
                         crate::scale::coordinate_scale(),
                     )
-                    .ok_or_else(|| Error::Platform {
-                        code: -1,
-                        message: format!(
-                            "GTK 4 text extents ({x}, {y}) overflow when offset by the \
+                    .ok_or_else(|| {
+                        Error::platform(
+                            -1,
+                            format!(
+                                "GTK 4 text extents ({x}, {y}) overflow when offset by the \
                              window origin ({ox}, {oy})"
-                        ),
+                            ),
+                        )
                     })?,
                 ),
                 None => None,
@@ -1607,9 +1599,8 @@ impl LinuxProvider {
             .map_err(|e| t.source.failed("Text.GetNSelections", e))?
             .body()
             .deserialize()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Text.GetNSelections deserialize failed: {e}"),
+            .map_err(|e| {
+                Error::platform(-1, format!("Text.GetNSelections deserialize failed: {e}"))
             })?;
         let (member, reply) = if existing > 0 {
             let reply = t

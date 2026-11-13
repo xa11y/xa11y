@@ -1607,10 +1607,10 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
         parts.push(format!("landmark_type={landmark}"));
     }
     if let Some(web_role) = &el.web_role {
-        parts.push(format!("web_role=\"{web_role}\""));
+        parts.push(format!("web_role={web_role:?}"));
     }
     if let Some(url) = &el.link_url {
-        parts.push(format!("url=\"{url}\""));
+        parts.push(format!("url={url:?}"));
     }
     if let Some(politeness) = el.live_region.as_ref().and_then(|l| l.politeness) {
         parts.push(format!("live={}", politeness.to_snake_case()));
@@ -1784,7 +1784,14 @@ pub(crate) fn resolve_capabilities(
         Error::InvalidActionData { message, .. } => CliError::Usage(message),
         other => CliError::Xa11y(other),
     };
-    let platform = platform.map(Platform::parse).transpose().map_err(usage)?;
+    let platform = platform
+        .map(|name| {
+            Platform::from_snake_case(name).ok_or_else(|| {
+                Error::unknown_name("platform", name, Platform::ALL.map(Platform::to_snake_case))
+            })
+        })
+        .transpose()
+        .map_err(usage)?;
     crate::capabilities_for_backend(platform, os_version, backend).map_err(usage)
 }
 
@@ -1899,10 +1906,10 @@ fn cmd_capabilities(args: &[String]) -> CliResult<()> {
             "capabilities": selected.iter().map(|c| capability_json(c)).collect::<Vec<_>>(),
         });
         let rendered = serde_json::to_string_pretty(&out).map_err(|e| {
-            CliError::Xa11y(Error::Platform {
-                code: -1,
-                message: format!("serialize the capability table: {e}"),
-            })
+            CliError::Xa11y(Error::platform(
+                -1,
+                format!("serialize the capability table: {e}"),
+            ))
         })?;
         println!("{rendered}");
         return Ok(());
@@ -2094,14 +2101,14 @@ fn cmd_windows(args: &[String]) -> CliResult<()> {
     for e in &errors {
         eprintln!("error: {e}");
     }
-    Err(CliError::Xa11y(Error::Platform {
-        code: -1,
-        message: format!(
+    Err(CliError::Xa11y(Error::platform(
+        -1,
+        format!(
             "{} of {} application(s) could not be enumerated; see stderr for details",
             errors.len(),
             apps.len()
         ),
-    }))
+    )))
 }
 
 /// Resolve the `--app` / `--pid` target and turn on its web content's
@@ -2297,10 +2304,13 @@ pub(crate) fn format_capture(cap: &Capture) -> CliResult<Vec<String>> {
             };
             tail_line(format!("… {missing} more (cut by {why})"), out);
         } else if not_read {
-            // A capture stops reading children when its node budget fills
-            // or its time runs out, whichever comes first; a full capture
-            // is the node budget's doing.
-            let why = if cap.truncated.by_nodes && cap.nodes.len() >= cap.options.max_nodes {
+            // A capture reads no children at the depth limit, and stops
+            // reading them when its node budget fills or its time runs out,
+            // whichever comes first; a full capture is the node budget's
+            // doing.
+            let why = if cap.options.max_depth.is_some_and(|d| node.depth >= d) {
+                "cut by --max-depth"
+            } else if cap.truncated.by_nodes && cap.nodes.len() >= cap.options.max_nodes {
                 "cut by --max-nodes"
             } else {
                 "out of time"
@@ -2395,8 +2405,9 @@ fn detail_lines(cap: &Capture, node: &xa11y_core::CapturedNode) -> CliResult<Vec
             }
         }
     }
-    for (kind, targets) in &node.relations {
-        for target in targets {
+    for relation in &node.relations {
+        let kind = relation.kind;
+        for target in &relation.targets {
             let described = match target {
                 xa11y_core::RelationTarget::Node(i) => describe_brief(&cap.nodes[*i].element),
                 xa11y_core::RelationTarget::Outside(el) => {
@@ -3376,7 +3387,16 @@ pub(crate) fn parse_text_op(op: &str, a: &TextArgs<'_>, names: &TextArgNames) ->
                     names.unit
                 ))
             })?;
-            let unit = TextUnit::parse(unit).map_err(|e| CliError::Usage(e.to_string()))?;
+            let unit = TextUnit::from_snake_case(unit).ok_or_else(|| {
+                CliError::Usage(
+                    Error::unknown_name(
+                        "text unit",
+                        unit,
+                        TextUnit::ALL.map(TextUnit::to_snake_case),
+                    )
+                    .to_string(),
+                )
+            })?;
             TextOp::RangeAt { offset, unit }
         }
         "lines" => {
@@ -3562,12 +3582,8 @@ pub(crate) fn json_without_nulls<T: serde::Serialize>(
     what: &str,
     value: &T,
 ) -> CliResult<serde_json::Value> {
-    let mut v = serde_json::to_value(value).map_err(|e| {
-        CliError::Xa11y(Error::Platform {
-            code: -1,
-            message: format!("serialize {what}: {e}"),
-        })
-    })?;
+    let mut v = serde_json::to_value(value)
+        .map_err(|e| CliError::Xa11y(Error::platform(-1, format!("serialize {what}: {e}"))))?;
     if let serde_json::Value::Object(map) = &mut v {
         map.retain(|_, field| !field.is_null());
     }
@@ -3764,12 +3780,12 @@ fn cmd_text(args: &[String]) -> CliResult<()> {
             }))
         }
     };
-    let result = run_text_op(&element.text()?, &op, &mut text_object_cli)?;
+    let result = run_text_op(&element.text(), &op, &mut text_object_cli)?;
     let rendered = serde_json::to_string_pretty(&result).map_err(|e| {
-        CliError::Xa11y(Error::Platform {
-            code: -1,
-            message: format!("serialize the text result: {e}"),
-        })
+        CliError::Xa11y(Error::platform(
+            -1,
+            format!("serialize the text result: {e}"),
+        ))
     })?;
     println!("{rendered}");
     Ok(())
@@ -3960,7 +3976,18 @@ pub(crate) fn relation_kind_names() -> Vec<&'static str> {
 pub(crate) fn parse_relation_kinds<S: AsRef<str>>(names: &[S]) -> CliResult<Vec<RelationKind>> {
     names
         .iter()
-        .map(|n| RelationKind::parse(n.as_ref()).map_err(|e| CliError::Usage(e.to_string())))
+        .map(|n| {
+            RelationKind::from_snake_case(n.as_ref()).ok_or_else(|| {
+                CliError::Usage(
+                    Error::unknown_name(
+                        "relation kind",
+                        n.as_ref(),
+                        RelationKind::ALL.map(RelationKind::to_snake_case),
+                    )
+                    .to_string(),
+                )
+            })
+        })
         .collect()
 }
 
@@ -3985,9 +4012,9 @@ fn cmd_relations(args: &[String]) -> CliResult<()> {
             }))
         }
     };
-    for (kind, targets) in element.relations(&kinds)? {
-        println!("{kind} ({}):", targets.len());
-        for el in &targets {
+    for relation in element.relations(&kinds)? {
+        println!("{} ({}):", relation.kind, relation.elements.len());
+        for el in &relation.elements {
             println!("  {}", format_element_oneline(el));
         }
     }
@@ -4519,12 +4546,12 @@ fn write_screenshot(shot: &Screenshot, out: &str) -> CliResult<()> {
     if out == "-" {
         use std::io::Write;
         let bytes = shot.to_png()?;
-        std::io::stdout()
-            .write_all(&bytes)
-            .map_err(|e| Error::Platform {
-                code: e.raw_os_error().unwrap_or(-1) as i64,
-                message: format!("write stdout: {e}"),
-            })?;
+        std::io::stdout().write_all(&bytes).map_err(|e| {
+            Error::platform(
+                e.raw_os_error().unwrap_or(-1) as i64,
+                format!("write stdout: {e}"),
+            )
+        })?;
     } else {
         shot.save_png(out)?;
         eprintln!(
@@ -4765,12 +4792,8 @@ fn render_legend_json(selectors: &[String], annotated: &crate::Annotated) -> Cli
         "truncated": annotated.truncated,
         "cap": crate::MAX_ANNOTATIONS,
     });
-    serde_json::to_string_pretty(&doc).map_err(|e| {
-        CliError::Xa11y(Error::Platform {
-            code: -1,
-            message: format!("render legend as JSON: {e}"),
-        })
-    })
+    serde_json::to_string_pretty(&doc)
+        .map_err(|e| CliError::Xa11y(Error::platform(-1, format!("render legend as JSON: {e}"))))
 }
 
 #[cfg(test)]
@@ -4862,10 +4885,7 @@ mod tests {
         let line = delivery_line("action", &miss).expect("an action failure reports delivery");
         assert!(line.starts_with("delivery: not_delivered"), "{line}");
 
-        let platform = CliError::Xa11y(Error::Platform {
-            code: -25204,
-            message: "cannot complete".into(),
-        });
+        let platform = CliError::Xa11y(Error::platform(-25204, "cannot complete"));
         let line = delivery_line("click", &platform).expect("a click failure reports delivery");
         assert!(line.starts_with("delivery: unknown"), "{line}");
     }
@@ -7043,10 +7063,7 @@ mod tests {
         );
 
         // An unrelated platform failure must never trigger the hint.
-        let unrelated = CliError::Xa11y(crate::Error::Platform {
-            code: -1,
-            message: "kAXErrorCannotComplete".into(),
-        });
+        let unrelated = CliError::Xa11y(crate::Error::platform(-1, "kAXErrorCannotComplete"));
         assert!(!is_accessibility_permission_denied(&unrelated));
         let usage = CliError::Usage("bad flag".into());
         assert!(!is_accessibility_permission_denied(&usage));
@@ -7177,10 +7194,16 @@ mod tests {
                 .expect("capture"),
         )
         .expect("formats");
+        // The depth limit reads no children below it, not even to count
+        // them, so the frontier says it was not read rather than how many.
         assert!(
             shallow
                 .iter()
-                .any(|l| l.contains("more (cut by --max-depth)")),
+                .any(|l| l.contains("… children not read (cut by --max-depth)")),
+            "{shallow:?}"
+        );
+        assert!(
+            shallow.iter().all(|l| !l.contains("more (cut by")),
             "{shallow:?}"
         );
     }
@@ -7484,12 +7507,7 @@ mod tests {
             &CLI_TEXT_ARG_NAMES,
         )
         .expect("valid");
-        let out = run_text_op(
-            &element.text().expect("has text"),
-            &op,
-            &mut text_object_cli,
-        )
-        .expect("reads");
+        let out = run_text_op(&element.text(), &op, &mut text_object_cli).expect("reads");
         assert_eq!(out["match"]["text"], "line");
         assert_eq!(out["match"]["start"], 22);
     }
@@ -7501,7 +7519,7 @@ mod tests {
         let element = resolve_text_element(&target, r#"text_area[name="Notes"]"#)
             .expect("resolves")
             .expect("one match");
-        let text = element.text().expect("text");
+        let text = element.text();
         // "Hello 😀 world...": the emoji is units 6..8. A 1-unit cap at 6
         // would split it; backing off would read nothing, so it takes both.
         let (s, end) = capped_read(&text, TextRange { start: 6, end: 14 }, 1).expect("reads");
@@ -7534,6 +7552,22 @@ mod tests {
                 .count()
                 .expect("counts"),
             1
+        );
+    }
+
+    #[test]
+    fn oneline_output_escapes_web_role_and_url() {
+        // Both come from the page, so either can hold a quote or a newline
+        // that would otherwise end the field or split the line.
+        let mut el = ElementData::for_role(Role::Link);
+        el.web_role = Some("tab\" forged=\"1".into());
+        el.link_url = Some("https://example.com/a\nbutton \"Fake\"".into());
+        let line = format_element_oneline(&el);
+        assert!(!line.contains('\n'), "{line}");
+        assert!(line.contains(r#"web_role="tab\" forged=\"1""#), "{line}");
+        assert!(
+            line.contains(r#"url="https://example.com/a\nbutton \"Fake\"""#),
+            "{line}"
         );
     }
 

@@ -60,9 +60,11 @@ pub fn text_range_bounds(
     };
     use windows::Win32::System::Variant::VT_R8;
     assert_per_monitor();
-    let err = |e: windows::core::Error| Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("reading UIA text bounding rectangles: {e}"),
+    let err = |e: windows::core::Error| {
+        Error::platform(
+            e.code().0 as i64,
+            format!("reading UIA text bounding rectangles: {e}"),
+        )
     };
     let array = unsafe { range.GetBoundingRectangles() }.map_err(err)?;
     if array.is_null() {
@@ -80,19 +82,19 @@ pub fn text_range_bounds(
     if unsafe { SafeArrayGetDim(array.0) } != 1
         || unsafe { SafeArrayGetVartype(array.0) }.map_err(err)? != VT_R8
     {
-        return Err(Error::Platform {
-            code: -1,
-            message: "UIA text rectangles must be a one-dimensional double array".into(),
-        });
+        return Err(Error::platform(
+            -1,
+            "UIA text rectangles must be a one-dimensional double array",
+        ));
     }
     let lower = unsafe { SafeArrayGetLBound(array.0, 1) }.map_err(err)?;
     let upper = unsafe { SafeArrayGetUBound(array.0, 1) }.map_err(err)?;
     let count = (i64::from(upper) - i64::from(lower) + 1).max(0);
     if count % 4 != 0 {
-        return Err(Error::Platform {
-            code: -1,
-            message: "UIA text rectangle array length is not a multiple of four".into(),
-        });
+        return Err(Error::platform(
+            -1,
+            "UIA text rectangle array length is not a multiple of four",
+        ));
     }
     let read = |index: i32| -> Result<f64> {
         let mut value = 0f64;
@@ -104,10 +106,10 @@ pub fn text_range_bounds(
         let i = i as i32;
         let (x, y, w, h) = (read(i)?, read(i + 1)?, read(i + 2)?, read(i + 3)?);
         if ![x, y, w, h].iter().all(|v| v.is_finite()) || w < 0.0 || h < 0.0 {
-            return Err(Error::Platform {
-                code: -1,
-                message: "UIA returned invalid text rectangle coordinates".into(),
-            });
+            return Err(Error::platform(
+                -1,
+                "UIA returned invalid text rectangle coordinates",
+            ));
         }
         union = Some(match union {
             None => (x, y, x + w, y + h),
@@ -262,10 +264,10 @@ pub fn monitor_rects(_scope: &DpiScope) -> Result<Vec<RECT>> {
     }
     .as_bool();
     if !ok {
-        return Err(Error::Platform {
-            code: -1,
-            message: "EnumDisplayMonitors failed while reading desktop layout".into(),
-        });
+        return Err(Error::platform(
+            -1,
+            "EnumDisplayMonitors failed while reading desktop layout",
+        ));
     }
     Ok(monitors)
 }
@@ -296,10 +298,10 @@ impl BoundsCacheRequest {
     /// Wrap `request`, adding the bounds property to it.
     pub fn new(request: IUIAutomationCacheRequest) -> Result<Self> {
         unsafe { request.AddProperty(UIA_BoundingRectanglePropertyId) }.map_err(|e| {
-            Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("AddProperty(BoundingRectangle) failed: {e}"),
-            }
+            Error::platform(
+                e.code().0 as i64,
+                format!("AddProperty(BoundingRectangle) failed: {e}"),
+            )
         })?;
         Ok(Self(request))
     }

@@ -249,40 +249,40 @@ fn display_regions() -> Result<Vec<Rect>> {
     // SAFETY: a null display buffer with capacity zero queries the count.
     let status = unsafe { CGGetActiveDisplayList(0, std::ptr::null_mut(), &mut count) };
     if status != 0 {
-        return Err(Error::Platform {
-            code: i64::from(status),
-            message: "CGGetActiveDisplayList(count) failed".into(),
-        });
+        return Err(Error::platform(
+            i64::from(status),
+            "CGGetActiveDisplayList(count) failed",
+        ));
     }
     // One spare slot detects a growing list rather than accepting a truncated
     // geometry set. Do not bound the native set by the diagnosis's size limit.
-    let capacity = count.checked_add(1).ok_or_else(|| Error::Platform {
-        code: -1,
-        message: "CGGetActiveDisplayList count overflow".into(),
-    })?;
+    let capacity = count
+        .checked_add(1)
+        .ok_or_else(|| Error::platform(-1, "CGGetActiveDisplayList count overflow"))?;
     let mut displays = Vec::new();
     displays
         .try_reserve_exact(capacity as usize)
-        .map_err(|error| Error::Platform {
-            code: -1,
-            message: format!("allocating CGGetActiveDisplayList buffer: {error}"),
+        .map_err(|error| {
+            Error::platform(
+                -1,
+                format!("allocating CGGetActiveDisplayList buffer: {error}"),
+            )
         })?;
     displays.resize(capacity as usize, 0);
     let mut written = 0;
     // SAFETY: the vector contains capacity writable display IDs.
     let status = unsafe { CGGetActiveDisplayList(capacity, displays.as_mut_ptr(), &mut written) };
     if status != 0 {
-        return Err(Error::Platform {
-            code: i64::from(status),
-            message: "CGGetActiveDisplayList(list) failed".into(),
-        });
+        return Err(Error::platform(
+            i64::from(status),
+            "CGGetActiveDisplayList(list) failed",
+        ));
     }
     if written >= capacity {
-        return Err(Error::Platform {
-            code: -1,
-            message: "active display list changed while enumerating; geometry may be incomplete"
-                .into(),
-        });
+        return Err(Error::platform(
+            -1,
+            "active display list changed while enumerating; geometry may be incomplete",
+        ));
     }
     displays.truncate(written as usize);
     displays
@@ -301,11 +301,11 @@ fn quartz_display_rect(bounds: CGRect) -> Result<Rect> {
     let top = bounds.origin.y.ceil();
     let right = (bounds.origin.x + bounds.size.width).ceil();
     let bottom = (bounds.origin.y + bounds.size.height).ceil();
-    let invalid_geometry = || Error::Platform {
-        code: -1,
-        message: format!(
-            "CGDisplayBounds returned invalid or unrepresentable geometry: {bounds:?}"
-        ),
+    let invalid_geometry = || {
+        Error::platform(
+            -1,
+            format!("CGDisplayBounds returned invalid or unrepresentable geometry: {bounds:?}"),
+        )
     };
     if ![left, top, right, bottom]
         .iter()
@@ -406,10 +406,7 @@ impl MacOSInputProvider {
     /// the guard argument proves.
     fn post_locked(&self, _locked: &MutexGuard<'_, ()>, event: CGEventRef) -> Result<()> {
         if event.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreate* returned NULL".to_string(),
-            });
+            return Err(Error::platform(-1, "CGEventCreate* returned NULL"));
         }
         // Stamp any modifiers held via `key_down` onto this event. See
         // `held_flags` for why the window server's own state can't be relied
@@ -472,10 +469,10 @@ impl MacOSInputProvider {
         // create a combined state from the pasted-in event source defaults").
         let ev = unsafe { CGEventCreateMouseEvent(std::ptr::null_mut(), ty, pt, button) };
         if ev.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("CGEventCreateMouseEvent failed (type={ty})"),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("CGEventCreateMouseEvent failed (type={ty})"),
+            ));
         }
         Ok(ev)
     }
@@ -487,10 +484,10 @@ impl MacOSInputProvider {
         // SAFETY: a null source samples the combined native event state.
         let current = unsafe { CGEventCreate(std::ptr::null_mut()) };
         if current.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreate failed while reading the current pointer position".into(),
-            });
+            return Err(Error::platform(
+                -1,
+                "CGEventCreate failed while reading the current pointer position",
+            ));
         }
         // SAFETY: current is a live event; the location is copied before release.
         let at = unsafe { CGEventGetLocation(current) };
@@ -504,10 +501,10 @@ impl MacOSInputProvider {
         let event =
             unsafe { CGEventCreateMouseEvent(std::ptr::null_mut(), kind, at, cg_button(button)) };
         if event.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreateMouseEvent failed for a button-only event".into(),
-            });
+            return Err(Error::platform(
+                -1,
+                "CGEventCreateMouseEvent failed for a button-only event",
+            ));
         }
         Ok(event)
     }
@@ -537,10 +534,7 @@ impl MacOSInputProvider {
         // SAFETY: nil source is allowed by CGEventSource contract.
         let ev = unsafe { CGEventCreateKeyboardEvent(std::ptr::null_mut(), vk, down) };
         if ev.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreateKeyboardEvent failed".to_string(),
-            });
+            return Err(Error::platform(-1, "CGEventCreateKeyboardEvent failed"));
         }
         Ok(ev)
     }
@@ -561,18 +555,18 @@ fn key_code_flags(event: CGEventRef) -> Result<u64> {
         let vk = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) as u16;
         let source = CGEventSourceCreate(K_CG_EVENT_SOURCE_STATE_PRIVATE);
         if source.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventSourceCreate(private) returned NULL".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "CGEventSourceCreate(private) returned NULL",
+            ));
         }
         let probe = CGEventCreateKeyboardEvent(source, vk, ty == K_CG_EVENT_KEY_DOWN);
         CFRelease(source as CFTypeRef);
         if probe.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("CGEventCreateKeyboardEvent failed (key code {vk})"),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("CGEventCreateKeyboardEvent failed (key code {vk})"),
+            ));
         }
         let flags = CGEventGetFlags(probe) & KEY_CODE_FLAGS;
         CFRelease(probe as CFTypeRef);
@@ -853,10 +847,7 @@ impl InputProvider for MacOSInputProvider {
             )
         };
         if ev.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreateScrollWheelEvent2 failed".to_string(),
-            });
+            return Err(Error::platform(-1, "CGEventCreateScrollWheelEvent2 failed"));
         }
         self.post(ev)
     }

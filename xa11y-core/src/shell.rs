@@ -594,10 +594,7 @@ mod tests {
 
     impl Provider for BrokenShellProvider {
         fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
-            Err(Error::Platform {
-                code: 55,
-                message: "shell enumeration failed".to_string(),
-            })
+            Err(Error::platform(55, "shell enumeration failed"))
         }
         fn activate(&self, e: &ElementData) -> Result<()> {
             self.inner.activate(e)

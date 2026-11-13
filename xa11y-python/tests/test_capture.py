@@ -49,12 +49,13 @@ def test_the_node_limit_cuts_and_says_where():
     assert "by_nodes=True" in repr(cap.truncated)
 
 
-def test_the_depth_limit_cuts_and_keeps_the_count():
+def test_the_depth_limit_reads_no_children_below_it():
     cap = _app().capture(max_depth=1)
     assert cap.truncated.by_depth
     assert max(n.depth for n in cap.nodes) == 1
     window = next(n for n in cap.nodes if n.depth == 1)
-    assert window.children == [] and window.children_count > 0
+    assert window.children == [] and window.children_count is None
+    assert window.children_truncated
 
 
 def test_a_captured_node_is_the_element_itself():
@@ -69,14 +70,16 @@ def test_relations_resolve_to_indices_inside_the_capture():
     window = _make_test_document_locator("window")
     cap = window.capture(detail={"relations"})
     field = next(n for n in cap.nodes if n.name == "Email")
-    (label,) = field.relations["labelled_by"]
+    assert all(isinstance(r, xa11y.CapturedRelation) for r in field.relations)
+    by_kind = {r.kind: r.targets for r in field.relations}
+    (label,) = by_kind["labelled_by"]
     assert isinstance(label, int)
     assert cap.nodes[label].name == "Email address"
     # Every other kind this platform reports is listed, empty.
-    others = {k: v for k, v in field.relations.items() if k not in ("labelled_by", "described_by")}
+    others = {k: v for k, v in by_kind.items() if k not in ("labelled_by", "described_by")}
     assert others and all(v == [] for v in others.values())
     alone = field.element.capture(detail=["relations"])
-    (outside,) = alone.root().relations["labelled_by"]
+    (outside,) = {r.kind: r.targets for r in alone.root().relations}["labelled_by"]
     assert isinstance(outside, xa11y.Element)
     assert outside.name == "Email address"
 

@@ -50,13 +50,15 @@ def test_the_node_limit_keeps_the_top_of_the_tree(app):
     assert marked, "the node that lost children says so"
 
 
-def test_the_depth_limit_cuts_with_the_real_child_count(app):
+def test_the_depth_limit_reads_no_children_below_it(app):
     cap = app.capture(max_depth=1)
     assert max(n.depth for n in cap.nodes) <= 1
-    for window in (n for n in cap.nodes if n.depth == 1):
+    frontier = [n for n in cap.nodes if n.depth == 1]
+    assert frontier and cap.truncated.by_depth
+    for window in frontier:
         assert window.children == []
-        if window.children_count:
-            assert window.children_truncated and cap.truncated.by_depth
+        assert window.children_count is None
+        assert window.children_truncated
 
 
 def test_a_captured_element_is_the_node_read(app):

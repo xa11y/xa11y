@@ -27,7 +27,8 @@ def main():
     assert mixed.object_at(7).same_as(link)
     assert mixed.object_at(0) is None
     related = app.locator('button[name="IA2 label target"]').element()
-    assert related.relations(["labelled_by"])["labelled_by"][0].name == "IA2 label target"
+    (labelled_by,) = related.relations(["labelled_by"])
+    assert labelled_by.elements[0].name == "IA2 label target"
     edit = app.locator(selector).element()
     assert edit.raw["accessibility_backend"] == "ia2"
     assert edit.text().read(xa11y.TextRange(6, 8)) == "\U0001f600"

@@ -10,23 +10,23 @@ use xa11y_core::{ElementData, Error, Provider, Result, ShellSurfaceKind, Subscri
 /// fail through their `Result`, never panic. The message names the operation and
 /// the host OS so the failure explains itself (tenet 6).
 pub(crate) fn unavailable(op: &str) -> Error {
-    Error::Platform {
-        code: -1,
-        message: format!(
+    Error::platform(
+        -1,
+        format!(
             "Windows backend unavailable: `{op}` called on {}",
             std::env::consts::OS
         ),
-    }
+    )
 }
 
 pub struct WindowsProvider;
 
 impl WindowsProvider {
     pub fn new() -> Result<Self> {
-        Err(Error::Platform {
-            code: -1,
-            message: "Windows backend only available on Windows".to_string(),
-        })
+        Err(Error::platform(
+            -1,
+            "Windows backend only available on Windows",
+        ))
     }
 }
 
@@ -35,10 +35,10 @@ pub struct WindowsInputProvider;
 
 impl WindowsInputProvider {
     pub fn new() -> Result<Self> {
-        Err(Error::Platform {
-            code: -1,
-            message: "Windows input backend only available on Windows".to_string(),
-        })
+        Err(Error::platform(
+            -1,
+            "Windows input backend only available on Windows",
+        ))
     }
 }
 

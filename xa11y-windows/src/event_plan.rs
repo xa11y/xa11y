@@ -149,7 +149,7 @@ impl HandlerPlan {
     /// `None` is every kind.
     ///
     /// A name this table does not know registers everything. Core validates
-    /// names against `EventKind::name()` first, so this only happens when a
+    /// names against `EventKind::to_snake_case()` first, so this only happens when a
     /// kind is added to core without a row here, and over-registering keeps
     /// such a kind delivered, where under-registering would drop it.
     pub(crate) fn for_kinds(kinds: Option<&[&str]>) -> Self {

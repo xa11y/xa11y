@@ -1036,9 +1036,12 @@ impl Locator {
     /// Read the matched element's text by range. See
     /// [`crate::text_api::Text`].
     ///
-    /// The returned [`Text`](crate::text_api::Text) re-resolves this locator
-    /// on every read, waiting (up to the locator's timeout) until the selector
+    /// Reads nothing yet, like [`Element::text`]: the returned
+    /// [`Text`](crate::text_api::Text) re-resolves this locator on every
+    /// read, waiting (up to the locator's timeout) until the selector
     /// matches. Reads do not wait for the element to be visible or enabled.
+    /// A match with no text interface fails on the read with
+    /// [`Error::ActionNotSupported`] (action `"text"`).
     pub fn text(&self) -> crate::text_api::Text {
         crate::text_api::Text::for_locator(self.clone())
     }
@@ -2999,10 +3002,10 @@ mod tests {
                     "list_item",
                 )),
                 ScrollMode::StaleOnce => reveal(),
-                ScrollMode::Fails => Err(Error::Platform {
-                    code: -1,
-                    message: "ScrollTo failed: org.freedesktop.DBus.Error.Failed".into(),
-                }),
+                ScrollMode::Fails => Err(Error::platform(
+                    -1,
+                    "ScrollTo failed: org.freedesktop.DBus.Error.Failed",
+                )),
             }
         }
         forward! {

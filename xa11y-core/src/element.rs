@@ -498,7 +498,7 @@ impl Element {
     pub fn relations(
         &self,
         kinds: &[crate::semantics::RelationKind],
-    ) -> crate::error::Result<Vec<(crate::semantics::RelationKind, Vec<Element>)>> {
+    ) -> crate::error::Result<Vec<crate::semantics::Relation>> {
         let kinds: Vec<crate::semantics::RelationKind> = if kinds.is_empty() {
             supported_relation_kinds(self.provider.as_ref())?
         } else {
@@ -508,7 +508,12 @@ impl Element {
             .provider
             .relations(&self.data, &kinds)?
             .into_iter()
-            .map(|(kind, targets)| (kind, targets.into_iter().map(|d| self.wrap(d)).collect()))
+            .map(|(kind, targets)| {
+                crate::semantics::Relation::new(
+                    kind,
+                    targets.into_iter().map(|d| self.wrap(d)).collect(),
+                )
+            })
             .collect())
     }
 
@@ -546,10 +551,9 @@ impl Element {
     /// expires during the check is a [`Error::Timeout`] whose
     /// [`delivery`](Error::delivery) is
     /// [`NotDelivered`](crate::Delivery::NotDelivered), not the `Unknown` a
-    /// timeout in the action call itself reports.
-    ///
-    /// A [`Error::Platform`] that is not a deadline cut carries no diagnosis
-    /// to hold the override, so it still reports `Unknown`.
+    /// timeout in the action call itself reports. A [`Error::Platform`] from
+    /// the check is `NotDelivered` the same way; every other variant the
+    /// check can fail with is `NotDelivered` already.
     fn revalidate_for_action(&self) -> crate::error::Result<()> {
         self.provider.revalidate(&self.data).map_err(|e| {
             // A cut the backend worded as its own failure becomes the
@@ -687,17 +691,19 @@ impl Element {
     /// Read this element's text by range: caret, selection, ranges, rendered
     /// lines, geometry and formatting. Offsets are UTF-16 code units.
     ///
-    /// Fails with [`Error::ActionNotSupported`] (action `"text"`) when the
-    /// element has no text interface. The returned [`Text`] stays bound to
-    /// this element; use [`crate::Locator::text`] to re-resolve on every read.
+    /// Reads nothing yet, like [`crate::Locator::text`]: every method of the
+    /// returned [`Text`] is a live read, and each first checks that this
+    /// element still names the node it was captured from (failing with
+    /// [`Error::ElementStale`] otherwise). An element with no text interface
+    /// fails on the first read with [`Error::ActionNotSupported`] (action
+    /// `"text"`). The [`Text`] stays bound to this element; use
+    /// [`crate::Locator::text`] to re-resolve on every read.
     ///
     /// [`Text`]: crate::text_api::Text
-    pub fn text(&self) -> crate::error::Result<crate::text_api::Text> {
-        // One call proves the interface exists, so a button fails here rather
-        // than on the first read. Where the platform counts code points it
-        // reads the text to measure it, so this is not free on GTK.
-        self.provider.text_length(&self.data)?;
-        Ok(crate::text_api::Text::for_element(self.clone()))
+    /// [`Error::ElementStale`]: crate::Error::ElementStale
+    /// [`Error::ActionNotSupported`]: crate::Error::ActionNotSupported
+    pub fn text(&self) -> crate::text_api::Text {
+        crate::text_api::Text::for_element(self.clone())
     }
 
     /// On a table: the cell at 0-based `row` / `column`. A slot covered by a
@@ -1964,6 +1970,42 @@ mod tests {
     }
 
     #[test]
+    fn a_platform_failure_in_the_liveness_check_is_not_delivered() {
+        // The check runs before dispatch, so a platform error from it
+        // reached nothing, though a `Platform` error is `Unknown` by default.
+        let provider = build_provider();
+        let back = find_element(&provider, r#"button[name="Back"]"#);
+        provider.fail_revalidate("Back", Error::platform(5, "the read of the node failed"));
+        let before = provider.actions().len();
+        let err = back.press().expect_err("the check failed");
+        assert!(matches!(err, Error::Platform { code: 5, .. }), "{err:?}");
+        assert_eq!(err.delivery(), crate::error::Delivery::NotDelivered);
+        assert_eq!(provider.actions().len(), before, "nothing was dispatched");
+        // The disposition adds nothing to the message.
+        assert_eq!(
+            err.to_string(),
+            "Platform error (5): the read of the node failed"
+        );
+        // Every variant the check can fail with is not delivered.
+        for e in [
+            Error::platform(1, "x"),
+            Error::timeout(std::time::Duration::from_secs(1)),
+            Error::stale(crate::error::StaleReason::Removed, "button"),
+            Error::Unsupported {
+                feature: "revalidate".into(),
+            },
+        ] {
+            provider.fail_revalidate("Back", e.clone());
+            let err = back.press().expect_err("the check failed");
+            assert_eq!(
+                err.delivery(),
+                crate::error::Delivery::NotDelivered,
+                "{e:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_reused_id_with_another_role_is_identity_changed_not_retargeted() {
         let provider = build_provider();
         let back = find_element(&provider, r#"button[name="Back"]"#);
@@ -2036,11 +2078,17 @@ mod tests {
         let rel = field
             .relations(&[K::DescribedBy, K::LabelledBy, K::Controls])
             .expect("relations");
-        let kinds: Vec<_> = rel.iter().map(|(k, _)| *k).collect();
+        let kinds: Vec<_> = rel.iter().map(|r| r.kind).collect();
         assert_eq!(kinds, [K::DescribedBy, K::LabelledBy, K::Controls]);
-        assert_eq!(rel[1].1[0].name.as_deref(), Some("Email address"));
-        assert_eq!(rel[0].1[0].name.as_deref(), Some("We never share it"));
-        assert!(rel[2].1.is_empty(), "supported but empty is an empty list");
+        assert_eq!(rel[1].elements[0].name.as_deref(), Some("Email address"));
+        assert_eq!(
+            rel[0].elements[0].name.as_deref(),
+            Some("We never share it")
+        );
+        assert!(
+            rel[2].elements.is_empty(),
+            "supported but empty is an empty list"
+        );
         // `linked` is macOS-only; elsewhere the mock refuses it, as the
         // platform would.
         let linked = field.relations(&[K::Linked]);
@@ -2050,6 +2098,6 @@ mod tests {
             assert!(matches!(linked, Err(Error::Unsupported { .. })));
         }
         // The labelled-by target is actionable: it is an Element.
-        rel[1].1[0].check_alive().expect("a live element");
+        rel[1].elements[0].check_alive().expect("a live element");
     }
 }
