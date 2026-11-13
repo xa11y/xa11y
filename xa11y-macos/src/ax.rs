@@ -370,22 +370,43 @@ mod grant_instruction_tests {
 // system-wide one holds that object's [`ElementGate`] for the whole
 // set / send / release sequence, and a bound can never be observed by a
 // message it was not set for.
+//
+// A shell-surface probe ([`ShellProbeBound`]) sets a bound that spans many
+// messages rather than one, so it holds the element's gate for its whole
+// lifetime. The gate is re-entrant on the thread that holds it: the probe's
+// own messages (each an `ax_bounded` call) and a probe nested on the same
+// element pass straight through, while every other thread waits for the
+// probe to release the element.
 
 thread_local! {
-    /// The element whose messaging timeout a shell-surface probe has bounded
-    /// on this thread, and that bound in seconds (see [`ShellProbeBound`]).
-    /// [`ax_bounded`] releases an element back to this bound rather than to
-    /// the global one, so a deadline does not undo the probe's tighter
-    /// bound.
-    static PROBE_BOUND: std::cell::Cell<Option<(usize, f32)>> =
-        const { std::cell::Cell::new(None) };
+    /// The elements whose messaging timeout a shell-surface probe has
+    /// bounded on this thread, innermost last, with each bound in seconds
+    /// (see [`ShellProbeBound`]). [`ax_bounded`] releases an element back to
+    /// its innermost bound here rather than to the global one, so a deadline
+    /// does not undo the probe's tighter bound. A stack, because rayon's work
+    /// stealing can nest one probe inside another on the same thread.
+    static PROBE_BOUND: std::cell::RefCell<Vec<(usize, f32)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The messaging timeout `element` has when no deadline lowers it.
 fn element_bound(element: AXUIElementRef) -> f32 {
-    match PROBE_BOUND.with(|b| b.get()) {
-        Some((probed, secs)) if probed == element as usize => secs,
-        _ => AX_MESSAGING_TIMEOUT_SECS,
+    PROBE_BOUND.with(|b| {
+        b.borrow()
+            .iter()
+            .rev()
+            .find(|(probed, _)| *probed == element as usize)
+            .map_or(AX_MESSAGING_TIMEOUT_SECS, |(_, secs)| *secs)
+    })
+}
+
+/// The value that returns `element` to `bound`: `0` ("use the global
+/// value") for the global bound, otherwise the bound itself.
+fn release_value(bound: f32) -> f32 {
+    if bound == AX_MESSAGING_TIMEOUT_SECS {
+        0.0
+    } else {
+        bound
     }
 }
 
@@ -410,7 +431,9 @@ fn describe_ax_call(element: AXUIElementRef, call: &str) -> String {
 /// unrelated objects share a gate for a moment, which costs a wait and never
 /// a wrong bound.
 struct ElementGate {
-    busy: Mutex<bool>,
+    /// The thread holding the gate and how many claims it holds (the gate is
+    /// re-entrant for that thread), or `None` when it is free.
+    holder: Mutex<Option<(std::thread::ThreadId, u32)>>,
     freed: std::sync::Condvar,
 }
 
@@ -424,7 +447,8 @@ fn element_gates() -> &'static Mutex<HashMap<usize, std::sync::Arc<ElementGate>>
 
 /// A claim on an [`ElementGate`]: held (`held == true`) or given up after a
 /// timed-out wait. Either way dropping it removes the map entry once nobody
-/// else holds or waits on the gate.
+/// else holds or waits on the gate. A thread that already holds the gate
+/// acquires it again at once; the gate is free once its last claim drops.
 struct ElementGateGuard {
     key: usize,
     gate: std::sync::Arc<ElementGate>,
@@ -447,7 +471,7 @@ impl ElementGateGuard {
             .entry(key)
             .or_insert_with(|| {
                 std::sync::Arc::new(ElementGate {
-                    busy: Mutex::new(false),
+                    holder: Mutex::new(None),
                     freed: std::sync::Condvar::new(),
                 })
             })
@@ -458,26 +482,37 @@ impl ElementGateGuard {
             held: false,
         };
         let gate = claim.gate.clone();
+        let me = std::thread::current().id();
         let start = Instant::now();
-        let mut busy = gate.busy.lock().unwrap_or_else(|e| e.into_inner());
-        while *busy {
-            busy = match limit {
-                None => gate.freed.wait(busy).unwrap_or_else(|e| e.into_inner()),
+        let mut holder = gate.holder.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match *holder {
+                None => {
+                    *holder = Some((me, 1));
+                    break;
+                }
+                Some((thread, ref mut depth)) if thread == me => {
+                    *depth += 1;
+                    break;
+                }
+                Some(_) => {}
+            }
+            holder = match limit {
+                None => gate.freed.wait(holder).unwrap_or_else(|e| e.into_inner()),
                 Some(limit) => {
                     let left = limit.saturating_sub(start.elapsed());
                     if left.is_zero() {
-                        drop(busy);
+                        drop(holder);
                         return Err(claim);
                     }
                     gate.freed
-                        .wait_timeout(busy, left)
+                        .wait_timeout(holder, left)
                         .unwrap_or_else(|e| e.into_inner())
                         .0
                 }
             };
         }
-        *busy = true;
-        drop(busy);
+        drop(holder);
         claim.held = true;
         Ok(claim)
     }
@@ -486,10 +521,23 @@ impl ElementGateGuard {
 impl Drop for ElementGateGuard {
     fn drop(&mut self) {
         if self.held {
-            *self.gate.busy.lock().unwrap_or_else(|e| e.into_inner()) = false;
-            // Every waiter re-checks; one that timed out meanwhile must not
-            // swallow the only wake-up.
-            self.gate.freed.notify_all();
+            let mut holder = self.gate.holder.lock().unwrap_or_else(|e| e.into_inner());
+            let freed = match *holder {
+                Some((_, ref mut depth)) if *depth > 1 => {
+                    *depth -= 1;
+                    false
+                }
+                _ => {
+                    *holder = None;
+                    true
+                }
+            };
+            drop(holder);
+            if freed {
+                // Every waiter re-checks; one that timed out meanwhile must
+                // not swallow the only wake-up.
+                self.gate.freed.notify_all();
+            }
         }
         let mut gates = element_gates().lock().unwrap_or_else(|e| e.into_inner());
         // The map's reference and this one: nobody else holds or waits.
@@ -576,12 +624,7 @@ fn ax_bounded(
     // value". The result does not matter for this message, which has
     // already been answered; a failure leaves the element on the tighter
     // bound, which is a faster failure for a later one, never a wrong answer.
-    let release = if bound == AX_MESSAGING_TIMEOUT_SECS {
-        0.0
-    } else {
-        bound
-    };
-    let _err = unsafe { safe_ax_set_messaging_timeout(element, release) };
+    let _err = unsafe { safe_ax_set_messaging_timeout(element, release_value(bound)) };
     // The deadline set the bound this message ran under, so a
     // `kAXErrorCannotComplete` is the deadline cutting it. Recorded without
     // re-checking `is_expired`: AX takes the bound as an `f32`, and rounding
@@ -773,7 +816,8 @@ fn derived_ax_name(ax: AXUIElementRef, role: Option<Role>) -> Option<String> {
 /// Whether `target` names itself from a non-empty `AXTitle`. A static text
 /// that does keeps a title-derived name, so a value change there is only a
 /// value change; an empty `AXTitle` (Chromium) is no title, and the name
-/// comes from `AXValue`.
+/// comes from a non-empty `AXValue`, else from `AXDescription` (see
+/// [`accessible_name`]).
 fn has_title_derived_name(target: Option<&ElementData>) -> bool {
     target.is_some_and(|t| {
         t.raw
@@ -4290,7 +4334,17 @@ pub struct MacOSProvider {
 /// out the frontmost app's element), so the scan does not leave one pinned at
 /// a quarter-second timeout: a caller who then walked the menu bar or the
 /// desktop would see spurious `kAXErrorCannotComplete`. Releasing with `0`
-/// returns the element to the process-wide value `MacOSProvider::new` set.
+/// returns the element to the process-wide value `MacOSProvider::new` set;
+/// a probe nested on the same element returns it to the outer probe's bound
+/// instead, so the outer probe's remaining messages stay bounded.
+///
+/// The guard holds the element's [`ElementGate`] from before the bound is set
+/// until after it is released. The element can be one the handle cache hands
+/// to every thread (a status-item surface's extras menu bar), and without the
+/// gate another thread's message would run under the quarter-second bound,
+/// or its deadline release would reset the element to the global value in
+/// the middle of the probe. The gate is re-entrant for this thread, so the
+/// probe's own messages and a nested probe pass through it.
 ///
 /// A guard rather than a call at the end of each probe, because every one of
 /// those probes can leave early — `?` on a missing child, an unanswered
@@ -4298,16 +4352,25 @@ pub struct MacOSProvider {
 /// that matters.
 struct ShellProbeBound<'a> {
     element: &'a AXElement,
-    /// The probe bound this one replaced in [`PROBE_BOUND`], restored on
-    /// drop so a probe nested on the same thread by rayon's work stealing
-    /// unwinds in order.
-    outer: Option<(usize, f32)>,
+    /// The bound the element had before this probe: the global one, or an
+    /// outer probe's on this thread. Restored on drop.
+    outer: f32,
+    /// Declared last so it drops after `drop` has released the bound.
+    _gate: ElementGateGuard,
 }
 
 impl Drop for ShellProbeBound<'_> {
     fn drop(&mut self) {
-        PROBE_BOUND.with(|b| b.set(self.outer));
-        MacOSProvider::unbound_shell_probe(self.element);
+        let key = self.element.as_ptr() as usize;
+        PROBE_BOUND.with(|b| {
+            let mut stack = b.borrow_mut();
+            // This probe's entry is the innermost one for its element: a
+            // probe nested inside it has already dropped.
+            if let Some(i) = stack.iter().rposition(|(probed, _)| *probed == key) {
+                stack.remove(i);
+            }
+        });
+        MacOSProvider::unbound_shell_probe(self.element, self.outer);
     }
 }
 
@@ -5107,6 +5170,8 @@ impl MacOSProvider {
     /// scan's cue to skip the element rather than read it at the
     /// process-wide bound: an element whose cost cannot be bounded is not one this scan
     /// can query inside its contract.
+    /// Only [`shell_probe_bound`](Self::shell_probe_bound) calls this, with
+    /// the element's gate held.
     fn bound_shell_probe(element: &AXElement) -> bool {
         let err = unsafe {
             safe_ax_set_messaging_timeout(element.as_ptr(), Self::SHELL_PROBE_TIMEOUT_SECS)
@@ -5114,35 +5179,47 @@ impl MacOSProvider {
         err == AX_ERROR_SUCCESS
     }
 
-    /// Release `element` back to the system-wide default messaging timeout.
+    /// Release `element` back to `outer`, the bound it had before the probe.
     ///
-    /// `0` means "no element-specific timeout", so the global default applies
-    /// again. Every bound the scan takes is released, on every path — see
-    /// [`ShellProbeBound`].
-    fn unbound_shell_probe(element: &AXElement) {
+    /// For the global bound that is `0`, "no element-specific timeout", so
+    /// the process-wide value applies again; under an outer probe on the same
+    /// element it is that probe's bound. Every bound the scan takes is
+    /// released, on every path — see [`ShellProbeBound`], whose drop is the
+    /// only caller, with the element's gate still held.
+    fn unbound_shell_probe(element: &AXElement, outer: f32) {
         // The result genuinely does not matter: a failure here leaves the
         // element on the scan's tighter bound, which is a slower walk and
         // never a wrong answer. Failing the listing over it would trade a
         // correct result for none.
-        let _err = unsafe { safe_ax_set_messaging_timeout(element.as_ptr(), 0.0_f32) };
+        let _err = unsafe { safe_ax_set_messaging_timeout(element.as_ptr(), release_value(outer)) };
     }
 
     /// Bound `element` for the duration of a probe, releasing it on every exit
     /// path.
     ///
     /// Returns `None` when the bound could not be established, which is the
-    /// scan's cue to skip the element (see [`bound_shell_probe`]).
+    /// scan's cue to skip the element (see [`bound_shell_probe`]). Waiting
+    /// for another thread's message to the element counts against the
+    /// caller's deadline, and running out of it is such a case.
     ///
     /// [`bound_shell_probe`]: Self::bound_shell_probe
     fn shell_probe_bound(element: &AXElement) -> Option<ShellProbeBound<'_>> {
-        Self::bound_shell_probe(element).then(|| ShellProbeBound {
+        let wait = xa11y_core::Deadline::current().map(|d| d.remaining());
+        // A wait the deadline cut is a skipped element, like a failed bound;
+        // the deadline itself reports the expiry to the caller.
+        let gate = ElementGateGuard::acquire(element.as_ptr(), wait).ok()?;
+        let outer = element_bound(element.as_ptr());
+        if !Self::bound_shell_probe(element) {
+            return None;
+        }
+        PROBE_BOUND.with(|b| {
+            b.borrow_mut()
+                .push((element.as_ptr() as usize, Self::SHELL_PROBE_TIMEOUT_SECS))
+        });
+        Some(ShellProbeBound {
             element,
-            outer: PROBE_BOUND.with(|b| {
-                b.replace(Some((
-                    element.as_ptr() as usize,
-                    Self::SHELL_PROBE_TIMEOUT_SECS,
-                )))
-            }),
+            outer,
+            _gate: gate,
         })
     }
 
@@ -5415,11 +5492,12 @@ impl MacOSProvider {
         if app_element.is_null() {
             return Ok(None);
         }
-        if !Self::bound_shell_probe(&app_element) {
-            return Ok(None);
-        }
-        let mut data = self.build_element_data(&app_element, Some(*pid as u32))?;
-        Self::unbound_shell_probe(&app_element);
+        let mut data = {
+            let Some(_bound) = Self::shell_probe_bound(&app_element) else {
+                return Ok(None);
+            };
+            self.build_element_data(&app_element, Some(*pid as u32))?
+        };
         // Same name policy as `list_apps`: the CGWindowList owner name wins.
         data.name = Some(name.clone());
         Ok(Some((ShellSurfaceKind::Dock, data)))
@@ -5438,8 +5516,8 @@ impl MacOSProvider {
     /// Finder's application element is bounded before its `AXChildren` are
     /// read: a wedged Finder is the case that makes the listing's 100ms poll
     /// contract false, and it is the one process this scan cannot route
-    /// around. No release afterwards — the root handed to the caller is the
-    /// scroll area, a child element that never carried the bound.
+    /// around. The bound is released once the scroll area is found; the root
+    /// handed to the caller is that child, which never carried the bound.
     fn desktop_surface(
         &self,
         apps: &[(i32, String)],
@@ -5451,9 +5529,9 @@ impl MacOSProvider {
         if app_element.is_null() {
             return Ok(None);
         }
-        if !Self::bound_shell_probe(&app_element) {
+        let Some(bound) = Self::shell_probe_bound(&app_element) else {
             return Ok(None);
-        }
+        };
         let Some(desktop) = ax_children(app_element.as_ptr()).into_iter().find(|child| {
             ax_string(child.as_ptr(), "AXRole").as_deref() == Some("AXScrollArea")
                 && ax_string(child.as_ptr(), "AXDescription")
@@ -5461,6 +5539,7 @@ impl MacOSProvider {
         }) else {
             return Ok(None);
         };
+        drop(bound);
         Ok(Some((
             ShellSurfaceKind::Desktop,
             self.build_element_data(&desktop, Some(*pid as u32))?,
@@ -6937,13 +7016,21 @@ fn handle_ax_notification(
                 "AXTextField" | "AXTextArea" | "AXSearchField" => {
                     ks.push(EventKind::TextChanged);
                 }
-                // Static text has no (non-empty) AXTitle, so its name is derived from
-                // AXValue (see `build_snapshot_data`): a value change is also
-                // a name change, and the Linux (AT-SPI `accessible-name`) and
-                // Windows (UIA NameProperty) backends emit NameChanged for the
-                // same label update. A static text that carries an AXTitle
-                // keeps a title-derived name, so there a value change really is
-                // only a value change.
+                // A static text with no (non-empty) AXTitle is named by its
+                // non-empty AXValue, else by its AXDescription (see
+                // `accessible_name`). Either way a value change is also a
+                // name change: the name is the new value, or it moves between
+                // the value and the description as the value empties or
+                // fills. The Linux (AT-SPI `accessible-name`) and Windows
+                // (UIA NameProperty) backends emit NameChanged for the same
+                // label update. A static text that carries an AXTitle keeps a
+                // title-derived name, so there a value change really is only
+                // a value change.
+                //
+                // AX has no notification for an AXDescription change, so a
+                // static text named by its description raises no NameChanged
+                // when the description alone changes (documented under the
+                // macOS events in platform-details.mdx).
                 "AXStaticText" if !has_title_derived_name(target.as_ref()) => {
                     ks.push(EventKind::NameChanged);
                 }
@@ -8082,6 +8169,64 @@ mod tests {
                 .contains_key(&key),
             "a gate nobody holds or waits on is removed"
         );
+    }
+
+    #[test]
+    fn an_element_gate_is_reentrant_for_its_holder_only() {
+        // A shell probe holds the gate across its own messages, each of which
+        // takes it again on the same thread.
+        let element = 0x20usize as AXUIElementRef;
+        let key = element as usize;
+        let other_thread_gets_it = move || {
+            std::thread::spawn(move || {
+                ElementGateGuard::acquire(key as AXUIElementRef, Some(Duration::from_millis(30)))
+                    .is_ok()
+            })
+            .join()
+            .expect("the waiting thread does not panic")
+        };
+        let Ok(outer) = ElementGateGuard::acquire(element, None) else {
+            panic!("an idle gate is free");
+        };
+        let Ok(inner) = ElementGateGuard::acquire(element, Some(Duration::ZERO)) else {
+            panic!("the holder re-enters its own gate without waiting");
+        };
+        assert!(!other_thread_gets_it(), "a re-entered gate excludes others");
+        drop(inner);
+        assert!(
+            !other_thread_gets_it(),
+            "releasing the inner claim leaves the outer one holding the gate"
+        );
+        drop(outer);
+        assert!(other_thread_gets_it(), "the last claim frees the gate");
+        assert!(
+            !element_gates()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&key),
+            "a gate nobody holds or waits on is removed"
+        );
+    }
+
+    #[test]
+    fn a_nested_probe_bound_releases_to_the_outer_one() {
+        let element = 0x30usize as AXUIElementRef;
+        let other = 0x40usize as AXUIElementRef;
+        assert_eq!(element_bound(element), AX_MESSAGING_TIMEOUT_SECS);
+        assert_eq!(release_value(element_bound(element)), 0.0);
+        PROBE_BOUND.with(|b| b.borrow_mut().push((element as usize, 0.25)));
+        PROBE_BOUND.with(|b| b.borrow_mut().push((other as usize, 0.5)));
+        // An inner probe on another element does not hide the outer one.
+        assert_eq!(element_bound(element), 0.25);
+        assert_eq!(element_bound(other), 0.5);
+        PROBE_BOUND.with(|b| b.borrow_mut().push((element as usize, 0.1)));
+        assert_eq!(element_bound(element), 0.1, "the innermost probe wins");
+        PROBE_BOUND.with(|b| b.borrow_mut().pop());
+        // What an inner probe's drop restores: the outer probe's bound, not
+        // the global value's `0`.
+        assert_eq!(release_value(element_bound(element)), 0.25);
+        PROBE_BOUND.with(|b| b.borrow_mut().clear());
+        assert_eq!(element_bound(element), AX_MESSAGING_TIMEOUT_SECS);
     }
 
     #[test]
