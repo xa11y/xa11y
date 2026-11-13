@@ -549,10 +549,7 @@ mod wait_tests {
             std::thread::sleep(t.duration);
             let err = t.expired(call).unwrap_or_else(|| Error::timeout(NATIVE));
             if self.as_platform.load(Ordering::SeqCst) {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("{call} failed: {err}"),
-                });
+                return Err(Error::platform(-1, format!("{call} failed: {err}")));
             }
             Err(err)
         }

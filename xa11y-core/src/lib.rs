@@ -34,7 +34,7 @@ pub use app::App;
 pub use capabilities::{Capabilities, Capability, Platform, Support};
 pub use capture::{
     CancelToken, Capture, CaptureError, CaptureOptions, CaptureStats, CaptureStep, CapturedNode,
-    CapturedText, RelationTarget, Truncation,
+    CapturedRelation, CapturedText, RelationTarget, Truncation,
 };
 pub use config::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
 pub use deadline::{call_timeout, CallTimeout, Deadline};
@@ -72,7 +72,7 @@ pub use screenshot::{Screenshot, ScreenshotProvider};
 pub use selector::{Selector, SelectorGroup};
 #[doc(hidden)]
 pub use semantics::LiveRegionParts;
-pub use semantics::{Landmark, LiveRegionInfo, Politeness, RelationKind};
+pub use semantics::{Landmark, LiveRegionInfo, Politeness, Relation, RelationKind};
 pub use shell::{ShellSurface, ShellSurfaceKind};
 pub use table::{CellInfo, CellKind, CollectionInfo, Count, HeaderKind, RowInfo, TableInfo};
 #[doc(hidden)]

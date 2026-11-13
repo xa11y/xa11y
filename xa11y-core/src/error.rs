@@ -617,8 +617,23 @@ pub enum Error {
     Unsupported { feature: String },
 
     /// A platform-specific error occurred.
-    #[error("Platform error ({code}): {message}")]
-    Platform { code: i64, message: String },
+    ///
+    /// Construct through [`Error::platform`]: the variant is
+    /// `#[non_exhaustive]`, so it can grow context without breaking every
+    /// backend that reports one. Match it with `Error::Platform { code, .. }`.
+    #[error("Platform error ({code}): {message}{}", diagnosis_suffix(.diagnosis))]
+    #[non_exhaustive]
+    Platform {
+        /// The platform's own code (an `HRESULT`, an `AXError`, a D-Bus
+        /// error number), or a negative value xa11y chose where the platform
+        /// gave none.
+        code: i64,
+        /// What failed, in the platform's words where it gave any.
+        message: String,
+        /// Context attached where the error escapes, such as the
+        /// [`Delivery`] of a failure known to precede dispatch.
+        diagnosis: Option<Box<Diagnosis>>,
+    },
 }
 
 impl Error {
@@ -644,6 +659,15 @@ impl Error {
         }
     }
 
+    /// Construct an [`Error::Platform`] (no diagnosis).
+    pub fn platform(code: i64, message: impl Into<String>) -> Self {
+        Self::Platform {
+            code,
+            message: message.into(),
+            diagnosis: None,
+        }
+    }
+
     /// Construct a bare [`Error::InvalidActionData`] (no diagnosis).
     pub fn invalid_action_data(message: impl Into<String>) -> Self {
         Self::InvalidActionData {
@@ -664,11 +688,12 @@ impl Error {
     /// Attach (or replace) a [`Diagnosis`] on errors that carry one.
     ///
     /// Supported variants: [`SelectorNotMatched`](Self::SelectorNotMatched),
-    /// [`Timeout`](Self::Timeout) and
-    /// [`InvalidActionData`](Self::InvalidActionData). Other variants are returned unchanged —
-    /// their primary fields already identify the failure, and silently
-    /// growing a diagnosis field on them would not be rendered. An empty
-    /// diagnosis is normalized to `None`.
+    /// [`Timeout`](Self::Timeout), [`InvalidActionData`](Self::InvalidActionData)
+    /// and [`Platform`](Self::Platform). Other variants are returned
+    /// unchanged: their primary fields already identify the failure, and
+    /// every one of them is [`Delivery::NotDelivered`] by its variant, so
+    /// there is no disposition to override either. An empty diagnosis is
+    /// normalized to `None`.
     #[must_use]
     pub fn diagnose(mut self, diagnosis: Diagnosis) -> Self {
         let normalized = if diagnosis.is_empty() {
@@ -679,7 +704,8 @@ impl Error {
         match &mut self {
             Self::SelectorNotMatched { diagnosis: d, .. }
             | Self::Timeout { diagnosis: d, .. }
-            | Self::InvalidActionData { diagnosis: d, .. } => {
+            | Self::InvalidActionData { diagnosis: d, .. }
+            | Self::Platform { diagnosis: d, .. } => {
                 *d = normalized;
             }
             _ => {}
@@ -730,7 +756,8 @@ impl Error {
         match self {
             Self::SelectorNotMatched { diagnosis, .. }
             | Self::Timeout { diagnosis, .. }
-            | Self::InvalidActionData { diagnosis, .. } => diagnosis.as_deref(),
+            | Self::InvalidActionData { diagnosis, .. }
+            | Self::Platform { diagnosis, .. } => diagnosis.as_deref(),
             _ => None,
         }
     }
@@ -841,10 +868,7 @@ mod tests {
 
     #[test]
     fn delivery_is_unknown_for_platform_failures_and_bare_timeouts() {
-        let platform = Error::Platform {
-            code: -25204,
-            message: "cannot complete".into(),
-        };
+        let platform = Error::platform(-25204, "cannot complete");
         assert_eq!(platform.delivery(), Delivery::Unknown);
         assert!(!platform.delivery().is_safe_to_retry());
         assert_eq!(

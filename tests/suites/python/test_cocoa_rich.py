@@ -265,7 +265,7 @@ def test_selecting_text_reports_a_text_selection_event(app, rich):
 def test_a_button_has_no_text_or_table_metadata(app):
     button = app.locator('button[name="OK"]').element()
     with pytest.raises(xa11y.ActionNotSupportedError):
-        button.text()
+        button.text().length()
     assert button.table is None
     assert button.cell is None
     assert button.collection is None

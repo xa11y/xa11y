@@ -125,12 +125,14 @@ test('selectedItems lists the selected descendants', async () => {
 
 // ── Text ───────────────────────────────────────────────────────────────────
 
-test('Element.text() returns a Text; a node without text rejects', async () => {
+test('Element.text() returns a Text synchronously; a node without text rejects on read', async () => {
   const notes = await one('text_area');
-  const text = await notes.text();
-  assert.ok(text instanceof Text);
+  const text = notes.text();
+  assert.ok(text instanceof Text, 'Element.text() is synchronous, like Locator.text()');
   assert.equal(await text.length(), 26);
-  await assert.rejects((await one('table')).text(), ActionNotSupportedError);
+  const none = (await one('table')).text();
+  assert.ok(none instanceof Text, 'nothing is read until a method is called');
+  await assert.rejects(none.length(), ActionNotSupportedError);
 });
 
 test('read / readAll return text by UTF-16 range', async () => {

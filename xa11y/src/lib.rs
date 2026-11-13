@@ -61,14 +61,14 @@ pub use xa11y_core::{NativeObject, NodeIdentity};
 pub use xa11y_core::capture;
 pub use xa11y_core::{
     CancelToken, Capture, CaptureError, CaptureOptions, CaptureStats, CaptureStep, CapturedNode,
-    CapturedText, RelationTarget, Truncation,
+    CapturedRelation, CapturedText, RelationTarget, Truncation,
 };
 
 // Document semantics (see `xa11y_core::semantics`).
 pub use xa11y_core::semantics;
 #[doc(hidden)]
 pub use xa11y_core::LiveRegionParts;
-pub use xa11y_core::{Landmark, LiveRegionInfo, Politeness, RelationKind};
+pub use xa11y_core::{Landmark, LiveRegionInfo, Politeness, Relation, RelationKind};
 
 // Re-export input simulation surface.
 pub use xa11y_core::input;
@@ -260,13 +260,13 @@ pub fn input_sim() -> Result<InputSim> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(Error::Platform {
-            code: -1,
-            message: format!(
+        Err(Error::platform(
+            -1,
+            format!(
                 "Input simulation not available on platform: {}",
                 std::env::consts::OS
             ),
-        })
+        ))
     }
 }
 
@@ -305,13 +305,13 @@ fn create_screenshot_backend() -> std::result::Result<Arc<dyn ScreenshotProvider
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(Error::Platform {
-            code: -1,
-            message: format!(
+        Err(Error::platform(
+            -1,
+            format!(
                 "Screenshot not available on platform: {}",
                 std::env::consts::OS
             ),
-        })
+        ))
     }
 }
 
@@ -858,10 +858,10 @@ fn create_provider_for_backend(source: &str) -> Result<Box<dyn Provider>> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(Error::Platform {
-            code: -1,
-            message: format!("Unsupported platform: {}", std::env::consts::OS),
-        })
+        Err(Error::platform(
+            -1,
+            format!("Unsupported platform: {}", std::env::consts::OS),
+        ))
     }
 }
 
@@ -1839,10 +1839,10 @@ mod cached_error_tests {
     fn a_platform_error_renders_its_prefix_once() {
         let cell: Mutex<Option<()>> = Mutex::new(None);
         let err = cached(&cell, || {
-            Err(Error::Platform {
-                code: -1,
-                message: "Failed to connect to D-Bus session bus".to_string(),
-            })
+            Err(Error::platform(
+                -1,
+                "Failed to connect to D-Bus session bus",
+            ))
         })
         .expect_err("the cached construction error must come back out");
         let rendered = err.to_string();

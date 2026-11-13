@@ -156,14 +156,11 @@ impl Interfaces {
 pub(crate) fn read_interfaces(accessible: &Proxy<'_>) -> Result<Interfaces> {
     let reply = accessible
         .call_method("GetInterfaces", &())
-        .map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("GetInterfaces failed: {}", e),
-        })?;
-    let names: Vec<String> = reply.body().deserialize().map_err(|e| Error::Platform {
-        code: -1,
-        message: format!("GetInterfaces deserialize failed: {}", e),
-    })?;
+        .map_err(|e| Error::platform(-1, format!("GetInterfaces failed: {}", e)))?;
+    let names: Vec<String> = reply
+        .body()
+        .deserialize()
+        .map_err(|e| Error::platform(-1, format!("GetInterfaces deserialize failed: {}", e)))?;
     Ok(Interfaces::from_names(&names))
 }
 
@@ -401,22 +398,26 @@ impl LinuxProvider {
     /// forever (zbus has no default method timeout).
     pub(crate) fn connect_a11y_bus() -> Result<Connection> {
         let address = Self::a11y_bus_address()?;
-        let parsed = zbus::Address::try_from(address.as_str()).map_err(|e| Error::Platform {
-            code: -1,
-            message: format!(
-                "the AT-SPI bus launcher (org.a11y.Bus) published an unparsable \
+        let parsed = zbus::Address::try_from(address.as_str()).map_err(|e| {
+            Error::platform(
+                -1,
+                format!(
+                    "the AT-SPI bus launcher (org.a11y.Bus) published an unparsable \
                  accessibility bus address {address:?}: {e}"
-            ),
+                ),
+            )
         })?;
         zbus::blocking::connection::Builder::address(parsed)
             .map(|b| b.method_timeout(ATSPI_METHOD_TIMEOUT))
             .and_then(|b| b.build())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!(
-                    "could not connect to the AT-SPI accessibility bus at {address:?} \
+            .map_err(|e| {
+                Error::platform(
+                    -1,
+                    format!(
+                        "could not connect to the AT-SPI accessibility bus at {address:?} \
                      (published by org.a11y.Bus on the session bus): {e}"
-                ),
+                    ),
+                )
             })
     }
 
@@ -428,13 +429,15 @@ impl LinuxProvider {
         let session = zbus::blocking::connection::Builder::session()
             .map(|b| b.method_timeout(ATSPI_METHOD_TIMEOUT))
             .and_then(|b| b.build())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!(
-                    "could not connect to the D-Bus session bus \
+            .map_err(|e| {
+                Error::platform(
+                    -1,
+                    format!(
+                        "could not connect to the D-Bus session bus \
                      (DBUS_SESSION_BUS_ADDRESS={session_address}) to look up the AT-SPI \
                      accessibility bus: {e}"
-                ),
+                    ),
+                )
             })?;
         let reply = session
             .call_method(
@@ -446,32 +449,31 @@ impl LinuxProvider {
             )
             .map_err(|e| {
                 if is_peer_gone(&e) {
-                    Error::Platform {
-                        code: -1,
-                        message: format!(
+                    Error::platform(
+                        -1,
+                        format!(
                             "AT-SPI is not running: no org.a11y.Bus service on the session bus \
                              (DBUS_SESSION_BUS_ADDRESS={session_address}). Install at-spi2-core \
                              and start at-spi-bus-launcher, or log in to a desktop session that \
                              runs it: {e}"
                         ),
-                    }
+                    )
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!(
+                    Error::platform(
+                        -1,
+                        format!(
                             "the AT-SPI bus launcher (org.a11y.Bus on the session bus \
                              {session_address}) did not return the accessibility bus address: {e}"
                         ),
-                    }
+                    )
                 }
             })?;
-        reply
-            .body()
-            .deserialize::<String>()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("org.a11y.Bus.GetAddress returned an unexpected reply: {e}"),
-            })
+        reply.body().deserialize::<String>().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("org.a11y.Bus.GetAddress returned an unexpected reply: {e}"),
+            )
+        })
     }
 
     /// The live accessibility-bus connection, reconnecting first when the
@@ -546,27 +548,15 @@ impl LinuxProvider {
         let conn = self.connection()?;
         zbus::blocking::proxy::Builder::<zbus::blocking::Proxy>::new(&conn)
             .destination(bus_name.to_owned())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Failed to set proxy destination: {}", e),
-            })?
+            .map_err(|e| Error::platform(-1, format!("Failed to set proxy destination: {}", e)))?
             .path(path.to_owned())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Failed to set proxy path: {}", e),
-            })?
+            .map_err(|e| Error::platform(-1, format!("Failed to set proxy path: {}", e)))?
             .interface(interface.to_owned())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Failed to set proxy interface: {}", e),
-            })?
+            .map_err(|e| Error::platform(-1, format!("Failed to set proxy interface: {}", e)))?
             .cache_properties(zbus::proxy::CacheProperties::No)
             .build()
             .map(Proxy::from)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Failed to create proxy: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("Failed to create proxy: {}", e)))
     }
 
     /// Read the interfaces an accessible object reports via
@@ -581,17 +571,11 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = proxy
             .call_method("GetRole", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRole failed: {}", e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("GetRole failed: {}", e)))?;
         reply
             .body()
             .deserialize::<u32>()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRole deserialize failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("GetRole deserialize failed: {}", e)))
     }
 
     /// Get the AT-SPI role name string.
@@ -599,17 +583,11 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = proxy
             .call_method("GetRoleName", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRoleName failed: {}", e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("GetRoleName failed: {}", e)))?;
         reply
             .body()
             .deserialize::<String>()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRoleName deserialize failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("GetRoleName deserialize failed: {}", e)))
     }
 
     /// Detect Chromium/Electron's "accessibility bridge disabled" signature.
@@ -672,10 +650,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         proxy
             .get_property::<String>("Name")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Get Name property failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("Get Name property failed: {}", e)))
     }
 
     /// Read a registry entry's application name for enumeration.
@@ -693,9 +668,9 @@ impl LinuxProvider {
             Ok(name) => Ok(Some(name)),
             Err(e) if is_peer_gone(&e) || is_absent_member(&e) => Ok(None),
             Err(e) if is_timeout(&e) => Err(self.unresponsive_peer(aref, "Accessible.Name")),
-            Err(e) => Err(Error::Platform {
-                code: -1,
-                message: format!(
+            Err(e) => Err(Error::platform(
+                -1,
+                format!(
                     "reading the name of AT-SPI application {}{}{} failed: {e}",
                     aref.bus_name,
                     aref.path,
@@ -703,7 +678,7 @@ impl LinuxProvider {
                         .map(|p| format!(" (pid {p})"))
                         .unwrap_or_default(),
                 ),
-            }),
+            )),
         }
     }
 
@@ -721,9 +696,8 @@ impl LinuxProvider {
             Err(e) => return Err(children_call_error(e, aref)),
         };
         let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetChildren deserialize failed: {}", e),
+            reply.body().deserialize().map_err(|e| {
+                Error::platform(-1, format!("GetChildren deserialize failed: {}", e))
             })?;
         Ok(Some(
             children
@@ -752,18 +726,20 @@ impl LinuxProvider {
                 return Err(self.unresponsive_peer(aref, "Accessible.GetState"))
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("GetState on {}{} failed: {e}", aref.bus_name, aref.path),
-                })
+                return Err(Error::platform(
+                    -1,
+                    format!("GetState on {}{} failed: {e}", aref.bus_name, aref.path),
+                ))
             }
         };
-        let words: Vec<u32> = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!(
-                "GetState deserialize failed for {}{}: {e}",
-                aref.bus_name, aref.path
-            ),
+        let words: Vec<u32> = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!(
+                    "GetState deserialize failed for {}{}: {e}",
+                    aref.bus_name, aref.path
+                ),
+            )
         })?;
         Ok(Some(
             words
@@ -806,10 +782,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         proxy
             .get_property::<String>("Description")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Get Description property failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("Get Description property failed: {}", e)))
     }
 
     /// Get children via the GetChildren method.
@@ -825,9 +798,8 @@ impl LinuxProvider {
             }
         })?;
         let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetChildren deserialize failed: {}", e),
+            reply.body().deserialize().map_err(|e| {
+                Error::platform(-1, format!("GetChildren deserialize failed: {}", e))
             })?;
         Ok(children
             .into_iter()
@@ -857,17 +829,11 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = proxy
             .call_method("GetState", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetState failed: {}", e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("GetState failed: {}", e)))?;
         reply
             .body()
             .deserialize::<Vec<u32>>()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetState deserialize failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("GetState deserialize failed: {}", e)))
     }
 
     /// `GetRole` for the shell scan, separating "the peer left the bus" from
@@ -880,21 +846,13 @@ impl LinuxProvider {
         let reply = match proxy.call_method("GetRole", &()) {
             Ok(reply) => reply,
             Err(e) if is_peer_gone(&e) => return Ok(None),
-            Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("GetRole failed: {}", e),
-                })
-            }
+            Err(e) => return Err(Error::platform(-1, format!("GetRole failed: {}", e))),
         };
         reply
             .body()
             .deserialize::<u32>()
             .map(Some)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRole deserialize failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("GetRole deserialize failed: {}", e)))
     }
 
     /// `GetAttributes` for the shell scan.
@@ -922,23 +880,20 @@ impl LinuxProvider {
                 return Err(self.unresponsive_peer(aref, "Accessible.GetAttributes"))
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                return Err(Error::platform(
+                    -1,
+                    format!(
                         "GetAttributes on {}{} failed: {e}",
                         aref.bus_name, aref.path
                     ),
-                })
+                ))
             }
         };
         reply
             .body()
             .deserialize::<HashMap<String, String>>()
             .map(|a| Some(Some(a)))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetAttributes deserialize failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("GetAttributes deserialize failed: {}", e)))
     }
 
     /// Return true if the element reports the AT-SPI MULTI_LINE state.
@@ -1015,15 +970,11 @@ impl LinuxProvider {
         // coord_type 0 = screen coordinates
         let reply = proxy
             .call_method("GetExtents", &(0u32,))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetExtents failed: {e}"),
-            })?;
-        let (x, y, w, h): (i32, i32, i32, i32) =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetExtents deserialize failed: {e}"),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("GetExtents failed: {e}")))?;
+        let (x, y, w, h): (i32, i32, i32, i32) = reply
+            .body()
+            .deserialize()
+            .map_err(|e| Error::platform(-1, format!("GetExtents deserialize failed: {e}")))?;
         // AT-SPI screen extents are physical device pixels. Convert to logical
         // coordinates (the cross-platform contract, same space as the
         // screenshot/input layers) using the detected display scale. On the
@@ -1070,10 +1021,7 @@ impl LinuxProvider {
                         &format!("Application.{property}"),
                     )
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!("Application.{property} on {bus}: {e}"),
-                    }
+                    Error::platform(-1, format!("Application.{property} on {bus}: {e}"))
                 }
             })
         };
@@ -1126,23 +1074,24 @@ impl LinuxProvider {
                 if is_timeout(&e) {
                     self.unresponsive_peer(aref, "Component.GetExtents")
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!(
+                    Error::platform(
+                        -1,
+                        format!(
                             "GetExtents(WINDOW) on {}{} failed: {e}",
                             aref.bus_name, aref.path
                         ),
-                    }
+                    )
                 }
             })?;
-        let (x, y, w, h): (i32, i32, i32, i32) =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!(
+        let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!(
                     "GetExtents(WINDOW) deserialize failed for {}{}: {e}",
                     aref.bus_name, aref.path
                 ),
-            })?;
+            )
+        })?;
         // Sentinel extents carry no position to offset.
         let Some(window_rect) = extents_to_rect(x, y, w, h) else {
             return Ok(None);
@@ -1150,13 +1099,15 @@ impl LinuxProvider {
         let origin = self.gtk4_window_origin(aref)?;
         gtk4_window_rect_to_screen(window_rect, origin, crate::scale::coordinate_scale())
             .map(Some)
-            .ok_or_else(|| Error::Platform {
-                code: -1,
-                message: format!(
-                    "GTK 4 extents ({x}, {y}) of {}{} overflow when offset by the window \
+            .ok_or_else(|| {
+                Error::platform(
+                    -1,
+                    format!(
+                        "GTK 4 extents ({x}, {y}) of {}{} overflow when offset by the window \
                      origin {origin:?}",
-                    aref.bus_name, aref.path
-                ),
+                        aref.bus_name, aref.path
+                    ),
+                )
             })
     }
 
@@ -1164,15 +1115,16 @@ impl LinuxProvider {
     /// turning its WINDOW coordinates into screen ones. An error, saying
     /// why, when the window cannot be identified uniquely.
     fn gtk4_window_origin(&self, aref: &AccessibleRef) -> Result<(i32, i32)> {
-        self.gtk4_window_origin_or_reason(aref)
-            .map_err(|reason| Error::Platform {
-                code: -1,
-                message: format!(
+        self.gtk4_window_origin_or_reason(aref).map_err(|reason| {
+            Error::platform(
+                -1,
+                format!(
                     "no screen bounds for GTK 4 object {}{}: its window's screen origin is \
                      unknown: {reason}",
                     aref.bus_name, aref.path
                 ),
-            })
+            )
+        })
     }
 
     /// [`Self::gtk4_window_origin`], saying why when there is none.
@@ -1207,15 +1159,11 @@ impl LinuxProvider {
     /// cannot be read, so "unknown" never reads as "absent".
     fn root_exports_application(&self, bus: &str) -> Result<bool> {
         let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.freedesktop.DBus.Introspectable")?;
-        let reply = proxy
-            .call_method("Introspect", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"),
-            })?;
-        let xml: String = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"),
+        let reply = proxy.call_method("Introspect", &()).map_err(|e| {
+            Error::platform(-1, format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"))
+        })?;
+        let xml: String = reply.body().deserialize().map_err(|e| {
+            Error::platform(-1, format!("Introspect {APP_ROOT_PATH} on {bus}: {e}"))
         })?;
         Ok(introspection_lists_interface(
             &xml,
@@ -1302,13 +1250,13 @@ impl LinuxProvider {
             if is_timeout(&e) {
                 self.unresponsive_peer(aref, "Action.NActions/GetName")
             } else {
-                Error::Platform {
-                    code: -1,
-                    message: format!(
+                Error::platform(
+                    -1,
+                    format!(
                         "reading the actions of {}{} failed: {e}",
                         aref.bus_name, aref.path
                     ),
-                }
+                )
             }
         })
     }
@@ -1330,12 +1278,10 @@ impl LinuxProvider {
                 },
                 "Application.ToolkitName",
             )),
-            Err(e) => Err(Error::Platform {
-                code: -1,
-                message: format!(
-                    "reading Application.ToolkitName of {bus} to {purpose} failed: {e}"
-                ),
-            }),
+            Err(e) => Err(Error::platform(
+                -1,
+                format!("reading Application.ToolkitName of {bus} to {purpose} failed: {e}"),
+            )),
         }
     }
 
@@ -2077,10 +2023,10 @@ impl LinuxProvider {
     fn read_ancestor_facts(&self, aref: &AccessibleRef) -> Result<AncestorFacts> {
         let (bits, read_ok) = self.state_bits(aref);
         if !read_ok {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("GetState on {}{} failed", aref.bus_name, aref.path),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("GetState on {}{} failed", aref.bus_name, aref.path),
+            ));
         }
         let iconified = bits & ATSPI_ICONIFIED != 0;
         let drawn = atspi_visible(bits);
@@ -2144,23 +2090,17 @@ impl LinuxProvider {
                         format!("{}{}", aref.bus_name, aref.path),
                     )
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!("Get Parent property failed: {}", e),
-                    }
+                    Error::platform(-1, format!("Get Parent property failed: {}", e))
                 }
             })?;
         // The reply is a Variant containing (so) — a struct of (bus_name, object_path)
-        let variant: zbus::zvariant::OwnedValue =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Parent deserialize variant failed: {}", e),
-            })?;
+        let variant: zbus::zvariant::OwnedValue = reply.body().deserialize().map_err(|e| {
+            Error::platform(-1, format!("Parent deserialize variant failed: {}", e))
+        })?;
         let (bus, path): (String, zbus::zvariant::OwnedObjectPath) =
             zbus::zvariant::Value::from(variant).try_into().map_err(
-                |e: zbus::zvariant::Error| Error::Platform {
-                    code: -1,
-                    message: format!("Parent deserialize struct failed: {}", e),
+                |e: zbus::zvariant::Error| {
+                    Error::platform(-1, format!("Parent deserialize struct failed: {}", e))
                 },
             )?;
         Ok(AccessibleRef {
@@ -2477,23 +2417,21 @@ impl LinuxProvider {
                 return Err(self.unresponsive_peer(aref, &format!("Accessible.{method}")))
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("{method} on {}{} failed: {e}", aref.bus_name, aref.path),
-                })
+                return Err(Error::platform(
+                    -1,
+                    format!("{method} on {}{} failed: {e}", aref.bus_name, aref.path),
+                ))
             }
         };
-        reply
-            .body()
-            .deserialize::<R>()
-            .map(Some)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!(
+        reply.body().deserialize::<R>().map(Some).map_err(|e| {
+            Error::platform(
+                -1,
+                format!(
                     "{method} reply from {}{} did not decode: {e}",
                     aref.bus_name, aref.path
                 ),
-            })
+            )
+        })
     }
 
     /// Whether `bus_name` still has an owner on the accessibility bus. A
@@ -2507,17 +2445,13 @@ impl LinuxProvider {
         )?;
         let reply = proxy
             .call_method("NameHasOwner", &(bus_name,))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("NameHasOwner({bus_name}) failed: {e}"),
-            })?;
-        reply
-            .body()
-            .deserialize::<bool>()
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("NameHasOwner({bus_name}) reply did not decode: {e}"),
-            })
+            .map_err(|e| Error::platform(-1, format!("NameHasOwner({bus_name}) failed: {e}")))?;
+        reply.body().deserialize::<bool>().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("NameHasOwner({bus_name}) reply did not decode: {e}"),
+            )
+        })
     }
 
     /// The stale error for an object that stopped answering: its process
@@ -2608,19 +2542,18 @@ impl LinuxProvider {
             .collect::<Result<_>>()?;
         let aref = self.get_cached(element.handle)?;
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
-        let reply = proxy
-            .call_method("GetRelationSet", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!(
+        let reply = proxy.call_method("GetRelationSet", &()).map_err(|e| {
+            Error::platform(
+                -1,
+                format!(
                     "GetRelationSet on {}{} failed: {e}",
                     aref.bus_name, aref.path
                 ),
-            })?;
+            )
+        })?;
         let set: Vec<(u32, Vec<(String, zbus::zvariant::OwnedObjectPath)>)> =
-            reply.body().deserialize().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetRelationSet reply did not decode: {e}"),
+            reply.body().deserialize().map_err(|e| {
+                Error::platform(-1, format!("GetRelationSet reply did not decode: {e}"))
             })?;
         Ok(codes
             .into_iter()
@@ -2653,25 +2586,24 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
         let reply = proxy
             .call_method("DoAction", &(index,))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("DoAction({}) failed: {}", index, e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("DoAction({}) failed: {}", index, e)))?;
         // AT-SPI's DoAction returns a boolean: true means the action ran. A
         // false reply means the provider declined — reporting Ok would let
         // activate()/focus() claim success while the window was never activated.
-        let performed: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("DoAction({}) reply decode failed: {}", index, e),
+        let performed: bool = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("DoAction({}) reply decode failed: {}", index, e),
+            )
         })?;
         if !performed {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
+            return Err(Error::platform(
+                -1,
+                format!(
                     "DoAction({}) returned false; the accessibility provider declined the action",
                     index
                 ),
-            });
+            ));
         }
         Ok(())
     }
@@ -3743,9 +3675,8 @@ impl Provider for LinuxProvider {
         // decision `activate` documents above (tenet 1).
         let proxy = self
             .make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Component proxy while focusing failed: {}", e),
+            .map_err(|e| {
+                Error::platform(-1, format!("Component proxy while focusing failed: {}", e))
             })?;
         let reply = grab_focus_result(
             proxy.call_method("GrabFocus", &()),
@@ -3753,9 +3684,11 @@ impl Provider for LinuxProvider {
             "focus",
             element.role,
         )?;
-        let grabbed: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Component.GrabFocus reply while focusing failed: {}", e),
+        let grabbed: bool = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("Component.GrabFocus reply while focusing failed: {}", e),
+            )
         })?;
         if grabbed {
             return Ok(());
@@ -3785,11 +3718,9 @@ impl Provider for LinuxProvider {
                     &parent_ref.path,
                     "org.a11y.atspi.Component",
                 )?;
-                p.call_method("GrabFocus", &())
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("Component.GrabFocus on parent failed: {}", e),
-                    })?;
+                p.call_method("GrabFocus", &()).map_err(|e| {
+                    Error::platform(-1, format!("Component.GrabFocus on parent failed: {}", e))
+                })?;
                 return Ok(());
             }
         }
@@ -3900,18 +3831,12 @@ impl Provider for LinuxProvider {
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
         let current: f64 = proxy
             .get_property("CurrentValue")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Value.CurrentValue failed: {}", e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("Value.CurrentValue failed: {}", e)))?;
         let step: f64 = proxy.get_property("MinimumIncrement").unwrap_or(1.0);
         let step = if step <= 0.0 { 1.0 } else { step };
         proxy
             .set_property("CurrentValue", current + step)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Value.SetCurrentValue failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("Value.SetCurrentValue failed: {}", e)))
     }
 
     fn decrement(&self, element: &ElementData) -> Result<()> {
@@ -3925,18 +3850,12 @@ impl Provider for LinuxProvider {
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
         let current: f64 = proxy
             .get_property("CurrentValue")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Value.CurrentValue failed: {}", e),
-            })?;
+            .map_err(|e| Error::platform(-1, format!("Value.CurrentValue failed: {}", e)))?;
         let step: f64 = proxy.get_property("MinimumIncrement").unwrap_or(1.0);
         let step = if step <= 0.0 { 1.0 } else { step };
         proxy
             .set_property("CurrentValue", current - step)
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Value.SetCurrentValue failed: {}", e),
-            })
+            .map_err(|e| Error::platform(-1, format!("Value.SetCurrentValue failed: {}", e)))
     }
 
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
@@ -3972,13 +3891,13 @@ impl Provider for LinuxProvider {
                             "Accessible.GetState (probing after Component.ScrollTo answered: {e})"
                         ),
                     )),
-                    Err(probe) => Err(Error::Platform {
-                        code: -1,
-                        message: format!(
+                    Err(probe) => Err(Error::platform(
+                        -1,
+                        format!(
                             "Component.ScrollTo answered {e}; probing GetState to tell a live \
                              object from a destroyed one then failed: {probe}"
                         ),
-                    }),
+                    )),
                 };
             }
             Err(e) if is_timeout(&e) => {
@@ -3996,16 +3915,16 @@ impl Provider for LinuxProvider {
                 return Err(not_supported())
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("Component.ScrollTo failed: {e}"),
-                })
+                return Err(Error::platform(
+                    -1,
+                    format!("Component.ScrollTo failed: {e}"),
+                ))
             }
         };
-        let scrolled: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Component.ScrollTo reply failed: {e}"),
-        })?;
+        let scrolled: bool = reply
+            .body()
+            .deserialize()
+            .map_err(|e| Error::platform(-1, format!("Component.ScrollTo reply failed: {e}")))?;
         // ScrollTo answers false when the adapter declines (ATK's default
         // `scroll_to` does, for a component that does not implement it).
         // Reporting that as success would tell an auto-wait the element was
@@ -4067,9 +3986,11 @@ impl Provider for LinuxProvider {
         }
         let proxy = self
             .make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("Component proxy while activating failed: {}", e),
+            .map_err(|e| {
+                Error::platform(
+                    -1,
+                    format!("Component proxy while activating failed: {}", e),
+                )
             })?;
         let reply = grab_focus_result(
             proxy.call_method("GrabFocus", &()),
@@ -4077,21 +3998,23 @@ impl Provider for LinuxProvider {
             "activate",
             element.role,
         )?;
-        let grabbed: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Component.GrabFocus reply while activating failed: {}", e),
+        let grabbed: bool = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("Component.GrabFocus reply while activating failed: {}", e),
+            )
         })?;
         if grabbed {
             return Ok(());
         }
-        Err(Error::Platform {
-            code: -1,
-            message: format!(
+        Err(Error::platform(
+            -1,
+            format!(
                 "activate: Component.GrabFocus on window {}{} returned false; the toolkit \
                  declined to activate it",
                 target.bus_name, target.path
             ),
-        })
+        ))
     }
 
     fn minimize(&self, element: &ElementData) -> Result<()> {
@@ -4138,15 +4061,17 @@ impl Provider for LinuxProvider {
                         role: element.role,
                     }
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!("Component.SetPosition while moving window failed: {e}"),
-                    }
+                    Error::platform(
+                        -1,
+                        format!("Component.SetPosition while moving window failed: {e}"),
+                    )
                 }
             })?;
-        let moved: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Component.SetPosition reply while moving window failed: {e}"),
+        let moved: bool = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("Component.SetPosition reply while moving window failed: {e}"),
+            )
         })?;
         if moved {
             Ok(())
@@ -4187,15 +4112,17 @@ impl Provider for LinuxProvider {
                         role: element.role,
                     }
                 } else {
-                    Error::Platform {
-                        code: -1,
-                        message: format!("Component.SetSize while resizing window failed: {e}"),
-                    }
+                    Error::platform(
+                        -1,
+                        format!("Component.SetSize while resizing window failed: {e}"),
+                    )
                 }
             })?;
-        let resized: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Component.SetSize reply while resizing window failed: {e}"),
+        let resized: bool = reply.body().deserialize().map_err(|e| {
+            Error::platform(
+                -1,
+                format!("Component.SetSize reply while resizing window failed: {e}"),
+            )
         })?;
         if resized {
             Ok(())
@@ -4260,15 +4187,15 @@ impl Provider for LinuxProvider {
             if is_timeout(&e) {
                 self.unresponsive_peer(&target, "Value.CurrentValue (set)")
             } else {
-                Error::Platform {
-                    code: -1,
-                    message: format!(
+                Error::platform(
+                    -1,
+                    format!(
                         "setting Value.CurrentValue to {value} on {} ({}{}) failed: {e}",
                         xa11y_core::error::stale_subject(element),
                         target.bus_name,
                         target.path
                     ),
-                }
+                )
             }
         })
     }
@@ -4299,13 +4226,13 @@ impl Provider for LinuxProvider {
                 return Err(self.gone(&target, xa11y_core::error::stale_subject(element)))
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                return Err(Error::platform(
+                    -1,
+                    format!(
                         "reading Text.CaretOffset of {}{} to place type_text failed: {e}",
                         target.bus_name, target.path
                     ),
-                })
+                ))
             }
         };
         // `make_proxy` only builds a local handle and never asks the object
@@ -4447,10 +4374,9 @@ impl Provider for LinuxProvider {
     }
 
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
-        let pid = element.pid.ok_or(Error::Platform {
-            code: -1,
-            message: "Element has no PID for subscribe".to_string(),
-        })?;
+        let pid = element
+            .pid
+            .ok_or(Error::platform(-1, "Element has no PID for subscribe"))?;
         let app_name = element.name.clone().unwrap_or_default();
         crate::events::subscribe_for_pid(self, pid, app_name)
     }
@@ -4530,10 +4456,10 @@ fn grab_focus_result(
         zbus::Error::MethodError(name, _, _) => {
             grab_focus_error(name.as_str().to_string(), verb, action, role)
         }
-        other => Error::Platform {
-            code: -1,
-            message: format!("Component.GrabFocus while {verb} failed: {other}"),
-        },
+        other => Error::platform(
+            -1,
+            format!("Component.GrabFocus while {verb} failed: {other}"),
+        ),
     })
 }
 
@@ -4546,10 +4472,10 @@ fn grab_focus_error(name: String, verb: &str, action: &str, role: Role) -> Error
             role,
         }
     } else {
-        Error::Platform {
-            code: -1,
-            message: format!("Component.GrabFocus while {verb} failed: {name}"),
-        }
+        Error::platform(
+            -1,
+            format!("Component.GrabFocus while {verb} failed: {name}"),
+        )
     }
 }
 
@@ -5102,10 +5028,7 @@ fn children_call_error(err: zbus::Error, aref: &AccessibleRef) -> Error {
             xa11y_core::StaleReason::ProcessExited,
             format!("{}{}", aref.bus_name, aref.path),
         ),
-        _ => Error::Platform {
-            code: -1,
-            message: format!("GetChildren failed: {err}"),
-        },
+        _ => Error::platform(-1, format!("GetChildren failed: {err}")),
     }
 }
 
@@ -5140,20 +5063,20 @@ fn atspi_bool_reply(
     target: &AccessibleRef,
     element: &ElementData,
 ) -> Result<()> {
-    let applied: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-        code: -1,
-        message: format!("{call} reply decode failed: {e}"),
-    })?;
+    let applied: bool = reply
+        .body()
+        .deserialize()
+        .map_err(|e| Error::platform(-1, format!("{call} reply decode failed: {e}")))?;
     if applied {
         Ok(())
     } else {
-        Err(Error::Platform {
-            code: -1,
-            message: format!(
+        Err(Error::platform(
+            -1,
+            format!(
                 "{call} on {} {}{} returned FALSE: the toolkit refused it",
                 element.role, target.bus_name, target.path
             ),
-        })
+        ))
     }
 }
 
@@ -5170,10 +5093,10 @@ pub(crate) fn unknown_after_mutation(e: Error, done: &str) -> Error {
     if e.delivery() == xa11y_core::Delivery::Unknown {
         return e;
     }
-    Error::Platform {
-        code: -1,
-        message: format!("{e}, after {done} had already changed the element"),
-    }
+    Error::platform(
+        -1,
+        format!("{e}, after {done} had already changed the element"),
+    )
 }
 
 /// Map a failed `EditableText` call. A missing member or interface is
@@ -5185,13 +5108,13 @@ fn editable_text_call_error(method: &str, e: zbus::Error, target: &AccessibleRef
     if is_unimplemented(&e) {
         Error::TextValueNotSupported
     } else {
-        Error::Platform {
-            code: -1,
-            message: format!(
+        Error::platform(
+            -1,
+            format!(
                 "EditableText.{method} on {}{} failed: {e}",
                 target.bus_name, target.path
             ),
-        }
+        )
     }
 }
 
@@ -5444,17 +5367,17 @@ fn is_absent_member(err: &zbus::Error) -> bool {
 fn classify_failure(app: &ElementData, top: &AccessibleRef, err: Error) -> Error {
     let name = app.name.as_deref().unwrap_or("<unnamed>");
     let pid = app.pid.map(|p| format!(" pid={p}")).unwrap_or_default();
-    Error::Platform {
-        code: match &err {
+    Error::platform(
+        match &err {
             Error::Platform { code, .. } => *code,
             _ => -1,
         },
-        message: format!(
+        format!(
             "could not classify top-level {} of application \"{name}\"{pid} as a shell \
              surface: {err}",
             top.path
         ),
-    }
+    )
 }
 
 /// Map an AT-SPI2 action name to its canonical `snake_case` xa11y action name.
@@ -5609,10 +5532,7 @@ mod tests {
             "{e:?}"
         );
         // Already-unknown errors are untouched.
-        let platform = Error::Platform {
-            code: 7,
-            message: "x".into(),
-        };
+        let platform = Error::platform(7, "x");
         assert!(matches!(
             unknown_after_mutation(platform, "DeleteText"),
             Error::Platform { code: 7, .. }
@@ -7384,12 +7304,9 @@ mod tests {
         let err = classify_failure(
             &app,
             &top,
-            Error::Platform {
-                code: -1,
-                message: "GetRole failed: connection closed".to_string(),
-            },
+            Error::platform(-1, "GetRole failed: connection closed"),
         );
-        let Error::Platform { code, message } = err else {
+        let Error::Platform { code, message, .. } = err else {
             panic!("a D-Bus failure must stay a platform error");
         };
         assert_eq!(code, -1);
@@ -7412,14 +7329,7 @@ mod tests {
             bus_name: ":1.9".to_string(),
             path: "/org/a11y/atspi/accessible/3".to_string(),
         };
-        let err = classify_failure(
-            &app,
-            &top,
-            Error::Platform {
-                code: -1,
-                message: "GetAttributes failed".to_string(),
-            },
-        );
+        let err = classify_failure(&app, &top, Error::platform(-1, "GetAttributes failed"));
         let msg = err.to_string();
         assert!(msg.contains("<unnamed>"), "{msg}");
         assert!(msg.contains("/org/a11y/atspi/accessible/3"), "{msg}");
@@ -8354,12 +8264,7 @@ mod tests {
 
         // A failed reconnect is returned as-is, and the next call retries.
         let err = provider
-            .connection_with(|| {
-                Err(Error::Platform {
-                    code: -1,
-                    message: "bus still down".into(),
-                })
-            })
+            .connection_with(|| Err(Error::platform(-1, "bus still down")))
             .expect_err("reconnect failure surfaces");
         assert!(err.to_string().contains("bus still down"));
 
@@ -8620,10 +8525,7 @@ mod tests {
                 climb_peer("/org/a11y/atspi/null", ROLE_SCROLL_PANE, CLIMB_DRAWN),
             ),
         ]);
-        let unreadable = Err(Error::Platform {
-            code: -1,
-            message: "GetExtents failed".into(),
-        });
+        let unreadable = Err(Error::platform(-1, "GetExtents failed"));
         assert_eq!(climb_reason(&provider, unreadable), HiddenReason::Unknown);
 
         // A parent that is not served at all fails its reads.

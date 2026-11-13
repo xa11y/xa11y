@@ -1492,8 +1492,9 @@ def test_a_depth_cut_is_marked_on_the_node_that_lost_its_children(mcp, app_pid):
 
     At `max_depth: 1` the application's top-level children are the frontier.
     Their roles vary by toolkit (GTK's top level is not always `window`), so
-    the test goes by position: every frontier node with children must say it
-    was cut and how many it has, and one that was not cut claims no count.
+    the test goes by position. The depth limit reads no children below it,
+    not even to count them, so every frontier node is marked and none claims
+    a count.
     """
     structured = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 1})["result"][
         "structuredContent"
@@ -1502,14 +1503,10 @@ def test_a_depth_cut_is_marked_on_the_node_that_lost_its_children(mcp, app_pid):
     root = structured["tree"]
     frontier = root.get("children", [])
     assert frontier, root
-    marked = [c for c in frontier if c.get("subtree_truncated")]
-    assert marked, "by_depth is set, so some frontier node must carry the cut"
     for child in frontier:
         assert "children" not in child, child
-        if child.get("subtree_truncated") is True:
-            assert child["children_count"] >= 1, child
-        else:
-            assert "children_count" not in child, child
+        assert child.get("subtree_truncated") is True, child
+        assert "children_count" not in child, child
 
 
 def test_an_uncut_tree_marks_no_node(mcp, app_pid):

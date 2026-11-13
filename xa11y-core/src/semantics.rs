@@ -301,6 +301,28 @@ impl std::fmt::Display for RelationKind {
     }
 }
 
+/// One kind of relation and the elements it points at, from
+/// [`Element::relations`](crate::Element::relations).
+///
+/// `#[non_exhaustive]`: a relation may grow fields (a platform-reported
+/// order, say) without breaking readers. Build one with [`Relation::new`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Relation {
+    /// The kind of relation.
+    pub kind: RelationKind,
+    /// The related elements, in platform order. Empty when the platform
+    /// reports the kind but this element has none.
+    pub elements: Vec<crate::Element>,
+}
+
+impl Relation {
+    /// A relation of `kind` to `elements`.
+    pub fn new(kind: RelationKind, elements: Vec<crate::Element>) -> Self {
+        Self { kind, elements }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

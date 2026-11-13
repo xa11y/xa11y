@@ -209,7 +209,10 @@ and reports which limit cut it. It is on `Element`, `App`, `Locator` and
 The tree is read breadth-first and listed in pre-order, so when `max_nodes`
 cuts, the top of the tree is complete. Each node carries its `index`,
 `parent`, `depth`, the `element` itself, its `children` as indices,
-`children_count` (its real number of children) and `children_truncated`.
+`children_count` (its real number of children, or none when they were not
+read) and `children_truncated`. A node at `max_depth` has its children left
+unread, so it is marked `children_truncated` with no count, and `by_depth` is
+set whenever the walk reaches that depth.
 `truncated` on the capture has `by_depth`, `by_nodes`, `by_text`,
 `by_formatting`, `by_time` and `by_cancel`, each set only when that limit
 left something out. With `formatting` detail, a node's `text` also carries
@@ -233,7 +236,8 @@ any callback in JavaScript.
 A node's `element` names exactly that node, so an action on it reaches it or
 raises `ElementStaleError`. With `relations` detail, a target inside the
 capture is the `int` index of its node and a target outside it is an
-`Element`.
+`Element`. A node's `relations` is a list of `CapturedRelation`, each a `kind`
+and its `targets`.
 
 ```python
 cap = app.capture(max_nodes=5000, detail={"text"})
@@ -248,7 +252,7 @@ print("".join(n.text.content for n in cap.subtree(article.index) if n.text))
 
 | Method | On | Returns |
 | --- | --- | --- |
-| `text()` | Any element with a text interface | A `Text` bound to this element. Raises `ActionNotSupported` when there is no text interface. |
+| `text()` | Any element with a text interface | A `Text` bound to this element. It reads nothing yet; each read checks the element is still live, and raises `ActionNotSupported` when there is no text interface. |
 | `cell_at(row, column)` | A table | The cell at that 0-based slot, the merged cell covering it, or none |
 | `column_headers()`, `row_headers()` | A table | Its header cells |
 | `column_header_cells()`, `row_header_cells()` | A cell | The header cells that head it |
@@ -261,8 +265,8 @@ print("".join(n.text.content for n in cap.subtree(article.index) if n.text))
 | `relations(kinds)` | The elements this one is related to, per kind. Its label is `labelled_by` and its hint `described_by`. The reverse of each kind is a kind too (`label_for`). |
 
 Each requested kind appears once, in request order, with an empty list when
-there are none. Python returns a `dict` keyed by kind and JavaScript an array
-of `{ kind, elements }`. With no kinds it reads every kind the platform reports,
+there are none. Every binding returns a list of `Relation`, each a `kind` and
+its `elements`. With no kinds it reads every kind the platform reports,
 the `relation:*` rows of [`capabilities()`](/reference/platform-details/#capabilities).
 A kind the platform never reports raises `Unsupported`. macOS reports
 `aria-controls` and `aria-flowto` together as `linked`, and Windows reports

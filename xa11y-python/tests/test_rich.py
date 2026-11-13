@@ -106,8 +106,11 @@ def test_table_queries_on_a_non_table_raise():
 
 def test_text_refused_on_an_element_without_text():
     button = _native._make_test_locator().descendant("button").first().element()
+    # Like ``Locator.text()``, nothing is read until a method is called.
+    text = button.text()
+    assert isinstance(text, xa11y.Text)
     with pytest.raises(xa11y.ActionNotSupportedError):
-        button.text()
+        text.length()
 
 
 def test_lengths_and_offsets_are_utf16():

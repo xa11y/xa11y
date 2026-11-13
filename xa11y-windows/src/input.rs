@@ -92,12 +92,10 @@ impl WindowsInputProvider {
                 let width = i64::from(rect.right) - i64::from(rect.left);
                 let height = i64::from(rect.bottom) - i64::from(rect.top);
                 if width <= 0 || height <= 0 {
-                    return Err(Error::Platform {
-                        code: -1,
-                        message: format!(
-                            "EnumDisplayMonitors returned an invalid rectangle: {rect:?}"
-                        ),
-                    });
+                    return Err(Error::platform(
+                        -1,
+                        format!("EnumDisplayMonitors returned an invalid rectangle: {rect:?}"),
+                    ));
                 }
                 Ok(xa11y_core::Rect {
                     x: rect.left,
@@ -210,9 +208,11 @@ impl WindowsInputProvider {
                 "mouse input",
             ),
             Target::PointerHere => {
-                let p = crate::coords::cursor_pos(dpi).map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("GetCursorPos failed while checking the mouse target: {e}"),
+                let p = crate::coords::cursor_pos(dpi).map_err(|e| {
+                    Error::platform(
+                        e.code().0 as i64,
+                        format!("GetCursorPos failed while checking the mouse target: {e}"),
+                    )
                 })?;
                 (crate::coords::window_from_point(dpi, p), "mouse input")
             }
@@ -231,13 +231,13 @@ fn send_packet(
         // SAFETY: GetLastError has no arguments.
         let code = unsafe { GetLastError().0 } as i64;
         return Err((
-            Error::Platform {
+            Error::platform(
                 code,
-                message: format!(
+                format!(
                     "SendInput sent {sent}/{} events (GetLastError={code})",
                     inputs.len()
                 ),
-            },
+            ),
             sent,
         ));
     }
@@ -594,13 +594,7 @@ mod partial_click_tests {
     use std::cell::Cell;
 
     fn short_send(sent: u32) -> std::result::Result<(), (Error, u32)> {
-        Err((
-            Error::Platform {
-                code: 123,
-                message: "original short send".into(),
-            },
-            sent,
-        ))
+        Err((Error::platform(123, "original short send"), sent))
     }
 
     #[test]
@@ -618,7 +612,7 @@ mod partial_click_tests {
         assert!(released.get());
         assert!(!provider.pointer_buttons_down());
         assert!(
-            matches!(error, Error::Platform { code: 123, ref message } if message == "original short send")
+            matches!(error, Error::Platform { code: 123, ref message, .. } if message == "original short send")
         );
     }
 
@@ -629,10 +623,7 @@ mod partial_click_tests {
         let error = provider
             .finish_click_batch(MouseButton::Right, short_send(1), || {
                 assert!(provider.pointer_buttons_down());
-                Err(Error::Platform {
-                    code: 456,
-                    message: "release failed".into(),
-                })
+                Err(Error::platform(456, "release failed"))
             })
             .unwrap_err();
         assert!(provider.pointer_buttons_down());
@@ -687,9 +678,11 @@ impl InputProvider for WindowsInputProvider {
     fn pointer_down(&self, button: MouseButton) -> Result<()> {
         let dpi = crate::dpi::DpiScope::enter()?;
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let point = crate::coords::cursor_pos(&dpi).map_err(|error| Error::Platform {
-            code: error.code().0 as i64,
-            message: format!("GetCursorPos failed while validating the mouse target: {error}"),
+        let point = crate::coords::cursor_pos(&dpi).map_err(|error| {
+            Error::platform(
+                error.code().0 as i64,
+                format!("GetCursorPos failed while validating the mouse target: {error}"),
+            )
         })?;
         self.validate_point(&dpi, Point::new(point.x, point.y))?;
         self.down_locked(&dpi, button)

@@ -392,12 +392,14 @@ fn version_lt(a: &[u32], b: &[u32]) -> bool {
 fn detected_os_version() -> Result<Option<String>> {
     static VERSION: std::sync::LazyLock<std::result::Result<Option<String>, String>> =
         std::sync::LazyLock::new(probe_os_version);
-    VERSION.clone().map_err(|message| Error::Platform {
-        code: 0,
-        message: format!(
-            "reading the OS version failed, so version-gated capabilities cannot be \
+    VERSION.clone().map_err(|message| {
+        Error::platform(
+            0,
+            format!(
+                "reading the OS version failed, so version-gated capabilities cannot be \
              answered: {message}"
-        ),
+            ),
+        )
     })
 }
 

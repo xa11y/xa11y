@@ -964,10 +964,7 @@ mod tests {
         fn focused_app(&self) -> Result<ElementData> {
             match self.mode {
                 FocusMode::None => Err(Error::selector_not_matched("focused application")),
-                FocusMode::Error => Err(Error::Platform {
-                    code: 99,
-                    message: "focus query failed".to_string(),
-                }),
+                FocusMode::Error => Err(Error::platform(99, "focus query failed")),
             }
         }
         fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
@@ -1889,10 +1886,7 @@ mod tests {
         // the error short-circuits the poll loop.
         let start = Instant::now();
         let err = App::try_find_with(provider, Duration::from_secs(30), |_| {
-            Err(Error::Platform {
-                code: 7,
-                message: "boom".to_string(),
-            })
+            Err(Error::platform(7, "boom"))
         })
         .expect_err("a predicate error must propagate, not retry");
         assert!(matches!(err, Error::Platform { code: 7, .. }));
@@ -2725,10 +2719,7 @@ mod tests {
     #[test]
     fn enable_web_accessibility_propagates_a_non_stale_scan_error() {
         let provider = Arc::new(
-            WebProvider::new(Ok(()), true).failing_children(Error::Platform {
-                code: 42,
-                message: "scan broke".to_string(),
-            }),
+            WebProvider::new(Ok(()), true).failing_children(Error::platform(42, "scan broke")),
         );
         let start = Instant::now();
         let err = web_app(&provider)

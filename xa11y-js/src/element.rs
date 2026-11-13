@@ -366,9 +366,9 @@ impl Element {
             Ok(el
                 .relations(&kinds)?
                 .into_iter()
-                .map(|(kind, targets)| Relation {
-                    kind: kind.to_snake_case().to_string(),
-                    elements: targets.into_iter().map(Element::from_core).collect(),
+                .map(|r| Relation {
+                    kind: r.kind.to_snake_case().to_string(),
+                    elements: r.elements.into_iter().map(Element::from_core).collect(),
                 })
                 .collect())
         })))
@@ -484,13 +484,14 @@ impl Element {
     /// rendered lines, geometry and formatting. Offsets are UTF-16 code
     /// units.
     ///
-    /// Rejects with `ActionNotSupportedError` when the element has no text
-    /// interface. The returned `Text` stays bound to this element; use
-    /// `Locator.text()` to re-resolve on every read.
-    #[napi(ts_return_type = "Promise<Text>")]
-    pub fn text(&self) -> AsyncTask<Blocking<Text>> {
-        let el = self.core();
-        AsyncTask::new(Blocking::new(move || Ok(Text::from_core(el.text()?))))
+    /// Reads nothing yet, like `Locator.text()`. The returned `Text` stays
+    /// bound to this element: every read first checks the element is still
+    /// live (rejecting with `ElementStaleError` if not), and rejects with
+    /// `ActionNotSupportedError` when the element has no text interface.
+    /// Use `Locator.text()` to re-resolve on every read.
+    #[napi]
+    pub fn text(&self) -> Text {
+        Text::from_core(self.core().text())
     }
 
     /// On a table: the cell at 0-based `row` / `column`. A slot covered by a

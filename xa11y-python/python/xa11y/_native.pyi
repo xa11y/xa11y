@@ -402,6 +402,19 @@ class LiveRegionInfo:
         (``"additions text"``)."""
     def __repr__(self) -> str: ...
 
+class Relation:
+    """One kind of relation and the elements it points at, as
+    ``Element.relations`` returns it."""
+
+    @property
+    def kind(self) -> RelationKindName:
+        """The relation kind, in snake_case (``"labelled_by"``, ``"controls"``)."""
+    @property
+    def elements(self) -> list[Element]:
+        """The related elements, in platform order; ``[]`` for a kind the
+        platform reports with no targets."""
+    def __repr__(self) -> str: ...
+
 # ── Bounded capture ──────────────────────────────────────────────────────────
 
 CaptureDetailName = Literal["text", "formatting", "relations"]
@@ -502,6 +515,20 @@ class CaptureError:
         """The exception the read raised, as an xa11y exception instance."""
     def __repr__(self) -> str: ...
 
+class CapturedRelation:
+    """One kind of relation on a :class:`CapturedNode` and its targets."""
+
+    @property
+    def kind(self) -> RelationKindName:
+        """The relation kind, in snake_case (``"labelled_by"``, ``"controls"``)."""
+    @property
+    def targets(self) -> list[int | Element]:
+        """The targets, in platform order: an ``int`` index into
+        ``Capture.nodes`` for a node inside the capture, an ``Element`` for
+        one outside it. ``[]`` when the platform reports the kind but the
+        node has none."""
+    def __repr__(self) -> str: ...
+
 class CapturedNode:
     """One node of a :class:`Capture`."""
 
@@ -536,11 +563,11 @@ class CapturedNode:
         """The node's text, with ``detail={"text"}``, when it has a text
         interface."""
     @property
-    def relations(self) -> dict[RelationKindName, list[int | Element]]:
-        """With ``detail={"relations"}``: kind → targets, each an ``int`` index
-        into ``Capture.nodes`` when inside the capture, or an ``Element``
-        when outside it. Every kind the platform reports appears, ``[]`` when
-        it has no targets."""
+    def relations(self) -> list[CapturedRelation]:
+        """With ``detail={"relations"}``: one :class:`CapturedRelation` per kind
+        the platform reports, in the order it reports them. Each target is an
+        ``int`` index into ``Capture.nodes`` when inside the capture, or an
+        ``Element`` when outside it."""
     @property
     def role(self) -> str:
         """Shortcut for ``element.role``."""
@@ -1444,13 +1471,17 @@ class Element:
         """Live-region settings; ``None`` when the element has none."""
     def relations(
         self, kinds: list[RelationKindName] | None = None
-    ) -> dict[RelationKindName, list[Element]]:
-        """The elements this one is related to, by kind, in the order asked
-        for. ``kinds=None`` asks for every kind this platform reports. A kind
-        it never reports raises :class:`ActionNotSupportedError` naming it; a
-        reported kind with no targets maps to ``[]``."""
+    ) -> list[Relation]:
+        """The elements this one is related to, as a list of :class:`Relation`
+        (``kind`` such as ``"labelled_by"`` or ``"controls"``, and its
+        ``elements``), in the order asked for. ``kinds=None`` asks for every
+        kind this platform reports. A kind it never reports raises
+        :class:`ActionNotSupportedError` (``Unsupported``) naming it; a
+        reported kind with no targets has ``elements == []``."""
     def text(self) -> Text:
-        """This element's text, read by range (UTF-16 offsets). Raises
+        """This element's text, read by range (UTF-16 offsets). Reads nothing
+        yet: every read first checks the element is still live (raising
+        :class:`ElementStaleError` if not), and raises
         ``ActionNotSupportedError`` when the element has no text interface."""
     def cell_at(self, row: int, column: int) -> Element | None:
         """On a table: the cell at 0-based ``row`` / ``column`` (a merged cell

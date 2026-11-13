@@ -42,14 +42,16 @@ fn sender() -> Result<Sender> {
         return Ok(*sender);
     }
     // Keep the HRESULT with the message (tenet 6).
-    let fail = |e: windows::core::Error| Error::Platform {
-        code: i64::from(e.code().0),
-        message: format!(
-            "reading this process's integrity level for the UIPI check failed: {} \
+    let fail = |e: windows::core::Error| {
+        Error::platform(
+            i64::from(e.code().0),
+            format!(
+                "reading this process's integrity level for the UIPI check failed: {} \
              (HRESULT {:#010x})",
-            e.message(),
-            e.code().0
-        ),
+                e.message(),
+                e.code().0
+            ),
+        )
     };
     let token = ProcessToken::current().map_err(fail)?;
     let sender = Sender {

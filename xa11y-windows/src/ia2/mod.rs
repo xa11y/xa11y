@@ -36,16 +36,10 @@ use xa11y_core::{
 const LIMIT: usize = 4096;
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 fn platform(message: impl Into<String>) -> Error {
-    Error::Platform {
-        code: -1,
-        message: message.into(),
-    }
+    Error::platform(-1, message)
 }
 fn native(error: windows::core::Error) -> Error {
-    Error::Platform {
-        code: error.code().0 as i64,
-        message: format!("MSAA/IA2: {error}"),
-    }
+    Error::platform(error.code().0 as i64, format!("MSAA/IA2: {error}"))
 }
 fn stale() -> Error {
     Error::stale(
@@ -347,21 +341,21 @@ impl Node {
         }
     }
     fn classify_error(&self, error: Error) -> Error {
-        if let Error::Platform { code, message } = error {
+        if let Error::Platform { code, message, .. } = error {
             if matches!(code as i32 as u32, 0x80010108 | 0x800401fd | 0x800706ba) {
                 return stale();
             }
             if code == 0x80004005u32 as i32 as i64 {
                 return match self.ensure_attached() {
                     Err(Error::ElementStale { .. }) => stale(),
-                    Ok(()) => Error::Platform { code, message },
-                    Err(proof) => Error::Platform {
+                    Ok(()) => Error::platform(code, message),
+                    Err(proof) => Error::platform(
                         code,
-                        message: format!("{message}; attachment check also failed: {proof}"),
-                    },
+                        format!("{message}; attachment check also failed: {proof}"),
+                    ),
                 };
             }
-            Error::Platform { code, message }
+            Error::platform(code, message)
         } else {
             error
         }
@@ -406,10 +400,10 @@ fn root_child(root: &IAccessible, id: i32) -> Result<IAccessible> {
     match unsafe { root.get_accChild(&id.into()) } {
         Ok(child) => child.cast().map_err(native),
         Err(error) if matches!(error.code().0 as u32, 0 | 0x80070057 | 0x80020003) => Err(stale()),
-        Err(error) => Err(Error::Platform {
-            code: error.code().0 as i64,
-            message: format!("resolving retained IA2 uniqueID {id}: {error}"),
-        }),
+        Err(error) => Err(Error::platform(
+            error.code().0 as i64,
+            format!("resolving retained IA2 uniqueID {id}: {error}"),
+        )),
     }
 }
 #[derive(Clone)]
@@ -1084,13 +1078,13 @@ impl Ia2Provider {
                 .take(160)
                 .collect::<String>();
             match error {
-                Error::Platform { code, message } => Error::Platform {
+                Error::Platform { code, message, .. } => Error::platform(
                     code,
-                    message: format!(
+                    format!(
                         "IA2 {operation} on {} {name:?} (pid {:?}, handle {}): {message}",
                         context.role, context.pid, context.handle
                     ),
-                },
+                ),
                 Error::ElementStale { reason, element } => Error::stale(
                     reason,
                     format!("{}[name={name:?}] via IA2: {element}", context.role),
@@ -1867,10 +1861,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(80));
                 state.classify_result(
                     &ElementData::for_role(Role::Unknown),
-                    Err(Error::Platform {
-                        code: 0x80004005u32 as i32 as i64,
-                        message: "real".into(),
-                    }),
+                    Err(Error::platform(0x80004005u32 as i32 as i64, "real")),
                 )
             })
             .expect_err("the work failed");

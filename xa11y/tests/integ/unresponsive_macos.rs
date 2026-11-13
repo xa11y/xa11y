@@ -69,7 +69,7 @@ mod tests {
             "press took {elapsed:?} with the app stopped"
         );
         let err = result.expect_err("press must fail while the app is stopped");
-        let Error::Platform { code, message } = &err else {
+        let Error::Platform { code, message, .. } = &err else {
             panic!("expected Error::Platform with kAXErrorCannotComplete, got: {err}");
         };
         assert_eq!(*code, -25204, "expected kAXErrorCannotComplete: {err}");

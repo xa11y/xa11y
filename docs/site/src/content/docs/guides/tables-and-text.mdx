@@ -212,7 +212,8 @@ print([el.name for el in selected])
 
 ## Read text by range
 
-`element.text()` and `locator.text()` return a `Text` object. Every method on
+`element.text()` and `locator.text()` return a `Text` object straight away,
+without reading anything, in Rust, Python and JavaScript alike. Every method on
 it is a live platform read that caches nothing, so polling `caret()` sees the
 current caret without fetching the whole text. A caret belongs to the focused
 element: `caret()` is `None` until the element has focus, and while a range is
@@ -221,9 +222,10 @@ say which end that is).
 
 The two differ in what they hold on to:
 
-- `element.text()` stays bound to that element. It raises
-  `ActionNotSupportedError` straight away when the element has no text
-  interface, and later reads fail if the control is re-rendered.
+- `element.text()` stays bound to that element. Every read first checks that
+  the element is still live, so a read after the control is re-rendered raises
+  `ElementStaleError`. An element with no text interface raises
+  `ActionNotSupportedError` on the first read.
 - `locator.text()` re-resolves the selector on every read, waiting until it
   matches. It doesn't wait for the element to be visible or enabled.
 

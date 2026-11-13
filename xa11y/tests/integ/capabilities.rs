@@ -148,7 +148,7 @@ mod tests {
                     }
                     let unit = TextUnit::parse(name.trim_start_matches("text:range_at:"))
                         .expect("the row names a text unit");
-                    let text = entry.text().expect("the text field has a text interface");
+                    let text = entry.text();
                     check_call(name, cap, text.range_at(0, unit).map(|_| ()));
                 }
                 _ if name.starts_with("relation:") => {

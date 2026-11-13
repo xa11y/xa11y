@@ -49,10 +49,10 @@ pub struct WindowsScreenshot;
 #[cfg(not(target_os = "windows"))]
 impl WindowsScreenshot {
     pub fn new() -> Result<Self> {
-        Err(Error::Platform {
-            code: -1,
-            message: "Windows screenshot backend only available on Windows".into(),
-        })
+        Err(Error::platform(
+            -1,
+            "Windows screenshot backend only available on Windows",
+        ))
     }
 }
 
@@ -110,19 +110,12 @@ impl ScreenshotProvider for WindowsScreenshot {
         // `rect` already uses the physical desktop pixels BitBlt reads.
         let (phys, scale, mapping) = crate::dpi::region_capture_plan(&dpi, rect)?;
         if phys.width == 0 || phys.height == 0 {
-            return Err(Error::Platform {
-                code: -1,
-                message: "zero-sized capture rect".into(),
-            });
+            return Err(Error::platform(-1, "zero-sized capture rect"));
         }
-        let w = i32::try_from(phys.width).map_err(|_| Error::Platform {
-            code: -1,
-            message: "rect width out of i32 range".into(),
-        })?;
-        let h = i32::try_from(phys.height).map_err(|_| Error::Platform {
-            code: -1,
-            message: "rect height out of i32 range".into(),
-        })?;
+        let w = i32::try_from(phys.width)
+            .map_err(|_| Error::platform(-1, "rect width out of i32 range"))?;
+        let h = i32::try_from(phys.height)
+            .map_err(|_| Error::platform(-1, "rect height out of i32 range"))?;
         Ok(capture_rect(&dpi, phys.x, phys.y, w, h, scale)?.with_mapping(mapping))
     }
 }
@@ -177,10 +170,7 @@ fn capture_rect(
                         .into(),
                 }
             } else {
-                Error::Platform {
-                    code: -1,
-                    message: format!("BitBlt: {e}"),
-                }
+                Error::platform(-1, format!("BitBlt: {e}"))
             }
         })?;
     }
@@ -241,10 +231,7 @@ fn capture_rect(
 
 #[cfg(target_os = "windows")]
 fn platform(msg: &str) -> Error {
-    Error::Platform {
-        code: -1,
-        message: msg.into(),
-    }
+    Error::platform(-1, msg)
 }
 
 // RAII guards so every exit path releases GDI handles.

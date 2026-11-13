@@ -240,14 +240,14 @@ enum ServerIdentity {
 }
 
 fn sway_server_identity(stream: &UnixStream) -> Result<ServerIdentity> {
-    let credentials = getsockopt(stream, PeerCredentials).map_err(|error| Error::Platform {
-        code: error as i32 as i64,
-        message: format!("read Sway IPC peer credentials: {error}"),
+    let credentials = getsockopt(stream, PeerCredentials).map_err(|error| {
+        Error::platform(
+            error as i32 as i64,
+            format!("read Sway IPC peer credentials: {error}"),
+        )
     })?;
-    let pid = u32::try_from(credentials.pid()).map_err(|_| Error::Platform {
-        code: -1,
-        message: "Sway IPC peer has an invalid process id".to_string(),
-    })?;
+    let pid = u32::try_from(credentials.pid())
+        .map_err(|_| Error::platform(-1, "Sway IPC peer has an invalid process id"))?;
     Ok(ServerIdentity::Sway {
         pid,
         process_start: process_start(pid)?,
@@ -262,17 +262,21 @@ fn process_start(pid: u32) -> Result<u64> {
             ),
         }
     })?;
-    let (_, fields) = stat.rsplit_once(") ").ok_or_else(|| Error::Platform {
-        code: -1,
-        message: format!("native window identity: invalid /proc/{pid}/stat"),
+    let (_, fields) = stat.rsplit_once(") ").ok_or_else(|| {
+        Error::platform(
+            -1,
+            format!("native window identity: invalid /proc/{pid}/stat"),
+        )
     })?;
     fields
         .split_whitespace()
         .nth(19)
         .and_then(|value| value.parse().ok())
-        .ok_or_else(|| Error::Platform {
-            code: -1,
-            message: format!("native window identity: missing start time for process {pid}"),
+        .ok_or_else(|| {
+            Error::platform(
+                -1,
+                format!("native window identity: missing start time for process {pid}"),
+            )
         })
 }
 
@@ -411,15 +415,11 @@ impl SwayWindowBackend {
             payload.as_bytes(),
             Some(binding.server_identity),
         )?;
-        let results = reply.as_array().ok_or_else(|| Error::Platform {
-            code: -1,
-            message: "Sway command reply was not an array".to_string(),
-        })?;
+        let results = reply
+            .as_array()
+            .ok_or_else(|| Error::platform(-1, "Sway command reply was not an array"))?;
         if results.is_empty() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Sway command reply was empty".to_string(),
-            });
+            return Err(Error::platform(-1, "Sway command reply was empty"));
         }
         if let Some(failure) = results
             .iter()
@@ -429,10 +429,10 @@ impl SwayWindowBackend {
                 .get("error")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("compositor refused the request");
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("Sway rejected {command:?} for con_id {id}: {diagnosis}"),
-            });
+            return Err(Error::platform(
+                -1,
+                format!("Sway rejected {command:?} for con_id {id}: {diagnosis}"),
+            ));
         }
         Ok(())
     }
@@ -497,9 +497,11 @@ impl SwayWindowBackend {
         payload: &[u8],
         expected: Option<ServerIdentity>,
     ) -> Result<(serde_json::Value, ServerIdentity)> {
-        let mut stream = UnixStream::connect(&self.socket).map_err(|error| Error::Platform {
-            code: -1,
-            message: format!("connect Sway IPC {}: {error}", self.socket.display()),
+        let mut stream = UnixStream::connect(&self.socket).map_err(|error| {
+            Error::platform(
+                -1,
+                format!("connect Sway IPC {}: {error}", self.socket.display()),
+            )
         })?;
         let server_identity = sway_server_identity(&stream)?;
         if expected.is_some_and(|identity| identity != server_identity) {
@@ -520,10 +522,10 @@ impl SwayWindowBackend {
         let mut response_header = [0_u8; 14];
         stream.read_exact(&mut response_header).map_err(sway_io)?;
         if &response_header[..6] != SWAY_IPC_MAGIC {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Sway IPC reply had an invalid magic header".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "Sway IPC reply had an invalid magic header",
+            ));
         }
         let response_length = u32::from_le_bytes(
             response_header[6..10]
@@ -547,10 +549,8 @@ impl SwayWindowBackend {
         }
         let mut response = vec![0_u8; response_length];
         stream.read_exact(&mut response).map_err(sway_io)?;
-        let value = serde_json::from_slice(&response).map_err(|error| Error::Platform {
-            code: -1,
-            message: format!("decode Sway IPC JSON: {error}"),
-        })?;
+        let value = serde_json::from_slice(&response)
+            .map_err(|error| Error::platform(-1, format!("decode Sway IPC JSON: {error}")))?;
         Ok((value, server_identity))
     }
 }
@@ -701,35 +701,34 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandGlobals {
 }
 
 fn advertised_wlr_foreign_toplevel_version() -> Result<Option<u32>> {
-    let connection = WaylandConnection::connect_to_env().map_err(|error| Error::Platform {
-        code: -1,
-        message: format!("connect Wayland compositor for window capability detection: {error}"),
+    let connection = WaylandConnection::connect_to_env().map_err(|error| {
+        Error::platform(
+            -1,
+            format!("connect Wayland compositor for window capability detection: {error}"),
+        )
     })?;
     let display = connection.display();
     let mut queue = connection.new_event_queue::<WaylandGlobals>();
     display.get_registry(&queue.handle(), ());
     let mut globals = WaylandGlobals::default();
-    queue
-        .roundtrip(&mut globals)
-        .map_err(|error| Error::Platform {
-            code: -1,
-            message: format!("query Wayland registry for window capabilities: {error}"),
-        })?;
+    queue.roundtrip(&mut globals).map_err(|error| {
+        Error::platform(
+            -1,
+            format!("query Wayland registry for window capabilities: {error}"),
+        )
+    })?;
     Ok(globals.wlr_foreign_toplevel_version)
 }
 
 fn sway_io(error: std::io::Error) -> Error {
-    Error::Platform {
-        code: error.raw_os_error().unwrap_or(-1) as i64,
-        message: format!("Sway IPC: {error}"),
-    }
+    Error::platform(
+        error.raw_os_error().unwrap_or(-1) as i64,
+        format!("Sway IPC: {error}"),
+    )
 }
 
 fn sway_protocol(message: &str) -> Error {
-    Error::Platform {
-        code: -1,
-        message: format!("Sway IPC: {message}"),
-    }
+    Error::platform(-1, format!("Sway IPC: {message}"))
 }
 
 #[derive(Clone, Copy)]
@@ -943,10 +942,7 @@ impl X11WindowBackend {
         match (result, release) {
             (Ok(value), Ok(())) => Ok(value),
             (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-            (Err(action_error), Err(release_error)) => Err(Error::Platform {
-                code: -1,
-                message: format!("native X11 action failed: {action_error}; releasing server grab failed: {release_error}"),
-            }),
+            (Err(action_error), Err(release_error)) => Err(Error::platform(-1, format!("native X11 action failed: {action_error}; releasing server grab failed: {release_error}"))),
         }
     }
 
@@ -1418,13 +1414,13 @@ impl X11WindowBackend {
                 i32::try_from(left).map_err(platform)?,
                 i32::try_from(top).map_err(platform)?,
             )),
-            other => Err(Error::Platform {
-                code: -1,
-                message: format!(
+            other => Err(Error::platform(
+                -1,
+                format!(
                     "_GTK_FRAME_EXTENTS of window {window:#x} has {} values, not 4",
                     other.len()
                 ),
-            }),
+            )),
         }
     }
 
@@ -1572,15 +1568,15 @@ impl X11WindowBackend {
                     Some(other) => format!("{other:#x}"),
                     None => "no window".to_string(),
                 };
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                return Err(Error::platform(
+                    -1,
+                    format!(
                         "activate: the window manager did not make window {window:#x} active \
                          within {budget:?} of the _NET_ACTIVE_WINDOW request (it may refuse \
                          activation, e.g. focus-stealing prevention); _NET_ACTIVE_WINDOW names \
                          {now}"
                     ),
-                });
+                ));
             }
             std::thread::sleep(ACTIVATE_POLL_INTERVAL);
         }
@@ -2087,9 +2083,11 @@ fn property_u32(
     reply
         .value32()
         .map(|values| values.collect())
-        .ok_or_else(|| Error::Platform {
-            code: -1,
-            message: format!("X11 property {property} did not contain 32-bit values"),
+        .ok_or_else(|| {
+            Error::platform(
+                -1,
+                format!("X11 property {property} did not contain 32-bit values"),
+            )
         })
 }
 
@@ -2107,10 +2105,7 @@ fn property_bytes(
 }
 
 fn platform(error: impl std::fmt::Display) -> Error {
-    Error::Platform {
-        code: -1,
-        message: format!("X11 window management: {error}"),
-    }
+    Error::platform(-1, format!("X11 window management: {error}"))
 }
 
 #[cfg(test)]

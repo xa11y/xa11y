@@ -303,7 +303,7 @@ fn map_to_py_err(e: xa11y::Error) -> PyErr {
         xa11y::Error::InvalidConfig { message } => {
             PyValueError::new_err(format!("Invalid configuration: {message}"))
         }
-        xa11y::Error::Platform { code, message } => {
+        xa11y::Error::Platform { code, message, .. } => {
             PlatformError::new_err(format!("Platform error ({code}): {message}"))
         }
         xa11y::Error::NoElementBounds => {
@@ -886,18 +886,18 @@ impl Element {
             .clone()
             .map(semantics::LiveRegionInfo::new)
     }
-    /// The elements this one is related to, as a ``dict`` from relation
-    /// kind (``"labelled_by"``, ``"controls"``, ...) to a list of elements,
-    /// in the order asked for. ``kinds=None`` asks for every kind this
-    /// platform reports. A kind it never reports raises
+    /// The elements this one is related to, as a list of :class:`Relation`
+    /// (``kind`` such as ``"labelled_by"`` or ``"controls"``, and its
+    /// ``elements``), in the order asked for. ``kinds=None`` asks for every
+    /// kind this platform reports. A kind it never reports raises
     /// :class:`ActionNotSupportedError` (``Unsupported``) naming it; a
-    /// reported kind with no targets maps to ``[]``.
+    /// reported kind with no targets has ``elements == []``.
     #[pyo3(signature = (kinds=None))]
     fn relations(
         &self,
         py: Python<'_>,
         kinds: Option<Vec<String>>,
-    ) -> PyResult<Py<pyo3::types::PyDict>> {
+    ) -> PyResult<Vec<Py<semantics::Relation>>> {
         let kinds: Vec<xa11y::RelationKind> = kinds
             .unwrap_or_default()
             .iter()
@@ -908,22 +908,18 @@ impl Element {
         let found = py
             .detach(move || element.relations(&kinds))
             .map_err(to_py_err)?;
-        let out = pyo3::types::PyDict::new(py);
-        for (kind, targets) in found {
-            let list = targets
-                .iter()
-                .map(|t| make_py_element(py, t.data(), t.provider().clone()))
-                .collect::<PyResult<Vec<_>>>()?;
-            out.set_item(kind.to_snake_case(), list)?;
-        }
-        Ok(out.unbind())
+        found
+            .iter()
+            .map(|r| Py::new(py, semantics::Relation::from_core(py, r)?))
+            .collect()
     }
-    /// This element's text, read by range (UTF-16 offsets). Raises
+    /// This element's text, read by range (UTF-16 offsets). Reads nothing
+    /// yet: every read first checks the element is still live (raising
+    /// :class:`ElementStaleError` if not), and raises
     /// ``ActionNotSupportedError`` when the element has no text interface.
-    fn text(&self, py: Python<'_>) -> PyResult<rich::Text> {
+    fn text(&self) -> rich::Text {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        let text = py.detach(move || element.text()).map_err(to_py_err)?;
-        Ok(rich::Text::new(text))
+        rich::Text::new(element.text())
     }
     /// On a table: the cell at 0-based ``row`` / ``column`` (a merged cell
     /// for a slot it covers), or ``None``.
@@ -1726,12 +1722,9 @@ impl Subscription {
     /// the interpreter for as long as another thread's `recv` blocks.
     fn with_sub<T>(&self, f: impl FnOnce(&xa11y::Subscription) -> T) -> PyResult<T> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let sub = guard.as_ref().ok_or_else(|| {
-            to_py_err(xa11y::Error::Platform {
-                code: -1,
-                message: "Subscription is closed".to_string(),
-            })
-        })?;
+        let sub = guard
+            .as_ref()
+            .ok_or_else(|| to_py_err(xa11y::Error::platform(-1, "Subscription is closed")))?;
         Ok(f(sub))
     }
 }
@@ -1791,11 +1784,11 @@ impl Subscription {
                     // Event source is gone — no further events can match the
                     // predicate. Surface this as a platform error rather than
                     // hanging until the overall timeout elapses.
-                    return Err(to_py_err(xa11y::Error::Platform {
-                        code: -1,
-                        message: "Subscription event source disconnected before predicate matched"
+                    return Err(to_py_err(xa11y::Error::platform(
+                        -1,
+                        "Subscription event source disconnected before predicate matched"
                             .to_string(),
-                    }));
+                    )));
                 }
             };
             let matched = {
@@ -2078,10 +2071,7 @@ impl App {
                             // Poisoning cannot lose anything that matters here:
                             // the stashed error is write-once and read once.
                             *pred_err.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
-                            Err(xa11y::Error::Platform {
-                                code: -1,
-                                message: "find() predicate raised".to_string(),
-                            })
+                            Err(xa11y::Error::platform(-1, "find() predicate raised"))
                         }
                     }
                 })
@@ -3451,8 +3441,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<capabilities::Capability>()?;
     m.add_class::<semantics::LiveRegionInfo>()?;
     m.add_class::<semantics::AnnouncementInfo>()?;
+    m.add_class::<semantics::Relation>()?;
     m.add_class::<capture::Capture>()?;
     m.add_class::<capture::CapturedNode>()?;
+    m.add_class::<capture::CapturedRelation>()?;
     m.add_class::<capture::CapturedText>()?;
     m.add_class::<capture::CaptureError>()?;
     m.add_class::<capture::Truncation>()?;

@@ -803,17 +803,11 @@ fn monitor_regions(monitors: impl Iterator<Item = Rect>) -> Result<Vec<Rect>> {
 }
 
 pub(crate) fn platform<E: std::fmt::Display>(e: E) -> Error {
-    Error::Platform {
-        code: -1,
-        message: e.to_string(),
-    }
+    Error::platform(-1, e.to_string())
 }
 
 pub(crate) fn platform_msg(msg: &str) -> Error {
-    Error::Platform {
-        code: -1,
-        message: msg.to_string(),
-    }
+    Error::platform(-1, msg.to_string())
 }
 
 /// Clamp an `i32` screen coordinate into the `i16` range that XTest takes.

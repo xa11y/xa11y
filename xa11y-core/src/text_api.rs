@@ -154,9 +154,13 @@ impl TextUnit {
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Color {
+    /// Red channel, 0 to 255.
     pub r: u8,
+    /// Green channel, 0 to 255.
     pub g: u8,
+    /// Blue channel, 0 to 255.
     pub b: u8,
+    /// Alpha channel, 0 (transparent) to 255 (opaque).
     pub a: u8,
 }
 
@@ -183,6 +187,13 @@ impl<'de> Deserialize<'de> for Color {
         let hex = s
             .strip_prefix('#')
             .ok_or_else(|| serde::de::Error::custom("colour must start with '#'"))?;
+        // `from_str_radix` accepts a leading sign ("+f"), so the digits are
+        // checked first: a colour is hex digits and nothing else.
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(serde::de::Error::custom(format!(
+                "bad colour {s:?}: expected hex digits after '#'"
+            )));
+        }
         let byte = |i: usize| {
             hex.get(i..i + 2)
                 .and_then(|h| u8::from_str_radix(h, 16).ok())
@@ -690,7 +701,8 @@ pub fn check_in_bounds(range: TextRange, length: u32) -> Result<()> {
 /// range. Returns the clipped units and, when `limit` stopped the walk, the
 /// offset to resume from.
 ///
-/// `length` is read only when a unit fails to advance: at `pos == length` a
+/// `length` is read only when the range is empty (no unit read could reveal
+/// that it lies past the end) or a unit fails to advance: at `pos == length` a
 /// backend reports the unit that *ends* there, so a range past the end of the
 /// text surfaces as that, and is then reported as
 /// [`Error::InvalidTextRange`] like [`Text::read`] reports it. Reading the
@@ -702,6 +714,12 @@ fn walk(
     mut unit_at: impl FnMut(u32) -> Result<TextRange>,
     length: impl FnOnce() -> Result<u32>,
 ) -> Result<(Vec<TextRange>, Option<u32>)> {
+    // An empty range runs no unit reads, so nothing below would notice one
+    // past the end; it is as invalid here as it is for `read`.
+    if range.is_empty() {
+        check_in_bounds(range, length()?)?;
+        return Ok((Vec::new(), None));
+    }
     let mut out = Vec::new();
     let mut pos = range.start;
     while pos < range.end {
@@ -714,12 +732,12 @@ fn walk(
             check_in_bounds(range, length()?)?;
             // A unit that does not contain `pos` and move forward would loop
             // forever; report the backend's answer instead.
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
+            return Err(Error::platform(
+                -1,
+                format!(
                     "text unit at offset {pos} reported as {unit}, which does not advance past it"
                 ),
-            });
+            ));
         }
         let clipped = TextRange {
             start: pos,
@@ -778,13 +796,13 @@ pub(crate) fn find_in_chunks(
         // units) would shift every later match silently. Refuse it instead.
         let got = utf16_len(&text);
         if got != end - read_pos {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!(
+            return Err(Error::platform(
+                -1,
+                format!(
                     "reading {read_pos}..{end} returned {got} UTF-16 units, expected {}",
                     end - read_pos
                 ),
-            });
+            ));
         }
         buf.extend(text.encode_utf16());
         read_pos = end;
@@ -1050,6 +1068,33 @@ mod tests {
     }
 
     #[test]
+    fn walk_reports_an_empty_range_past_the_end_as_invalid() {
+        let never = |_pos: u32| -> Result<TextRange> { unreachable!("no unit is read") };
+        assert!(matches!(
+            walk(
+                TextRange {
+                    start: 1000,
+                    end: 1000
+                },
+                10,
+                never,
+                || Ok(6)
+            ),
+            Err(Error::InvalidTextRange {
+                start: 1000,
+                end: 1000,
+                length: Some(6),
+                ..
+            })
+        ));
+        // An empty range inside the text, the end included, is a page of
+        // nothing.
+        let (lines, next) = walk(TextRange { start: 6, end: 6 }, 10, never, || Ok(6)).unwrap();
+        assert!(lines.is_empty());
+        assert_eq!(next, None);
+    }
+
+    #[test]
     fn colour_hex_round_trip() {
         let c = Color {
             r: 0x1a,
@@ -1061,6 +1106,23 @@ mod tests {
         let t = Color { a: 0x80, ..c };
         assert_eq!(t.to_hex(), "#1a2b3c80");
         assert_eq!(serde_json::from_str::<Color>("\"#1a2b3c80\"").unwrap(), t);
+    }
+
+    #[test]
+    fn colour_rejects_anything_but_hex_digits() {
+        for bad in [
+            "#+f+f+f",
+            "#+f+f+f+f",
+            "#1a2b3g",
+            "#-12345",
+            "1a2b3c",
+            "#1a2b3",
+        ] {
+            assert!(
+                serde_json::from_str::<Color>(&format!("{bad:?}")).is_err(),
+                "{bad} must not parse"
+            );
+        }
     }
 
     #[test]
@@ -1105,7 +1167,7 @@ mod api_tests {
         let el = locator(provider.clone(), "text_area")
             .element()
             .expect("fixture element");
-        let text = el.text().expect("text");
+        let text = el.text();
         assert!(text.length().is_ok());
         // The platform hands the same id to a different node.
         provider.replace_node_role("Notes", crate::role::Role::Button);
@@ -1126,7 +1188,7 @@ mod api_tests {
     fn embedded_object_mapping_distinguishes_unsupported_and_invalid_offsets() {
         let p = build_table_provider();
         let field = locator(p, "text_area").element().expect("mock text field");
-        let text = field.text().expect("mock text");
+        let text = field.text();
         assert!(matches!(text.object_at(0), Err(Error::Unsupported { .. })));
         assert!(matches!(
             text.object_at(text.length().unwrap()),
@@ -1193,17 +1255,34 @@ mod api_tests {
     }
 
     #[test]
-    fn element_text_refuses_a_node_without_text() {
+    fn element_text_refuses_a_node_without_text_on_the_first_read() {
         let button = locator(build_provider(), "button").element().unwrap();
+        // Getting the reader reads nothing; the first read refuses.
+        let text = button.text();
         assert!(matches!(
-            button.text(),
+            text.length(),
             Err(Error::ActionNotSupported { action, .. }) if action == "text"
         ));
     }
 
     #[test]
+    fn element_text_revalidates_before_measuring() {
+        // A reused platform id names another node now: the read must fail
+        // as stale rather than measure whatever the id names.
+        let p = build_table_provider();
+        let field = locator(p.clone(), "text_area").element().unwrap();
+        let mut moved = field.data().clone();
+        moved.role = crate::Role::Button;
+        let stale = Element::new(moved, field.provider().clone());
+        assert!(matches!(
+            stale.text().length(),
+            Err(Error::ElementStale { .. })
+        ));
+    }
+
+    #[test]
     fn text_reads_use_utf16_offsets() {
-        let t = one("text_area").text().unwrap();
+        let t = one("text_area").text();
         // "Hello 😀 world\nsecond line": the emoji is two units.
         assert_eq!(t.length().unwrap(), 26);
         let world = t.find("world").unwrap().unwrap();
@@ -1238,7 +1317,7 @@ mod api_tests {
     #[test]
     fn caret_and_selection_follow_select_text() {
         let el = one("text_area");
-        let t = el.text().unwrap();
+        let t = el.text();
         assert_eq!(t.caret().unwrap(), None);
         assert!(t.selections().unwrap().is_empty());
         el.select_text(9, 14).unwrap();
@@ -1252,7 +1331,7 @@ mod api_tests {
 
     #[test]
     fn lines_bounds_and_runs_page_and_clip() {
-        let t = one("text_area").text().unwrap();
+        let t = one("text_area").text();
         let all = r(0, 26);
         let lines = t.lines(all, 10).unwrap();
         assert_eq!(lines.lines, vec![r(0, 15), r(15, 26)]);
@@ -1281,7 +1360,7 @@ mod api_tests {
 
     #[test]
     fn lines_bounds_and_runs_past_the_end_are_invalid_ranges() {
-        let t = one("text_area").text().unwrap();
+        let t = one("text_area").text();
         let past = r(0, 99);
         let invalid = |res: Result<()>| {
             assert!(

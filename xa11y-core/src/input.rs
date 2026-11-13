@@ -794,10 +794,7 @@ mod pointer_validation_tests {
         fn validate_pointer_target(&self, point: Point) -> Result<()> {
             self.queries.fetch_add(1, Ordering::Relaxed);
             if self.query_failure.load(Ordering::Relaxed) {
-                return Err(Error::Platform {
-                    code: 42,
-                    message: "native display query failed".into(),
-                });
+                return Err(Error::platform(42, "native display query failed"));
             }
             validate_pointer_regions(point, point, "test pixels", &[rect(0, 0, 100, 100)])
         }
@@ -807,10 +804,7 @@ mod pointer_validation_tests {
         fn pointer_move(&self, _: Point) -> Result<()> {
             if self.fail_drag_move && self.pointer_buttons_down() {
                 self.record("move failed");
-                return Err(Error::Platform {
-                    code: 99,
-                    message: "move failed".into(),
-                });
+                return Err(Error::platform(99, "move failed"));
             }
             self.record("move");
             Ok(())
@@ -1000,7 +994,7 @@ mod pointer_validation_tests {
         let sim = InputSim::new(backend.clone());
         let error = sim.mouse().click((5, 5)).unwrap_err();
         assert!(
-            matches!(error, Error::Platform { code: 42, ref message } if message == "native display query failed")
+            matches!(error, Error::Platform { code: 42, ref message, .. } if message == "native display query failed")
         );
         assert!(error.diagnosis().is_none());
         assert!(backend.events.lock().unwrap().is_empty());

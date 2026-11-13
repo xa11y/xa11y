@@ -1140,13 +1140,13 @@ fn app_top_level_children(app: AXUIElementRef) -> Result<Vec<AXElement>> {
             RawAttr::Unanswered(code) => match classify_element_churn_code(i64::from(code)) {
                 ElementChurn::Gone => false,
                 ElementChurn::Unreachable | ElementChurn::Fatal => {
-                    return Err(Error::Platform {
-                        code: i64::from(code),
-                        message: format!(
+                    return Err(Error::platform(
+                        i64::from(code),
+                        format!(
                             "AXRole read of an application child failed (AXError {code}); \
                              cannot tell whether it is a menu"
                         ),
-                    })
+                    ))
                 }
             },
         };
@@ -1176,13 +1176,13 @@ fn ax_element_list_strict(element: AXUIElementRef, attribute: &str) -> Result<Ve
             unsafe {
                 if safe_cf_get_type_id(value) != safe_cf_array_get_type_id() {
                     safe_cf_release(value);
-                    return Err(Error::Platform {
-                        code: -1,
-                        message: format!(
+                    return Err(Error::platform(
+                        -1,
+                        format!(
                             "{attribute} returned a non-array value; the provider answered \
                              malformed, not empty"
                         ),
-                    });
+                    ));
                 }
                 let count = safe_cf_array_get_count(value);
                 let mut windows = Vec::with_capacity(count as usize);
@@ -1192,13 +1192,13 @@ fn ax_element_list_strict(element: AXUIElementRef, attribute: &str) -> Result<Ve
                     // item would read as a shorter list (tenet 1).
                     if !safe_ax_is_element(w) {
                         safe_cf_release(value);
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: format!(
+                        return Err(Error::platform(
+                            -1,
+                            format!(
                                 "{attribute} item {i} is not an AXUIElement; the provider \
                                  answered malformed"
                             ),
-                        });
+                        ));
                     }
                     windows.push(AXElement::from_borrowed(w));
                 }
@@ -1212,10 +1212,10 @@ fn ax_element_list_strict(element: AXUIElementRef, attribute: &str) -> Result<Ve
         // Everything else — kAXErrorCannotComplete (the code a messaging
         // timeout surfaces as), kAXErrorInvalidUIElement, an ObjC exception
         // caught by the wrapper — means we did not get an answer.
-        code => Err(Error::Platform {
-            code: code as i64,
-            message: format!("AXUIElementCopyAttributeValue({attribute}) failed (AXError {code})"),
-        }),
+        code => Err(Error::platform(
+            code as i64,
+            format!("AXUIElementCopyAttributeValue({attribute}) failed (AXError {code})"),
+        )),
     }
 }
 
@@ -1361,14 +1361,14 @@ fn find_close_button(element: AXUIElementRef, role: Role) -> Result<Option<AXEle
         }
         RawAttr::Absent => None,
         RawAttr::Unanswered(code) => {
-            return Err(Error::Platform {
-                code: code as i64,
-                message: format!(
+            return Err(Error::platform(
+                code as i64,
+                format!(
                     "AXCloseButton read failed for a {} (AXError {code}); the close button \
                      is unknown, not absent",
                     role
                 ),
-            });
+            ));
         }
     };
     match raw_attr_close {
@@ -1412,15 +1412,15 @@ fn find_close_button(element: AXUIElementRef, role: Role) -> Result<Option<AXEle
                                     // release here or every failed
                                     // subrole read leaks the array.
                                     safe_cf_release(v);
-                                    return Err(Error::Platform {
-                                        code: code as i64,
-                                        message: format!(
+                                    return Err(Error::platform(
+                                        code as i64,
+                                        format!(
                                             "AXSubrole read failed while scanning for the \
                                              close button of a {} (AXError {code}); the \
                                              close button is unknown, not absent",
                                             role
                                         ),
-                                    });
+                                    ));
                                 }
                             };
                             if is_close_button {
@@ -1435,14 +1435,14 @@ fn find_close_button(element: AXUIElementRef, role: Role) -> Result<Option<AXEle
                 Ok(found)
             }
             RawAttr::Absent => Ok(None),
-            RawAttr::Unanswered(code) => Err(Error::Platform {
-                code: code as i64,
-                message: format!(
+            RawAttr::Unanswered(code) => Err(Error::platform(
+                code as i64,
+                format!(
                     "AXChildren read failed while scanning for the close button of a {} \
                      (AXError {code}); the close button is unknown, not absent",
                     role
                 ),
-            }),
+            )),
         },
     }
 }
@@ -1531,10 +1531,10 @@ fn action_names_in(element: AXUIElementRef, context: CannotCompleteContext) -> R
             ))
         }
         code => {
-            return Err(Error::Platform {
-                code: i64::from(code),
-                message: format!("AXUIElementCopyActionNames failed (AXError {code})"),
-            })
+            return Err(Error::platform(
+                i64::from(code),
+                format!("AXUIElementCopyActionNames failed (AXError {code})"),
+            ))
         }
     }
     if names.is_null() {
@@ -1542,10 +1542,10 @@ fn action_names_in(element: AXUIElementRef, context: CannotCompleteContext) -> R
     }
     if unsafe { safe_cf_get_type_id(names) } != unsafe { safe_cf_array_get_type_id() } {
         unsafe { safe_cf_release(names) };
-        return Err(Error::Platform {
-            code: -1,
-            message: "AXUIElementCopyActionNames returned a non-array value".to_string(),
-        });
+        return Err(Error::platform(
+            -1,
+            "AXUIElementCopyActionNames returned a non-array value",
+        ));
     }
     Ok(unsafe {
         let count = safe_cf_array_get_count(names);
@@ -2044,9 +2044,8 @@ impl ResolvedAttrs {
                     // `cf_string_owned` releases the +1 copy; a string it
                     // cannot read (the wrapper caught an exception) is as
                     // malformed as a non-string.
-                    cf_string_owned(v).ok_or_else(|| Error::Platform {
-                        code: -1,
-                        message: "AXRole returned a string that could not be read".to_string(),
+                    cf_string_owned(v).ok_or_else(|| {
+                        Error::platform(-1, "AXRole returned a string that could not be read")
                     })?
                 } else {
                     // A value of another type is a malformed answer, not the
@@ -2056,12 +2055,12 @@ impl ResolvedAttrs {
                     // the same distinction `ax_windows` makes for a
                     // non-array `AXWindows`.
                     unsafe { safe_cf_release(v) };
-                    return Err(Error::Platform {
-                        code: -1,
-                        message: "AXRole returned a non-string value; the provider answered \
+                    return Err(Error::platform(
+                        -1,
+                        "AXRole returned a non-string value; the provider answered \
                                   malformed, not role-less"
                             .to_string(),
-                    });
+                    ));
                 }
             }
             RawAttr::Absent => String::new(),
@@ -2077,13 +2076,13 @@ impl ResolvedAttrs {
                 ));
             }
             RawAttr::Unanswered(code) => {
-                return Err(Error::Platform {
-                    code: code as i64,
-                    message: format!(
+                return Err(Error::platform(
+                    code as i64,
+                    format!(
                         "AXRole read failed while building an element snapshot (AXError \
                          {code}); the element is unreadable, not role-less"
                     ),
-                });
+                ));
             }
         };
         let subrole_str = ax_string(element, "AXSubrole");
@@ -2195,10 +2194,10 @@ fn unknown_after_step(e: Error, done: &str) -> Error {
     if e.delivery() == xa11y_core::Delivery::Unknown {
         return e;
     }
-    Error::Platform {
-        code: -1,
-        message: format!("{e}, after {done} had already changed the window"),
-    }
+    Error::platform(
+        -1,
+        format!("{e}, after {done} had already changed the window"),
+    )
 }
 
 /// Convert a failed AX action call into an appropriate `Error`. Returns
@@ -2227,10 +2226,7 @@ fn action_error(
             CannotCompleteContext::Action,
         )
     } else {
-        Error::Platform {
-            code: call.code as i64,
-            message: fallback_msg.to_string(),
-        }
+        Error::platform(call.code as i64, fallback_msg.to_string())
     }
 }
 
@@ -2253,21 +2249,21 @@ const AX_MESSAGING_TIMEOUT_SECS: f32 = 2.0;
 fn set_global_messaging_timeout() -> Result<()> {
     let system_wide = system_wide_element();
     if system_wide.is_null() {
-        return Err(Error::Platform {
-            code: -1,
-            message: "AXUIElementCreateSystemWide returned NULL".to_string(),
-        });
+        return Err(Error::platform(
+            -1,
+            "AXUIElementCreateSystemWide returned NULL",
+        ));
     }
     let err =
         unsafe { safe_ax_set_messaging_timeout(system_wide.as_ptr(), AX_MESSAGING_TIMEOUT_SECS) };
     if err != AX_ERROR_SUCCESS {
-        return Err(Error::Platform {
-            code: err as i64,
-            message: format!(
+        return Err(Error::platform(
+            err as i64,
+            format!(
                 "AXUIElementSetMessagingTimeout({AX_MESSAGING_TIMEOUT_SECS}s) on the \
                  system-wide element failed"
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -2339,9 +2335,9 @@ fn cannot_complete_error(
         (true, None) => format!("the application with pid {pid}"),
         (false, _) => "the owning application (pid unknown)".to_string(),
     };
-    Error::Platform {
-        code: AX_ERROR_CANNOT_COMPLETE as i64,
-        message: cannot_complete_message(
+    Error::platform(
+        AX_ERROR_CANNOT_COMPLETE as i64,
+        cannot_complete_message(
             what,
             &app,
             elapsed,
@@ -2351,7 +2347,7 @@ fn cannot_complete_error(
             // apply to it.
             xa11y_core::Deadline::current().is_some_and(|d| d.is_expired()),
         ),
-    }
+    )
 }
 
 /// The text of [`cannot_complete_error`], split out so its wording is
@@ -2449,10 +2445,10 @@ fn is_attr_settable(el_ptr: AXUIElementRef, attr_name: &str) -> Result<bool> {
         // is about real failures — an explicit "not supported" is the
         // answer).
         AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(false),
-        code => Err(Error::Platform {
-            code: code as i64,
-            message: format!("IsAttributeSettable({attr_name}) failed"),
-        }),
+        code => Err(Error::platform(
+            code as i64,
+            format!("IsAttributeSettable({attr_name}) failed"),
+        )),
     }
 }
 
@@ -2489,25 +2485,25 @@ fn owning_app_element(el_ptr: AXUIElementRef, action: &str, role: Role) -> Resul
     let mut pid = 0;
     let pid_err = unsafe { safe_ax_get_pid(el_ptr, &mut pid) };
     if pid_err != AX_ERROR_SUCCESS {
-        return Err(Error::Platform {
-            code: pid_err as i64,
-            message: format!(
+        return Err(Error::platform(
+            pid_err as i64,
+            format!(
                 "AXUIElementGetPid failed (AXError {pid_err}) while running {action} on a {role}"
             ),
-        });
+        ));
     }
     if pid == 0 {
-        return Err(Error::Platform {
-            code: -1,
-            message: format!("AXUIElementGetPid returned pid 0 while running {action} on a {role}"),
-        });
+        return Err(Error::platform(
+            -1,
+            format!("AXUIElementGetPid returned pid 0 while running {action} on a {role}"),
+        ));
     }
     let app = AXElement::from_owned(unsafe { safe_ax_create_application(pid) });
     if app.is_null() {
-        return Err(Error::Platform {
-            code: -9999,
-            message: format!("AXUIElementCreateApplication failed while running {action}"),
-        });
+        return Err(Error::platform(
+            -9999,
+            format!("AXUIElementCreateApplication failed while running {action}"),
+        ));
     }
     Ok(app)
 }
@@ -2604,17 +2600,17 @@ fn enable_web_accessibility_for(app: &ElementData) -> Result<()> {
         });
     }
     let Some(pid) = app.pid else {
-        return Err(Error::Platform {
-            code: -1,
-            message: format!("{ACTION}: the application element has no pid"),
-        });
+        return Err(Error::platform(
+            -1,
+            format!("{ACTION}: the application element has no pid"),
+        ));
     };
     let app_el = AXElement::from_owned(unsafe { safe_ax_create_application(pid as i32) });
     if app_el.is_null() {
-        return Err(Error::Platform {
-            code: -9999,
-            message: format!("AXUIElementCreateApplication({pid}) failed while running {ACTION}"),
-        });
+        return Err(Error::platform(
+            -9999,
+            format!("AXUIElementCreateApplication({pid}) failed while running {ACTION}"),
+        ));
     }
     let attr = CFString::new(WEB_ACCESSIBILITY_ATTR);
     let set = do_set_attribute(
@@ -2768,26 +2764,26 @@ fn read_bool_attr(
                 // is unknown, not false, and the doc above promises not to
                 // collapse that (tenet 1).
                 unsafe { safe_cf_release(v) };
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                return Err(Error::platform(
+                    -1,
+                    format!(
                         "{attr_name} returned a non-boolean value while handling {action} on a \
                          {role}; the state is unknown, not false"
                     ),
-                });
+                ));
             }
             let b = unsafe { safe_cf_boolean_get_value(v) };
             unsafe { safe_cf_release(v) };
             Ok(Some(b))
         }
         RawAttr::Absent => Ok(None),
-        RawAttr::Unanswered(code) => Err(Error::Platform {
-            code: code as i64,
-            message: format!(
+        RawAttr::Unanswered(code) => Err(Error::platform(
+            code as i64,
+            format!(
                 "{attr_name} read failed while handling {action} on a {role} (AXError {code}); \
                  the state is unknown, not false"
             ),
-        }),
+        )),
     }
 }
 
@@ -3402,23 +3398,23 @@ fn read_window_position(
             if ok {
                 Ok(Some((point.x, point.y)))
             } else {
-                Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                Err(Error::platform(
+                    -1,
+                    format!(
                         "AXPosition returned a non-point value while handling {action} on a \
                          {role}; the position is unknown"
                     ),
-                })
+                ))
             }
         }
         RawAttr::Absent => Ok(None),
-        RawAttr::Unanswered(code) => Err(Error::Platform {
-            code: code as i64,
-            message: format!(
+        RawAttr::Unanswered(code) => Err(Error::platform(
+            code as i64,
+            format!(
                 "AXPosition read failed while handling {action} on a {role} (AXError {code}); \
                  the position is unknown"
             ),
-        }),
+        )),
     }
 }
 
@@ -3432,10 +3428,10 @@ fn set_window_position(
 ) -> Result<()> {
     let value = unsafe { safe_ax_value_create_cg_point(f64::from(x), f64::from(y)) };
     if value.is_null() {
-        return Err(Error::Platform {
-            code: -1,
-            message: "Failed to create CGPoint AXValue for window move".to_string(),
-        });
+        return Err(Error::platform(
+            -1,
+            "Failed to create CGPoint AXValue for window move",
+        ));
     }
     let attr = CFString::new("AXPosition");
     let err = do_set_attribute(el_ptr, &attr, value);
@@ -3541,23 +3537,23 @@ fn read_window_size(
             if ok {
                 Ok(Some((size.width, size.height)))
             } else {
-                Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                Err(Error::platform(
+                    -1,
+                    format!(
                         "AXSize returned a non-size value while handling {action} on a \
                          {role}; the size is unknown"
                     ),
-                })
+                ))
             }
         }
         RawAttr::Absent => Ok(None),
-        RawAttr::Unanswered(code) => Err(Error::Platform {
-            code: code as i64,
-            message: format!(
+        RawAttr::Unanswered(code) => Err(Error::platform(
+            code as i64,
+            format!(
                 "AXSize read failed while handling {action} on a {role} (AXError {code}); \
                  the size is unknown"
             ),
-        }),
+        )),
     }
 }
 
@@ -3571,10 +3567,10 @@ fn set_window_size(
 ) -> Result<()> {
     let value = unsafe { safe_ax_value_create_cg_size(f64::from(width), f64::from(height)) };
     if value.is_null() {
-        return Err(Error::Platform {
-            code: -1,
-            message: "Failed to create CGSize AXValue for window resize".to_string(),
-        });
+        return Err(Error::platform(
+            -1,
+            "Failed to create CGSize AXValue for window resize",
+        ));
     }
     let attr = CFString::new("AXSize");
     let err = do_set_attribute(el_ptr, &attr, value);
@@ -3776,22 +3772,20 @@ fn ax_single_element(element: AXUIElementRef, attribute: &str) -> Result<Option<
                 Ok(Some(AXElement::from_owned(v as AXUIElementRef)))
             } else {
                 unsafe { safe_cf_release(v) };
-                Err(Error::Platform {
-                    code: -1,
-                    message: format!(
+                Err(Error::platform(
+                    -1,
+                    format!(
                         "{attribute} returned a non-element value; the provider answered \
                          malformed, not empty"
                     ),
-                })
+                ))
             }
         }
         RawAttr::Absent => Ok(None),
-        RawAttr::Unanswered(code) => Err(Error::Platform {
-            code: code as i64,
-            message: format!(
-                "{attribute} read failed (AXError {code}); the relation is unknown, not empty"
-            ),
-        }),
+        RawAttr::Unanswered(code) => Err(Error::platform(
+            code as i64,
+            format!("{attribute} read failed (AXError {code}); the relation is unknown, not empty"),
+        )),
     }
 }
 
@@ -5169,10 +5163,10 @@ impl MacOSProvider {
     ) -> Result<Option<(ShellSurfaceKind, ElementData)>> {
         let system_wide = system_wide_element();
         if system_wide.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "AXUIElementCreateSystemWide returned NULL".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "AXUIElementCreateSystemWide returned NULL",
+            ));
         }
         let app_ax = match probe_element_attr(system_wide.as_ptr(), "AXFocusedApplication") {
             ElementProbe::Found(app) => app,
@@ -5223,14 +5217,14 @@ impl MacOSProvider {
                 ElementChurn::Gone | ElementChurn::Unreachable => Ok(None),
                 // Anything else is a genuine platform failure and propagates
                 // with the AXError code that produced it (tenet 1, tenet 6).
-                ElementChurn::Fatal => Err(Error::Platform {
-                    code: code as i64,
-                    message: format!(
+                ElementChurn::Fatal => Err(Error::platform(
+                    code as i64,
+                    format!(
                         "AXUIElementCopyAttributeValue(AXMenuBar) failed on the frontmost \
                          application{}",
                         app_pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
                     ),
-                }),
+                )),
             },
         }
     }
@@ -5567,10 +5561,10 @@ impl Provider for MacOSProvider {
                             CannotCompleteContext::PreAction,
                         )
                     }
-                    ElementChurn::Unreachable | ElementChurn::Fatal => Error::Platform {
-                        code: i64::from(code),
-                        message: format!("AXRole read for {subject} failed (AXError {code})"),
-                    },
+                    ElementChurn::Unreachable | ElementChurn::Fatal => Error::platform(
+                        i64::from(code),
+                        format!("AXRole read for {subject} failed (AXError {code})"),
+                    ),
                 });
             }
         };
@@ -5841,12 +5835,12 @@ impl Provider for MacOSProvider {
             // windows — and the one other cause, missing Screen Recording
             // permission, `MacOSProvider::new` already rejects. So this is
             // "process enumeration failed", which propagates.
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGWindowListCopyWindowInfo listed no processes; \
+            return Err(Error::platform(
+                -1,
+                "CGWindowListCopyWindowInfo listed no processes; \
                           cannot enumerate shell surfaces"
                     .to_string(),
-            });
+            ));
         }
 
         let mut surfaces: Vec<(ShellSurfaceKind, ElementData)> = Vec::new();
@@ -6014,12 +6008,12 @@ impl Provider for MacOSProvider {
                     ),
                 )
             }
-            _ => Err(Error::Platform {
-                code: err as i64,
-                message: format!(
+            _ => Err(Error::platform(
+                err as i64,
+                format!(
                     "AXUIElementCopyAttributeValue(AXRole) failed while attaching to pid {pid}"
                 ),
-            }),
+            )),
         }
     }
 
@@ -6040,10 +6034,10 @@ impl Provider for MacOSProvider {
     fn focused_app(&self) -> Result<ElementData> {
         let system_wide = system_wide_element();
         if system_wide.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "AXUIElementCreateSystemWide returned NULL".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "AXUIElementCreateSystemWide returned NULL",
+            ));
         }
 
         let attr = CFString::new("AXFocusedApplication");
@@ -6244,14 +6238,14 @@ impl Provider for MacOSProvider {
             // here. AXMain is not taken as proof the window is in front: it
             // can be stale right after AXFrontmost, and skipping the raise on
             // it would report success for a raise that never ran (tenet 1).
-            return Err(Error::Platform {
-                code: call.code as i64,
-                message: "activate: the app was brought to the front, but the window \
+            return Err(Error::platform(
+                call.code as i64,
+                "activate: the app was brought to the front, but the window \
                           refused AXRaise (kAXErrorAttributeUnsupported) although it \
                           lists AXRaise among its actions, so it may not be the front \
                           window"
                     .to_string(),
-            });
+            ));
         }
         if call != AX_ERROR_SUCCESS {
             return Err(unknown_after_step(
@@ -6557,10 +6551,10 @@ impl Provider for MacOSProvider {
         let length = (end as isize) - (start as isize);
         let range_value = unsafe { safe_ax_value_create_cf_range(location, length) };
         if range_value.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Failed to create CFRange value for text selection".to_string(),
-            });
+            return Err(Error::platform(
+                -1,
+                "Failed to create CFRange value for text selection",
+            ));
         }
         let attr = CFString::new("AXSelectedTextRange");
         let err = do_set_attribute(ax.as_ptr(), &attr, range_value);
@@ -6727,10 +6721,9 @@ impl Provider for MacOSProvider {
     }
 
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
-        let pid = element.pid.ok_or(Error::Platform {
-            code: -1,
-            message: "Element has no PID for subscribe".to_string(),
-        })?;
+        let pid = element
+            .pid
+            .ok_or(Error::platform(-1, "Element has no PID for subscribe"))?;
         let app_name = element.name.clone().unwrap_or_default();
         self.subscribe_impl(pid as i32, app_name)
     }
@@ -7118,10 +7111,10 @@ impl MacOSProvider {
             unsafe { safe_ax_observer_create_with_info(pid, ax_observer_callback, &mut observer) };
         if err != AX_ERROR_SUCCESS || observer.is_null() {
             unsafe { drop(Box::from_raw(ctx_ptr as *mut ObserverContext)) };
-            return Err(Error::Platform {
-                code: err as i64,
-                message: "AXObserverCreateWithInfoCallback failed".to_string(),
-            });
+            return Err(Error::platform(
+                err as i64,
+                "AXObserverCreateWithInfoCallback failed",
+            ));
         }
 
         let app_element = unsafe { safe_ax_create_application(pid) };
@@ -7195,10 +7188,10 @@ impl MacOSProvider {
                         safe_cf_release(observer);
                         drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
                     }
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: format!("AXObserverAddNotification({notif}) failed"),
-                    });
+                    return Err(Error::platform(
+                        err as i64,
+                        format!("AXObserverAddNotification({notif}) failed"),
+                    ));
                 }
             }
         }
@@ -7254,10 +7247,7 @@ impl MacOSProvider {
                     safe_cf_release(observer);
                     drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
                 }
-                return Err(Error::Platform {
-                    code: -1,
-                    message: "Failed to start observer RunLoop".to_string(),
-                });
+                return Err(Error::platform(-1, "Failed to start observer RunLoop"));
             }
         };
 
@@ -7699,10 +7689,7 @@ mod tests {
 
     #[test]
     fn classify_element_churn_folds_only_the_retryable_ax_codes() {
-        let platform = |code: i32| Error::Platform {
-            code: code as i64,
-            message: String::new(),
-        };
+        let platform = |code: i32| Error::platform(code as i64, String::new());
         // The one code that means "this AX object no longer exists": the
         // enumerating callers drop the element instead of failing the whole
         // listing/search.
@@ -7759,10 +7746,7 @@ mod tests {
         ] {
             assert_eq!(
                 classify_element_churn_code(i64::from(code)),
-                classify_element_churn(&Error::Platform {
-                    code: i64::from(code),
-                    message: String::new(),
-                }),
+                classify_element_churn(&Error::platform(i64::from(code), String::new())),
                 "AXError {code}"
             );
         }
@@ -7983,7 +7967,9 @@ mod tests {
             "AXPress failed",
         );
         match err {
-            Error::Platform { code, ref message } => {
+            Error::Platform {
+                code, ref message, ..
+            } => {
                 assert_eq!(code, AX_ERROR_CANNOT_COMPLETE as i64);
                 assert!(message.contains("press: AXPress failed"), "{message}");
                 assert!(message.contains("did not respond within"), "{message}");
@@ -8027,7 +8013,7 @@ mod tests {
         ));
         assert!(matches!(
             action_error(std::ptr::null(), call(-1, 0), "press", Role::Button, "x"),
-            Error::Platform { code: -1, ref message } if message == "x"
+            Error::Platform { code: -1, ref message, .. } if message == "x"
         ));
     }
 

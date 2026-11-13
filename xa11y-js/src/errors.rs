@@ -133,7 +133,7 @@ pub fn map_err(e: xa11y::Error) -> Error {
             codes::INVALID_CONFIG,
             format!("Invalid configuration: {message}"),
         ),
-        xa11y::Error::Platform { code, message } => (
+        xa11y::Error::Platform { code, message, .. } => (
             codes::PLATFORM,
             format!("Platform error ({code}): {message}"),
         ),
