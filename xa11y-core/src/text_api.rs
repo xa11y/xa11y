@@ -680,6 +680,8 @@ fn check_ordered(range: TextRange) -> Result<()> {
 }
 
 /// Reject a range outside `[0, length]`. Backends call this before a read.
+/// Backend plumbing, not public API: hidden from the docs.
+#[doc(hidden)]
 pub fn check_in_bounds(range: TextRange, length: u32) -> Result<()> {
     if range.fits(length) {
         Ok(())
@@ -835,6 +837,8 @@ pub(crate) fn find_in_chunks(
 }
 
 /// UTF-16 length of `s`.
+/// Backend plumbing, not public API: hidden from the docs.
+#[doc(hidden)]
 pub fn utf16_len(s: &str) -> u32 {
     s.encode_utf16().count() as u32
 }
@@ -844,6 +848,8 @@ pub fn utf16_len(s: &str) -> u32 {
 /// Fails with [`Error::InvalidTextRange`] when the offset is past the end of
 /// `s` or splits a surrogate pair. Backends whose platform counts code points
 /// (GTK over AT-SPI) use this with the text before the offset.
+/// Backend plumbing, not public API: hidden from the docs.
+#[doc(hidden)]
 pub fn utf16_to_char_offset(s: &str, utf16: u32) -> Result<u32> {
     let mut units = 0u32;
     for (chars, c) in s.chars().enumerate() {
@@ -874,6 +880,8 @@ pub fn utf16_to_char_offset(s: &str, utf16: u32) -> Result<u32> {
 
 /// Convert a code-point offset into `s` to a UTF-16 offset. An offset past
 /// the end fails with [`Error::InvalidTextRange`]; it is never clamped.
+/// Backend plumbing, not public API: hidden from the docs.
+#[doc(hidden)]
 pub fn char_to_utf16_offset(s: &str, chars: u32) -> Result<u32> {
     let mut units = 0u32;
     let mut count = 0u32;
@@ -901,6 +909,8 @@ pub fn char_to_utf16_offset(s: &str, chars: u32) -> Result<u32> {
 /// Fails with [`Error::InvalidTextRange`] when the range is out of bounds or
 /// either end splits a surrogate pair. For backends that hold the whole text
 /// (the mock, small values).
+/// Backend plumbing, not public API: hidden from the docs.
+#[doc(hidden)]
 pub fn slice_utf16(s: &str, range: TextRange) -> Result<String> {
     let units: Vec<u16> = s.encode_utf16().collect();
     slice_utf16_units(&units, range)

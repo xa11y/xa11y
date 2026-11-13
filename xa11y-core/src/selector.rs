@@ -489,6 +489,8 @@ impl Selector {
 ///
 /// [`Selector::validate`] applies the same rule to everything past segment 0;
 /// this is the entry-point check for callers holding only the tail.
+/// Backend plumbing, not public API: hidden from the docs.
+#[doc(hidden)]
 pub fn validate_tail_segments(segments: &[SelectorSegment]) -> Result<()> {
     check_tail_segments(segments, "tail segment", 0).map_err(|message| Error::InvalidSelector {
         selector: format!("{segments:?}"),
@@ -524,6 +526,8 @@ fn check_tail_segments(
 
 /// Attributes whose value is a number the element reports. See
 /// [`numeric_filter_value`].
+/// Backend plumbing, not public API: hidden from the docs.
+#[doc(hidden)]
 pub const NUMERIC_ATTRS: &[&str] = &[
     "row",
     "column",

@@ -111,8 +111,6 @@ internal = [
     { type = "NativeObject", reason = "Implemented by backends to give a platform object (an AXUIElementRef) an identity; consumers only compare NodeIdentity values." },
     { type = "InputProvider", reason = "Implemented by platform backends; not user API." },
     { type = "ScreenshotProvider", reason = "Implemented by platform backends; not user API." },
-    { type = "Deadline", reason = "The ambient deadline core opens around a timed operation and backends read to bound native calls; bindings pass a timeout and never see it." },
-    { type = "CallTimeout", reason = "What a backend gets from call_timeout to bound one native call; provider-facing, not user API." },
     { type = "IntoPoint", reason = "Rust ergonomics trait for accepting (x, y) tuples or Points; bindings take plain numbers." },
 
     # ── Selector engine internals: bindings accept selector strings ──
