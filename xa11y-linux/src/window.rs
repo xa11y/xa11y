@@ -55,6 +55,26 @@ pub(crate) struct WindowFacts {
     pub(crate) protocol_version: Option<u32>,
 }
 
+/// What the window manager reports as the active window, for
+/// `focused_app`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActiveWindow {
+    /// The backend cannot say: the Wayland backend, an X11 window manager
+    /// without `_NET_ACTIVE_WINDOW`, or one that names no window (0).
+    NotReported,
+    /// `_NET_ACTIVE_WINDOW` names a window that no longer exists. It does
+    /// for a moment after the focused window closes, until the window
+    /// manager names its successor.
+    Destroyed { window: u32 },
+    /// The active window, with its `_NET_WM_PID` and its non-empty
+    /// `_NET_WM_NAME` when it sets them.
+    Window {
+        window: u32,
+        pid: Option<u32>,
+        title: Option<String>,
+    },
+}
+
 pub(crate) struct WindowManager {
     backend: WindowBackend,
 }
@@ -115,14 +135,13 @@ impl WindowManager {
         }
     }
 
-    /// The pid of the window that the window manager reports as active
-    /// (`_NET_ACTIVE_WINDOW`). `Ok(None)` when the backend cannot say: no
-    /// X11 window manager with `_NET_ACTIVE_WINDOW`, no active window, an
-    /// active window without `_NET_WM_PID`, or the Wayland backend.
-    pub(crate) fn active_window_pid(&self) -> Result<Option<u32>> {
+    /// The window that the window manager reports as active
+    /// (`_NET_ACTIVE_WINDOW`), with the identity `focused_app` matches it
+    /// by. See [`ActiveWindow`] for what each answer means.
+    pub(crate) fn active_window(&self) -> Result<ActiveWindow> {
         match &self.backend {
-            WindowBackend::X11(backend) => backend.active_window_pid(),
-            WindowBackend::Sway(_) | WindowBackend::Unavailable(_) => Ok(None),
+            WindowBackend::X11(backend) => backend.active_window_identity(),
+            WindowBackend::Sway(_) | WindowBackend::Unavailable(_) => Ok(ActiveWindow::NotReported),
         }
     }
 
@@ -1506,12 +1525,12 @@ impl X11WindowBackend {
         .to_logical(crate::scale::coordinate_scale()))
     }
 
-    fn active_window_pid(&self) -> Result<Option<u32>> {
+    fn active_window_identity(&self) -> Result<ActiveWindow> {
         if !self.supports(self.atoms.net_active_window) {
-            return Ok(None);
+            return Ok(ActiveWindow::NotReported);
         }
         // Under the grab, so the active window cannot go away between the
-        // two reads.
+        // reads.
         self.with_server_grab(|conn| {
             let active = property_u32(
                 conn,
@@ -1520,16 +1539,45 @@ impl X11WindowBackend {
                 AtomEnum::WINDOW.into(),
             )?;
             let Some(&window) = active.first().filter(|&&window| window != 0) else {
-                return Ok(None);
+                return Ok(ActiveWindow::NotReported);
             };
-            Ok(property_u32(
+            // The grab cannot help with a window destroyed before it was
+            // taken: right after the focused window closes the root can
+            // still name its XID until the window manager catches up. That
+            // is BadWindow on the first read of the window, and the answer
+            // is that the window is gone, not a platform failure (as in
+            // `forget_renamed`).
+            let pid = match conn
+                .get_property(
+                    false,
+                    window,
+                    self.atoms.net_wm_pid,
+                    AtomEnum::CARDINAL,
+                    0,
+                    1,
+                )
+                .map_err(platform)?
+                .reply()
+            {
+                Ok(reply) => reply.value32().and_then(|mut values| values.next()),
+                Err(x11rb::errors::ReplyError::X11Error(error))
+                    if error.error_kind == x11rb::protocol::ErrorKind::Window =>
+                {
+                    return Ok(ActiveWindow::Destroyed { window });
+                }
+                Err(error) => return Err(platform(error)),
+            };
+            // Still under the grab, so the window that answered above cannot
+            // vanish before this read: a failure here is a real one.
+            let title = String::from_utf8(property_bytes(
                 conn,
                 window,
-                self.atoms.net_wm_pid,
-                AtomEnum::CARDINAL.into(),
-            )?
-            .first()
-            .copied())
+                self.atoms.net_wm_name,
+                self.atoms.utf8_string,
+            )?)
+            .ok()
+            .filter(|title| !title.is_empty());
+            Ok(ActiveWindow::Window { window, pid, title })
         })
     }
 
@@ -2655,11 +2703,13 @@ mod tests {
         std::fs::remove_file(socket).expect("remove fake socket");
     }
 
-    /// `active_window_pid` reads the pid of `_NET_ACTIVE_WINDOW`, and says
-    /// nothing when there is no active window or the WM does not support it.
+    /// `active_window_identity` reads the pid and title of `_NET_ACTIVE_WINDOW`, says
+    /// nothing when there is no active window or the WM does not support
+    /// it, and reports a destroyed active window as destroyed rather than a
+    /// BadWindow platform error.
     #[test]
     #[ignore = "requires Xvfb; run through scripts/run_integ_tests.sh"]
-    fn x11_active_window_pid_reads_the_ewmh_active_window() {
+    fn x11_active_window_reads_the_ewmh_active_window() {
         use x11rb::connection::Connection as _;
         use x11rb::protocol::xproto::{
             AtomEnum, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass,
@@ -2733,24 +2783,61 @@ mod tests {
             .expect("PID stored");
 
         assert_eq!(
-            ewmh.active_window_pid().unwrap(),
-            None,
+            ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::NotReported,
             "no _NET_ACTIVE_WINDOW yet"
         );
         set_active(window);
-        assert_eq!(ewmh.active_window_pid().unwrap(), Some(4242));
+        assert_eq!(
+            ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::Window {
+                window,
+                pid: Some(4242),
+                title: None
+            }
+        );
+        observer
+            .change_property8(
+                PropMode::REPLACE,
+                window,
+                atoms.net_wm_name,
+                atoms.utf8_string,
+                b"Editor",
+            )
+            .expect("set title")
+            .check()
+            .expect("title stored");
+        assert_eq!(
+            ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::Window {
+                window,
+                pid: Some(4242),
+                title: Some("Editor".into())
+            }
+        );
         set_active(0);
         assert_eq!(
-            ewmh.active_window_pid().unwrap(),
-            None,
+            ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::NotReported,
             "window 0 means no active window"
         );
         set_active(window);
         let no_ewmh = backend(connect(), &[]);
         assert_eq!(
-            no_ewmh.active_window_pid().unwrap(),
-            None,
+            no_ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::NotReported,
             "a WM without _NET_ACTIVE_WINDOW support is not asked"
+        );
+        // The focused window closes before the window manager updates the
+        // root: the stale XID is a destroyed window, not a platform error.
+        observer
+            .destroy_window(window)
+            .expect("destroy window")
+            .check()
+            .expect("window destroyed");
+        assert_eq!(
+            ewmh.active_window_identity().unwrap(),
+            super::ActiveWindow::Destroyed { window }
         );
     }
 
