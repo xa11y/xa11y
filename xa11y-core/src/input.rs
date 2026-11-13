@@ -35,7 +35,7 @@
 //! the unshifted physical key; use [`Key::Shift`] explicitly for uppercase
 //! or shifted symbols (see [`Key`] for the rationale).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::element::{Element, Rect};
@@ -376,6 +376,23 @@ impl Key {
             }
         }
         Ok(())
+    }
+
+    /// `Shift`, `Ctrl`, `Alt` and `Meta`: the keys that change what another
+    /// key produces while held.
+    fn is_modifier(&self) -> bool {
+        matches!(self, Key::Shift | Key::Ctrl | Key::Alt | Key::Meta)
+    }
+
+    /// The name a binding caller writes for a modifier, for error messages.
+    fn modifier_name(&self) -> &'static str {
+        match self {
+            Key::Shift => "Shift",
+            Key::Ctrl => "Ctrl",
+            Key::Alt => "Alt",
+            Key::Meta => "Meta",
+            _ => "a key",
+        }
     }
 }
 
@@ -1222,6 +1239,11 @@ mod pointer_validation_tests {
 #[derive(Clone)]
 pub struct InputSim {
     backend: Arc<dyn InputProvider>,
+    /// Modifiers pressed with [`Keyboard::down`] and not yet released with
+    /// [`Keyboard::up`], in press order. Shared by clones, since they drive
+    /// the same keyboard. [`Keyboard::type_text`] refuses while it is
+    /// non-empty.
+    held: Arc<Mutex<Vec<Key>>>,
 }
 
 impl InputSim {
@@ -1232,7 +1254,10 @@ impl InputSim {
     /// bindings. This constructor exists for tests and for embedders that
     /// supply their own [`InputProvider`].
     pub fn new(backend: Arc<dyn InputProvider>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            held: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
     /// Get the backing provider for advanced or composite sequences.
@@ -1251,6 +1276,7 @@ impl InputSim {
     pub fn keyboard(&self) -> Keyboard<'_> {
         Keyboard {
             backend: &self.backend,
+            held: &self.held,
         }
     }
 
@@ -1473,6 +1499,7 @@ fn validate_scroll(delta: ScrollDelta) -> Result<()> {
 /// Keyboard operations. Obtain via [`InputSim::keyboard`].
 pub struct Keyboard<'a> {
     backend: &'a Arc<dyn InputProvider>,
+    held: &'a Mutex<Vec<Key>>,
 }
 
 impl Keyboard<'_> {
@@ -1504,15 +1531,34 @@ impl Keyboard<'_> {
     }
 
     /// Press `key` without releasing. Pair with [`up`](Self::up).
+    ///
+    /// A modifier held this way (`Shift`, `Ctrl`, `Alt`, `Meta`) makes
+    /// [`type_text`](Self::type_text) refuse until it is released.
     pub fn down(&self, key: Key) -> Result<()> {
         key.validate()?;
-        self.backend.key_down(&key)
+        self.backend.key_down(&key)?;
+        if key.is_modifier() {
+            // Poisoning only means another thread panicked mid-update of a
+            // plain Vec; the list itself is still usable.
+            let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            if !held.contains(&key) {
+                held.push(key);
+            }
+        }
+        Ok(())
     }
 
     /// Release a previously pressed key.
     pub fn up(&self, key: Key) -> Result<()> {
         key.validate()?;
-        self.backend.key_up(&key)
+        self.backend.key_up(&key)?;
+        // Only a release the platform accepted clears the key: after a failed
+        // one it may still be down, and refusing `type_text` is the safe read.
+        self.held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k| *k != key);
+        Ok(())
     }
 
     /// Type literal text into whichever element currently has keyboard focus.
@@ -1531,10 +1577,31 @@ impl Keyboard<'_> {
     /// `"\r\n"`, `"\r"` and `"\n"` each type one Return/Enter keypress, so
     /// in a single-line field this may activate the default button.
     /// `"\t"` types the Tab key on every platform, so it can move focus to
-    /// the next control rather than insert a tab character. Both are key
-    /// taps, so a modifier held with [`down`](Self::down) applies to them on
-    /// every platform: with Shift held, `"\t"` is Shift+Tab.
+    /// the next control rather than insert a tab character.
+    ///
+    /// While a modifier pressed with [`down`](Self::down) is still held, this
+    /// returns [`Error::InvalidActionData`] naming it, and nothing is typed.
+    /// The platforms disagree about what a held modifier does to typed text:
+    /// Windows sends characters as Unicode packets that ignore it, while the
+    /// Enter and Tab taps and the other backends' key events take it. No
+    /// result would be the same everywhere, so the call is refused rather
+    /// than typing something different on each. Release the
+    /// modifier with [`up`](Self::up) first; for a shortcut, use
+    /// [`chord`](Self::chord). Only modifiers held through this `InputSim` (or
+    /// a clone of it) are known: a physically held key is not detected.
     pub fn type_text(&self, text: &str) -> Result<()> {
+        {
+            let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            if !held.is_empty() {
+                let names: Vec<&str> = held.iter().map(Key::modifier_name).collect();
+                return Err(Error::invalid_action_data(format!(
+                    "type_text refused: {} held with key_down. A held modifier \
+                     changes typed text differently on each platform, so \
+                     release it with key_up first, or use chord for a shortcut",
+                    names.join("+")
+                )));
+            }
+        }
         self.backend.type_text(text)
     }
 }
@@ -1670,6 +1737,104 @@ mod keys_held_tests {
             *backend.log.lock().unwrap(),
             ["down Ctrl", "down Shift", "up Shift", "up Ctrl"]
         );
+    }
+
+    /// Records every call, including `type_text`.
+    #[derive(Default)]
+    struct Recording {
+        log: Mutex<Vec<String>>,
+    }
+
+    impl InputProvider for Recording {
+        fn pointer_move(&self, _: Point) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_down(&self, _: MouseButton) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_up(&self, _: MouseButton) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_click(&self, _: Point, _: MouseButton, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn pointer_scroll(&self, _: Point, _: ScrollDelta) -> Result<()> {
+            Ok(())
+        }
+        fn key_down(&self, key: &Key) -> Result<()> {
+            self.log.lock().unwrap().push(format!("down {key:?}"));
+            Ok(())
+        }
+        fn key_up(&self, key: &Key) -> Result<()> {
+            self.log.lock().unwrap().push(format!("up {key:?}"));
+            Ok(())
+        }
+        fn type_text(&self, text: &str) -> Result<()> {
+            self.log.lock().unwrap().push(format!("type {text}"));
+            Ok(())
+        }
+    }
+
+    fn sim() -> (Arc<Recording>, InputSim) {
+        let backend = Arc::new(Recording::default());
+        (backend.clone(), InputSim::new(backend))
+    }
+
+    #[test]
+    fn type_text_refuses_while_a_modifier_is_held_and_names_it() {
+        let (backend, sim) = sim();
+        sim.keyboard().down(Key::Ctrl).unwrap();
+        sim.keyboard().down(Key::Shift).unwrap();
+        let err = sim.keyboard().type_text("hi").expect_err("held modifiers");
+        let Error::InvalidActionData { message, .. } = &err else {
+            panic!("expected InvalidActionData, got {err:?}");
+        };
+        assert!(message.contains("Ctrl+Shift held"), "{message}");
+        assert!(message.contains("key_up"), "{message}");
+        assert_eq!(
+            *backend.log.lock().unwrap(),
+            ["down Ctrl", "down Shift"],
+            "nothing is typed"
+        );
+    }
+
+    #[test]
+    fn type_text_runs_once_every_modifier_is_released() {
+        let (backend, sim) = sim();
+        let kb = sim.keyboard();
+        kb.down(Key::Shift).unwrap();
+        kb.down(Key::Alt).unwrap();
+        kb.up(Key::Shift).unwrap();
+        assert!(kb.type_text("x").is_err(), "Alt is still held");
+        kb.up(Key::Alt).unwrap();
+        kb.type_text("x").unwrap();
+        assert_eq!(backend.log.lock().unwrap().last().unwrap(), "type x");
+    }
+
+    #[test]
+    fn a_held_non_modifier_does_not_block_type_text() {
+        let (_backend, sim) = sim();
+        sim.keyboard().down(Key::Char('a')).unwrap();
+        sim.keyboard().down(Key::Enter).unwrap();
+        sim.keyboard().type_text("x").unwrap();
+    }
+
+    #[test]
+    fn clones_share_held_modifiers() {
+        let (_backend, sim) = sim();
+        let other = sim.clone();
+        sim.keyboard().down(Key::Meta).unwrap();
+        assert!(other.keyboard().type_text("x").is_err());
+        other.keyboard().up(Key::Meta).unwrap();
+        sim.keyboard().type_text("x").unwrap();
+    }
+
+    #[test]
+    fn chord_and_press_leave_nothing_held() {
+        let (_backend, sim) = sim();
+        sim.keyboard().chord(Key::Char('a'), &[Key::Ctrl]).unwrap();
+        sim.keyboard().press(Key::Shift).unwrap();
+        sim.keyboard().type_text("x").unwrap();
     }
 }
 

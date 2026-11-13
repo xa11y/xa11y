@@ -861,9 +861,10 @@ impl InputProvider for WindowsInputProvider {
                     inputs.push(key_input(VK_RETURN, KEYBD_EVENT_FLAGS(0)));
                     inputs.push(key_input(VK_RETURN, KEYEVENTF_KEYUP));
                 }
-                // A key tap, like Enter, so a modifier held with key_down
-                // applies (Shift+Tab), as it does on Linux and macOS; the
-                // Unicode characters around it are not keys and take none.
+                // A key tap, like Enter. A modifier held with key_down would
+                // apply to it but not to the Unicode characters around it,
+                // which is why core's Keyboard::type_text refuses to run
+                // while one is held.
                 Typed::Tab => {
                     inputs.push(key_input(VK_TAB, KEYBD_EVENT_FLAGS(0)));
                     inputs.push(key_input(VK_TAB, KEYEVENTF_KEYUP));

@@ -1840,6 +1840,10 @@ class InputSim:
         keypress, so in a single-line field this may activate the default
         button. ``"\\t"`` types the Tab key, which can move focus to the next
         control.
+
+        Raises ``InvalidActionDataError``, typing nothing, while a modifier
+        pressed with :meth:`key_down` is still held: release it with
+        :meth:`key_up` first, or use :meth:`chord` for a shortcut.
         """
 
 # ── Screenshot ───────────────────────────────────────────────────────────────
