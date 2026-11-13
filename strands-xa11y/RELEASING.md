@@ -31,7 +31,7 @@ wheel with xa11y's version. A static line plus `strands-xa11y-v*` tags is what
 
 ## Release gate: the xa11y bound
 
-The declared dependency is `xa11y>=0.13.0,<0.14.0` — a bounded minor range,
+The declared dependency is `xa11y>=0.13.0,<0.17.0` — a bounded minor range,
 not the bare floor `pytest-xa11y` declares. The difference is deliberate.
 
 This package reads xa11y by string, not by import: `_errors.py` keys its
