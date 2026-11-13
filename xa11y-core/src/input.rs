@@ -1537,7 +1537,9 @@ impl Keyboard<'_> {
     /// `"\r\n"`, `"\r"` and `"\n"` each type one Return/Enter keypress, so
     /// in a single-line field this may activate the default button.
     /// `"\t"` types the Tab key on every platform, so it can move focus to
-    /// the next control rather than insert a tab character.
+    /// the next control rather than insert a tab character. Both are key
+    /// taps, so a modifier held with [`down`](Self::down) applies to them on
+    /// every platform: with Shift held, `"\t"` is Shift+Tab.
     pub fn type_text(&self, text: &str) -> Result<()> {
         self.backend.type_text(text)
     }
