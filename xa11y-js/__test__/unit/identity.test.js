@@ -28,6 +28,8 @@ test('an action on a removed node rejects stale and does nothing', async () => {
     assert.ok(err instanceof SelectorNotMatchedError, 'existing handlers keep catching it');
     assert.equal(err.reason, 'removed');
     assert.match(err.element, /Back/);
+    // The parent class's `selector` names the same thing, as in Python.
+    assert.equal(err.selector, err.element);
     assert.equal(err.delivery, 'not_delivered');
     assert.match(err.message, /^Element stale \(removed\)/);
     return true;

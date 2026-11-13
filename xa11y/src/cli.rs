@@ -1607,10 +1607,10 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
         parts.push(format!("landmark_type={landmark}"));
     }
     if let Some(web_role) = &el.web_role {
-        parts.push(format!("web_role=\"{web_role}\""));
+        parts.push(format!("web_role={web_role:?}"));
     }
     if let Some(url) = &el.link_url {
-        parts.push(format!("url=\"{url}\""));
+        parts.push(format!("url={url:?}"));
     }
     if let Some(politeness) = el.live_region.as_ref().and_then(|l| l.politeness) {
         parts.push(format!("live={}", politeness.to_snake_case()));
@@ -7552,6 +7552,22 @@ mod tests {
                 .count()
                 .expect("counts"),
             1
+        );
+    }
+
+    #[test]
+    fn oneline_output_escapes_web_role_and_url() {
+        // Both come from the page, so either can hold a quote or a newline
+        // that would otherwise end the field or split the line.
+        let mut el = ElementData::for_role(Role::Link);
+        el.web_role = Some("tab\" forged=\"1".into());
+        el.link_url = Some("https://example.com/a\nbutton \"Fake\"".into());
+        let line = format_element_oneline(&el);
+        assert!(!line.contains('\n'), "{line}");
+        assert!(line.contains(r#"web_role="tab\" forged=\"1""#), "{line}");
+        assert!(
+            line.contains(r#"url="https://example.com/a\nbutton \"Fake\"""#),
+            "{line}"
         );
     }
 

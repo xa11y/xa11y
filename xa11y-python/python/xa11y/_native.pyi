@@ -883,7 +883,9 @@ class Subscription:
     @property
     def dropped(self) -> int:
         """How many events the buffer has dropped, in total, because it was full.
-        A dropped event leaves a gap in ``Event.sequence``."""
+        A dropped event leaves a gap in ``Event.sequence``. Never blocks, even
+        while another thread waits in ``recv``, and still answers after
+        ``close`` with the final count."""
     def try_recv(self) -> Event | None: ...
     def recv(self, timeout: float = 5.0) -> Event: ...
     def wait_for(
@@ -1469,9 +1471,7 @@ class Element:
     @property
     def live_region(self) -> LiveRegionInfo | None:
         """Live-region settings; ``None`` when the element has none."""
-    def relations(
-        self, kinds: list[RelationKindName] | None = None
-    ) -> list[Relation]:
+    def relations(self, kinds: list[RelationKindName] | None = None) -> list[Relation]:
         """The elements this one is related to, as a list of :class:`Relation`
         (``kind`` such as ``"labelled_by"`` or ``"controls"``, and its
         ``elements``), in the order asked for. ``kinds=None`` asks for every
@@ -2116,6 +2116,7 @@ def _find_test_shell_surface(
 ) -> ShellSurface: ...
 def _make_disconnected_subscription() -> Subscription: ...
 def _make_test_text_event_subscription() -> Subscription: ...
+def _make_test_open_subscription() -> Subscription: ...
 
 class _TestActionProbe:
     def locator(self, selector: str) -> Locator: ...

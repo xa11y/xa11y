@@ -214,6 +214,36 @@ coordinate tools.";
 
 /// The per-field byte cap, as the element-returning tools state it.
 ///
+/// The capability table's areas (`event:`, `relation:`, ...) in table order,
+/// each once. Derived from the table so the `capabilities` description
+/// cannot omit an area a new row opens.
+fn capability_areas() -> Vec<&'static str> {
+    let mut areas: Vec<&'static str> = Vec::new();
+    for name in crate::Capabilities::names() {
+        let area = match name.find(':') {
+            Some(i) => &name[..=i],
+            None => name,
+        };
+        if !areas.contains(&area) {
+            areas.push(area);
+        }
+    }
+    areas
+}
+
+/// [`capability_areas`] as prose: "`event:`, `action:` and `text:`".
+fn capability_areas_prose() -> String {
+    let quoted: Vec<String> = capability_areas()
+        .iter()
+        .map(|a| format!("`{a}`"))
+        .collect();
+    match quoted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        Some((last, _)) => last.clone(),
+        None => String::new(),
+    }
+}
+
 /// Built from [`MAX_FIELD_BYTES`] so the number a model reads is the number
 /// the encoder enforces.
 fn field_cap_note() -> String {
@@ -576,6 +606,7 @@ fn tool_definition(name: &str) -> Value {
             tool(
                 "capabilities",
                 "What this platform can report",
+                &format!(
                 "Say, per feature, whether this platform's accessibility backend can \
                  report it: `supported`, `partial` (some toolkits, apps or display servers \
                  only; `note` says which) or `unsupported` (never). Reads a fixed table and \
@@ -586,9 +617,10 @@ fn tool_definition(name: &str) -> Value {
                  fails as unsupported is explained here. Check an event kind before waiting \
                  on it: `event:menu_opened` is `unsupported` on Linux, so a wait for it \
                  there can only time out.\n\n\
-                 Names are `<area>:<name>`; the areas are `event:`, `action:`, `app:`, \
-                 `window:`, `state:`, `table:` and `text:`. An unknown name is an \
+                 Names are `<area>:<name>`; the areas are {areas}. An unknown name is an \
                  `invalid_arguments` failure listing the closest known names.",
+                    areas = capability_areas_prose(),
+                ),
                 object_schema(props, &[]),
             )
         }
@@ -4958,6 +4990,35 @@ mod tests {
         }
         assert!(guide.contains("`<field>_truncated: true`"));
         assert!(guide.contains("`<field>_bytes`"));
+    }
+
+    #[test]
+    fn the_capabilities_description_names_every_area_of_the_table() {
+        let description = tool_definition("capabilities")["description"]
+            .as_str()
+            .expect("description")
+            .to_owned();
+        let areas = capability_areas();
+        // The areas the review found missing, and the rest of today's table.
+        for area in [
+            "event:",
+            "action:",
+            "app:",
+            "window:",
+            "state:",
+            "table:",
+            "text:",
+            "property:",
+            "relation:",
+        ] {
+            assert!(areas.contains(&area), "{area} not in {areas:?}");
+        }
+        for area in &areas {
+            assert!(
+                description.contains(&format!("`{area}`")),
+                "{area}: {description}"
+            );
+        }
     }
 
     #[test]

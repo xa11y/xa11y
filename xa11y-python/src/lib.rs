@@ -637,10 +637,7 @@ impl Element {
         let sub = py
             .detach(move || xa11y::subscribe_with(&*provider, &data, &options))
             .map_err(to_py_err)?;
-        Ok(Subscription {
-            inner: std::sync::Mutex::new(Some(sub)),
-            provider: self.provider.clone(),
-        })
+        Ok(Subscription::new(sub, self.provider.clone()))
     }
 
     /// Read the subtree into a bounded :class:`Capture`: every node read,
@@ -1710,6 +1707,12 @@ fn epoch_seconds(t: std::time::SystemTime) -> f64 {
 #[pyclass]
 struct Subscription {
     inner: std::sync::Mutex<Option<xa11y::Subscription>>,
+    /// The drop count as last read under `inner`. `dropped` answers from
+    /// here when a `recv` holds the lock, and after `close`, so the getter
+    /// never waits and keeps answering once the subscription is gone.
+    /// A `recv` blocks only on an empty buffer, and an empty buffer drops
+    /// nothing, so the count cannot move while the lock is held that way.
+    dropped: std::sync::atomic::AtomicU64,
     provider: Arc<dyn xa11y::Provider>,
 }
 
@@ -1724,6 +1727,19 @@ fn subscribe_options(kinds: Option<Vec<String>>, buffer: Option<usize>) -> xa11y
 }
 
 impl Subscription {
+    fn new(sub: xa11y::Subscription, provider: Arc<dyn xa11y::Provider>) -> Self {
+        Self {
+            dropped: std::sync::atomic::AtomicU64::new(sub.dropped()),
+            inner: std::sync::Mutex::new(Some(sub)),
+            provider,
+        }
+    }
+
+    fn record_dropped(&self, sub: &xa11y::Subscription) {
+        self.dropped
+            .store(sub.dropped(), std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Run `f` on the open subscription. `recv` holds this lock for its
     /// whole timeout, so every caller must already have released the GIL
     /// (`py.detach`); a thread waiting here with the GIL held would freeze
@@ -1733,17 +1749,38 @@ impl Subscription {
         let sub = guard
             .as_ref()
             .ok_or_else(|| to_py_err(xa11y::Error::platform(-1, "Subscription is closed")))?;
-        Ok(f(sub))
+        let out = f(sub);
+        self.record_dropped(sub);
+        Ok(out)
     }
 }
 
 #[pymethods]
 impl Subscription {
     /// How many events the buffer has dropped, in total, because it was full.
-    /// A dropped event leaves a gap in ``Event.sequence``.
+    /// A dropped event leaves a gap in ``Event.sequence``. Never blocks,
+    /// even while another thread waits in ``recv``, and still answers after
+    /// ``close`` with the final count.
     #[getter]
-    fn dropped(&self, py: Python<'_>) -> PyResult<u64> {
-        py.detach(|| self.with_sub(|sub| sub.dropped()))
+    fn dropped(&self) -> u64 {
+        // `try_lock`, not `lock`: a `recv` on another thread holds `inner`
+        // for its whole timeout, and the cached count is exact meanwhile
+        // (see the field).
+        match self.inner.try_lock() {
+            Ok(guard) => {
+                if let Some(sub) = guard.as_ref() {
+                    self.record_dropped(sub);
+                }
+            }
+            Err(std::sync::TryLockError::Poisoned(e)) => {
+                if let Some(sub) = e.into_inner().as_ref() {
+                    self.record_dropped(sub);
+                }
+            }
+            // A `recv` holds the lock; the cached count is current.
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn try_recv(&self, py: Python<'_>) -> PyResult<Option<Event>> {
@@ -1813,7 +1850,14 @@ impl Subscription {
 
     fn close(&self, py: Python<'_>) {
         // Released GIL: a concurrent `recv` holds this lock until it returns.
-        let sub = py.detach(|| self.inner.lock().unwrap_or_else(|e| e.into_inner()).take());
+        let sub = py.detach(|| {
+            let sub = self.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(sub) = &sub {
+                // `dropped` keeps answering with the final count.
+                self.record_dropped(sub);
+            }
+            sub
+        });
         // Dropping cancels the platform subscription, which can block too.
         py.detach(move || drop(sub));
     }
@@ -1867,7 +1911,12 @@ impl Subscription {
     }
 
     fn __repr__(&self) -> String {
-        if self.inner.lock().unwrap().is_some() {
+        if self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
             "Subscription(active)".to_string()
         } else {
             "Subscription(closed)".to_string()
@@ -2156,10 +2205,7 @@ impl App {
         let sub = py
             .detach(move || app.subscribe_with(&options))
             .map_err(to_py_err)?;
-        Ok(Subscription {
-            inner: std::sync::Mutex::new(Some(sub)),
-            provider: self.provider.clone(),
-        })
+        Ok(Subscription::new(sub, self.provider.clone()))
     }
 
     /// Get direct children (typically windows) of this application.
@@ -3510,6 +3556,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_find_test_shell_surface, m)?)?;
     m.add_function(wrap_pyfunction!(_make_disconnected_subscription, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_text_event_subscription, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_open_subscription, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_action_probe, m)?)?;
 
     Ok(())
@@ -3693,22 +3740,35 @@ fn _find_test_shell_surface(
 /// needing a live platform event source.
 #[pyfunction]
 fn _make_disconnected_subscription() -> Subscription {
-    Subscription {
-        inner: std::sync::Mutex::new(Some(xa11y::mock::disconnected_subscription())),
-        provider: xa11y::mock::build_provider(),
-    }
+    Subscription::new(
+        xa11y::mock::disconnected_subscription(),
+        xa11y::mock::build_provider(),
+    )
 }
 
 /// Create a Subscription that yields the mock's text events
 /// (`xa11y::mock::text_edit_events`) and then disconnects.
 #[pyfunction]
 fn _make_test_text_event_subscription() -> Subscription {
-    Subscription {
-        inner: std::sync::Mutex::new(Some(xa11y::mock::scripted_subscription(
-            xa11y::mock::text_edit_events(),
-        ))),
-        provider: xa11y::mock::build_provider(),
-    }
+    Subscription::new(
+        xa11y::mock::scripted_subscription(xa11y::mock::text_edit_events()),
+        xa11y::mock::build_provider(),
+    )
+}
+
+/// Create a Subscription that stays open with nothing to deliver, so a
+/// `recv` on it blocks for its whole timeout. The sender lives in the cancel
+/// handle and goes away on `close`.
+#[pyfunction]
+fn _make_test_open_subscription() -> Subscription {
+    let (tx, rx) = std::sync::mpsc::channel::<xa11y::Event>();
+    Subscription::new(
+        xa11y::Subscription::new(
+            xa11y::EventReceiver::new(rx),
+            xa11y::CancelHandle::new(move || drop(tx)),
+        ),
+        xa11y::mock::build_provider(),
+    )
 }
 
 /// Probe wrapping a single shared mock provider so tests can drive actions
