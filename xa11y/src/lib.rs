@@ -151,9 +151,9 @@ pub fn capabilities_for_backend(
         },
     };
     let source = match backend {
-        Some(b) => parse_accessibility_source(Some(b.into()))?,
+        Some(b) => parse_accessibility_source(Some(b.into()), "backend")?,
         None if platform.is_none() => {
-            parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"))?
+            parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"), SOURCE_ENV)?
         }
         None => "native".into(),
     };
@@ -770,21 +770,23 @@ fn plan_annotations(
     (annotations, legend, omitted)
 }
 
-fn parse_accessibility_source(value: Option<std::ffi::OsString>) -> Result<String> {
+const SOURCE_ENV: &str = "XA11Y_ACCESSIBILITY_SOURCE";
+const SOURCES: [&str; 3] = ["native", "uia", "ia2"];
+
+/// Validate an accessibility source. `what` is how the caller supplied it
+/// (`"backend"` for an argument, [`SOURCE_ENV`] for the environment), so
+/// the error names what the caller actually set.
+fn parse_accessibility_source(value: Option<std::ffi::OsString>, what: &str) -> Result<String> {
     let source = value.map_or_else(
         || Ok("native".to_string()),
         |value| {
             value.into_string().map_err(|_| {
-                Error::invalid_action_data(
-                    "XA11Y_ACCESSIBILITY_SOURCE must be UTF-8: native, uia, or ia2",
-                )
+                Error::invalid_action_data(format!("{what} must be UTF-8: native, uia, or ia2"))
             })
         },
     )?;
-    if !matches!(source.as_str(), "native" | "uia" | "ia2") {
-        return Err(Error::invalid_action_data(format!(
-            "unknown XA11Y_ACCESSIBILITY_SOURCE {source:?}; choose native, uia, or ia2"
-        )));
+    if !SOURCES.contains(&source.as_str()) {
+        return Err(Error::unknown_name(what, &source, SOURCES));
     }
     Ok(source)
 }
@@ -795,26 +797,41 @@ mod accessibility_source_tests {
     #[test]
     fn source_selection_is_explicit_and_rejects_unknown_values() {
         assert_eq!(
-            parse_accessibility_source(None).expect("default source"),
+            parse_accessibility_source(None, SOURCE_ENV).expect("default source"),
             "native"
         );
         for source in ["native", "uia", "ia2"] {
             assert_eq!(
-                parse_accessibility_source(Some(source.into())).expect("known source"),
+                parse_accessibility_source(Some(source.into()), SOURCE_ENV).expect("known source"),
                 source
             );
         }
         for source in ["", "IA2", "atspi", "typo"] {
             assert!(matches!(
-                parse_accessibility_source(Some(source.into())),
+                parse_accessibility_source(Some(source.into()), SOURCE_ENV),
                 Err(Error::InvalidActionData { .. })
             ));
         }
     }
+
+    #[test]
+    fn an_explicit_backend_error_names_the_argument_not_the_variable() {
+        let Err(err) = provider_for_backend("typo") else {
+            panic!("typo is not a source");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("unknown backend \"typo\""), "{msg}");
+        assert!(!msg.contains(SOURCE_ENV), "{msg}");
+        let msg = capabilities_for_backend(None, None, Some("typo"))
+            .expect_err("typo is not a source")
+            .to_string();
+        assert!(msg.contains("unknown backend"), "{msg}");
+    }
 }
 
 fn create_provider_boxed() -> Result<Box<dyn Provider>> {
-    let source = parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"))?;
+    let source =
+        parse_accessibility_source(std::env::var_os("XA11Y_ACCESSIBILITY_SOURCE"), SOURCE_ENV)?;
     create_provider_for_backend(&source)
 }
 
@@ -823,7 +840,7 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
 /// Windows-only; unsupported selections fail before attaching to any app.
 /// Use with `App::by_pid_with` or `App::by_name_with`.
 pub fn provider_for_backend(backend: &str) -> Result<Arc<dyn Provider>> {
-    let source = parse_accessibility_source(Some(backend.into()))?;
+    let source = parse_accessibility_source(Some(backend.into()), "backend")?;
     create_provider_for_backend(&source).map(Arc::from)
 }
 

@@ -22,6 +22,18 @@ fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
     xa11y::provider().map_err(to_py_err)
 }
 
+/// The provider for an optional ``backend=`` argument: the named
+/// accessibility source, or the environment default when omitted. Built
+/// with the GIL released, since connecting can block.
+fn provider_for(py: Python<'_>, backend: Option<&str>) -> PyResult<Arc<dyn xa11y::Provider>> {
+    match backend {
+        Some(b) => py
+            .detach(|| xa11y::provider_for_backend(b))
+            .map_err(to_py_err),
+        None => get_provider(),
+    }
+}
+
 // ── Exceptions ──────────────────────────────────────────────────────────────
 
 // Exception class names are kept identical to the public `xa11y` package
@@ -1984,12 +1996,7 @@ impl App {
         // Validate `timeout` before touching the provider so callers get a
         // crisp `ValueError` regardless of whether accessibility is set up.
         let timeout = effective_timeout(timeout)?;
-        let provider = match backend {
-            Some(b) => py
-                .detach(|| xa11y::provider_for_backend(b))
-                .map_err(to_py_err)?,
-            None => get_provider()?,
-        };
+        let provider = provider_for(py, backend)?;
         let app = py
             .detach(move || xa11y::App::by_name_with(provider, name, timeout))
             .map_err(to_py_err)?;
@@ -2021,12 +2028,7 @@ impl App {
         backend: Option<&str>,
     ) -> PyResult<Self> {
         let timeout = effective_timeout(timeout)?;
-        let provider = match backend {
-            Some(b) => py
-                .detach(|| xa11y::provider_for_backend(b))
-                .map_err(to_py_err)?,
-            None => get_provider()?,
-        };
+        let provider = provider_for(py, backend)?;
         let app = py
             .detach(move || xa11y::App::by_pid_with(provider, pid, timeout))
             .map_err(to_py_err)?;
@@ -2049,12 +2051,7 @@ impl App {
     #[pyo3(signature = (*, timeout=None, backend=None))]
     fn foreground(py: Python<'_>, timeout: Option<f64>, backend: Option<&str>) -> PyResult<Self> {
         let timeout = effective_timeout(timeout)?;
-        let provider = match backend {
-            Some(b) => py
-                .detach(|| xa11y::provider_for_backend(b))
-                .map_err(to_py_err)?,
-            None => get_provider()?,
-        };
+        let provider = provider_for(py, backend)?;
         let app = py
             .detach(move || xa11y::App::foreground_with(provider, timeout))
             .map_err(to_py_err)?;
@@ -2066,9 +2063,13 @@ impl App {
     /// Single enumeration, no polling. To wait for an app that is still
     /// starting up, use `by_pid` / `by_name` / `find` with a `timeout`
     /// instead of polling this in a loop.
+    ///
+    /// ``backend`` names the accessibility source to enumerate, as for
+    /// ``by_name``; omitted, the environment default.
     #[staticmethod]
-    fn list(py: Python<'_>) -> PyResult<Vec<Self>> {
-        let provider = get_provider()?;
+    #[pyo3(signature = (*, backend=None))]
+    fn list(py: Python<'_>, backend: Option<&str>) -> PyResult<Vec<Self>> {
+        let provider = provider_for(py, backend)?;
         let apps = py
             .detach(move || xa11y::App::list_with(provider))
             .map_err(to_py_err)?;
@@ -2092,11 +2093,18 @@ impl App {
     ///     timeout=30.0,
     /// )
     /// ```
+    ///
+    /// ``backend`` names the accessibility source, as for ``by_name``.
     #[staticmethod]
-    #[pyo3(signature = (predicate, *, timeout=None))]
-    fn find(py: Python<'_>, predicate: Py<PyAny>, timeout: Option<f64>) -> PyResult<Self> {
+    #[pyo3(signature = (predicate, *, timeout=None, backend=None))]
+    fn find(
+        py: Python<'_>,
+        predicate: Py<PyAny>,
+        timeout: Option<f64>,
+        backend: Option<&str>,
+    ) -> PyResult<Self> {
         let timeout = effective_timeout(timeout)?;
-        let provider = get_provider()?;
+        let provider = provider_for(py, backend)?;
         // The poll loop runs with the GIL released (tenet 5); the predicate
         // closure reacquires it per call. This mirrors `Locator.wait_until`.
         // Holding the GIL for the loop would freeze every other thread in the

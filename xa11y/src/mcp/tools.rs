@@ -28,8 +28,8 @@ use crate::cli::{
     ACTIONS_REQUIRING_SIZE, ACTIONS_REQUIRING_VALUE, ACTION_NAMES, TREE_DETAILS,
 };
 use crate::{
-    App, AppExt, ClickOptions, ClickTarget, DragOptions, Element, Locator, Rect, ScrollDelta,
-    ShellSurface, ShellSurfaceExt,
+    App, ClickOptions, ClickTarget, DragOptions, Element, Locator, Rect, ScrollDelta, ShellSurface,
+    ShellSurfaceExt,
 };
 
 /// Depth used by `tree` when the caller does not ask for one.
@@ -421,7 +421,7 @@ impl ToolHost for Xa11yTools {
 
     fn call(&self, name: &str, args: &Value) -> CliResult<ToolOutput> {
         match name {
-            "apps" => tool_apps(),
+            "apps" => tool_apps(args),
             "capabilities" => tool_capabilities(args),
             "shell" => tool_shell(),
             "windows" => tool_windows(args, &self.refs),
@@ -567,13 +567,17 @@ fn held_property() -> Value {
 
 fn tool_definition(name: &str) -> Value {
     match name {
-        "apps" => tool(
-            "apps",
-            "List applications",
-            "List running applications with their process ids. Start here to find \
-             the `app` or `pid` the other tools need.",
-            json!({ "type": "object", "additionalProperties": false }),
-        ),
+        "apps" => {
+            let mut props = Map::new();
+            props.insert("backend".into(), json!({"type":"string", "enum": cli::BACKENDS, "description":"Accessibility source to enumerate; default: server environment. IA2 requires Windows."}));
+            tool(
+                "apps",
+                "List applications",
+                "List running applications with their process ids. Start here to find \
+                 the `app` or `pid` the other tools need.",
+                object_schema(props, &[]),
+            )
+        }
         "capabilities" => {
             let mut props = Map::new();
             props.insert("backend".into(), json!({"type":"string", "enum": cli::BACKENDS, "description":"Accessibility source to describe. Default: the server environment's source for the running platform, and native for another `platform`. IA2 has its own table, including unsupported events."}));
@@ -1972,8 +1976,11 @@ fn target_fields(target: &Target, out: &mut Map<String, Value>) {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-fn tool_apps() -> CliResult<ToolOutput> {
-    let apps = App::list()?;
+fn tool_apps(args: &Value) -> CliResult<ToolOutput> {
+    let apps = App::list_with(match backend_arg(args)? {
+        Some(b) => crate::provider_for_backend(&b)?,
+        None => crate::provider()?,
+    })?;
     let listed: Vec<Value> = apps
         .iter()
         .map(|app| {
@@ -4354,6 +4361,7 @@ mod tests {
         for (tool, arguments) in [
             ("tree", json!({ "app": "X", "backend": "foo" })),
             ("windows", json!({ "backend": "foo" })),
+            ("apps", json!({ "backend": "foo" })),
             ("capabilities", json!({ "backend": "foo" })),
             ("events_start", json!({ "app": "X", "backend": "foo" })),
         ] {

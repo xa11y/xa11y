@@ -706,9 +706,9 @@ class App extends native.App {
     }
   }
 
-  static async list() {
+  static async list(options) {
     try {
-      const apps = await native.App.list();
+      const apps = await native.App.list(options);
       for (const a of apps) Object.setPrototypeOf(a, App.prototype);
       return apps;
     } catch (err) {
@@ -733,6 +733,7 @@ class App extends native.App {
    * @param {number} [options.timeout] - Timeout in milliseconds; defaults to the process-wide default timeout (see `setDefaultTimeout`)
    * @param {string} [options.condition] - Human-readable description of the application being sought
    * @param {AbortSignal} [options.signal] - Abort signal for cancellation
+   * @param {string} [options.backend] - Accessibility source to enumerate, as for `App.list`
    * @returns {Promise<App>}
    * @example
    * ```js
@@ -749,6 +750,7 @@ class App extends native.App {
       timeout = native.getDefaultTimeout().timeout,
       condition = 'application matching predicate',
       signal,
+      backend,
     } = options;
     const deadline = Date.now() + timeout;
 
@@ -757,7 +759,7 @@ class App extends native.App {
     }
 
     while (true) {
-      const apps = await App.list();
+      const apps = await App.list(backend === undefined ? undefined : { backend });
       for (const app of apps) {
         if (await predicate(app)) return app;
       }

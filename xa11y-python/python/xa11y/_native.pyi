@@ -969,7 +969,12 @@ class App:
         can reach it. See ``by_name`` for ``timeout`` semantics.
         """
     @staticmethod
-    def find(predicate: Callable[[App], bool], *, timeout: float | None = None) -> App:
+    def find(
+        predicate: Callable[[App], bool],
+        *,
+        timeout: float | None = None,
+        backend: str | None = None,
+    ) -> App:
         """Find an application matching ``predicate``.
 
         ``predicate`` is called with an :class:`App` for each running
@@ -1004,12 +1009,14 @@ class App:
         ``is_foreground == True``.
         """
     @staticmethod
-    def list() -> list[App]:
+    def list(*, backend: str | None = None) -> list[App]:
         """List all running applications.
 
         Single enumeration, no polling. To wait for an app that is still
         starting up, use ``by_pid`` / ``by_name`` / ``find`` with a
-        ``timeout`` instead of polling this in a loop.
+        ``timeout`` instead of polling this in a loop. ``backend`` names the
+        accessibility source (``"native"``, ``"uia"``, ``"ia2"``), as for
+        ``by_name``; omitted, the environment default.
         """
     def locator(self, selector: str) -> Locator:
         """Create a Locator scoped to this application's accessibility tree."""
