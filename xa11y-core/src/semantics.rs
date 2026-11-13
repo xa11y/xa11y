@@ -32,7 +32,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::element::reader_writer_pair;
-use crate::error::{Error, Result};
 
 /// The kind of landmark a [`Role::Landmark`](crate::Role::Landmark) element
 /// is. Spelled as the ARIA landmark roles are.
@@ -126,6 +125,9 @@ pub enum Politeness {
 }
 
 impl Politeness {
+    /// Every value, in declaration order.
+    pub const ALL: [Politeness; 3] = [Self::Off, Self::Polite, Self::Assertive];
+
     /// `"off"`, `"polite"` or `"assertive"`.
     pub fn to_snake_case(self) -> &'static str {
         match self {
@@ -135,14 +137,11 @@ impl Politeness {
         }
     }
 
-    /// Parse the ARIA / AT-SPI / AX spelling. Unknown spellings are `None`.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "off" => Some(Self::Off),
-            "polite" => Some(Self::Polite),
-            "assertive" => Some(Self::Assertive),
-            _ => None,
-        }
+    /// The value [`to_snake_case`](Self::to_snake_case) spells as `name`,
+    /// or `None`. This is also the ARIA / AT-SPI / AX spelling, which a
+    /// backend trims and lowercases before it asks.
+    pub fn from_snake_case(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.to_snake_case() == name)
     }
 }
 
@@ -271,22 +270,11 @@ impl RelationKind {
         }
     }
 
-    /// Parse a name as [`to_snake_case`](Self::to_snake_case) spells it.
-    /// Fails with [`Error::InvalidActionData`] naming the valid names.
-    pub fn parse(name: &str) -> Result<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|k| k.to_snake_case() == name)
-            .ok_or_else(|| {
-                Error::invalid_action_data(format!(
-                    "unknown relation kind {name:?}; expected one of {}",
-                    Self::ALL
-                        .iter()
-                        .map(|k| k.to_snake_case())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-            })
+    /// The kind [`to_snake_case`](Self::to_snake_case) spells as `name`, or
+    /// `None`. [`Error::unknown_name`](crate::Error::unknown_name) builds the
+    /// error for a name that is not one.
+    pub fn from_snake_case(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.to_snake_case() == name)
     }
 
     /// The capability-table feature name for this kind (`relation:labelled_by`).
@@ -330,17 +318,25 @@ mod tests {
     #[test]
     fn names_round_trip() {
         for kind in RelationKind::ALL {
-            assert_eq!(RelationKind::parse(kind.to_snake_case()).ok(), Some(kind));
+            assert_eq!(
+                RelationKind::from_snake_case(kind.to_snake_case()),
+                Some(kind)
+            );
         }
-        assert!(RelationKind::parse("labeled_by").is_err());
+        assert_eq!(RelationKind::from_snake_case("labeled_by"), None);
         for name in ["main", "banner", "contentinfo", "region", "search"] {
             let landmark = Landmark::from_aria_role(name).expect("landmark");
             assert_eq!(landmark.to_snake_case(), name);
         }
         assert_eq!(Landmark::from_aria_role("Main"), Some(Landmark::Main));
         assert_eq!(Landmark::from_aria_role("button"), None);
-        assert_eq!(Politeness::parse("Assertive"), Some(Politeness::Assertive));
-        assert_eq!(Politeness::parse("rude"), None);
+        for p in Politeness::ALL {
+            assert_eq!(Politeness::from_snake_case(p.to_snake_case()), Some(p));
+        }
+        // Exact, like every other `from_snake_case`: a backend normalises a
+        // platform's spelling before it asks.
+        assert_eq!(Politeness::from_snake_case("Assertive"), None);
+        assert_eq!(Politeness::from_snake_case("rude"), None);
     }
 
     #[test]

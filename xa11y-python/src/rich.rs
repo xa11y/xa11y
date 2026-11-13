@@ -539,7 +539,15 @@ impl Text {
     /// The ``unit`` (``"character"``, ``"word"``, ``"line"``,
     /// ``"paragraph"``) containing ``offset``. ``"line"`` is the rendered line.
     fn range_at(&self, py: Python<'_>, offset: u32, unit: &str) -> PyResult<TextRange> {
-        let unit = xa11y::TextUnit::parse(unit).map_err(to_py_err)?;
+        let unit = xa11y::TextUnit::from_snake_case(unit)
+            .ok_or_else(|| {
+                xa11y::Error::unknown_name(
+                    "text unit",
+                    unit,
+                    xa11y::TextUnit::ALL.map(xa11y::TextUnit::to_snake_case),
+                )
+            })
+            .map_err(to_py_err)?;
         let t = self.inner.clone();
         let r = py
             .detach(move || t.range_at(offset, unit))

@@ -1784,7 +1784,14 @@ pub(crate) fn resolve_capabilities(
         Error::InvalidActionData { message, .. } => CliError::Usage(message),
         other => CliError::Xa11y(other),
     };
-    let platform = platform.map(Platform::parse).transpose().map_err(usage)?;
+    let platform = platform
+        .map(|name| {
+            Platform::from_snake_case(name).ok_or_else(|| {
+                Error::unknown_name("platform", name, Platform::ALL.map(Platform::to_snake_case))
+            })
+        })
+        .transpose()
+        .map_err(usage)?;
     crate::capabilities_for_backend(platform, os_version, backend).map_err(usage)
 }
 
@@ -3380,7 +3387,16 @@ pub(crate) fn parse_text_op(op: &str, a: &TextArgs<'_>, names: &TextArgNames) ->
                     names.unit
                 ))
             })?;
-            let unit = TextUnit::parse(unit).map_err(|e| CliError::Usage(e.to_string()))?;
+            let unit = TextUnit::from_snake_case(unit).ok_or_else(|| {
+                CliError::Usage(
+                    Error::unknown_name(
+                        "text unit",
+                        unit,
+                        TextUnit::ALL.map(TextUnit::to_snake_case),
+                    )
+                    .to_string(),
+                )
+            })?;
             TextOp::RangeAt { offset, unit }
         }
         "lines" => {
@@ -3960,7 +3976,18 @@ pub(crate) fn relation_kind_names() -> Vec<&'static str> {
 pub(crate) fn parse_relation_kinds<S: AsRef<str>>(names: &[S]) -> CliResult<Vec<RelationKind>> {
     names
         .iter()
-        .map(|n| RelationKind::parse(n.as_ref()).map_err(|e| CliError::Usage(e.to_string())))
+        .map(|n| {
+            RelationKind::from_snake_case(n.as_ref()).ok_or_else(|| {
+                CliError::Usage(
+                    Error::unknown_name(
+                        "relation kind",
+                        n.as_ref(),
+                        RelationKind::ALL.map(RelationKind::to_snake_case),
+                    )
+                    .to_string(),
+                )
+            })
+        })
         .collect()
 }
 

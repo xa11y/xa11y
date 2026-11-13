@@ -127,20 +127,14 @@ impl TextUnit {
         }
     }
 
-    /// Parse the `snake_case` name. Unknown names fail with
-    /// [`Error::InvalidActionData`] listing the valid ones.
-    pub fn parse(name: &str) -> Result<Self> {
-        Ok(match name {
-            "character" => Self::Character,
-            "word" => Self::Word,
-            "line" => Self::Line,
-            "paragraph" => Self::Paragraph,
-            other => {
-                return Err(Error::invalid_action_data(format!(
-                    "unknown text unit {other:?}; expected one of character, word, line, paragraph"
-                )))
-            }
-        })
+    /// Every unit, in declaration order.
+    pub const ALL: [TextUnit; 4] = [Self::Character, Self::Word, Self::Line, Self::Paragraph];
+
+    /// The unit [`to_snake_case`](Self::to_snake_case) spells as `name`, or
+    /// `None`. [`Error::unknown_name`] builds the error for a name that is
+    /// not one.
+    pub fn from_snake_case(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|u| u.to_snake_case() == name)
     }
 }
 
@@ -1136,12 +1130,11 @@ mod tests {
     }
 
     #[test]
-    fn text_unit_parse() {
-        assert_eq!(TextUnit::parse("line").unwrap(), TextUnit::Line);
-        assert!(matches!(
-            TextUnit::parse("sentence"),
-            Err(Error::InvalidActionData { .. })
-        ));
+    fn text_unit_names_round_trip() {
+        for unit in TextUnit::ALL {
+            assert_eq!(TextUnit::from_snake_case(unit.to_snake_case()), Some(unit));
+        }
+        assert_eq!(TextUnit::from_snake_case("sentence"), None);
     }
 }
 

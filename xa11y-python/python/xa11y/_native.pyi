@@ -2009,7 +2009,7 @@ class Capabilities:
         """Shorthand for ``get(name).support``."""
     def note(self, name: str) -> str | None:
         """Shorthand for ``get(name).note``."""
-    def has(self, name: str) -> bool:
+    def contains(self, name: str) -> bool:
         """Whether ``name`` is a feature the table knows (also ``name in caps``)."""
     def __len__(self) -> int: ...
     def __contains__(self, name: object) -> bool: ...

@@ -224,7 +224,8 @@ pub(crate) fn semantics_from_attributes(role: Role, attrs: &HashMap<String, Stri
     });
     let own_or_container = |k: &str| get(k).or_else(|| get(&format!("container-{k}")));
     let live: xa11y_core::LiveRegionInfo = xa11y_core::LiveRegionParts {
-        politeness: own_or_container("live").and_then(xa11y_core::Politeness::parse),
+        politeness: own_or_container("live")
+            .and_then(|v| xa11y_core::Politeness::from_snake_case(&v.trim().to_ascii_lowercase())),
         atomic: own_or_container("atomic").and_then(|v| match v {
             "true" => Some(true),
             "false" => Some(false),

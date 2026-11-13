@@ -154,7 +154,7 @@ impl EventKind {
     /// capability table names each kind `event:<name>`, and
     /// [`SubscribeOptions::kinds`](crate::SubscribeOptions::kinds) takes
     /// these names.
-    pub fn name(&self) -> &'static str {
+    pub const fn to_snake_case(&self) -> &'static str {
         match self {
             Self::FocusChanged => "focus_changed",
             Self::ValueChanged => "value_changed",
@@ -173,17 +173,47 @@ impl EventKind {
             Self::Announcement => "announcement",
         }
     }
+
+    /// One value of every kind, in declaration order. `StateChanged`'s
+    /// payload is arbitrary: only the kind matters to the names derived from
+    /// it.
+    ///
+    /// `to_snake_case` is an exhaustive `match`, so a new variant cannot be
+    /// left unnamed; `every_event_kind_has_a_row` in `capabilities.rs` counts
+    /// this list against the capability table's event rows, so it cannot be
+    /// left out here either.
+    pub(crate) const EVERY: [EventKind; 15] = [
+        Self::FocusChanged,
+        Self::ValueChanged,
+        Self::NameChanged,
+        Self::StateChanged {
+            flag: StateFlag::Enabled,
+            value: true,
+        },
+        Self::StructureChanged,
+        Self::WindowOpened,
+        Self::WindowClosed,
+        Self::WindowActivated,
+        Self::WindowDeactivated,
+        Self::SelectionChanged,
+        Self::MenuOpened,
+        Self::MenuClosed,
+        Self::TextChanged,
+        Self::TextSelectionChanged,
+        Self::Announcement,
+    ];
 }
 
 /// Why an [`EventKind::Announcement`] was raised.
-#[allow(
-    clippy::exhaustive_enums,
-    reason = "Closed domain: every platform's announcement-like events are an \
-              explicit request, a live-region change or an alert (UIA \
-              Notification / LiveRegionChanged / SystemAlert)."
-)]
+///
+/// `#[non_exhaustive]`: the set follows what platforms report, not a closed
+/// domain, and a new source of announcements (a toast, a status-bar
+/// message) must not break consumers. Backends map platform events to an
+/// origin, never the reverse, and the bindings' string spelling is guarded
+/// by `[[types.variant_coverage]]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AnnouncementOrigin {
     /// An app asked for text to be spoken (UIA Notification,
     /// `AXAnnouncementRequested`, AT-SPI `Object:Announcement`).
@@ -300,8 +330,10 @@ reader_writer_pair! {
     ///
     /// Deliberately exhaustive, for the same reason as
     /// [`crate::ElementParts`]. `Event::new` is not a substitute: it takes
-    /// three of the five fields, so a new one would land beside `target` and
-    /// `timestamp` as a silent default rather than a compile error.
+    /// only the three required fields and defaults the rest (`target`,
+    /// `timestamp`, `text_change`, `announcement`, `sequence`), so a new one
+    /// would land beside them as a silent default rather than a compile
+    /// error.
     ///
     /// Not public API (`#[doc(hidden)]`).
     #[allow(
@@ -413,7 +445,8 @@ reader_writer_pair! {
 }
 
 impl Event {
-    /// An event with no `target` and `timestamp` set to now.
+    /// An event with `timestamp` set to now, `sequence` 0, and no `target`,
+    /// `text_change` or `announcement`.
     ///
     /// The *partial* construction path, for tests and for callers that only
     /// have the three required fields. A backend translating a real platform

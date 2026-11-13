@@ -65,13 +65,13 @@ opaque = [
     { type = "RowInfo", reason = "Python exposes a frozen RowInfo class; JS returns a plain object. Same split as Rect." },
     { type = "CollectionInfo", reason = "Python exposes a frozen CollectionInfo class; JS returns a plain object. Same split as Rect." },
     { type = "Capability", reason = "Python exposes a frozen Capability class; JS returns a plain { name, description, support, note, since } object. Same split as Rect: members are covered by the per-binding tests (test_capabilities.py, capabilities.test.js)." },
-    { type = "Platform", reason = "Crosses as the identically-spelled strings 'linux' | 'macos' | 'windows' via Platform::to_snake_case / Platform::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
+    { type = "Platform", reason = "Crosses as the identically-spelled strings 'linux' | 'macos' | 'windows' via Platform::to_snake_case / Platform::from_snake_case; an unknown name is rejected loudly through Error::unknown_name. See [[types.variant_coverage]]." },
     { type = "Support", reason = "Crosses as the identically-spelled strings 'supported' | 'partial' | 'unsupported' via Support::to_snake_case. See [[types.variant_coverage]]." },
     { type = "StaleReason", reason = "Crosses as the identically-spelled snake_case strings 'removed' | 'process_exited' | 'process_restarted' | 'identity_changed' | 'evicted', as the `reason` attribute of ElementStaleError in both bindings and the `stale_reason` of an MCP `element_stale` failure. See [[types.variant_coverage]]." },
     { type = "NodeIdentity", reason = "Not a binding class: Both bindings expose identity as an explicit live check: Python Element.same_as, JS Element.sameAs. Python == / hash stay object identity. The identity value itself is session-local and opaque." },
     { type = "Landmark", reason = "Crosses as the ARIA landmark role string ('main', 'navigation', 'contentinfo', ...) as Element.landmark_type / landmarkType, identically spelled in both bindings. See [[types.variant_coverage]]." },
     { type = "Politeness", reason = "Crosses as the strings 'off' | 'polite' | 'assertive' (LiveRegionInfo.politeness). See [[types.variant_coverage]]." },
-    { type = "RelationKind", reason = "Crosses as identically-spelled snake_case strings ('labelled_by', 'flows_to', ...): the `kind` of each Relation / CapturedRelation in both bindings, and the accepted names of its `kinds` argument, parsed by RelationKind::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
+    { type = "RelationKind", reason = "Crosses as identically-spelled snake_case strings ('labelled_by', 'flows_to', ...): the `kind` of each Relation / CapturedRelation in both bindings, and the accepted names of its `kinds` argument, parsed by RelationKind::from_snake_case, with an unknown name rejected loudly through Error::unknown_name. See [[types.variant_coverage]]." },
     { type = "AnnouncementInfo", reason = "Event.announcement: Python exposes a frozen AnnouncementInfo class; JS returns a plain { origin, text, politeness, platformPriority, activityId } object. Same split as LiveRegionInfo: covered by test_events_bounded.py and events-bounded.test.js." },
     { type = "AnnouncementOrigin", reason = "Crosses as the strings 'request' | 'live_region' | 'alert' (AnnouncementInfo.origin). See [[types.variant_coverage]]." },
     { type = "SubscribeOptions", reason = "Options struct for App::subscribe_with; its fields are the optional `kinds` / `buffer` parameters of the bindings' subscribe() (Python keywords, JS options object), per the options-struct fold." },
@@ -100,7 +100,7 @@ opaque = [
     { type = "TextAttributes", reason = "Python exposes a frozen TextAttributes class; JS returns a plain object. Same split as Rect." },
     { type = "Color", reason = "Crosses as a '#rrggbb' / '#rrggbbaa' string via Color::to_hex, matching its serde form." },
     { type = "TextScript", reason = "Crosses as the identically-spelled strings 'baseline' | 'superscript' | 'subscript' via TextScript::to_snake_case. See [[types.variant_coverage]]." },
-    { type = "TextUnit", reason = "Crosses as the identically-spelled strings 'character' | 'word' | 'line' | 'paragraph', parsed by TextUnit::parse, which rejects an unknown name loudly. See [[types.variant_coverage]]." },
+    { type = "TextUnit", reason = "Crosses as the identically-spelled strings 'character' | 'word' | 'line' | 'paragraph', parsed by TextUnit::from_snake_case, with an unknown name rejected loudly through Error::unknown_name. See [[types.variant_coverage]]." },
     { type = "AutoScrollOutcome", reason = "Outcomes cross the boundary as identically-spelled snake_case strings (`refused`, `no_effect`, `revealed`) via AutoScrollOutcome::to_snake_case, as the auto_scroll diagnosis field (Python attribute, JS `autoScroll`); the enum's variants are not mirrored as binding members. See [[types.variant_coverage]]." },
 ]
 
@@ -330,10 +330,9 @@ files = [
 # type. Members listed here are REQUIRED on the target binding type — this
 # replaces what used to be dozens of per-member allowlist entries.
 # Header kinds, text scripts and text units cross as identically-spelled
-# snake_case strings. Each binding maps them in a hand-written match (Python
-# through `to_snake_case` / `TextUnit::parse` in core, JS in its own arms), and
-# the TypeScript unions are hand-maintained, so a new variant could reach users
-# as a string their type checker rejects.
+# snake_case strings. Some binding arms are hand-written, and the Python
+# Literals and TypeScript unions are hand-maintained, so a new variant could
+# reach users as a string their type checker rejects.
 [[types.variant_coverage]]
 type = "HeaderKind"
 reason = "Crosses as 'column' | 'row'; the JS arms, the CLI/MCP `table` op parser and the Python Literal / TypeScript union are hand-written."
@@ -388,7 +387,7 @@ files = [
 ]
 [[types.variant_coverage]]
 type = "RelationKind"
-reason = "RelationKind::parse / to_snake_case do the conversion; the Python Literal and the TypeScript union are hand-written lists a new kind must join."
+reason = "RelationKind::from_snake_case / to_snake_case do the conversion; the Python Literal and the TypeScript union are hand-written lists a new kind must join."
 files = [
     { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake", within = "RelationKindName" },
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "RelationKindName" },
@@ -404,7 +403,7 @@ files = [
 ]
 [[types.variant_coverage]]
 type = "Platform"
-reason = "Crosses as 'linux' | 'macos' | 'windows' through Platform::to_snake_case / Platform::parse; the Python Literal, the TypeScript union and the capability table's per-platform columns are hand-written."
+reason = "Crosses as 'linux' | 'macos' | 'windows' through Platform::to_snake_case / Platform::from_snake_case; the Python Literal, the TypeScript union and the capability table's per-platform columns are hand-written."
 files = [
     "xa11y-core/src/capabilities.rs",
     { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake", within = "PlatformName" },
@@ -428,9 +427,8 @@ files = [
 ]
 [[types.variant_coverage]]
 type = "TextUnit"
-reason = "Crosses as 'character' | 'word' | 'line' | 'paragraph'; the JS parser and the Python Literal / TypeScript union are hand-written."
+reason = "Crosses as 'character' | 'word' | 'line' | 'paragraph', parsed in both bindings by TextUnit::from_snake_case; the Python Literal / TypeScript union are hand-written."
 files = [
-    "xa11y-js/src/text.rs",
     { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "TextUnitName" },
 ]

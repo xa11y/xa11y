@@ -99,6 +99,9 @@ pub(crate) fn origin_name(o: xa11y::AnnouncementOrigin) -> &'static str {
         xa11y::AnnouncementOrigin::Request => "request",
         xa11y::AnnouncementOrigin::LiveRegion => "live_region",
         xa11y::AnnouncementOrigin::Alert => "alert",
+        // `AnnouncementOrigin` is `#[non_exhaustive]`; variant coverage in the
+        // parity check fails the build before a new one reaches this arm.
+        other => other.to_snake_case(),
     }
 }
 

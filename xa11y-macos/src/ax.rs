@@ -3700,7 +3700,7 @@ fn document_semantics(attrs: &ResolvedAttrs, role: Role) -> AxSemantics {
         politeness: attrs
             .aria_live
             .as_deref()
-            .and_then(xa11y_core::Politeness::parse),
+            .and_then(|v| xa11y_core::Politeness::from_snake_case(&v.trim().to_ascii_lowercase())),
         atomic: attrs.aria_atomic,
         relevant: attrs.aria_relevant.clone().filter(|r| !r.is_empty()),
     }

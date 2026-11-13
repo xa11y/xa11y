@@ -550,7 +550,13 @@ pub enum Error {
     /// with a selector to act on whatever is there now.
     #[error("Element stale ({reason}): {element}")]
     ElementStale {
+        /// Why the element is stale: removed from the tree, its process
+        /// exited or restarted, its identity changed, or its handle was
+        /// evicted.
         reason: StaleReason,
+        /// What was captured, for the message: `role "name"`, the role
+        /// alone, or the handle (`handle:42`) when that is all the provider
+        /// still has. Descriptive only; never used to re-match.
         element: String,
     },
 
@@ -595,9 +601,16 @@ pub enum Error {
     /// the text is now.
     #[error("Invalid text range {start}..{end}{}: {message}", length.map(|l| format!(" (text length {l})")).unwrap_or_default())]
     InvalidTextRange {
+        /// Start of the rejected range, in UTF-16 code units. 0-based.
         start: u32,
+        /// End of the rejected range, exclusive, in UTF-16 code units.
+        /// 0-based.
         end: u32,
+        /// The text's length in UTF-16 code units when the check knew it,
+        /// else `None`.
         length: Option<u32>,
+        /// Which rule the range broke (past the end, reversed, splits a
+        /// surrogate pair).
         message: String,
     },
 
@@ -674,6 +687,38 @@ impl Error {
             message: message.into(),
             diagnosis: None,
         }
+    }
+
+    /// The [`Error::InvalidActionData`] for a name that is not one of
+    /// `valid`: it quotes the bad `input` and lists every valid name, so a
+    /// typo is fixable from the message alone. `what` names the vocabulary
+    /// (`"relation kind"`, `"text unit"`).
+    ///
+    /// The shared spelling for every `from_snake_case` caller that has to
+    /// turn `None` into an error:
+    ///
+    /// ```
+    /// use xa11y_core::{Error, TextUnit};
+    /// let err = TextUnit::from_snake_case("sentence")
+    ///     .ok_or_else(|| Error::unknown_name("text unit", "sentence",
+    ///         TextUnit::ALL.map(TextUnit::to_snake_case)))
+    ///     .unwrap_err();
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "Invalid action data: unknown text unit \"sentence\"; expected one of \
+    ///      \"character\", \"word\", \"line\", \"paragraph\"",
+    /// );
+    /// ```
+    pub fn unknown_name<'a>(
+        what: &str,
+        input: &str,
+        valid: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        let valid: Vec<String> = valid.into_iter().map(|n| format!("{n:?}")).collect();
+        Self::invalid_action_data(format!(
+            "unknown {what} {input:?}; expected one of {}",
+            valid.join(", ")
+        ))
     }
 
     /// An [`Error::ElementStale`] for `element` (a description such as

@@ -146,13 +146,13 @@ mod tests {
                     if cfg!(any(target_os = "linux", target_os = "windows")) {
                         continue;
                     }
-                    let unit = TextUnit::parse(name.trim_start_matches("text:range_at:"))
+                    let unit = TextUnit::from_snake_case(name.trim_start_matches("text:range_at:"))
                         .expect("the row names a text unit");
                     let text = entry.text();
                     check_call(name, cap, text.range_at(0, unit).map(|_| ()));
                 }
                 _ if name.starts_with("relation:") => {
-                    let kind = RelationKind::parse(name.trim_start_matches("relation:"))
+                    let kind = RelationKind::from_snake_case(name.trim_start_matches("relation:"))
                         .expect("the row names a relation kind");
                     check_call(name, cap, entry.relations(&[kind]).map(|_| ()));
                 }

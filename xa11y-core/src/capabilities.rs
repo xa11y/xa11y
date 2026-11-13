@@ -78,18 +78,13 @@ impl Platform {
         }
     }
 
-    /// Parse a platform name as [`to_snake_case`](Self::to_snake_case)
-    /// spells it. Fails with [`Error::InvalidActionData`] naming the valid
-    /// names.
-    pub fn parse(name: &str) -> Result<Platform> {
+    /// The platform [`to_snake_case`](Self::to_snake_case) spells as
+    /// `name`, or `None`. [`Error::unknown_name`] builds the error for a
+    /// name that is not one.
+    pub fn from_snake_case(name: &str) -> Option<Platform> {
         Platform::ALL
             .into_iter()
             .find(|p| p.to_snake_case() == name)
-            .ok_or_else(|| {
-                Error::invalid_action_data(format!(
-                    "unknown platform {name:?}; expected one of \"linux\", \"macos\", \"windows\""
-                ))
-            })
     }
 
     fn display_name(self) -> &'static str {
@@ -290,8 +285,8 @@ impl Capabilities {
         self.get(name).map(|c| c.note.as_deref())
     }
 
-    /// Whether `name` is a feature the table knows.
-    pub fn has(&self, name: &str) -> bool {
+    /// Whether `name` is a feature the table knows, whatever its support.
+    pub fn contains(&self, name: &str) -> bool {
         self.entries.iter().any(|c| c.name == name)
     }
 
@@ -504,10 +499,11 @@ fn probe_os_version() -> std::result::Result<Option<String>, String> {
     Ok(None)
 }
 
-/// The feature name of an event kind: `event:` plus [`EventKind::name`].
+/// The feature name of an event kind: `event:` plus
+/// [`EventKind::to_snake_case`].
 #[cfg(test)]
 fn event_feature(kind: &crate::EventKind) -> String {
-    format!("event:{}", kind.name())
+    format!("event:{}", kind.to_snake_case())
 }
 
 // ── The table ───────────────────────────────────────────────────────────────
@@ -1032,7 +1028,6 @@ const ROWS: &[Row] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::StateFlag;
 
     #[test]
     fn ia2_has_an_explicit_answer_for_every_row() {
@@ -1123,28 +1118,9 @@ mod tests {
 
     #[test]
     fn every_event_kind_has_a_row() {
-        let kinds = [
-            EventKind::FocusChanged,
-            EventKind::ValueChanged,
-            EventKind::NameChanged,
-            EventKind::StateChanged {
-                flag: StateFlag::Checked,
-                value: true,
-            },
-            EventKind::StructureChanged,
-            EventKind::WindowOpened,
-            EventKind::WindowClosed,
-            EventKind::WindowActivated,
-            EventKind::WindowDeactivated,
-            EventKind::SelectionChanged,
-            EventKind::MenuOpened,
-            EventKind::MenuClosed,
-            EventKind::TextChanged,
-            EventKind::TextSelectionChanged,
-            EventKind::Announcement,
-        ];
-        // The list above must name every kind: `event_feature` is exhaustive,
-        // so count its distinct names against the rows instead of trusting it.
+        let kinds = EventKind::EVERY;
+        // `EVERY` must name every kind: `event_feature` is exhaustive, so
+        // count its distinct names against the rows instead of trusting it.
         for kind in &kinds {
             let name = event_feature(kind);
             assert!(ROWS.iter().any(|r| r.name == name), "no row for {name}");
@@ -1165,7 +1141,7 @@ mod tests {
             "an event row has no EventKind, or the kind list is short"
         );
         // `subscribe_with` validates names against this list.
-        let names: Vec<&str> = kinds.iter().map(EventKind::name).collect();
+        let names: Vec<&str> = kinds.iter().map(EventKind::to_snake_case).collect();
         assert_eq!(names, crate::event_provider::KIND_NAMES);
     }
 
@@ -1262,8 +1238,9 @@ mod tests {
     #[test]
     fn platform_names_round_trip() {
         for p in Platform::ALL {
-            assert_eq!(Platform::parse(p.to_snake_case()).ok(), Some(p));
+            assert_eq!(Platform::from_snake_case(p.to_snake_case()), Some(p));
         }
-        assert!(Platform::parse("darwin").is_err());
+        assert_eq!(Platform::from_snake_case("darwin"), None);
+        assert_eq!(Platform::from_snake_case("Linux"), None);
     }
 }

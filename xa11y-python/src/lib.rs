@@ -901,7 +901,15 @@ impl Element {
         let kinds: Vec<xa11y::RelationKind> = kinds
             .unwrap_or_default()
             .iter()
-            .map(|k| xa11y::RelationKind::parse(k))
+            .map(|k| {
+                xa11y::RelationKind::from_snake_case(k).ok_or_else(|| {
+                    xa11y::Error::unknown_name(
+                        "relation kind",
+                        k,
+                        xa11y::RelationKind::ALL.map(xa11y::RelationKind::to_snake_case),
+                    )
+                })
+            })
             .collect::<xa11y::Result<_>>()
             .map_err(to_py_err)?;
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());

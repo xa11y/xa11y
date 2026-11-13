@@ -40,7 +40,7 @@ impl Subscription {
         }
     }
 
-    /// Keep only `kinds` (by [`EventKind::name`](crate::EventKind::name))
+    /// Keep only `kinds` (by [`EventKind::to_snake_case`](crate::EventKind::to_snake_case))
     /// and bound the buffer to `buffer` events. Events of other kinds
     /// already buffered are discarded.
     fn restrict(&self, kinds: Option<Vec<&'static str>>, buffer: usize) {
@@ -48,7 +48,9 @@ impl Subscription {
             Source::Ring(ring) => {
                 let mut state = ring.lock();
                 if let Some(kinds) = &kinds {
-                    state.queue.retain(|e| kinds.contains(&e.kind.name()));
+                    state
+                        .queue
+                        .retain(|e| kinds.contains(&e.kind.to_snake_case()));
                 }
                 state.kinds = kinds;
                 state.capacity = buffer;
@@ -266,7 +268,7 @@ impl EventReceiver {
                     let kinds = self.channel_kinds.lock().unwrap_or_else(|e| e.into_inner());
                     if kinds
                         .as_ref()
-                        .is_none_or(|k| k.contains(&event.kind.name()))
+                        .is_none_or(|k| k.contains(&event.kind.to_snake_case()))
                     {
                         return RecvStatus::Event(Box::new(event));
                     }
@@ -334,7 +336,7 @@ impl EventSender {
             return Err(EventSendError);
         }
         if let Some(kinds) = &state.kinds {
-            if !kinds.contains(&event.kind.name()) {
+            if !kinds.contains(&event.kind.to_snake_case()) {
                 return Ok(());
             }
         }
@@ -438,7 +440,7 @@ impl Drop for EventReceiver {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SubscribeOptions {
-    /// Event kinds to deliver, by [`EventKind::name`](crate::EventKind::name).
+    /// Event kinds to deliver, by [`EventKind::to_snake_case`](crate::EventKind::to_snake_case).
     /// Empty means every kind the backend reports.
     pub kinds: Vec<String>,
     /// Buffer size; `None` is [`DEFAULT_EVENT_BUFFER`].
@@ -471,24 +473,17 @@ pub fn event_kind_names() -> &'static [&'static str] {
     KIND_NAMES
 }
 
-/// Every event kind's name, in declaration order.
-pub(crate) const KIND_NAMES: &[&str] = &[
-    "focus_changed",
-    "value_changed",
-    "name_changed",
-    "state_changed",
-    "structure_changed",
-    "window_opened",
-    "window_closed",
-    "window_activated",
-    "window_deactivated",
-    "selection_changed",
-    "menu_opened",
-    "menu_closed",
-    "text_changed",
-    "text_selection_changed",
-    "announcement",
-];
+/// Every event kind's name, in declaration order: [`EventKind::to_snake_case`]
+/// over [`crate::EventKind::EVERY`], so the two cannot spell a kind differently.
+pub(crate) const KIND_NAMES: &[&str] = &{
+    let mut names = [""; crate::EventKind::EVERY.len()];
+    let mut i = 0;
+    while i < names.len() {
+        names[i] = crate::EventKind::EVERY[i].to_snake_case();
+        i += 1;
+    }
+    names
+};
 
 /// Subscribe `element` (an application) through `provider` with `options`.
 ///
@@ -515,10 +510,11 @@ pub fn subscribe_with(
         let mut names = Vec::with_capacity(options.kinds.len());
         for kind in &options.kinds {
             let Some(name) = KIND_NAMES.iter().find(|n| **n == kind.as_str()) else {
-                return Err(Error::invalid_action_data(format!(
-                    "unknown event kind {kind:?}; expected one of {}",
-                    KIND_NAMES.join(", ")
-                )));
+                return Err(Error::unknown_name(
+                    "event kind",
+                    kind,
+                    KIND_NAMES.iter().copied(),
+                ));
             };
             let feature = format!("event:{name}");
             if caps.support(&feature)? == crate::Support::Unsupported {
@@ -641,7 +637,7 @@ mod tests {
         tx.send(named(EventKind::Announcement)).expect("subscribed");
         tx.send(named(EventKind::ValueChanged)).expect("subscribed");
         let got: Vec<&str> = std::iter::from_fn(|| sub.try_recv())
-            .map(|e| e.kind.name())
+            .map(|e| e.kind.to_snake_case())
             .collect();
         assert_eq!(
             got,
