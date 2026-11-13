@@ -475,6 +475,10 @@ impl InputSim {
     /// `"\r\n"`, `"\r"` and `"\n"` each type one Return/Enter keypress, so in
     /// a single-line field this may activate the default button. `"\t"` types
     /// the Tab key, which can move focus to the next control.
+    ///
+    /// Rejects with `InvalidActionDataError`, typing nothing, while a
+    /// modifier pressed with `keyDown()` is still held: release it with
+    /// `keyUp()` first, or use `chord()` for a shortcut.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn type_text(&self, text: String) -> AsyncTask<KeyboardTask> {
         AsyncTask::new(KeyboardTask {
