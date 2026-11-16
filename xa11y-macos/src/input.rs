@@ -187,6 +187,8 @@ unsafe extern "C" {
 
     fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
 
+    fn CGEventSetLocation(event: CGEventRef, location: CGPoint);
+
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
 
     fn CGEventGetFlags(event: CGEventRef) -> u64;
@@ -858,8 +860,17 @@ impl InputProvider for MacOSInputProvider {
         if ev.is_null() {
             return Err(Error::platform(-1, "CGEventCreateScrollWheelEvent2 failed"));
         }
+        // A new event takes the pointer location of the moment, which can
+        // still be the old one while the move posted above is on its way.
+        let pt = CGPoint {
+            x: at.x as f64,
+            y: at.y as f64,
+        };
         // SAFETY: `ev` is a valid CGEventRef we just created.
-        unsafe { CGEventSetIntegerValueField(ev, K_CG_SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1) };
+        unsafe {
+            CGEventSetIntegerValueField(ev, K_CG_SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1);
+            CGEventSetLocation(ev, pt);
+        }
         self.post(ev)
     }
 

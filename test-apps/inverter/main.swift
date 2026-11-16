@@ -34,7 +34,6 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
     return Unmanaged.passUnretained(event)
   }
   let continuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
-  // Read every axis before the first write: a write to a DeltaAxis field makes CoreGraphics recompute the others.
   let before = axes.map { read(event, $0) }
   if !continuous {
     for (axis, value) in zip(axes, before) {
