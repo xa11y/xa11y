@@ -84,7 +84,6 @@ const K_CG_EVENT_KEY_UP: u32 = 11;
 
 // CGEventSourceStateID
 const K_CG_EVENT_SOURCE_STATE_PRIVATE: i32 = -1;
-const K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION: i32 = 0;
 
 // CGEventFlags (modifier flags applied at post time).
 const K_CG_EVENT_FLAG_MASK_SHIFT: u64 = 0x0002_0000;
@@ -194,8 +193,6 @@ unsafe extern "C" {
 
     fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
 
-    fn CGEventSourceFlagsState(state_id: i32) -> u64;
-
     fn CGEventKeyboardSetUnicodeString(event: CGEventRef, length: usize, chars: *const u16);
 }
 
@@ -237,9 +234,16 @@ pub struct MacOSInputProvider {
     /// created, and the window server applies a synthetic key-up a moment
     /// after the post. So after `chord("u", ["Meta"])`, the next "i" copied
     /// Cmd and arrived as Cmd+I (#681). `post` strips these flags from every
-    /// event until the session state no longer reports them, then forgets
-    /// them, so a modifier held on the physical keyboard after that is kept.
+    /// event until the next explicit `key_down` for that modifier. A clear
+    /// session sample is not an acknowledgement: older queued events can
+    /// still put the modifier back. Once explicitly controlled through this
+    /// provider, a modifier is governed by its key_down/key_up calls.
     released_flags: AtomicU64,
+}
+
+/// Explicit synthetic key state wins over asynchronous session snapshots.
+fn apply_modifier_state(flags: u64, held: u64, released: u64) -> u64 {
+    without_modifiers(flags, released & !held) | held
 }
 
 /// Quartz display bounds and CGEvent positions share the global logical
@@ -420,21 +424,11 @@ impl MacOSInputProvider {
         let held = self.held_flags.load(Ordering::SeqCst);
         // SAFETY: `event` is a valid CGEventRef we just created.
         let flags = unsafe { CGEventGetFlags(event) };
-        // Modifiers that xa11y released and the session still reports. Once
-        // the session no longer reports one, it is forgotten (see
-        // `released_flags`).
+        // A session-state sample cannot acknowledge a posted release: it can
+        // still describe the state before our chord, then later expose its
+        // key-down. Keep explicit releases authoritative until key_down.
         let released = self.released_flags.load(Ordering::SeqCst);
-        let stale = if released == 0 {
-            0
-        } else {
-            // SAFETY: CGEventSourceFlagsState takes a state ID and has no
-            // other preconditions.
-            let session =
-                unsafe { CGEventSourceFlagsState(K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION) };
-            self.released_flags
-                .fetch_and(session | !released, Ordering::SeqCst);
-            flags & released & !held
-        };
+        let stale = flags & released & !held;
         let borrowed = if flags & KEY_CODE_FLAGS == 0 {
             0
         } else {
@@ -449,7 +443,12 @@ impl MacOSInputProvider {
         };
         if held != 0 || borrowed != 0 || stale != 0 {
             // SAFETY: `event` is a valid CGEventRef we just created.
-            unsafe { CGEventSetFlags(event, without_modifiers(flags & !borrowed, stale) | held) };
+            unsafe {
+                CGEventSetFlags(
+                    event,
+                    apply_modifier_state(flags & !borrowed, held, released),
+                )
+            };
         }
         // SAFETY: `event` is a valid CGEventRef we just created; CGEventPost
         // takes an owned +0 borrow and does not consume it.
@@ -1086,6 +1085,24 @@ mod tests {
         assert_eq!(
             without_modifiers(current, MODIFIER_FLAGS & !held) | held,
             K_CG_EVENT_FLAG_MASK_SHIFT | NX_DEVICE_L_SHIFT_KEY_MASK | NON_COALESCED
+        );
+    }
+
+    #[test]
+    fn released_command_stays_released_across_delayed_session_updates() {
+        let cmd = K_CG_EVENT_FLAG_MASK_COMMAND;
+        let released = cmd;
+        // A clear snapshot may precede an older queued Cmd-down. Neither
+        // snapshot acknowledges delivery of our Cmd-up.
+        for session in [0, cmd, 0, cmd | NX_DEVICE_R_CMD_KEY_MASK, 0] {
+            assert_eq!(apply_modifier_state(session, 0, released), 0);
+        }
+        // An explicit new key-down wins over the prior release.
+        assert_eq!(apply_modifier_state(0, cmd, released), cmd);
+        // Untouched physical modifiers keep their original state.
+        assert_eq!(
+            apply_modifier_state(K_CG_EVENT_FLAG_MASK_SHIFT | cmd, 0, released),
+            K_CG_EVENT_FLAG_MASK_SHIFT
         );
     }
 

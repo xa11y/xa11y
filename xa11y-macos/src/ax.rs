@@ -3244,7 +3244,7 @@ fn describe_cached_target(fullscreen: &AttrProbe, settable: &AttrProbe) -> Strin
 /// is read for the re-issue decision and the diagnosis, but cannot confirm
 /// (see [`SettleRun`]).
 ///
-/// Every unconfirmed iteration re-issues `AXFullScreen = want`: a set that
+/// Each poll away from the desired state re-issues `AXFullScreen = want`: a set that
 /// lands mid-transition is discarded rather than queued (see the constants),
 /// and absolute sets make the repetition safe — with one exception. A desired
 /// state the window refuses to write (`AXFullScreen=true` with
@@ -3277,33 +3277,20 @@ fn settle_window_fullscreen(
     loop {
         let now = Instant::now();
         let sample = poll_target(app.as_ptr(), el_ptr, action, role)?;
-        let (reached, settable) = match &sample {
-            Some(sample) => sample.evaluate(want),
-            None => (false, None),
+        let reached = match &sample {
+            Some(sample) => sample.evaluate(want).0,
+            None => false,
         };
         run.observe(sample.as_ref(), reached, now);
         if run.confirmed(now) {
             return Ok(());
         }
-        // Re-issue the absolute set while the promise is unconfirmed — not
-        // only when the state still reads the wrong value: the entry
-        // transient reads the desired pair for a while (see the constants),
-        // and a set that lands mid-transition is discarded, so the loop keeps
-        // issuing until the confirmation proves the state committed. Setting
-        // the desired value on a window that already holds it is a no-op. An
-        // already-desired state on an attribute the window refuses to write
-        // (`AXFullScreen=true` with `IsAttributeSettable=false`) has nothing
-        // to set: issuing the write can be rejected and turn an advertised
-        // no-op `enter_fullscreen` into a failure, while the confirmation above
-        // still
-        // validates the read. The one expected failure is the invalidated
-        // object (`kAXErrorInvalidUIElement`): the set is retried on the next
-        // tick and recorded for the deadline diagnosis, superseded by a later
-        // successful retry. Every other failure is real — the settability
-        // probe and the snapshot reads propagate theirs — so it must not be
-        // retried into a generic timeout; it returns with its original code
-        // (tenet 1, tenet 6).
-        if !(reached && settable == Some(false)) {
+        // A reached sample needs confirmation, not another mutation. AppKit
+        // can reject even an absolute no-op during deminiaturization. Keep
+        // polling through the grace; if the state regresses (including the
+        // fullscreen entry transient), re-issue the set on that poll.
+        // Invalidated objects remain the only retryable write error.
+        if !reached {
             match set_bool_attr(el_ptr, "AXFullScreen", want, action, role) {
                 Ok(()) => {
                     // A later successful retry supersedes the recorded
