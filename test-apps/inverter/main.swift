@@ -6,11 +6,24 @@
 import CoreGraphics
 import Foundation
 
+let fixedPoint: Set<CGEventField> = [.scrollWheelEventFixedPtDeltaAxis1, .scrollWheelEventFixedPtDeltaAxis2]
 let axes: [CGEventField] = [
   .scrollWheelEventDeltaAxis1, .scrollWheelEventDeltaAxis2,
   .scrollWheelEventFixedPtDeltaAxis1, .scrollWheelEventFixedPtDeltaAxis2,
   .scrollWheelEventPointDeltaAxis1, .scrollWheelEventPointDeltaAxis2,
 ]
+
+func read(_ event: CGEvent, _ axis: CGEventField) -> Double {
+  fixedPoint.contains(axis) ? event.getDoubleValueField(axis) : Double(event.getIntegerValueField(axis))
+}
+
+func write(_ event: CGEvent, _ axis: CGEventField, _ value: Double) {
+  if fixedPoint.contains(axis) {
+    event.setDoubleValueField(axis, value: value)
+  } else {
+    event.setIntegerValueField(axis, value: Int64(value))
+  }
+}
 
 var port: CFMachPort?
 var inverted = 0
@@ -18,12 +31,19 @@ var inverted = 0
 let callback: CGEventTapCallBack = { _, type, event, _ in
   if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
     CGEvent.tapEnable(tap: port!, enable: true)
-  } else if event.getIntegerValueField(.scrollWheelEventIsContinuous) == 0 {
-    for axis in axes {
-      event.setIntegerValueField(axis, value: -event.getIntegerValueField(axis))
+    return Unmanaged.passUnretained(event)
+  }
+  let continuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
+  // Read every axis before the first write: a write to a DeltaAxis field makes CoreGraphics recompute the others.
+  let before = axes.map { read(event, $0) }
+  if !continuous {
+    for (axis, value) in zip(axes, before) {
+      write(event, axis, -value)
     }
     inverted += 1
   }
+  let after = axes.map { read(event, $0) }
+  FileHandle.standardError.write("continuous=\(continuous) at=\(event.location) before=\(before) after=\(after)\n".data(using: .utf8)!)
   return Unmanaged.passUnretained(event)
 }
 

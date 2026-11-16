@@ -68,8 +68,8 @@ def test_scroll_keeps_its_direction_while_a_wheel_inverter_runs(app):
         value = wait_for(view, "↓↑→")
     finally:
         inverter.terminate()
-        report, _ = inverter.communicate(timeout=10)
+        report, events = inverter.communicate(timeout=10)
     assert "enabled=true" in report, f"the inverter was not on: {report}"
     assert value == "↓↑→", (
-        f"Wheel Events kept {value!r}, not '↓↑→'; the inverter reported {report.strip()}"
+        f"Wheel Events kept {value!r}, not '↓↑→'; the inverter reported {report.strip()}\n{events}"
     )
