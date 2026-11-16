@@ -73,11 +73,15 @@ const K_CG_MOUSE_BUTTON_RIGHT: u32 = 1;
 const K_CG_MOUSE_BUTTON_CENTER: u32 = 2;
 
 // CGScrollEventUnit
-const K_CG_SCROLL_EVENT_UNIT_LINE: u32 = 1;
+const K_CG_SCROLL_EVENT_UNIT_PIXEL: u32 = 0;
+
+/// The points that macOS scrolls for one line of a line-unit wheel event.
+const POINTS_PER_TICK: i32 = 10;
 
 // CGEventField
 const K_CG_MOUSE_EVENT_CLICK_STATE: u32 = 1;
 const K_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
+const K_CG_SCROLL_WHEEL_EVENT_IS_CONTINUOUS: u32 = 88;
 
 const K_CG_EVENT_KEY_DOWN: u32 = 10;
 const K_CG_EVENT_KEY_UP: u32 = 11;
@@ -824,21 +828,27 @@ impl InputProvider for MacOSInputProvider {
         // before the first OS call: `i32::MIN` has no negation, and a refused
         // delta must not leave the pointer moved.
         let negate = |axis: &str, n: i32| {
-            n.checked_neg().ok_or_else(|| {
-                Error::invalid_action_data(format!(
-                    "scroll delta {axis}={n} cannot be reversed for Quartz's wheel direction"
-                ))
-            })
+            n.checked_neg()
+                .and_then(|n| n.checked_mul(POINTS_PER_TICK))
+                .ok_or_else(|| {
+                    Error::invalid_action_data(format!(
+                        "scroll delta {axis}={n} cannot be reversed for Quartz's wheel direction"
+                    ))
+                })
         };
         let wheel1 = negate("dy", delta.dy)?;
         let wheel2 = negate("dx", delta.dx)?;
         self.validate_pointer_target(at)?;
         self.move_pointer(at)?;
+        // A continuous pixel event, as a trackpad gives. Wheel inverters
+        // (Scroll Reverser, UnnaturalScrollWheels, Mos) flip line events, the
+        // events of a mouse wheel, and leave continuous ones alone, so a line
+        // event scrolled the other way on a Mac that runs one.
         // SAFETY: nil source is valid.
         let ev = unsafe {
             CGEventCreateScrollWheelEvent2(
                 std::ptr::null_mut(),
-                K_CG_SCROLL_EVENT_UNIT_LINE,
+                K_CG_SCROLL_EVENT_UNIT_PIXEL,
                 2,
                 wheel1,
                 wheel2,
@@ -848,6 +858,8 @@ impl InputProvider for MacOSInputProvider {
         if ev.is_null() {
             return Err(Error::platform(-1, "CGEventCreateScrollWheelEvent2 failed"));
         }
+        // SAFETY: `ev` is a valid CGEventRef we just created.
+        unsafe { CGEventSetIntegerValueField(ev, K_CG_SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1) };
         self.post(ev)
     }
 
