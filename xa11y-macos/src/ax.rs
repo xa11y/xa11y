@@ -1162,7 +1162,7 @@ fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
 /// An open context menu is an `AXMenu` child of the application, never an
 /// entry in `AXWindows`. Search walks `AXChildren`, so a listing built from
 /// `AXWindows` alone missed a menu that a selector found (issue #518). The
-/// menu bar stays out, as it does for search (`should_filter_child_with_role`).
+/// menu bar and the Touch Bar (`AXFunctionRowTopLevelElement`) stay out.
 /// Both reads are error-preserving, like [`ax_windows`]: a child that vanished
 /// between the reads is dropped, any other unreadable role is an error.
 fn app_top_level_children(app: AXUIElementRef) -> Result<Vec<AXElement>> {
@@ -1202,6 +1202,14 @@ fn app_top_level_children(app: AXUIElementRef) -> Result<Vec<AXElement>> {
         }
     }
     Ok(out)
+}
+
+/// A child from [`MacOSProvider::listed_children`], with the role strings the
+/// listing read.
+struct ListedChild {
+    ax: AXElement,
+    role: String,
+    subrole: Option<String>,
 }
 
 /// Read an attribute holding an array of accessibility elements, preserving
@@ -4943,10 +4951,6 @@ impl MacOSProvider {
         child_subrole: Option<&str>,
         child: &AXElement,
     ) -> bool {
-        if parent_role == Role::Application && child_role == "AXMenuBar" {
-            return true;
-        }
-
         if parent_role == Role::Window {
             let sr = child_subrole.unwrap_or("");
             if matches!(
@@ -4982,15 +4986,9 @@ impl MacOSProvider {
         parent: &ElementData,
         children: &[AXElement],
     ) -> Result<Vec<ElementData>> {
-        let role = parent.role;
-        let name = parent.name.as_deref();
-        let filtered: Vec<&AXElement> = children
-            .iter()
-            .filter(|child| !Self::should_filter_child(role, name, child))
-            .collect();
-        let built: Vec<Result<ElementData>> = filtered
+        let built: Vec<Result<ElementData>> = children
             .par_iter()
-            .map(carry_deadline(|child: &&AXElement| {
+            .map(carry_deadline(|child: &AXElement| {
                 self.build_element_data(child, parent.pid)
             }))
             .collect();
@@ -5007,21 +5005,35 @@ impl MacOSProvider {
         Ok(results)
     }
 
-    /// Convenience wrapper that fetches role/subrole before filtering.
-    fn should_filter_child(
+    /// The children of `parent` as both `get_children` and search see them:
+    /// an application's top-level children (see [`app_top_level_children`]),
+    /// any other element's `AXChildren`, without window chrome. Each comes
+    /// with the role and subrole read to filter it.
+    fn listed_children(
+        parent: &AXElement,
         parent_role: Role,
         parent_name: Option<&str>,
-        child: &AXElement,
-    ) -> bool {
-        let child_role = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
-        let child_subrole = ax_string(child.as_ptr(), "AXSubrole");
-        Self::should_filter_child_with_role(
-            parent_role,
-            parent_name,
-            &child_role,
-            child_subrole.as_deref(),
-            child,
-        )
+    ) -> Result<Vec<ListedChild>> {
+        let children = match parent_role {
+            Role::Application => app_top_level_children(parent.as_ptr())?,
+            _ => ax_children(parent.as_ptr()),
+        };
+        let listed: Vec<Option<ListedChild>> = children
+            .into_par_iter()
+            .map(carry_deadline(|ax: AXElement| {
+                let role = ax_string(ax.as_ptr(), "AXRole").unwrap_or_default();
+                let subrole = ax_string(ax.as_ptr(), "AXSubrole");
+                let chrome = Self::should_filter_child_with_role(
+                    parent_role,
+                    parent_name,
+                    &role,
+                    subrole.as_deref(),
+                    &ax,
+                );
+                (!chrome).then_some(ListedChild { ax, role, subrole })
+            }))
+            .collect();
+        Ok(listed.into_iter().flatten().collect())
     }
 
     /// Parallel DFS over the AX subtree, evaluating every clause's first
@@ -5048,34 +5060,20 @@ impl MacOSProvider {
         depth: u32,
         max_depth: u32,
         limit: Option<usize>,
-    ) -> Vec<(usize, AXElement)> {
+    ) -> Result<Vec<(usize, AXElement)>> {
         if depth > max_depth {
-            return vec![];
+            return Ok(vec![]);
         }
 
-        let children = ax_children(parent.as_ptr());
+        let children = Self::listed_children(parent, parent_role, parent_name)?;
 
         // Process children in parallel: check each clause + recurse.
         let per_child_results: Vec<Vec<(usize, AXElement)>> = children
             .par_iter()
-            .map(carry_deadline(|child: &AXElement| {
+            .map(carry_deadline(|listed: &ListedChild| -> Result<_> {
                 let mut child_results: Vec<(usize, AXElement)> = Vec::new();
-
-                // Fetch role+subrole once — used for filter, match, and recursion.
-                let role_str = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
-                let subrole_str = ax_string(child.as_ptr(), "AXSubrole");
-
-                if Self::should_filter_child_with_role(
-                    parent_role,
-                    parent_name,
-                    &role_str,
-                    subrole_str.as_deref(),
-                    child,
-                ) {
-                    return child_results;
-                }
-
-                let child_role = map_ax_role(&role_str, subrole_str.as_deref());
+                let child = &listed.ax;
+                let child_role = map_ax_role(&listed.role, listed.subrole.as_deref());
 
                 for (idx, simple) in clauses.iter().enumerate() {
                     if matches_ax_with_role(child.as_ptr(), simple, Some(child_role), pid) {
@@ -5094,12 +5092,12 @@ impl MacOSProvider {
                     depth + 1,
                     max_depth,
                     limit,
-                );
+                )?;
                 child_results.extend(sub);
 
-                child_results
+                Ok(child_results)
             }))
-            .collect();
+            .collect::<Result<_>>()?;
 
         // Merge results, respecting limit.
         let mut results = Vec::new();
@@ -5108,12 +5106,12 @@ impl MacOSProvider {
                 results.push(elem);
                 if let Some(limit) = limit {
                     if results.len() >= limit {
-                        return results;
+                        return Ok(results);
                     }
                 }
             }
         }
-        results
+        Ok(results)
     }
 
     // ── Shell surfaces ───────────────────────────────────────────────────
@@ -5124,10 +5122,10 @@ impl MacOSProvider {
     // element, and Finder's desktop scroll area. Every root is an element
     // the platform itself vends — xa11y adds the tag, never the node.
     //
-    // None of them touches `should_filter_child_with_role`'s `AXMenuBar`
-    // drop (PROPOSAL §5): app trees stay exactly as they are, and these
-    // surfaces reach the same elements through a root the caller asked for
-    // by name.
+    // None of them adds the `AXMenuBar` to an application's child list
+    // (`app_top_level_children`, PROPOSAL §5): app trees stay exactly as they
+    // are, and these surfaces reach the same elements through a root the
+    // caller asked for by name.
 
     /// Messaging timeout for one shell-surface probe, in seconds.
     ///
@@ -5660,19 +5658,12 @@ impl Provider for MacOSProvider {
             Some(element_data) => {
                 let ax = self.get_cached(element_data.handle)?;
 
-                // An Application element's children are its top-level
-                // windows (`AXWindows`) followed by any app-level `AXMenu`,
-                // such as an open context menu, which search reaches through
-                // `AXChildren` and `AXWindows` never lists (see
-                // `app_top_level_children`). Every other role keeps the raw
-                // `AXChildren` walk. The application read is error-preserving
-                // on purpose: a dead app must report its failure, not an
-                // empty list (tenet 1).
-                let ax_children_list = match element_data.role {
-                    Role::Application => app_top_level_children(ax.as_ptr())?,
-                    _ => ax_children(ax.as_ptr()),
-                };
-                self.snapshot_children(element_data, &ax_children_list)
+                let listed: Vec<AXElement> =
+                    Self::listed_children(&ax, element_data.role, element_data.name.as_deref())?
+                        .into_iter()
+                        .map(|child| child.ax)
+                        .collect();
+                self.snapshot_children(element_data, &listed)
             }
         }
     }
@@ -5767,7 +5758,7 @@ impl Provider for MacOSProvider {
                 0,
                 max_depth_val,
                 walk_limit,
-            );
+            )?;
 
             // Snapshot phase-1 hits in walk order, bucketed by the clause each
             // belongs to. The per-clause entries keep their original walk
