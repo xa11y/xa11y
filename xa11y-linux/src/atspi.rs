@@ -19,6 +19,8 @@ use zbus::DBusError;
 use crate::window::{ActiveWindow, WindowManager};
 
 mod bounded;
+#[cfg(test)]
+mod bus_daemon_tests;
 mod rich;
 pub(crate) use rich::{read_offset_unit_unless_gone, OffsetUnit};
 
@@ -666,7 +668,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         match proxy.get_property::<String>("Name") {
             Ok(name) => Ok(Some(name)),
-            Err(e) if is_peer_gone(&e) || is_absent_member(&e) => Ok(None),
+            Err(e) if is_gone(&proxy, &e) => Ok(None),
             Err(e) if is_timeout(&e) => Err(self.unresponsive_peer(aref, "Accessible.Name")),
             Err(e) => Err(Error::platform(
                 -1,
@@ -689,7 +691,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = match proxy.call_method("GetChildren", &()) {
             Ok(reply) => reply,
-            Err(e) if is_peer_gone(&e) || is_absent_member(&e) => return Ok(None),
+            Err(e) if is_gone(&proxy, &e) => return Ok(None),
             Err(e) if is_timeout(&e) => {
                 return Err(self.unresponsive_peer(aref, "Accessible.GetChildren"))
             }
@@ -721,7 +723,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = match proxy.call_method("GetState", &()) {
             Ok(reply) => reply,
-            Err(e) if is_peer_gone(&e) || is_absent_member(&e) => return Ok(None),
+            Err(e) if is_gone(&proxy, &e) => return Ok(None),
             Err(e) if is_timeout(&e) => {
                 return Err(self.unresponsive_peer(aref, "Accessible.GetState"))
             }
@@ -845,7 +847,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = match proxy.call_method("GetRole", &()) {
             Ok(reply) => reply,
-            Err(e) if is_peer_gone(&e) => return Ok(None),
+            Err(e) if left_bus(&proxy, &e) => return Ok(None),
             Err(e) => return Err(Error::platform(-1, format!("GetRole failed: {}", e))),
         };
         reply
@@ -874,7 +876,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = match proxy.call_method("GetAttributes", &()) {
             Ok(reply) => reply,
-            Err(e) if is_peer_gone(&e) => return Ok(None),
+            Err(e) if left_bus(&proxy, &e) => return Ok(None),
             Err(e) if is_absent_member(&e) => return Ok(Some(None)),
             Err(e) if is_timeout(&e) => {
                 return Err(self.unresponsive_peer(aref, "Accessible.GetAttributes"))
@@ -2480,7 +2482,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = match proxy.call_method(method, &args) {
             Ok(reply) => reply,
-            Err(e) if is_peer_gone(&e) || is_absent_member(&e) => return Ok(None),
+            Err(e) if is_gone(&proxy, &e) => return Ok(None),
             Err(e) if is_timeout(&e) => {
                 return Err(self.unresponsive_peer(aref, &format!("Accessible.{method}")))
             }
@@ -2502,31 +2504,18 @@ impl LinuxProvider {
         })
     }
 
-    /// Whether `bus_name` still has an owner on the accessibility bus. A
-    /// unique name (`:1.42`) is never reused within one bus lifetime, so
-    /// `false` means the process that served it is gone.
-    fn bus_has_owner(&self, bus_name: &str) -> Result<bool> {
-        let proxy = self.make_proxy(
-            "org.freedesktop.DBus",
-            "/org/freedesktop/DBus",
-            "org.freedesktop.DBus",
-        )?;
-        let reply = proxy
-            .call_method("NameHasOwner", &(bus_name,))
-            .map_err(|e| Error::platform(-1, format!("NameHasOwner({bus_name}) failed: {e}")))?;
-        reply.body().deserialize::<bool>().map_err(|e| {
-            Error::platform(
-                -1,
-                format!("NameHasOwner({bus_name}) reply did not decode: {e}"),
-            )
-        })
-    }
-
     /// The stale error for an object that stopped answering: its process
-    /// exited when its bus name has no owner, otherwise the object was
-    /// removed.
+    /// exited when its bus name has no owner (a unique name is never reused
+    /// within one bus lifetime), otherwise the object was removed.
     fn gone(&self, aref: &AccessibleRef, subject: String) -> Error {
-        match self.bus_has_owner(&aref.bus_name) {
+        let has_owner = self
+            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")
+            .and_then(|proxy| {
+                proxy.destination_has_owner().map_err(|e| {
+                    Error::platform(-1, format!("NameHasOwner({}) failed: {e}", aref.bus_name))
+                })
+            });
+        match has_owner {
             Ok(false) => Error::stale(xa11y_core::StaleReason::ProcessExited, subject),
             Ok(true) => Error::stale(xa11y_core::StaleReason::Removed, subject),
             Err(e) => e,
@@ -3422,8 +3411,8 @@ impl Provider for LinuxProvider {
                 // is in the reply, not missing from it. (AccessKit does serve
                 // this one; the bridges that skip it are the reason the split
                 // is here rather than only on the role.) Every other D-Bus
-                // outcome — ServiceUnknown, NoReply, a timeout, a dropped
-                // connection — still fails the listing.
+                // outcome — `NoReply` from an application still on the bus, a
+                // timeout, a dropped connection — still fails the listing.
                 let Some(attributes) = self
                     .scan_attributes(top)
                     .map_err(|e| classify_failure(&app, top, e))?
@@ -5534,9 +5523,9 @@ const ABSENT_MEMBER_ERRORS: [&str; 3] = [
 /// application that quits between `list_apps()` and those reads answers with
 /// one of these. That is genuine absence — the process and its surfaces are
 /// gone — not a failure to hide (tenet 1): there is nothing left to report and
-/// nothing a caller could do about it. A hung or broken application is a
-/// different outcome and stays a failure: it answers `NoReply` or `Timeout`, or
-/// does not answer at all.
+/// nothing a caller could do about it. An application that quits while a call
+/// to it is pending gets `NoReply` instead, which [`left_bus`] tells apart from
+/// a hung or broken application; those stay failures.
 ///
 /// Kept separate from [`ABSENT_MEMBER_ERRORS`] because the two are different
 /// axes — "this object does not implement that member" versus "this bus name
@@ -5546,28 +5535,47 @@ const PEER_GONE_ERRORS: [&str; 2] = [
     "org.freedesktop.DBus.Error.NameHasNoOwner",
 ];
 
-/// Whether a failed D-Bus call means the peer left the bus (see
-/// [`PEER_GONE_ERRORS`]).
-///
-/// Matches the structured error name for the same reason
-/// [`is_absent_member`] does, never a substring of a formatted message.
-fn is_peer_gone(err: &zbus::Error) -> bool {
+const NO_REPLY: &str = "org.freedesktop.DBus.Error.NoReply";
+
+/// Whether a failed D-Bus call carries one of `names` as its structured error
+/// name, never a substring of a formatted message.
+fn error_named(err: &zbus::Error, names: &[&str]) -> bool {
     match err {
-        zbus::Error::MethodError(name, ..) => PEER_GONE_ERRORS.contains(&name.as_str()),
+        zbus::Error::MethodError(name, ..) => names.contains(&name.as_str()),
         // Property reads go through `org.freedesktop.DBus.Properties`, whose
         // error replies zbus surfaces as a structured `fdo::Error` instead.
-        zbus::Error::FDO(e) => PEER_GONE_ERRORS.contains(&e.name().as_str()),
+        zbus::Error::FDO(e) => names.contains(&e.name().as_str()),
         _ => false,
     }
 }
 
-/// Whether a failed D-Bus call means the object or its application is gone:
-/// an absent member (see [`is_absent_member`]; GDBus answers a destroyed
-/// object with `UnknownMethod`) or a departed peer (see [`is_peer_gone`]).
-/// Only for members every accessible implements, where absence can mean
-/// nothing else.
-pub(crate) fn is_gone(err: &zbus::Error) -> bool {
-    is_absent_member(err) || is_peer_gone(err)
+/// Whether a failed D-Bus call means the peer left the bus before the call
+/// was delivered (see [`PEER_GONE_ERRORS`]).
+fn is_peer_gone(err: &zbus::Error) -> bool {
+    error_named(err, &PEER_GONE_ERRORS)
+}
+
+/// Whether `err`, from a read made through `proxy`, means the application
+/// left the bus.
+///
+/// `NoReply` alone does not say: the bus daemon sends it when the peer
+/// disconnects with the call pending and when its own reply timeout expires,
+/// and a peer can return it itself. A unique name is never reused, so after a
+/// `NoReply` the bus's answer to `NameHasOwner` decides. Only for reads: a
+/// write that got `NoReply` may have run before the application left.
+pub(crate) fn left_bus(proxy: &Proxy<'_>, err: &zbus::Error) -> bool {
+    is_peer_gone(err)
+        // A failed owner query leaves `err` to be reported as it is.
+        || (error_named(err, &[NO_REPLY]) && matches!(proxy.destination_has_owner(), Ok(false)))
+}
+
+/// Whether a failed read through `proxy` means the object or its application
+/// is gone: an absent member (see [`is_absent_member`]; GDBus answers a
+/// destroyed object with `UnknownMethod`) or a departed peer (see
+/// [`left_bus`]). Only for members every accessible implements, where
+/// absence can mean nothing else.
+pub(crate) fn is_gone(proxy: &Proxy<'_>, err: &zbus::Error) -> bool {
+    is_absent_member(err) || left_bus(proxy, err)
 }
 
 /// Whether a failed D-Bus call means the member is absent (see
@@ -5579,11 +5587,7 @@ pub(crate) fn is_gone(err: &zbus::Error) -> bool {
 /// Every other `zbus::Error` (no reply, a timeout, a service that left the
 /// bus, a broken connection) is a genuine failure and stays one.
 fn is_absent_member(err: &zbus::Error) -> bool {
-    match err {
-        zbus::Error::MethodError(name, ..) => ABSENT_MEMBER_ERRORS.contains(&name.as_str()),
-        zbus::Error::FDO(e) => ABSENT_MEMBER_ERRORS.contains(&e.name().as_str()),
-        _ => false,
-    }
+    error_named(err, &ABSENT_MEMBER_ERRORS)
 }
 
 /// Re-word a classification failure so it names the top-level that would not
