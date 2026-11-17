@@ -742,12 +742,35 @@ class KeyEventView: NSView {
 /// Keeps the direction of each scroll event it receives: "↓" for one that
 /// scrolls toward the end of the content, "↑" toward the start, "→" and "←"
 /// for the horizontal axis. Focusing it clears what it kept.
-class WheelEventView: NSView {
+class WheelContentView: NSView {
+    override var isFlipped: Bool { true }
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Wheel Content Offset" }
+    override func accessibilityValue() -> Any? {
+        let origin = superview?.bounds.origin ?? .zero
+        return "\(origin.x),\(origin.y)"
+    }
+}
+
+class WheelEventView: NSScrollView {
     private var directions = ""
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // A real AppKit scroller: record direction and let NSScrollView move
+        // its document, so tests observe distance as well as event delivery.
+        documentView = WheelContentView(frame: NSRect(x: 0, y: 0, width: 2000, height: 2000))
+        contentView.scroll(to: NSPoint(x: 400, y: 400))
+        reflectScrolledClipView(contentView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     override var acceptsFirstResponder: Bool { true }
 
     override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
         if event.scrollingDeltaY != 0 {
             directions.append(event.scrollingDeltaY < 0 ? "↓" : "↑")
         }

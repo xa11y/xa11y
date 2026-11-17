@@ -73,3 +73,24 @@ def test_scroll_keeps_its_direction_while_a_wheel_inverter_runs(app):
     assert value == "↓↑→", (
         f"Wheel Events kept {value!r}, not '↓↑→'; the inverter reported {report.strip()}\n{events}"
     )
+
+
+@pytest.mark.parametrize("dx,dy", [(0, 3), (0, -3), (3, 0), (-3, 0)])
+@pytest.mark.xa11y_requires("input_sim")
+@pytest.mark.xa11y_frontmost
+def test_continuous_scroll_moves_an_appkit_document_by_ten_points_per_tick(app, dx, dy):
+    view = app.locator('[name="Wheel Events"]')
+    content = app.locator('[name="Wheel Content Offset"]')
+
+    def offset():
+        return tuple(float(n) for n in content.element().value.split(","))
+
+    before = offset()
+    xa11y.input_sim().scroll(view.element(), dx=dx, dy=dy)
+    expected = (before[0] + 10 * dx, before[1] + 10 * dy)
+    deadline = time.monotonic() + SETTLE_TIMEOUT
+    after = offset()
+    while time.monotonic() < deadline and after != pytest.approx(expected, abs=1):
+        time.sleep(0.05)
+        after = offset()
+    assert after == pytest.approx(expected, abs=1), (before, after, expected)
