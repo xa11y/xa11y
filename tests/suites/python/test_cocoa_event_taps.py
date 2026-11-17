@@ -111,3 +111,38 @@ def test_a_tap_that_drops_keys_gives_an_error_that_names_its_program(app):
     assert any(str(TAPS) in c for c in raised.value.candidates), raised.value.candidates
     xa11y.input_sim().press("y")
     assert wait_for(view, "y") == "y"
+
+
+@pytest.mark.xa11y_requires("input_sim")
+@pytest.mark.xa11y_frontmost
+def test_replacement_events_without_the_marker_are_acknowledged(app):
+    view = key_events(app)
+    tap = Tap("--events", "keys,flags", "--replace")
+    try:
+        sim = xa11y.input_sim()
+        sim.press("i")
+        sim.type_text("ab")
+        assert wait_for(view, "iab") == "iab"
+    finally:
+        report = tap.stop()
+    assert int(report["held"]) >= 6, report
+
+
+@pytest.mark.xa11y_requires("input_sim")
+@pytest.mark.xa11y_frontmost
+def test_uncertain_modifier_release_does_not_restore_stale_flags(app):
+    view = key_events(app)
+    sim = xa11y.input_sim()
+    tap = Tap("--events", "flags", "--drop-command-release")
+    try:
+        sim.key_down("Meta")
+        with pytest.raises(xa11y.TimeoutError):
+            sim.key_up("Meta")
+        # Inspect the provider before a retry can repair its bookkeeping.
+        sim.press("i")
+        assert wait_for(view, "i") == "i"
+    finally:
+        tap.stop()
+        # An explicit retry restores the native session even if a filter dropped
+        # the first release. It must also clear the provider's modifier record.
+        sim.key_up("Meta")

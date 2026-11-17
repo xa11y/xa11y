@@ -19,6 +19,8 @@ var location = CGEventTapLocation.cghidEventTap
 var mask: CGEventMask = 0
 var delayUs: UInt32 = 0
 var drop = false
+var replace = false
+var dropRelease = false
 var args = CommandLine.arguments.dropFirst()
 while let arg = args.popFirst() {
   switch arg {
@@ -29,6 +31,8 @@ while let arg = args.popFirst() {
     guard let ms = UInt32(args.popFirst() ?? "") else { fail("--delay-ms takes a number") }
     delayUs = ms * 1000
   case "--drop": drop = true
+  case "--replace": replace = true
+  case "--drop-command-release": dropRelease = true
   case "--events":
     for name in (args.popFirst() ?? "").split(separator: ",") {
       guard let types = groups[String(name)] else { fail("--events takes keys,flags") }
@@ -51,7 +55,15 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
   }
   held += 1
   usleep(delayUs)
-  return drop ? nil : Unmanaged.passUnretained(event)
+  if drop || (dropRelease && type == .flagsChanged && !event.flags.contains(.maskCommand)) {
+    return nil
+  }
+  if replace {
+    guard let copy = event.copy() else { fail("CGEvent copy failed") }
+    copy.setIntegerValueField(.eventSourceUserData, value: 0)
+    return Unmanaged.passRetained(copy)
+  }
+  return Unmanaged.passUnretained(event)
 }
 
 setvbuf(stdout, nil, _IOLBF, 0)

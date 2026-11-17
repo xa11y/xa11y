@@ -9,10 +9,10 @@
 //! for that before it posts the next event. A dropped event gives an error
 //! that names the filtering taps.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
-use std::sync::{mpsc, Condvar, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use core_foundation::base::TCFType;
@@ -92,6 +92,7 @@ unsafe extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGGetEventTapList(max: u32, list: *mut CGEventTapInformation, count: *mut u32) -> i32;
     fn CGEventGetType(event: CGEventRef) -> u32;
+    fn CGEventGetTimestamp(event: CGEventRef) -> u64;
     fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
     fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
 }
@@ -106,42 +107,60 @@ unsafe extern "C" {
 }
 
 pub(crate) struct Arrivals {
-    arrived: Mutex<BTreeSet<u64>>,
+    state: Mutex<ArrivalState>,
     changed: Condvar,
     next: AtomicU64,
     port: AtomicPtr<c_void>,
 }
 
-static ARRIVALS: OnceLock<std::result::Result<&'static Arrivals, String>> = OnceLock::new();
-
-/// The process-wide arrival monitor, started on first use.
-pub(crate) fn arrivals() -> Result<&'static Arrivals> {
-    ARRIVALS
-        .get_or_init(start)
-        .as_ref()
-        .copied()
-        .map_err(|reason| Error::PermissionDenied {
-            instructions: format!(
-                "xa11y cannot see posted input arrive ({reason}). Grant Accessibility to this \
-                 process in System Settings > Privacy & Security > Accessibility; without it \
-                 macOS also drops the input that it posts"
-            ),
-        })
+#[derive(Default)]
+struct ArrivalState {
+    arrived: BTreeSet<u64>,
+    pending: BTreeMap<u64, (u32, u64)>,
 }
 
-fn start() -> std::result::Result<&'static Arrivals, String> {
-    let arrivals: &'static Arrivals = Box::leak(Box::new(Arrivals {
-        arrived: Mutex::new(BTreeSet::new()),
+static ARRIVALS: Mutex<Option<Arc<Arrivals>>> = Mutex::new(None);
+
+// Serialize initialization, but cache only success: a denied permission can
+// be granted while the embedding process stays alive.
+fn cached<T: Clone>(
+    cache: &Mutex<Option<T>>,
+    start: impl FnOnce() -> std::result::Result<T, String>,
+) -> std::result::Result<T, String> {
+    let mut value = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(value) = value.as_ref() {
+        return Ok(value.clone());
+    }
+    let initialized = start()?;
+    *value = Some(initialized.clone());
+    Ok(initialized)
+}
+
+/// The process-wide arrival monitor, started on first use.
+pub(crate) fn arrivals() -> Result<Arc<Arrivals>> {
+    cached(&ARRIVALS, start).map_err(|reason| Error::PermissionDenied {
+        instructions: format!(
+            "xa11y cannot see posted input arrive ({reason}). Grant Accessibility to this \
+             process in System Settings > Privacy & Security > Accessibility; without it \
+             macOS also drops the input that it posts"
+        ),
+    })
+}
+
+fn start() -> std::result::Result<Arc<Arrivals>, String> {
+    let arrivals = Arc::new(Arrivals {
+        state: Mutex::new(ArrivalState::default()),
         changed: Condvar::new(),
         next: AtomicU64::new(1),
         port: AtomicPtr::new(std::ptr::null_mut()),
-    }));
+    });
+    let monitor_state = Arc::clone(&arrivals);
     let mask = POSTED.iter().fold(0u64, |mask, (ty, _)| mask | 1 << ty);
     let (ready, started) = mpsc::channel();
     std::thread::Builder::new()
         .name("xa11y-input-arrival".into())
         .spawn(move || {
-            let monitor = listen(arrivals, mask);
+            let monitor = listen(&monitor_state, mask);
             let source = monitor.as_ref().ok().cloned();
             // `start` waits on the receiver until this send, so the send cannot fail.
             let _ = ready.send(monitor.map(|_| ()));
@@ -158,8 +177,8 @@ fn start() -> std::result::Result<&'static Arrivals, String> {
     Ok(arrivals)
 }
 
-fn listen(arrivals: &'static Arrivals, mask: u64) -> std::result::Result<CFRunLoopSource, String> {
-    // SAFETY: the callback and the leaked `arrivals` live for the whole process.
+fn listen(arrivals: &Arrivals, mask: u64) -> std::result::Result<CFRunLoopSource, String> {
+    // SAFETY: the run-loop thread retains `arrivals` until its event source stops.
     let port = unsafe {
         CGEventTapCreate(
             K_CG_ANNOTATED_SESSION_EVENT_TAP,
@@ -185,7 +204,7 @@ fn listen(arrivals: &'static Arrivals, mask: u64) -> std::result::Result<CFRunLo
 }
 
 extern "C" fn arrived(_: *mut c_void, ty: u32, event: CGEventRef, info: *mut c_void) -> CGEventRef {
-    // SAFETY: `info` is the leaked `Arrivals` given to CGEventTapCreate.
+    // SAFETY: `info` is the thread-owned `Arrivals` given to CGEventTapCreate.
     let arrivals = unsafe { &*(info as *const Arrivals) };
     if ty == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT || ty == K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT {
         // SAFETY: the port is stored before the run loop delivers any event.
@@ -194,17 +213,40 @@ extern "C" fn arrived(_: *mut c_void, ty: u32, event: CGEventRef, info: *mut c_v
     }
     // SAFETY: the tap gives a live event.
     let data = unsafe { CGEventGetIntegerValueField(event, K_CG_EVENT_SOURCE_USER_DATA) };
-    if data & !SEQUENCE == MARK {
-        let seq = (data & SEQUENCE) as u64;
-        let mut arrived = arrivals.arrived.lock().unwrap_or_else(|e| e.into_inner());
-        arrived.insert(seq);
-        *arrived = arrived.split_off(&seq.saturating_sub(KEPT));
-        arrivals.changed.notify_all();
-    }
+    // SAFETY: the callback holds a live event.
+    let timestamp = unsafe { CGEventGetTimestamp(event) };
+    arrivals.record(ty, data, timestamp);
+
     event
 }
 
 impl Arrivals {
+    fn record(&self, ty: u32, data: i64, timestamp: u64) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let marked = (data & !SEQUENCE == MARK).then_some((data & SEQUENCE) as u64);
+        // A filter may copy/repost an event and clear sourceUserData. Match
+        // only a registered timestamp AND type, never the next arbitrary input.
+        // Replacements that change both identifiers remain Unknown delivery.
+        let seq = marked
+            .filter(|seq| state.pending.contains_key(seq))
+            .or_else(|| {
+                state.pending.iter().find_map(|(seq, signature)| {
+                    (timestamp != 0 && *signature == (ty, timestamp)).then_some(*seq)
+                })
+            });
+        if let Some(seq) = seq {
+            state.pending.remove(&seq);
+            state.arrived.insert(seq);
+            self.changed.notify_all();
+        }
+    }
+
+    pub(crate) fn discard(&self, seq: u64) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.pending.remove(&seq);
+        state.arrived.remove(&seq);
+    }
+
     /// Marks `event` so that the monitor knows it, and gives the mark to wait for.
     pub(crate) fn mark(&self, event: CGEventRef) -> u64 {
         let seq = self.next.fetch_add(1, Ordering::SeqCst);
@@ -212,23 +254,42 @@ impl Arrivals {
         unsafe {
             CGEventSetIntegerValueField(event, K_CG_EVENT_SOURCE_USER_DATA, MARK | seq as i64)
         };
+        // SAFETY: the caller owns the live event.
+        let signature = unsafe { (CGEventGetType(event), CGEventGetTimestamp(event)) };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.pending.insert(seq, signature);
+        state.arrived = state.arrived.split_off(&seq.saturating_sub(KEPT));
         seq
     }
 
     /// Waits until the event marked `seq` got through every tap, or fails with the taps that can hold it.
     pub(crate) fn wait(&self, seq: u64, ty: u32) -> Result<()> {
         let start = Instant::now();
-        let deadline = start + ARRIVAL_TIMEOUT;
-        let mut arrived = self.arrived.lock().unwrap_or_else(|e| e.into_inner());
-        while !arrived.remove(&seq) {
+        let timeout = match xa11y_core::call_timeout(ARRIVAL_TIMEOUT, || {
+            "posted input acknowledgment".to_string()
+        }) {
+            Ok(timeout) => timeout,
+            Err(error) => {
+                self.discard(seq);
+                return Err(error.diagnose(Diagnosis::new().delivery(Delivery::Unknown)));
+            }
+        };
+        let deadline = start + timeout.duration;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        while !state.arrived.remove(&seq) {
             let now = Instant::now();
             if now >= deadline {
-                drop(arrived);
+                state.pending.remove(&seq);
+                drop(state);
+                // Record which native wait exhausted an enclosing operation.
+                if timeout.is_deadline() {
+                    let _ = timeout.expired("posted input acknowledgment".to_string());
+                }
                 return not_arrived(ty, start.elapsed());
             }
-            arrived = self
+            state = self
                 .changed
-                .wait_timeout(arrived, deadline - now)
+                .wait_timeout(state, deadline - now)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
@@ -341,5 +402,44 @@ fn location_name(tap_point: u32) -> &'static str {
         1 => "session",
         K_CG_ANNOTATED_SESSION_EVENT_TAP => "annotated session",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn denied_monitor_start_can_be_retried_and_success_is_cached() {
+        let cache = Mutex::new(None);
+        assert!(cached::<u32>(&cache, || Err("permission denied".into())).is_err());
+        assert_eq!(cached(&cache, || Ok(42)).unwrap(), 42);
+        assert_eq!(
+            cached(&cache, || panic!("must reuse the monitor")).unwrap(),
+            42
+        );
+    }
+
+    fn monitor() -> Arrivals {
+        Arrivals {
+            state: Mutex::new(ArrivalState::default()),
+            changed: Condvar::new(),
+            next: AtomicU64::new(1),
+            port: AtomicPtr::new(std::ptr::null_mut()),
+        }
+    }
+
+    #[test]
+    fn stripped_marker_requires_the_registered_timestamp_and_type() {
+        let monitor = monitor();
+        monitor.state.lock().unwrap().pending.insert(1, (10, 1234));
+        monitor.record(10, 0, 1235);
+        monitor.record(11, 0, 1234);
+        assert!(monitor.state.lock().unwrap().arrived.is_empty());
+        monitor.record(10, 0, 1234);
+        assert!(monitor.state.lock().unwrap().arrived.contains(&1));
+        monitor.discard(1);
+        monitor.record(10, 0, 1234);
+        assert!(monitor.state.lock().unwrap().arrived.is_empty());
     }
 }

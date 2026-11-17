@@ -470,6 +470,7 @@ impl MacOSInputProvider {
             CFRelease(event as CFTypeRef);
         }
         if unseen {
+            arrivals.discard(seq);
             log::info!("secure input is on, so xa11y posted a key event without a wait for it to get through");
             return Ok(());
         }
@@ -888,8 +889,11 @@ impl InputProvider for MacOSInputProvider {
         self.released_flags
             .store(released_before & !flags, Ordering::SeqCst);
         let posted = self.post_locked(&guard, ev);
-        if posted.is_err() {
-            // The key-down never reached the window server, so the modifier
+        if posted
+            .as_ref()
+            .is_err_and(|e| e.delivery() == xa11y_core::Delivery::NotDelivered)
+        {
+            // A pre-dispatch failure means the modifier
             // is not held: put both records back as they were, or every
             // later event would carry a modifier nobody pressed.
             self.held_flags.store(held_before, Ordering::SeqCst);
@@ -935,8 +939,11 @@ impl InputProvider for MacOSInputProvider {
             }
         }
         let posted = self.post_locked(&guard, ev);
-        if posted.is_err() {
-            // The key-up never reached the window server, so the modifier is
+        if posted
+            .as_ref()
+            .is_err_and(|e| e.delivery() == xa11y_core::Delivery::NotDelivered)
+        {
+            // A pre-dispatch failure means the modifier is
             // still down: restore both records, or the next event would go
             // out without a modifier the session still holds.
             self.held_flags.store(held_before, Ordering::SeqCst);
