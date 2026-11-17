@@ -917,12 +917,31 @@ struct SceneWindowApp: App {
     }
 }
 
+// ── Application ──────────────────────────────────────────────────────────────
+
+/// Lists one more accessibility child than its windows and menu bar, as
+/// AppKit's Touch Bar element (`AXFunctionRowTopLevelElement`) does on every
+/// app of a Mac that has one.
+final class TestApplication: NSApplication {
+    lazy var appLevelButton: NSAccessibilityElement = {
+        let button = NSAccessibilityElement()
+        button.setAccessibilityRole(.button)
+        button.setAccessibilityLabel("xa11y App-Level Button")
+        button.setAccessibilityParent(self)
+        return button
+    }()
+
+    override func accessibilityChildren() -> [Any]? {
+        (super.accessibilityChildren() ?? []) + [appLevelButton]
+    }
+}
+
 // ── Run ───────────────────────────────────────────────────────────────────────
 
 if args.contains("--swiftui-scene") {
     SceneWindowApp.main()
 } else {
-    let app = NSApplication.shared
+    let app = TestApplication.shared
     let delegate = AppDelegate()
     app.delegate = delegate
     app.run()
