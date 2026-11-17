@@ -1063,16 +1063,17 @@ fn seed_top_level_windows(
     windows: &mut HashMap<String, TrackedWindow>,
 ) -> Result<()> {
     let call = |bus: &str, path: &str, method: &str| -> Result<Option<zbus::Message>> {
-        let proxy = zbus::blocking::Proxy::new(
+        let proxy: crate::atspi::BoundedProxy = zbus::blocking::Proxy::new(
             conn,
             bus.to_owned(),
             path.to_owned(),
             "org.a11y.atspi.Accessible",
         )
-        .map_err(|e| Error::platform(-1, format!("proxy for {bus}{path}: {e}")))?;
+        .map_err(|e| Error::platform(-1, format!("proxy for {bus}{path}: {e}")))?
+        .into();
         match proxy.call_method(method, &()) {
             Ok(reply) => Ok(Some(reply)),
-            Err(e) if crate::atspi::is_gone(&e) => Ok(None),
+            Err(e) if crate::atspi::is_gone(&proxy, &e) => Ok(None),
             Err(e) => Err(Error::platform(
                 -1,
                 format!("{method} on {bus}{path} while seeding window states: {e}"),
