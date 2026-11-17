@@ -768,6 +768,9 @@ class WheelEventView: NSScrollView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     override var acceptsFirstResponder: Bool { true }
+    // NSScrollView normally forwards first responder to its document. This
+    // fixture owns its focus/reset contract, as the original event view did.
+    override func becomeFirstResponder() -> Bool { true }
 
     override func scrollWheel(with event: NSEvent) {
         super.scrollWheel(with: event)
