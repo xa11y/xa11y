@@ -163,6 +163,10 @@ unsafe impl Send for AXElement {}
 unsafe impl Sync for AXElement {}
 
 impl AXElement {
+    fn same_as(&self, other: &AXElement) -> bool {
+        unsafe { safe_cf_equal(self.0 as CFTypeRef, other.0 as CFTypeRef) }
+    }
+
     fn from_owned(ptr: AXUIElementRef) -> Self {
         Self(ptr)
     }
@@ -1162,46 +1166,117 @@ fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
 /// An open context menu is an `AXMenu` child of the application, never an
 /// entry in `AXWindows`. Search walks `AXChildren`, so a listing built from
 /// `AXWindows` alone missed a menu that a selector found (issue #518). The
-/// menu bar stays out, as it does for search (`should_filter_child_with_role`).
+/// menu bar and the Touch Bar (`AXFunctionRowTopLevelElement`) stay out.
 /// Both reads are error-preserving, like [`ax_windows`]: a child that vanished
 /// between the reads is dropped, any other unreadable role is an error.
 fn app_top_level_children(app: AXUIElementRef) -> Result<Vec<AXElement>> {
     let mut out = ax_windows(app)?;
     let windows = out.len();
     for child in ax_element_list_strict(app, "AXChildren")? {
-        let is_menu = match read_raw_attr(child.as_ptr(), "AXRole") {
-            RawAttr::Value(v) => {
-                if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
-                    // `cf_string_owned` releases the +1 copy.
-                    cf_string_owned(v).as_deref() == Some("AXMenu")
-                } else {
-                    // Not a role string, so not a menu; release the copy.
-                    unsafe { safe_cf_release(v) };
-                    false
-                }
-            }
-            RawAttr::Absent => false,
-            RawAttr::Unanswered(code) => match classify_element_churn_code(i64::from(code)) {
-                ElementChurn::Gone => false,
-                ElementChurn::Unreachable | ElementChurn::Fatal => {
-                    return Err(Error::platform(
-                        i64::from(code),
-                        format!(
-                            "AXRole read of an application child failed (AXError {code}); \
-                             cannot tell whether it is a menu"
-                        ),
-                    ))
-                }
-            },
-        };
-        let already_listed = out[..windows].iter().any(|w| unsafe {
-            safe_cf_equal(w.as_ptr() as CFTypeRef, child.as_ptr() as CFTypeRef)
-        });
+        let role = strict_role(child.as_ptr()).map_err(|code| {
+            Error::platform(
+                i64::from(code),
+                format!(
+                    "AXRole read of an application child failed (AXError {code}); \
+                     cannot tell whether it is a menu"
+                ),
+            )
+        })?;
+        let is_menu = role.as_deref() == Some("AXMenu");
+        let already_listed = out[..windows].iter().any(|w| w.same_as(&child));
         if is_menu && !already_listed {
             out.push(child);
         }
     }
     Ok(out)
+}
+
+/// An element's `AXRole`: `None` when it has none that is a string, or when
+/// the element is gone; the AXError when the process did not answer.
+fn strict_role(element: AXUIElementRef) -> std::result::Result<Option<String>, i32> {
+    match read_raw_attr(element, "AXRole") {
+        RawAttr::Value(v) => {
+            if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
+                // `cf_string_owned` releases the +1 copy.
+                Ok(cf_string_owned(v))
+            } else {
+                unsafe { safe_cf_release(v) };
+                Ok(None)
+            }
+        }
+        RawAttr::Absent => Ok(None),
+        RawAttr::Unanswered(code) => match classify_element_churn_code(i64::from(code)) {
+            ElementChurn::Gone => Ok(None),
+            ElementChurn::Unreachable | ElementChurn::Fatal => Err(code),
+        },
+    }
+}
+
+/// An element-valued attribute: `None` when it is absent or the element is
+/// gone, an error when the process did not answer.
+fn strict_element_attr(element: AXUIElementRef, attribute: &str) -> Result<Option<AXElement>> {
+    match probe_element_attr(element, attribute) {
+        ElementProbe::Found(found) => Ok(Some(found)),
+        ElementProbe::Absent => Ok(None),
+        ElementProbe::Unanswered(code) => match classify_element_churn_code(i64::from(code)) {
+            ElementChurn::Gone => Ok(None),
+            ElementChurn::Unreachable | ElementChurn::Fatal => Err(Error::platform(
+                i64::from(code),
+                format!("{attribute} read failed (AXError {code})"),
+            )),
+        },
+    }
+}
+
+/// Whether `cell`, listed by `parent`, is a cell a row of `table` lists:
+/// its `AXParent` is not `parent` but an `AXRow` whose `AXParent` is `table`.
+///
+/// Chromium lists each table cell under its row, which is its `AXParent`,
+/// and again under every `AXColumn` and the table's `AXHeader` group, which
+/// are the row's siblings. The row's copy is the one kept.
+fn listed_by_a_row(table: &AXElement, parent: &AXElement, cell: &AXElement) -> Result<bool> {
+    let Some(row) = strict_element_attr(cell.as_ptr(), "AXParent")? else {
+        return Ok(false);
+    };
+    if row.same_as(parent) {
+        return Ok(false);
+    }
+    let role = strict_role(row.as_ptr()).map_err(|code| {
+        Error::platform(
+            i64::from(code),
+            format!(
+                "AXRole read of a table cell's parent failed (AXError {code}); cannot tell \
+                 whether the cell is listed by a row"
+            ),
+        )
+    })?;
+    if role.as_deref() != Some("AXRow") {
+        return Ok(false);
+    }
+    Ok(strict_element_attr(row.as_ptr(), "AXParent")?.is_some_and(|t| t.same_as(table)))
+}
+
+/// The `AXRole` a snapshot was built with, or read now when it has none.
+fn captured_ax_role(data: &ElementData, ax: &AXElement) -> Result<String> {
+    if let Some(role) = data.raw.get("ax_role").and_then(|v| v.as_str()) {
+        return Ok(role.to_owned());
+    }
+    strict_role(ax.as_ptr())
+        .map(Option::unwrap_or_default)
+        .map_err(|code| {
+            Error::platform(
+                i64::from(code),
+                format!("AXRole read failed (AXError {code})"),
+            )
+        })
+}
+
+/// A child from [`MacOSProvider::listed_children`], with the role strings the
+/// listing read.
+struct ListedChild {
+    ax: AXElement,
+    role: String,
+    subrole: Option<String>,
 }
 
 /// Read an attribute holding an array of accessibility elements, preserving
@@ -4943,10 +5018,6 @@ impl MacOSProvider {
         child_subrole: Option<&str>,
         child: &AXElement,
     ) -> bool {
-        if parent_role == Role::Application && child_role == "AXMenuBar" {
-            return true;
-        }
-
         if parent_role == Role::Window {
             let sr = child_subrole.unwrap_or("");
             if matches!(
@@ -4982,15 +5053,9 @@ impl MacOSProvider {
         parent: &ElementData,
         children: &[AXElement],
     ) -> Result<Vec<ElementData>> {
-        let role = parent.role;
-        let name = parent.name.as_deref();
-        let filtered: Vec<&AXElement> = children
-            .iter()
-            .filter(|child| !Self::should_filter_child(role, name, child))
-            .collect();
-        let built: Vec<Result<ElementData>> = filtered
+        let built: Vec<Result<ElementData>> = children
             .par_iter()
-            .map(carry_deadline(|child: &&AXElement| {
+            .map(carry_deadline(|child: &AXElement| {
                 self.build_element_data(child, parent.pid)
             }))
             .collect();
@@ -5007,21 +5072,58 @@ impl MacOSProvider {
         Ok(results)
     }
 
-    /// Convenience wrapper that fetches role/subrole before filtering.
-    fn should_filter_child(
+    /// The children of `parent` as both `get_children` and search see them:
+    /// an application's top-level children (see [`app_top_level_children`]),
+    /// any other element's `AXChildren`, without window chrome and without
+    /// table cells a row lists (see [`listed_by_a_row`]). Each comes with the
+    /// role and subrole read to filter it.
+    fn listed_children(
+        parent: &AXElement,
         parent_role: Role,
+        parent_ax_role: &str,
         parent_name: Option<&str>,
-        child: &AXElement,
-    ) -> bool {
-        let child_role = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
-        let child_subrole = ax_string(child.as_ptr(), "AXSubrole");
-        Self::should_filter_child_with_role(
-            parent_role,
-            parent_name,
-            &child_role,
-            child_subrole.as_deref(),
-            child,
-        )
+    ) -> Result<Vec<ListedChild>> {
+        let children = match parent_role {
+            Role::Application => app_top_level_children(parent.as_ptr())?,
+            _ => ax_children(parent.as_ptr()),
+        };
+        let listed: Vec<Option<ListedChild>> = children
+            .into_par_iter()
+            .map(carry_deadline(|ax: AXElement| {
+                let role = ax_string(ax.as_ptr(), "AXRole").unwrap_or_default();
+                let subrole = ax_string(ax.as_ptr(), "AXSubrole");
+                let chrome = Self::should_filter_child_with_role(
+                    parent_role,
+                    parent_name,
+                    &role,
+                    subrole.as_deref(),
+                    &ax,
+                );
+                (!chrome).then_some(ListedChild { ax, role, subrole })
+            }))
+            .collect();
+        let listed: Vec<ListedChild> = listed.into_iter().flatten().collect();
+        if parent_ax_role == "AXRow" || !listed.iter().any(|c| c.role == "AXCell") {
+            return Ok(listed);
+        }
+        let Some(table) = strict_element_attr(parent.as_ptr(), "AXParent")? else {
+            return Ok(listed);
+        };
+        let repeats: Vec<bool> = listed
+            .par_iter()
+            .map(carry_deadline(|child: &ListedChild| {
+                if child.role == "AXCell" {
+                    listed_by_a_row(&table, parent, &child.ax)
+                } else {
+                    Ok(false)
+                }
+            }))
+            .collect::<Result<_>>()?;
+        Ok(listed
+            .into_iter()
+            .zip(repeats)
+            .filter_map(|(child, repeat)| (!repeat).then_some(child))
+            .collect())
     }
 
     /// Parallel DFS over the AX subtree, evaluating every clause's first
@@ -5042,40 +5144,27 @@ impl MacOSProvider {
         &self,
         parent: &AXElement,
         parent_role: Role,
+        parent_ax_role: &str,
         parent_name: Option<&str>,
         clauses: &[&SimpleSelector],
         pid: Option<u32>,
         depth: u32,
         max_depth: u32,
         limit: Option<usize>,
-    ) -> Vec<(usize, AXElement)> {
+    ) -> Result<Vec<(usize, AXElement)>> {
         if depth > max_depth {
-            return vec![];
+            return Ok(vec![]);
         }
 
-        let children = ax_children(parent.as_ptr());
+        let children = Self::listed_children(parent, parent_role, parent_ax_role, parent_name)?;
 
         // Process children in parallel: check each clause + recurse.
         let per_child_results: Vec<Vec<(usize, AXElement)>> = children
             .par_iter()
-            .map(carry_deadline(|child: &AXElement| {
+            .map(carry_deadline(|listed: &ListedChild| -> Result<_> {
                 let mut child_results: Vec<(usize, AXElement)> = Vec::new();
-
-                // Fetch role+subrole once — used for filter, match, and recursion.
-                let role_str = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
-                let subrole_str = ax_string(child.as_ptr(), "AXSubrole");
-
-                if Self::should_filter_child_with_role(
-                    parent_role,
-                    parent_name,
-                    &role_str,
-                    subrole_str.as_deref(),
-                    child,
-                ) {
-                    return child_results;
-                }
-
-                let child_role = map_ax_role(&role_str, subrole_str.as_deref());
+                let child = &listed.ax;
+                let child_role = map_ax_role(&listed.role, listed.subrole.as_deref());
 
                 for (idx, simple) in clauses.iter().enumerate() {
                     if matches_ax_with_role(child.as_ptr(), simple, Some(child_role), pid) {
@@ -5088,18 +5177,19 @@ impl MacOSProvider {
                 let sub = self.collect_matching_ax_group(
                     child,
                     child_role,
+                    &listed.role,
                     child_name.as_deref(),
                     clauses,
                     pid,
                     depth + 1,
                     max_depth,
                     limit,
-                );
+                )?;
                 child_results.extend(sub);
 
-                child_results
+                Ok(child_results)
             }))
-            .collect();
+            .collect::<Result<_>>()?;
 
         // Merge results, respecting limit.
         let mut results = Vec::new();
@@ -5108,12 +5198,12 @@ impl MacOSProvider {
                 results.push(elem);
                 if let Some(limit) = limit {
                     if results.len() >= limit {
-                        return results;
+                        return Ok(results);
                     }
                 }
             }
         }
-        results
+        Ok(results)
     }
 
     // ── Shell surfaces ───────────────────────────────────────────────────
@@ -5124,10 +5214,10 @@ impl MacOSProvider {
     // element, and Finder's desktop scroll area. Every root is an element
     // the platform itself vends — xa11y adds the tag, never the node.
     //
-    // None of them touches `should_filter_child_with_role`'s `AXMenuBar`
-    // drop (PROPOSAL §5): app trees stay exactly as they are, and these
-    // surfaces reach the same elements through a root the caller asked for
-    // by name.
+    // None of them adds the `AXMenuBar` to an application's child list
+    // (`app_top_level_children`, PROPOSAL §5): app trees stay exactly as they
+    // are, and these surfaces reach the same elements through a root the
+    // caller asked for by name.
 
     /// Messaging timeout for one shell-surface probe, in seconds.
     ///
@@ -5660,19 +5750,16 @@ impl Provider for MacOSProvider {
             Some(element_data) => {
                 let ax = self.get_cached(element_data.handle)?;
 
-                // An Application element's children are its top-level
-                // windows (`AXWindows`) followed by any app-level `AXMenu`,
-                // such as an open context menu, which search reaches through
-                // `AXChildren` and `AXWindows` never lists (see
-                // `app_top_level_children`). Every other role keeps the raw
-                // `AXChildren` walk. The application read is error-preserving
-                // on purpose: a dead app must report its failure, not an
-                // empty list (tenet 1).
-                let ax_children_list = match element_data.role {
-                    Role::Application => app_top_level_children(ax.as_ptr())?,
-                    _ => ax_children(ax.as_ptr()),
-                };
-                self.snapshot_children(element_data, &ax_children_list)
+                let listed: Vec<AXElement> = Self::listed_children(
+                    &ax,
+                    element_data.role,
+                    &captured_ax_role(element_data, &ax)?,
+                    element_data.name.as_deref(),
+                )?
+                .into_iter()
+                .map(|child| child.ax)
+                .collect();
+                self.snapshot_children(element_data, &listed)
             }
         }
     }
@@ -5715,6 +5802,7 @@ impl Provider for MacOSProvider {
         let root_data = root;
 
         let root_ax = self.get_cached(root_data.handle)?;
+        let root_ax_role = captured_ax_role(root_data, &root_ax)?;
 
         let firsts: Vec<&SimpleSelector> = group
             .clauses
@@ -5761,13 +5849,14 @@ impl Provider for MacOSProvider {
             let phase1: Vec<(usize, AXElement)> = self.collect_matching_ax_group(
                 &root_ax,
                 root_data.role,
+                &root_ax_role,
                 root_data.name.as_deref(),
                 &firsts,
                 root_data.pid,
                 0,
                 max_depth_val,
                 walk_limit,
-            );
+            )?;
 
             // Snapshot phase-1 hits in walk order, bucketed by the clause each
             // belongs to. The per-clause entries keep their original walk
