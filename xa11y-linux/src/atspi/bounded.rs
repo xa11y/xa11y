@@ -38,7 +38,10 @@ impl Proxy<'_> {
         B: serde::ser::Serialize + zbus::zvariant::DynamicType,
     {
         let member = MemberName::try_from(method)?;
-        self.bounded(method, self.0.inner().call_method(member, body))
+        self.bounded(
+            || self.describe(method),
+            self.0.inner().call_method(member, body),
+        )
     }
 
     /// `zbus::blocking::Proxy::get_property`, bounded by the deadline.
@@ -47,7 +50,10 @@ impl Proxy<'_> {
         T: TryFrom<zbus::zvariant::OwnedValue>,
         T::Error: Into<zbus::Error>,
     {
-        self.bounded(property, self.0.inner().get_property(property))
+        self.bounded(
+            || self.describe(property),
+            self.0.inner().get_property(property),
+        )
     }
 
     /// `zbus::blocking::Proxy::set_property`, bounded by the deadline.
@@ -56,11 +62,22 @@ impl Proxy<'_> {
         T: 'static + zbus::zvariant::DynamicType + Into<zbus::zvariant::Value<'static>>,
     {
         let inner = self.0.inner();
-        self.bounded(property, async move {
+        self.bounded(|| self.describe(property), async move {
             inner
                 .set_property(property, value)
                 .await
                 .map_err(|e| zbus::Error::FDO(Box::new(e)))
+        })
+    }
+
+    /// Whether the application this proxy calls still owns its bus name,
+    /// asked of the bus daemon, bounded by the deadline.
+    pub(crate) fn destination_has_owner(&self) -> zbus::Result<bool> {
+        let inner = self.0.inner();
+        let describe = || format!("DBus.NameHasOwner({})", inner.destination().as_str());
+        self.bounded(describe, async move {
+            let dbus = zbus::fdo::DBusProxy::new(inner.connection()).await?;
+            Ok(dbus.name_has_owner(inner.destination().clone()).await?)
         })
     }
 
@@ -80,11 +97,10 @@ impl Proxy<'_> {
 
     fn bounded<T>(
         &self,
-        member: &str,
+        describe: impl Fn() -> String,
         call: impl Future<Output = zbus::Result<T>>,
     ) -> zbus::Result<T> {
-        let timeout = match xa11y_core::call_timeout(ATSPI_METHOD_TIMEOUT, || self.describe(member))
-        {
+        let timeout = match xa11y_core::call_timeout(ATSPI_METHOD_TIMEOUT, &describe) {
             Ok(t) => t,
             // The deadline passed before the call was made, and recorded
             // it. Fail as a timeout so the call site reports it as one.
@@ -103,7 +119,7 @@ impl Proxy<'_> {
             if is_timeout(e) {
                 // Recording the cut is the point of this call; the error it
                 // returns is built again by core with the wait's own context.
-                let _ = timeout.expired(self.describe(member));
+                let _ = timeout.expired(describe());
             }
         }
         result

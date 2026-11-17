@@ -105,7 +105,7 @@ pub(crate) fn read_offset_unit_unless_gone(
     let toolkit = match proxy.get_property::<String>("ToolkitName") {
         Ok(name) => Some(name),
         Err(e) if is_property_absent(&e) => None,
-        Err(e) if crate::atspi::is_gone(&e) => return Ok(None),
+        Err(e) if crate::atspi::is_gone(proxy, &e) => return Ok(None),
         Err(e) if is_timeout(&e) => return Err(on_timeout()),
         Err(e) => {
             return Err(Error::platform(
