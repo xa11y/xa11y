@@ -12,6 +12,8 @@
 //! platform details reference.
 
 #[cfg(target_os = "macos")]
+mod arrival;
+#[cfg(target_os = "macos")]
 mod ax;
 #[cfg(target_os = "macos")]
 mod input;

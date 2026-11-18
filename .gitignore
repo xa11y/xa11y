@@ -46,3 +46,4 @@ htmlcov/
 # Built test-app binaries (make output, one per test app)
 /test-apps/cocoa/xa11y-cocoa-test-app
 /test-apps/inverter/xa11y-inverter
+/test-apps/taps/xa11y-taps
