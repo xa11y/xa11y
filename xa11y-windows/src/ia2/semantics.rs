@@ -25,6 +25,11 @@ pub(super) fn apply(
     ia2_role: i32,
 ) -> Result<()> {
     let get = |key: &str| attrs.get(key).map(String::as_str);
+    data.placeholder = xa11y_core::text::strip_bidi_opt(
+        get("placeholder")
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+    );
     data.web_role = get("xml-roles")
         .filter(|v| !v.is_empty())
         .map(str::to_string);
@@ -250,6 +255,20 @@ mod tests {
             0x414
         )
         .is_err());
+    }
+    #[test]
+    fn placeholder_is_the_unescaped_attribute() {
+        let mut data = ElementData::for_role(Role::TextField);
+        let attrs = rich::parse_attributes(r"placeholder:Find\: items;").unwrap();
+        apply(&mut data, &attrs, 0).unwrap();
+        assert_eq!(data.placeholder.as_deref(), Some("Find: items"));
+        apply(
+            &mut data,
+            &rich::parse_attributes("placeholder:;").unwrap(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(data.placeholder, None);
     }
     #[test]
     fn collection_position_is_read_only_for_collection_roles() {
