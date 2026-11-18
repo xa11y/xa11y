@@ -3151,6 +3151,7 @@ version = "0.16.0"
 dependencies = [
  "cc",
  "core-foundation 0.10.1",
+ "log",
  "rayon",
  "serde_json",
  "xa11y-core",

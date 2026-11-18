@@ -593,6 +593,13 @@ jobs:
             make -C test-apps/cocoa build
           fi
 
+      # test_cocoa_event_taps.py runs this filtering event tap; a tap needs Accessibility.
+      - name: Build the fixture event tap and grant it Accessibility
+        if: matrix.app == 'cocoa'
+        run: |
+          make -C test-apps/taps build
+          bash scripts/grant_macos_tcc.sh "$PWD/test-apps/taps/xa11y-taps"
+
       - name: Check repeated Linux Tauri startup (#638)
         if: matrix.app == 'tauri' && runner.os == 'Linux'
         timeout-minutes: 6

@@ -2,9 +2,9 @@
 //!
 //! Posts synthesised pointer and keyboard events to the HID event tap
 //! (`kCGHIDEventTap`). Requires the host process to have the **Accessibility**
-//! and **Input Monitoring** privacy grants — absent those, the OS silently
-//! drops events (there is no API-level error signal). The backend itself only
-//! surfaces failures from `CGEvent*` allocation.
+//! privacy grant. Each post returns after the event got through the event taps
+//! of other programs, and fails with the filtering taps when it does not get
+//! through; see [`crate::arrival`].
 //!
 //! Drag events: `pointer_drag` is overridden to emit the distinct
 //! `kCGEventLeftMouseDragged` / `…RightMouseDragged` / `…OtherMouseDragged`
@@ -25,6 +25,8 @@ use xa11y_core::input::{
     validate_pointer_regions, InputProvider, Key, MouseButton, Point, ScrollDelta,
 };
 use xa11y_core::{Error, Rect, Result};
+
+use crate::arrival;
 
 // ── Quartz / CoreGraphics FFI ───────────────────────────────────────
 
@@ -412,6 +414,14 @@ impl MacOSInputProvider {
         if event.is_null() {
             return Err(Error::platform(-1, "CGEventCreate* returned NULL"));
         }
+        let arrivals = match arrival::arrivals() {
+            Ok(arrivals) => arrivals,
+            Err(error) => {
+                // SAFETY: `event` is a valid CGEventRef we own and do not post.
+                unsafe { CFRelease(event as CFTypeRef) };
+                return Err(error);
+            }
+        };
         // Stamp any modifiers held via `key_down` onto this event. See
         // `held_flags` for why the window server's own state can't be relied
         // on here. OR rather than assign, so flags the event already carries
@@ -450,13 +460,21 @@ impl MacOSInputProvider {
                 )
             };
         }
+        let ty = arrival::event_type(event);
+        let seq = arrivals.mark(event);
+        let unseen = arrival::hidden_from_taps(ty);
         // SAFETY: `event` is a valid CGEventRef we just created; CGEventPost
         // takes an owned +0 borrow and does not consume it.
         unsafe {
             CGEventPost(K_CG_HID_EVENT_TAP, event);
             CFRelease(event as CFTypeRef);
         }
-        Ok(())
+        if unseen {
+            arrivals.discard(seq);
+            log::info!("secure input is on, so xa11y posted a key event without a wait for it to get through");
+            return Ok(());
+        }
+        arrivals.wait(seq, ty)
     }
 
     fn mouse_event(&self, ty: u32, at: Point, button: u32) -> Result<CGEventRef> {
@@ -871,8 +889,11 @@ impl InputProvider for MacOSInputProvider {
         self.released_flags
             .store(released_before & !flags, Ordering::SeqCst);
         let posted = self.post_locked(&guard, ev);
-        if posted.is_err() {
-            // The key-down never reached the window server, so the modifier
+        if posted
+            .as_ref()
+            .is_err_and(|e| e.delivery() == xa11y_core::Delivery::NotDelivered)
+        {
+            // A pre-dispatch failure means the modifier
             // is not held: put both records back as they were, or every
             // later event would carry a modifier nobody pressed.
             self.held_flags.store(held_before, Ordering::SeqCst);
@@ -918,8 +939,11 @@ impl InputProvider for MacOSInputProvider {
             }
         }
         let posted = self.post_locked(&guard, ev);
-        if posted.is_err() {
-            // The key-up never reached the window server, so the modifier is
+        if posted
+            .as_ref()
+            .is_err_and(|e| e.delivery() == xa11y_core::Delivery::NotDelivered)
+        {
+            // A pre-dispatch failure means the modifier is
             // still down: restore both records, or the next event would go
             // out without a modifier the session still holds.
             self.held_flags.store(held_before, Ordering::SeqCst);
