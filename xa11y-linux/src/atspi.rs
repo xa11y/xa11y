@@ -1770,6 +1770,12 @@ impl LinuxProvider {
                     serde_json::Value::String(d.clone()),
                 );
             }
+            if let Some(ref p) = meta.placeholder {
+                raw.insert(
+                    "atspi_placeholder".into(),
+                    serde_json::Value::String(p.clone()),
+                );
+            }
             // DEFUNCT (bit 6) marks a dead accessible — the object was
             // destroyed provider-side but a reference still resolves. It has
             // no cross-platform StateSet field, but it's the key diagnostic
@@ -1786,6 +1792,7 @@ impl LinuxProvider {
         let name = xa11y_core::text::strip_bidi_opt(name);
         let value = xa11y_core::text::strip_bidi_opt(value);
         let description = xa11y_core::text::strip_bidi_opt(description);
+        let placeholder = xa11y_core::text::strip_bidi_opt(meta.placeholder.clone());
 
         let handle = self.cache_element(aref.clone(), role);
         if let Some(indices) = action_index_map {
@@ -1829,7 +1836,7 @@ impl LinuxProvider {
             name,
             value,
             description,
-            placeholder: None,
+            placeholder,
             bounds,
             actions,
             states,
