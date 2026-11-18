@@ -1325,6 +1325,28 @@ mod tests {
     /// secure-text field (AXSecureTextField subrole, AT-SPI `password text`,
     /// UIA `IsPassword`). xa11y keeps the `text_field` role and sets
     /// `password` (#522); the ordinary Name field next to it stays unflagged.
+    /// AccessKit publishes the placeholder of an empty text input as the
+    /// `placeholder-text` object attribute on Linux, `AXPlaceholderValue` on
+    /// macOS, and UIA `HelpText` on Windows. UIA has no placeholder
+    /// property, so there the text is the field's description.
+    #[test]
+    #[ignore]
+    fn placeholder_on_empty_password_field() {
+        let app = h::app_root();
+        if cfg!(target_os = "windows") {
+            let password = h::one(&app, r#"text_field[name="Password"]"#);
+            assert_eq!(password.placeholder, None);
+            assert_eq!(password.description.as_deref(), Some("Enter password"));
+            return;
+        }
+        let password = h::one(&app, r#"text_field[placeholder="Enter password"]"#);
+        assert_eq!(password.name.as_deref(), Some("Password"));
+        assert_eq!(password.placeholder.as_deref(), Some("Enter password"));
+        assert_eq!(password.value, None);
+        let name = h::one(&app, r#"text_field[name="Name"]"#);
+        assert_eq!(name.placeholder, None);
+    }
+
     #[test]
     #[ignore]
     fn state_password_on_password_field() {

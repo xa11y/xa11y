@@ -16,6 +16,8 @@ shapes real apps show every day. Chromium can, so the Electron test app's
   characters), right-to-left text, lines that wrap in a ``textarea``, and
   ``contenteditable`` editors. It also checks that line bounds scale at a
   non-default device scale factor.
+- **A box named only by its placeholder**: a combo box with no label and no
+  value, whose only text is its placeholder.
 
 Each test pins what Chromium reports through the platform API. Where Linux
 (AT-SPI) and macOS (AX) differ, the test says which one it describes. The
@@ -418,6 +420,29 @@ def test_wrapped_line_bounds_stack_inside_the_element(wrapped):
         assert contains(wrapped.bounds, rect), (rect, wrapped.bounds)
     ys = [rect.y for rect in rects]
     assert ys == sorted(ys) and len(set(ys)) == 3, ys
+
+
+# ── Placeholder ───────────────────────────────────────────────────────────
+
+HINT = "Search for items"
+
+
+@pytest.mark.skipif(not MACOS, reason="pins Chromium's AX placeholder")
+def test_a_box_named_only_by_its_placeholder_reports_it_on_macos(app):
+    # Chromium puts a placeholder that names the box in AXPlaceholderValue
+    # and leaves AXTitle empty, so the placeholder is the box's only text.
+    box = app.locator(f'combo_box[placeholder="{HINT}"]').element()
+    assert not box.name
+    assert not box.value
+    assert not box.description
+
+
+@pytest.mark.skipif(not LINUX, reason="pins Chromium's AT-SPI name")
+def test_a_box_named_only_by_its_placeholder_has_it_as_its_name_on_linux(app):
+    # On AT-SPI, Chromium makes such a placeholder the name and sends no
+    # `placeholder` attribute.
+    box = app.locator(f'combo_box[name="{HINT}"]').element()
+    assert box.placeholder is None
 
 
 # ── Text: device scale factor ─────────────────────────────────────────────

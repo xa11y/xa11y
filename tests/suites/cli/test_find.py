@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import time
 
 import pytest
@@ -163,6 +164,24 @@ def test_find_lists_the_password_state(run_cli, app_pid, app_name):
     assert "Password" in result_lines[0], stdout
     states = re.search(r"\[([^\]]*)\]", result_lines[0])
     assert states and "password" in states.group(1).split(), result_lines[0]
+
+
+# Apps whose text field shows the hint "Type here..." as a platform
+# placeholder. UIA has no placeholder property, so Windows reports none.
+PLACEHOLDER_APPS = {"cocoa", "gtk", "tauri", "electron"}
+
+
+def test_find_by_placeholder_prints_it(run_cli, app_pid, app_name):
+    """``xa11y find`` matches and prints a text field's placeholder."""
+    if app_name not in PLACEHOLDER_APPS or sys.platform == "win32":
+        pytest.skip(f"the {app_name} test app reports no placeholder here")
+    rc, stdout, stderr = run_cli(
+        "find", 'text_field[placeholder="Type here..."]', "--pid", str(app_pid)
+    )
+    assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
+    result_lines = stdout.strip().splitlines()[:-1]
+    assert len(result_lines) == 1, stdout
+    assert 'placeholder="Type here..."' in result_lines[0], stdout
 
 
 def test_find_says_why_a_scrolled_out_element_is_hidden(run_cli, app_pid, app_name):

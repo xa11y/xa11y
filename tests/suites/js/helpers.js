@@ -42,6 +42,7 @@ const APP_CONFIG = {
   gtk: {
     okButtonName: 'OK',
     textFieldName: null,           // GTK doesn't reliably expose AX label on text_field
+    placeholder: 'Type here...',
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
@@ -51,6 +52,7 @@ const APP_CONFIG = {
   cocoa: {
     okButtonName: 'OK',
     textFieldName: 'Search',
+    placeholder: 'Type here...',
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
@@ -61,6 +63,8 @@ const APP_CONFIG = {
     hasSlideWidget: true,
     okButtonName: 'OK',
     textFieldName: 'Search',
+    // UIA has no placeholder property.
+    placeholder: process.platform === 'win32' ? null : 'Type here...',
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
@@ -69,6 +73,7 @@ const APP_CONFIG = {
   electron: {
     okButtonName: 'OK',           // Electron index.html has <button id="ok">OK</button>
     textFieldName: null,           // Electron text input has no AX label
+    placeholder: 'Type here...',
     minButtons: 2,                 // "OK" + "Cancel"
     hasCheckbox: false,
     hasRadio: false,

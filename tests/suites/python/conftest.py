@@ -172,6 +172,8 @@ APP_CONFIGS: dict[str, dict] = {
         # app does not show one (#522).
         "password_field_name": None,
         "textfield_initial_value": "hello world",
+        # Gtk.Entry placeholder, the `placeholder-text` attribute.
+        "textfield_placeholder": "Type here...",
         "textarea_selector": "text_area",
         # Table — Gtk.ColumnView (AT-SPI "tree table"); only one table in the
         # app so a role selector suffices. GTK 4.14 names each "table cell"
@@ -230,6 +232,8 @@ APP_CONFIGS: dict[str, dict] = {
         # app does not show one (#522).
         "password_field_name": None,
         "textfield_initial_value": "hello world",
+        # NSTextField.placeholderString, read from AXPlaceholderValue.
+        "textfield_placeholder": "Type here...",
         "textarea_selector": 'text_area[name="Notes"]',
         # Table — multi-column cell-based NSTableView ("Users Table").
         # AppKit exposes AXCell elements without a title; the text is the
@@ -285,6 +289,14 @@ APP_CONFIGS: dict[str, dict] = {
         # `password` state while its role stays text_field.
         "password_field_name": "Password",
         "textfield_initial_value": "hello world",
+        # UIA has no placeholder property. WebView2 reports the placeholder
+        # as HelpText, which xa11y reads as the description.
+        "textfield_placeholder": (
+            unsupported("UIA has no placeholder property")
+            if sys.platform == "win32"
+            else "Type here..."
+        ),
+        "textfield_placeholder_as_description": "Type here..." if sys.platform == "win32" else None,
         # Text area — WebView2 goes through UIA, which has no distinct
         # multiline text role: <textarea> collapses to UIA_EditControlTypeId
         # (xa11y `text_field`). Skip on Windows, same as the egui entry below.
@@ -359,6 +371,7 @@ APP_CONFIGS: dict[str, dict] = {
         # Password entry (#522), mirroring the Tauri page.
         "password_field_name": "Password",
         "textfield_initial_value": "hello world",
+        "textfield_placeholder": "Type here...",
         "textarea_selector": 'text_area[name="Notes"]',
         # Table — markup mirrors the Tauri test app; same descendant-based
         # content assertion (Chromium's cell naming varies by platform).
