@@ -1802,7 +1802,8 @@ mod attr_idx {
     pub const ARIA_ATOMIC: usize = 26;
     pub const ARIA_RELEVANT: usize = 27;
     pub const URL: usize = 28;
-    pub const COUNT: usize = 29;
+    pub const PLACEHOLDER: usize = 29;
+    pub const COUNT: usize = 30;
 }
 
 /// Raw values returned by a single batch AX fetch. Values are borrowed
@@ -1849,6 +1850,7 @@ impl BatchAttrs {
             CFString::new("AXARIAAtomic"),
             CFString::new("AXARIARelevant"),
             CFString::new("AXURL"),
+            CFString::new("AXPlaceholderValue"),
         ];
         let ptrs: Vec<CFTypeRef> = attr_names
             .iter()
@@ -2071,6 +2073,7 @@ struct ResolvedAttrs {
     aria_atomic: Option<bool>,
     aria_relevant: Option<String>,
     url: Option<String>,
+    placeholder: Option<String>,
 }
 
 impl ResolvedAttrs {
@@ -2136,6 +2139,7 @@ impl ResolvedAttrs {
             aria_atomic: batch.boolean(attr_idx::ARIA_ATOMIC),
             aria_relevant: batch.string(attr_idx::ARIA_RELEVANT),
             url: batch.url(attr_idx::URL),
+            placeholder: batch.string(attr_idx::PLACEHOLDER),
         })
     }
 
@@ -2237,6 +2241,7 @@ impl ResolvedAttrs {
                 unsafe { safe_cf_release(v) };
                 s
             }),
+            placeholder: ax_string(element, "AXPlaceholderValue"),
         })
     }
 }
@@ -4653,6 +4658,12 @@ fn build_snapshot_data(
         if let Some(ref h) = attrs.ax_help {
             raw.insert("AXHelp".into(), serde_json::Value::String(h.clone()));
         }
+        if let Some(ref p) = attrs.placeholder {
+            raw.insert(
+                "AXPlaceholderValue".into(),
+                serde_json::Value::String(p.clone()),
+            );
+        }
         if let Some(e) = attrs.enabled {
             raw.insert("AXEnabled".into(), serde_json::Value::Bool(e));
         }
@@ -4977,6 +4988,8 @@ fn build_snapshot_data(
         let name = xa11y_core::text::strip_bidi_opt(name);
         let value = xa11y_core::text::strip_bidi_opt(value);
         let description = xa11y_core::text::strip_bidi_opt(description);
+        let placeholder =
+            xa11y_core::text::strip_bidi_opt(attrs.placeholder.filter(|p| !p.is_empty()));
 
         Ok(ElementParts {
             heading_level: semantics.heading_level,
@@ -4988,7 +5001,7 @@ fn build_snapshot_data(
             name,
             value,
             description,
-            placeholder: None,
+            placeholder,
             bounds,
             actions,
             states,
