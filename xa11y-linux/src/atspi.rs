@@ -4556,7 +4556,7 @@ fn try_map_atspi_role(role_name: &str) -> Option<Role> {
         "dialog" | "file chooser" => Role::Dialog,
         "alert" | "notification" | "info bar" => Role::Alert,
         "push button" | "push button menu" => Role::Button,
-        "toggle button" => Role::Switch,
+        "toggle button" | "switch" => Role::Switch,
         "check box" | "check menu item" => Role::CheckBox,
         "radio button" | "radio menu item" => Role::RadioButton,
         "entry" | "password text" => Role::TextField,
@@ -4746,6 +4746,7 @@ pub(crate) fn try_map_atspi_role_number(role: u32) -> Option<Role> {
         110 => Role::Landmark,
         116 => Role::StaticText, // Static
         129 => Role::Button,     // PushButtonMenu
+        130 => Role::Switch,     // Switch (AT-SPI 2.56+)
         _ => return None,
     })
 }
@@ -6221,6 +6222,14 @@ mod tests {
         // …and is otherwise the platform's own "unknown", not an unmapped role
         // (this must not hit the strict-roles panic).
         assert_eq!(role_from_atspi(ATSPI_ROLE_UNKNOWN, ""), Role::Unknown);
+    }
+
+    #[test]
+    fn switch_roles_cover_old_and_new_gtk_bridges() {
+        assert_eq!(role_from_atspi(62, "toggle button"), Role::Switch);
+        assert_eq!(role_from_atspi(130, "switch"), Role::Switch);
+        assert_eq!(role_from_atspi(130, ""), Role::Switch);
+        assert_eq!(role_from_atspi(0, "switch"), Role::Switch);
     }
 
     #[test]

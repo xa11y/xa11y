@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import sys
 import time
 from ctypes import wintypes
 
@@ -99,11 +100,25 @@ def _foreground_pid():
     return pid.value
 
 
-def _wait_value(notes, expected, *, complete_length=False):
+def _read_value(notes, read_timeouts):
+    try:
+        return _normalized(notes.element().value or "")
+    except xa11y.TimeoutError as error:
+        # A busy WPF provider can time out while reading a completed input
+        # sample. Re-read that same sample once, without sending more input.
+        # Keep the native error in the report and logs; a second timeout (or
+        # any other error) still fails the probe, as does incorrect text.
+        if len(read_timeouts) < 3:
+            read_timeouts.append(str(error)[:2048])
+        print(f"UIA sample read timed out; reading once more: {error}", file=sys.stderr)
+        return _normalized(notes.element().value or "")
+
+
+def _wait_value(notes, expected, read_timeouts, *, complete_length=False):
     deadline = time.monotonic() + 3.0
     value = ""
     while time.monotonic() < deadline:
-        value = _normalized(notes.element().value or "")
+        value = _read_value(notes, read_timeouts)
         if value == expected or (complete_length and len(value) >= len(expected)):
             return value
         time.sleep(0.02)
@@ -131,7 +146,13 @@ def compare(pid, repeats):
     rect = notes.element().bounds
     assert rect is not None, "Notes must have bounds"
     sim.click((rect.x + rect.width // 2, rect.y + rect.height // 2))
-    report = {"pid": pid, "control": {}, "paced": {}}
+    read_timeouts = []
+    report = {
+        "pid": pid,
+        "control": {},
+        "paced": {},
+        "uia_read_timeouts": read_timeouts,
+    }
     try:
         for mode, shapes in [
             ("control", ["plain"]),
@@ -146,7 +167,9 @@ def compare(pid, repeats):
                     typed = _sample(shape, attempt)
                     expected = _normalized(typed)
                     notes.set_value("")
-                    assert _wait_value(notes, "") == "", "Notes reset never completed"
+                    assert _wait_value(notes, "", read_timeouts) == "", (
+                        "Notes reset never completed"
+                    )
                     if mode == "control":
                         _unpaced_type(typed)
                     elif shape == "composed":
@@ -154,7 +177,9 @@ def compare(pid, repeats):
                             sim.type_text(character)
                     else:
                         sim.type_text(typed)
-                    actual = _wait_value(notes, expected, complete_length=True)
+                    actual = _wait_value(
+                        notes, expected, read_timeouts, complete_length=True
+                    )
                     if actual != expected:
                         bad += 1
                         if len(failures) < 3:

@@ -308,13 +308,20 @@ pub fn probe(hwnd: HWND, pid: u32, active: &str, inactive: &str) -> ProbeResult<
     }
     let root = unsafe { IAccessible::from_raw(raw) };
     eprintln!("IA2 identity phase: capture browser chrome");
-    let nodes = capture(&root)?;
-    let mut tabs = Vec::new();
-    for node in &nodes {
-        if node.role()? == 0x25 && node.name()?.contains(active) {
-            tabs.push(node);
+    // Chrome publishes its initial chrome tree after the HWND/title becomes
+    // visible too. Just as after switching tabs below, an enumerated object
+    // may be invalidated before its role/name is read. Recapture that entire
+    // read-only snapshot on E_FAIL; never repeat the tab action itself.
+    let tabs = read_during_publication(Instant::now() + Duration::from_secs(5), || {
+        check_window(hwnd, pid)?;
+        let mut tabs = Vec::new();
+        for node in capture(&root)? {
+            if node.role()? == 0x25 && node.name()?.contains(active) {
+                tabs.push(node);
+            }
         }
-    }
+        Ok(tabs)
+    })?;
     if tabs.len() != 1 {
         return Err(format!("expected one fixture tab {active:?}, found {}", tabs.len()).into());
     }

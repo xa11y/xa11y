@@ -156,9 +156,9 @@ APP_CONFIGS: dict[str, dict] = {
         "has_checkbox": True,
         "checkbox_unchecked_name": "Agree to terms",
         "checkbox_checked_name": "Subscribe",
-        # GTK4 radio buttons use check_box role
+        # The fixture explicitly sets RADIO on its grouped CheckButtons.
         "has_radio": True,
-        "radio_role": "check_box",
+        "radio_role": "radio_button",
         "radio_a_name": "Option A",
         "radio_b_name": "Option B",
         "slider_selector": "slider",  # GTK doesn't reliably expose AX labels
