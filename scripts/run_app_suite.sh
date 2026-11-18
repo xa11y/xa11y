@@ -156,6 +156,7 @@ case "$APP" in
             echo "Building Cocoa test app..."
             make -C test-apps/cocoa build
         fi
+        [ -f test-apps/inverter/xa11y-inverter ] || make -C test-apps/inverter build
         [ -f test-apps/taps/xa11y-taps ] || make -C test-apps/taps build
         ;;
     winforms)

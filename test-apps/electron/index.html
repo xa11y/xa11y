@@ -164,5 +164,21 @@ Line 3</textarea>
       spin.setAttribute('aria-valuenow', spin.value);
     });
   </script>
+  <!-- Real Chromium overflow scrolling, outside the page's fixed widgets. -->
+  <div style="position:fixed;bottom:8px;right:8px;background:white;z-index:10">
+    <div id="pixel-scroll" role="group" aria-label="Pixel Scroll Area" tabindex="0"
+         style="width:180px;height:60px;overflow:auto;scroll-behavior:auto">
+      <div style="width:2000px;height:2000px;background:linear-gradient(135deg,#ddd,#777)"></div>
+    </div>
+    <output id="pixel-offset" aria-label="Pixel Scroll Offset">400,400</output>
+  </div>
+  <script>
+    const pixelScroll = document.getElementById('pixel-scroll');
+    const pixelOffset = document.getElementById('pixel-offset');
+    pixelScroll.scrollTo(400, 400);
+    pixelScroll.addEventListener('scroll', () => {
+      pixelOffset.textContent = `${pixelScroll.scrollLeft},${pixelScroll.scrollTop}`;
+    });
+  </script>
 </body>
 </html>

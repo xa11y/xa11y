@@ -100,6 +100,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let keyEvents = KeyEventView(frame: NSRect(x: 480, y: stripY, width: 180, height: 28))
         keyEvents.autoresizingMask = [.minYMargin]
         container.addSubview(keyEvents)
+        let wheelEvents = WheelEventView(frame: NSRect(x: 146, y: stripY, width: 144, height: 28))
+        wheelEvents.autoresizingMask = [.minYMargin]
+        container.addSubview(wheelEvents)
 
         let docView = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 1480))
         scroll.documentView = docView
@@ -732,6 +735,67 @@ class KeyEventView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.systemBlue.setFill()
+        bounds.fill()
+    }
+}
+
+/// Keeps the direction of each scroll event it receives: "↓" for one that
+/// scrolls toward the end of the content, "↑" toward the start, "→" and "←"
+/// for the horizontal axis. Focusing it clears what it kept.
+class WheelContentView: NSView {
+    override var isFlipped: Bool { true }
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Wheel Content Offset" }
+    override func accessibilityValue() -> Any? {
+        let origin = superview?.bounds.origin ?? .zero
+        return "\(origin.x),\(origin.y)"
+    }
+}
+
+class WheelEventView: NSScrollView {
+    private var directions = ""
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // A real AppKit scroller: record direction and let NSScrollView move
+        // its document, so tests observe distance as well as event delivery.
+        documentView = WheelContentView(frame: NSRect(x: 0, y: 0, width: 2000, height: 2000))
+        contentView.scroll(to: NSPoint(x: 400, y: 400))
+        reflectScrolledClipView(contentView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var acceptsFirstResponder: Bool { true }
+    // NSScrollView normally forwards first responder to its document. This
+    // fixture owns its focus/reset contract, as the original event view did.
+    override func becomeFirstResponder() -> Bool { true }
+
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+        if event.scrollingDeltaY != 0 {
+            directions.append(event.scrollingDeltaY < 0 ? "↓" : "↑")
+        }
+        if event.scrollingDeltaX != 0 {
+            directions.append(event.scrollingDeltaX < 0 ? "→" : "←")
+        }
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Wheel Events" }
+    override func accessibilityValue() -> Any? { directions }
+    override func isAccessibilityFocused() -> Bool { window?.firstResponder === self }
+    override func setAccessibilityFocused(_ focused: Bool) {
+        if focused {
+            directions = ""
+            window?.makeFirstResponder(self)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.systemGreen.setFill()
         bounds.fill()
     }
 }

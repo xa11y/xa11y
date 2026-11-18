@@ -250,7 +250,7 @@ In Rust, additional anchors are available via `ClickOptions.anchor` (`Anchor::To
   </TabItem>
 </Tabs>
 
-Scroll units are platform "ticks", typically one notch of a physical scroll wheel. Positive `dy` scrolls down, toward the end of the content, and negative `dy` scrolls up. Positive `dx` scrolls right. The sign is the same on every platform, and matches `deltaY` and `deltaX` of a browser wheel event.
+Scroll units are platform "ticks", typically one notch of a physical scroll wheel. Positive `dy` scrolls down, toward the end of the content, and negative `dy` scrolls up. Positive `dx` scrolls right. The sign is the same on every platform, and matches `deltaY` and `deltaX` of a browser wheel event. On macOS a tick goes out as a continuous scroll of 10 points, as a trackpad sends, so a wheel inverter such as Scroll Reverser or UnnaturalScrollWheels does not reverse it.
 
 ## Keyboard
 

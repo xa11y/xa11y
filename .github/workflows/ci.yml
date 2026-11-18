@@ -593,6 +593,13 @@ jobs:
             make -C test-apps/cocoa build
           fi
 
+      # test_cocoa_wheel_inverter.py runs this wheel inverter; its event tap needs Accessibility.
+      - name: Build the fixture wheel inverter and grant it Accessibility
+        if: matrix.app == 'cocoa'
+        run: |
+          make -C test-apps/inverter build
+          bash scripts/grant_macos_tcc.sh "$PWD/test-apps/inverter/xa11y-inverter"
+
       # test_cocoa_event_taps.py runs this filtering event tap; a tap needs Accessibility.
       - name: Build the fixture event tap and grant it Accessibility
         if: matrix.app == 'cocoa'
