@@ -83,11 +83,20 @@ class TestWindow(Gtk.ApplicationWindow):
         radio_group = self._make_group("Options")
         box.append(radio_group)
 
-        self.radio_a = Gtk.CheckButton(label="Option A")
+        # Older GTK versions publish grouped CheckButtons as check boxes;
+        # newer versions use radio buttons. Give this fixture its intended
+        # semantic role explicitly so the contract is the same on both.
+        self.radio_a = Gtk.CheckButton(
+            label="Option A", accessible_role=Gtk.AccessibleRole.RADIO
+        )
         self.radio_a.set_active(True)
-        self.radio_b = Gtk.CheckButton(label="Option B")
+        self.radio_b = Gtk.CheckButton(
+            label="Option B", accessible_role=Gtk.AccessibleRole.RADIO
+        )
         self.radio_b.set_group(self.radio_a)
-        self.radio_c = Gtk.CheckButton(label="Option C")
+        self.radio_c = Gtk.CheckButton(
+            label="Option C", accessible_role=Gtk.AccessibleRole.RADIO
+        )
         self.radio_c.set_group(self.radio_a)
         radio_group.append(self.radio_a)
         radio_group.append(self.radio_b)
