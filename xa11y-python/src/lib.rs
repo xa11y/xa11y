@@ -887,6 +887,12 @@ impl Element {
     fn link_url(&self) -> Option<String> {
         self.inner_data.link_url.clone()
     }
+    /// A text input's hint text; ``None`` when not reported, and always on
+    /// Windows UI Automation.
+    #[getter]
+    fn placeholder(&self) -> Option<String> {
+        self.inner_data.placeholder.clone()
+    }
     /// Live-region settings; ``None`` when the element has none.
     #[getter]
     fn live_region(&self) -> Option<semantics::LiveRegionInfo> {

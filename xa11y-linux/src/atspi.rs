@@ -1829,6 +1829,7 @@ impl LinuxProvider {
             name,
             value,
             description,
+            placeholder: None,
             bounds,
             actions,
             states,

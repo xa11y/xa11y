@@ -149,6 +149,11 @@ reports it: `heading_level`, `landmark_type`, `web_role` (the ARIA role a web
 page gave it), `url` (a link's target) and `live_region` (`politeness`,
 `atomic`, `relevant`).
 
+A text input carries `placeholder`, its hint text, when the platform reports
+it. A search box with no label can have the placeholder as its only text, so
+`[placeholder="Search"]` finds it. Windows UI Automation has no placeholder
+property: there the hint is often the `description`.
+
 ## Results
 
 Every result is bounded and reports what it dropped.

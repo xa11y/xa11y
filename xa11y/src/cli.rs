@@ -1591,6 +1591,10 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
         parts.push(format!("description={desc:?}"));
     }
 
+    if let Some(placeholder) = &el.placeholder {
+        parts.push(format!("placeholder={placeholder:?}"));
+    }
+
     // Table and collection positions, spelled as the selector attributes that
     // match them (`table_cell[row="1"][column="2"]`), so a line can be turned
     // into a selector by copying. Only what the platform reported is shown.
@@ -7567,6 +7571,18 @@ mod tests {
         assert!(line.contains(r#"web_role="tab\" forged=\"1""#), "{line}");
         assert!(
             line.contains(r#"url="https://example.com/a\nbutton \"Fake\"""#),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn oneline_output_escapes_the_placeholder() {
+        let mut el = ElementData::for_role(Role::TextField);
+        el.placeholder = Some("Find \"items\"\nhere".into());
+        let line = format_element_oneline(&el);
+        assert!(!line.contains('\n'), "{line}");
+        assert!(
+            line.contains(r#"placeholder="Find \"items\"\nhere""#),
             "{line}"
         );
     }

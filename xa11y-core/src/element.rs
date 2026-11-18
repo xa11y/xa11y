@@ -198,6 +198,19 @@ reader_writer_pair! {
         /// See [`crate::text::strip_bidi`].
         pub description: Option<String>,
 
+        /// Hint text a text input shows while it is empty, such as "Search".
+        /// It is not the value: an empty field with a placeholder has no
+        /// `value`.
+        ///
+        /// Stripped of Unicode bidi format controls. The unstripped platform
+        /// string is preserved in [`Self::raw`] (`AXPlaceholderValue` on
+        /// macOS, `atspi_placeholder` on Linux, the `placeholder` key of
+        /// `ia2_attributes` on the Windows IA2 backend). Always `None` on Windows UI Automation, which
+        /// has no placeholder property: Chromium and AccessKit report a
+        /// placeholder there as `HelpText`, which is [`Self::description`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub placeholder: Option<String>,
+
         /// Bounding rectangle in desktop coordinates: physical pixels on
         /// Windows and logical points on macOS and Linux. The origin is the
         /// top-left of the primary display. This is the space accepted by
@@ -326,6 +339,7 @@ impl ElementData {
             name: None,
             value: None,
             description: None,
+            placeholder: None,
             bounds: None,
             actions: Vec::new(),
             states: StateSet::default(),

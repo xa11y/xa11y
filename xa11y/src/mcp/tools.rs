@@ -3408,6 +3408,7 @@ pub(crate) fn element_data_json(data: &crate::ElementData, center: bool) -> Valu
     insert_text(&mut node, "name", data.name.as_deref());
     insert_text(&mut node, "value", data.value.as_deref());
     insert_text(&mut node, "description", data.description.as_deref());
+    insert_text(&mut node, "placeholder", data.placeholder.as_deref());
     insert_some(&mut node, "id", data.stable_id.as_deref().map(Value::from));
 
     if let Some(b) = data.bounds {
@@ -6557,7 +6558,9 @@ mod tests {
             one(r#"status[name="Saved"]"#)["live_region"],
             json!({ "politeness": "polite", "atomic": true, "relevant": "additions text" })
         );
+        assert!(h1.get("placeholder").is_none(), "{h1}");
         let field = one(r#"text_field[name="Email"]"#);
+        assert_eq!(field["placeholder"], "name@example.com");
         for key in [
             "heading_level",
             "landmark_type",

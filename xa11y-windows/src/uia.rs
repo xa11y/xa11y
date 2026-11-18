@@ -1059,6 +1059,7 @@ impl WindowsProvider {
             name: if name.is_empty() { None } else { Some(name) },
             value: None,
             description: None,
+            placeholder: None,
             bounds: None,
             actions: vec![],
             states: StateSet::default(),
@@ -3250,6 +3251,9 @@ fn build_snapshot_data(
         name,
         value,
         description,
+        // UIA has no placeholder property. Chromium and AccessKit put a
+        // placeholder in HelpText, which already feeds `description` above.
+        placeholder: None,
         bounds,
         actions,
         states,

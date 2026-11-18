@@ -339,6 +339,13 @@ impl Element {
         self.data.link_url.clone()
     }
 
+    /// A text input's hint text; `null` when not reported, and always on
+    /// Windows UI Automation.
+    #[napi(getter)]
+    pub fn placeholder(&self) -> Option<String> {
+        self.data.placeholder.clone()
+    }
+
     /// Live-region settings; `null` when the element has none.
     #[napi(getter)]
     pub fn live_region(&self) -> Option<crate::types::LiveRegionInfo> {

@@ -607,6 +607,9 @@ fn ia2_entry(name: &str) -> Result<Entry> {
         "property:link_url" => {
             partial("IAccessibleHyperlink::anchorTarget when it returns a URI string")
         }
+        "property:placeholder" => {
+            partial("IA2 `placeholder` object attribute when it is not the name")
+        }
         "property:live_region" => {
             partial("IA2 live/atomic/relevant object attributes and container forms")
         }
@@ -747,6 +750,13 @@ const ROWS: &[Row] = &[
         linux: yes_by("`Hyperlink.GetURI`"),
         macos: yes_by("`AXURL`"),
         windows: partial("the value of a Hyperlink, which browsers set to the URL; UIA has no URL property"),
+    },
+    Row {
+        name: "property:placeholder",
+        description: "A text input's hint text (`ElementData.placeholder`).",
+        linux: partial("the `placeholder-text` attribute (GTK, Firefox, AccessKit), or `placeholder` (Chromium) when it is not the name"),
+        macos: yes_by("`AXPlaceholderValue`"),
+        windows: no("UIA has no placeholder property; Chromium and AccessKit report a placeholder as `HelpText`, read as `description`"),
     },
     Row {
         name: "property:live_region",

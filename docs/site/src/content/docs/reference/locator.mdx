@@ -141,6 +141,7 @@ A live handle returned by `app.children()`, `element.children()`,
 | `name` | String, optional |
 | `value` | String, optional |
 | `description` | String, optional |
+| `placeholder` | The hint text a text input shows while it is empty, optional. Not reported by Windows UI Automation. |
 | `bounds` | Rect (`x`, `y`, `width`, `height`), optional |
 | `states` | State set (`enabled`, `visible`, `focused`, and the rest) |
 | `actions` | List of action names this element supports |
@@ -160,7 +161,7 @@ A live handle returned by `app.children()`, `element.children()`,
 | `pid` | Process ID of the owning application |
 | `raw` | Platform-native key/value map |
 
-`name`, `value`, and `description` are stripped of Unicode bidi format
+`name`, `value`, `description`, and `placeholder` are stripped of Unicode bidi format
 controls. `raw` holds the unstripped platform string under the platform-native
 key. Each of these properties except `raw`, `states`, and `actions` is also
 usable as a selector attribute, along with the individual state flags.

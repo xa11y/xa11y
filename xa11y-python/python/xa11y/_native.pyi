@@ -1476,6 +1476,10 @@ class Element:
     def link_url(self) -> str | None:
         """A link's target URL; ``None`` on a non-link or when not reported."""
     @property
+    def placeholder(self) -> str | None:
+        """A text input's hint text; ``None`` when not reported, and always on
+        Windows UI Automation."""
+    @property
     def live_region(self) -> LiveRegionInfo | None:
         """Live-region settings; ``None`` when the element has none."""
     def relations(self, kinds: list[RelationKindName] | None = None) -> list[Relation]:

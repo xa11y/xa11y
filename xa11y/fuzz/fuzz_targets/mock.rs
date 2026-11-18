@@ -293,6 +293,7 @@ pub fn build_provider(elements: &[FuzzElement]) -> Option<Arc<FuzzProvider>> {
                 name: fuzz.name.clone(),
                 value: fuzz.value.clone(),
                 description: fuzz.description.clone(),
+                placeholder: fuzz.name.clone(),
                 bounds: fuzz.bounds.as_ref().map(|b| Rect {
                     x: b.x,
                     y: b.y,
