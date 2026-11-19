@@ -149,6 +149,19 @@ reports it: `heading_level`, `landmark_type`, `web_role` (the ARIA role a web
 page gave it), `url` (a link's target) and `live_region` (`politeness`,
 `atomic`, `relevant`).
 
+`[placeholder=…]` matches only a distinct placeholder reported by the
+accessibility provider. For a known Electron search box, the same
+hint can be the placeholder on macOS and the accessible name on Linux. Use
+selector alternation to match either property for that control.
+
+```text
+combo_box[placeholder="Search for items"], combo_box[name="Search for items"]
+```
+
+Check that the selector matches exactly one element before acting. Windows
+UI Automation leaves `placeholder` unset. The Windows IA2 backend can report
+it when the provider exposes a dedicated placeholder attribute.
+
 ## Results
 
 Every result is bounded and reports what it dropped.

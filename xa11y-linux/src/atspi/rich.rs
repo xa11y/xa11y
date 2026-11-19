@@ -66,6 +66,7 @@ pub(super) struct TableMeta {
     pub(super) collection: Option<CollectionInfo>,
     pub(super) semantics: Semantics,
     pub(super) link_url: Option<String>,
+    pub(super) placeholder: Option<String>,
 }
 
 /// The offset unit a toolkit's `org.a11y.atspi.Text` speaks.
@@ -177,6 +178,24 @@ fn carries_document_semantics(role: Role) -> bool {
             | Role::Alert
             | Role::WebArea
     )
+}
+
+/// Roles a toolkit can give a placeholder, read from the object attributes.
+fn takes_text_entry(role: Role) -> bool {
+    matches!(
+        role,
+        Role::TextField | Role::TextArea | Role::ComboBox | Role::SpinButton
+    )
+}
+
+/// A text input's placeholder. GTK, Firefox and AccessKit name the attribute
+/// `placeholder-text`; Chromium names it `placeholder`, and leaves it out when
+/// the placeholder became the name.
+pub(crate) fn placeholder_from_attributes(attrs: &HashMap<String, String>) -> Option<String> {
+    ["placeholder-text", "placeholder"]
+        .into_iter()
+        .find_map(|k| attrs.get(k).filter(|v| !v.is_empty()))
+        .cloned()
 }
 
 /// Document semantics read from object attributes (#476).
@@ -1059,10 +1078,12 @@ impl LinuxProvider {
             kind_only()
         };
         // One GetAttributes read serves the collection position, the document
-        // semantics (#476) and a table's declared totals, and only for nodes
-        // that can carry them, so other nodes pay nothing.
-        let attrs = if is_collection_role(role) || carries_document_semantics(role) || ifaces.table
-        {
+        // semantics (#476), a table's declared totals and a text input's
+        // placeholder, and only for nodes that can carry them, so other nodes
+        // pay nothing.
+        let reads_semantics =
+            is_collection_role(role) || carries_document_semantics(role) || ifaces.table;
+        let attrs = if reads_semantics || takes_text_entry(role) {
             match self.scan_attributes(aref) {
                 Ok(Some(Some(attrs))) => Some(attrs),
                 // The object has gone, or has no attributes: nothing to read.
@@ -1087,8 +1108,10 @@ impl LinuxProvider {
             .as_ref()
             .filter(|_| is_collection_role(role))
             .and_then(collection_from_attributes);
+        // A text entry's attributes are read for its placeholder only.
         let semantics = attrs
             .as_ref()
+            .filter(|_| reads_semantics)
             .map(|a| semantics_from_attributes(role, a))
             .unwrap_or_else(|| Semantics::for_role(role));
         let link_url = if role == Role::Link && ifaces.hyperlink {
@@ -1096,6 +1119,10 @@ impl LinuxProvider {
         } else {
             None
         };
+        let placeholder = attrs
+            .as_ref()
+            .filter(|_| takes_text_entry(role))
+            .and_then(placeholder_from_attributes);
         TableMeta {
             table,
             cell,
@@ -1103,6 +1130,7 @@ impl LinuxProvider {
             collection,
             semantics,
             link_url,
+            placeholder,
         }
     }
 
@@ -1642,6 +1670,18 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn placeholder_reads_the_gtk_and_the_chromium_key() {
+        let read = |pairs| super::placeholder_from_attributes(&attrs(pairs));
+        assert_eq!(
+            read(&[("placeholder-text", "Find")]).as_deref(),
+            Some("Find")
+        );
+        assert_eq!(read(&[("placeholder", "Find")]).as_deref(), Some("Find"));
+        assert_eq!(read(&[("placeholder", "")]), None);
+        assert_eq!(read(&[("xml-roles", "textbox")]), None);
     }
 
     #[test]

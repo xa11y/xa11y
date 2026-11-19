@@ -30,9 +30,10 @@
 //! `header` takes `"column"` or `"row"` and matches header cells:
 //! `table_cell[header="column"]`.
 //!
-//! `url` matches a link's target URL and `web_role` the role a web page
-//! declared (its ARIA `role`), as the element reports them; both take every
-//! operator: `link[url^="https://"]`, `[web_role="tab"]`.
+//! `url` matches a link's target URL, `web_role` the role a web page
+//! declared (its ARIA `role`) and `placeholder` a text input's hint text, as
+//! the element reports them; all three take every operator:
+//! `link[url^="https://"]`, `[web_role="tab"]`, `[placeholder*="Search"]`.
 //!
 //! Attributes with a closed set of values refuse any other value with `=`,
 //! since it could never match: the boolean states (`enabled`, `visible`,
@@ -877,6 +878,7 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
         "name" => element.name.clone(),
         "value" => element.value.clone(),
         "description" => element.description.clone(),
+        "placeholder" => element.placeholder.clone(),
         "bounds" => element.bounds.as_ref().map(|b| {
             serde_json::json!({
                 "x": b.x, "y": b.y, "width": b.width, "height": b.height,
@@ -1834,6 +1836,7 @@ mod tests {
                 name: Some(row.name.to_string()),
                 value: None,
                 description: None,
+                placeholder: None,
                 bounds: None,
                 actions: vec![],
                 states: crate::element::StateSet::default(),
@@ -2071,6 +2074,7 @@ mod tests {
             name: None,
             value: None,
             description: None,
+            placeholder: None,
             bounds: None,
             actions: Vec::new(),
             states: crate::element::StateSet::default(),
@@ -2737,6 +2741,7 @@ mod tests {
             name: Some(row.name.to_string()),
             value: None,
             description: None,
+            placeholder: None,
             bounds: None,
             actions: vec![],
             states: crate::element::StateSet::default(),
@@ -2899,6 +2904,7 @@ mod tests {
                     name: Some(row.name.to_string()),
                     value: None,
                     description: None,
+                    placeholder: None,
                     bounds: None,
                     actions: vec![],
                     states: crate::element::StateSet::default(),
@@ -3199,6 +3205,7 @@ mod tests {
             name: Some("T".to_string()),
             value: None,
             description: None,
+            placeholder: None,
             bounds: None,
             actions: vec![],
             states: crate::element::StateSet::default(),

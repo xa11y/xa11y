@@ -1583,6 +1583,7 @@ fn build_event_snapshot(
             name,
             value,
             description: None,
+            placeholder: None,
             bounds: None,
             actions: vec![],
             states,

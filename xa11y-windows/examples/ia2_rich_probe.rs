@@ -121,6 +121,12 @@ fn main() {
             "{:?}",
             link.link_url
         );
+        let hint = one(
+            provider.as_ref(),
+            &doc,
+            r#"text_field[placeholder="IA2 hint text"]"#,
+        )?;
+        assert_eq!(hint.name.as_deref(), Some("IA2 hint field"));
         let again = Element::new(
             one(provider.as_ref(), &doc, r#"link[name="embedded link"]"#)?,
             Arc::clone(&provider),

@@ -912,6 +912,7 @@ fn data(snapshot: Snapshot, bits: i32, owner: &Owner, handle: u64) -> ElementDat
         name,
         value,
         description,
+        placeholder: None,
         bounds,
         actions,
         states,

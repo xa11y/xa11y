@@ -297,6 +297,31 @@ def test_textfield_found(app, app_config):
         assert el.value == initial
 
 
+def test_textfield_placeholder(app, app_config):
+    """A text field's hint text is `placeholder`, apart from its value."""
+    hint = app_config.get("textfield_placeholder")
+    if not hint:
+        pytest.skip("app reports no text field placeholder")
+    field = app.locator(app_config["textfield_selector"]).element()
+    assert field.placeholder == hint
+    assert field.value != hint
+    found = app.locator(f'text_field[placeholder="{hint}"]').element()
+    assert found.same_as(field)
+
+
+def test_uia_reads_a_web_placeholder_as_the_description(app, app_config):
+    """UIA has no placeholder property, so `placeholder` stays None there.
+
+    WebView2 (Chromium) reports the placeholder as HelpText instead, and
+    HelpText is the description on every UIA element.
+    """
+    hint = app_config.get("textfield_placeholder_as_description")
+    if not hint:
+        pytest.skip("app reports no placeholder through UIA HelpText")
+    field = app.locator(app_config["textfield_selector"]).element()
+    assert (field.placeholder, field.description) == (None, hint)
+
+
 def test_password_field_is_flagged(app, app_config):
     """A password entry keeps the text_field role and sets `password` (#522).
 

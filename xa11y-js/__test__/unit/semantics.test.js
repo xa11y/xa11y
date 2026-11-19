@@ -32,6 +32,13 @@ test('landmarks, headings, links and live regions are getters', async () => {
   });
 });
 
+test('placeholder is a getter and a selector attribute', async () => {
+  const field = await one('text_field[placeholder="name@example.com"]');
+  assert.equal(field.name, 'Email');
+  assert.equal(field.placeholder, 'name@example.com');
+  assert.equal((await one('link[name="Docs"]')).placeholder, null);
+});
+
 test('navigation is refused with its replacement', async () => {
   await assert.rejects(one('navigation'), (e) => {
     assert.ok(e instanceof InvalidSelectorError, e);

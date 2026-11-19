@@ -52,6 +52,14 @@ test('tree has the named text field', async () => {
   assert.equal(field.editable, true);
 });
 
+test('a text field reports its placeholder apart from its value', async () => {
+  if (!appConfig.placeholder) return; // skip if the app reports no placeholder
+  const app = await getApp();
+  const field = await one(app, `text_field[placeholder="${appConfig.placeholder}"]`);
+  assert.equal(field.placeholder, appConfig.placeholder);
+  assert.notEqual(field.value, appConfig.placeholder);
+});
+
 test('UWP retains the native nested Edit and selects the outer TextBox (#606)', {
   skip: appEnv !== 'uwp',
 }, async () => {

@@ -19,6 +19,12 @@ def test_landmarks_and_headings():
     assert one('[name="Docs"]').landmark_type is None
 
 
+def test_placeholder_is_a_property_and_a_selector_attribute():
+    field = one('text_field[placeholder="name@example.com"]')
+    assert (field.name, field.placeholder) == ("Email", "name@example.com")
+    assert one('[name="Docs"]').placeholder is None
+
+
 def test_link_and_live_region():
     link = one('link[url*="example.com"]')
     assert link.link_url == "https://example.com/docs"

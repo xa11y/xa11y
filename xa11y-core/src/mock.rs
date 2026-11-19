@@ -1449,6 +1449,7 @@ pub fn build_provider() -> Arc<MockProvider> {
             name: name.map(String::from),
             value: value.map(String::from),
             description: desc.map(String::from),
+            placeholder: None,
             bounds,
             actions: actions.iter().map(|s| s.to_string()).collect(),
             states,
@@ -1619,8 +1620,8 @@ fn mock_unit_at(text: &str, offset: u32, unit: TextUnit) -> Result<TextRange> {
 
 /// The shared tree plus a document (#476): a `main` landmark holding an h1
 /// and an h2, a navigation landmark with a link, a polite live region, and a
-/// labelled, described text field whose relations point at its label and its
-/// hint. Used by the binding tests of document semantics.
+/// labelled, described text field with a placeholder, whose relations point
+/// at its label and its hint. Used by the binding tests of document semantics.
 pub fn build_document_provider() -> Arc<MockProvider> {
     use crate::semantics::{Landmark, LiveRegionParts, Politeness, RelationKind};
     let provider = build_provider();
@@ -1674,7 +1675,9 @@ pub fn build_document_provider() -> Arc<MockProvider> {
         add(window, live);
         let label = add(window, named(Role::StaticText, "Email address"));
         let hint = add(window, named(Role::StaticText, "We never share it"));
-        let field = add(window, named(Role::TextField, "Email"));
+        let mut field = named(Role::TextField, "Email");
+        field.placeholder = Some("name@example.com".into());
+        let field = add(window, field);
         provider
             .relations
             .lock()

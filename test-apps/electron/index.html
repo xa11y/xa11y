@@ -17,7 +17,7 @@
   <button id="ok">OK</button>
   <button id="cancel">Cancel</button>
   <label for="entry">Search</label>
-  <input id="entry" type="text" aria-label="Search" value="hello world">
+  <input id="entry" type="text" aria-label="Search" placeholder="Type here..." value="hello world">
   <!-- aria-label, as the Tauri app has: on macOS Chromium sometimes exposes
        this checkbox with an empty AXTitle and AXDescription when its name
        comes only from the wrapping <label>, which failed every checkbox test
@@ -151,6 +151,11 @@ Line 3</textarea>
          dir="rtl">&#x5E9;&#x5DC;&#x5D5;&#x5DD; abc</div>
     <textarea id="rtl-notes" aria-label="RTL Notes" dir="rtl" rows="1">&#x5E9;&#x5DC;&#x5D5;&#x5DD; abc</textarea>
     <textarea id="wrapped-notes" aria-label="Wrapped Notes" cols="16" rows="4">alpha beta gamma delta epsilon zeta</textarea>
+
+    <!-- A search box whose only text is its placeholder, as an Electron app
+         shows: no label, no value. -->
+    <input id="hint-only" type="text" role="combobox" aria-expanded="false"
+           placeholder="Search for items">
   </section>
 
   <script>

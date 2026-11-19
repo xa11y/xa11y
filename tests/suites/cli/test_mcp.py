@@ -1601,6 +1601,23 @@ def test_find_flags_a_password_entry(mcp, app_pid, app_name):
     assert "password" not in plain[0]["states"], plain[0]
 
 
+# Apps whose text field shows the hint "Type here..." as a platform
+# placeholder. UIA has no placeholder property, so Windows reports none.
+PLACEHOLDER_APPS = {"cocoa", "gtk", "tauri", "electron"}
+
+
+def test_find_returns_the_placeholder(mcp, app_pid, app_name):
+    """A match carries its placeholder, and the selector attribute finds it."""
+    if app_name not in PLACEHOLDER_APPS or sys.platform == "win32":
+        pytest.skip(f"the {app_name} test app reports no placeholder here")
+    result = mcp.call_tool(
+        "find", {"pid": app_pid, "selector": 'text_field[placeholder="Type here..."]'}
+    )["result"]
+    assert result["isError"] is False, result["content"]
+    matches = result["structuredContent"]["matches"]
+    assert [m.get("placeholder") for m in matches] == ["Type here..."], matches
+
+
 def test_find_says_why_a_scrolled_out_element_is_hidden(mcp, app_pid, app_name):
     """`states.hidden_reason` names why a match is hidden, and is absent on a
     visible one (#590). Only the WinForms app has a scrolled-out control."""

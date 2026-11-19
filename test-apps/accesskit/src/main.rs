@@ -130,8 +130,9 @@ const ZERO_SIZE_NODE: NodeId = NodeId(77);
 // A password entry (#522): AccessKit's `PasswordInput` reaches each platform
 // as its native secure-text field (AXSecureTextField subrole, AT-SPI
 // `password text`, UIA `IsPassword`), which is what the `password` state
-// reads. Late in document order so it is not the first `text_field` a test
-// picks up, and shifts no `:nth(n)` index another test relies on.
+// reads. It is empty, so AccessKit also publishes its placeholder. Late in
+// document order so it is not the first `text_field` a test picks up, and
+// shifts no `:nth(n)` index another test relies on.
 const PASSWORD_FIELD: NodeId = NodeId(79);
 
 // A label whose text is far larger than any per-field cap a consumer applies
@@ -881,6 +882,7 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
 
     let mut password = Node::new(Role::PasswordInput);
     password.set_label("Password");
+    password.set_placeholder("Enter password");
     password.add_action(Action::Focus);
     nodes.push((PASSWORD_FIELD, password));
 
