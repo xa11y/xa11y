@@ -141,7 +141,7 @@ A live handle returned by `app.children()`, `element.children()`,
 | `name` | String, optional |
 | `value` | String, optional |
 | `description` | String, optional |
-| `placeholder` | The hint text a text input shows while it is empty, optional. Not reported by Windows UI Automation. |
+| `placeholder` | Optional hint text reported as a distinct placeholder by the accessibility provider. An unset value means xa11y did not obtain a distinct placeholder. Always unset on Windows UI Automation. |
 | `bounds` | Rect (`x`, `y`, `width`, `height`), optional |
 | `states` | State set (`enabled`, `visible`, `focused`, and the rest) |
 | `actions` | List of action names this element supports |
