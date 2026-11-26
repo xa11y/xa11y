@@ -92,7 +92,11 @@ class TestWindow(QMainWindow):
     def _build_menu_bar(self) -> None:
         mb: QMenuBar = self.menuBar()
         file_menu = mb.addMenu("&File")
-        file_menu.addAction("&New")
+        new_action = file_menu.addAction("&New")
+        # UIA invokes QAction.trigger directly, which does not run QMenu's
+        # pointer-activation dismissal. Give the fixture's cleanup action an
+        # explicit close so tests do not leave its popup on the desktop.
+        new_action.triggered.connect(file_menu.close)
         file_menu.addAction("&Open")
         file_menu.addAction("&Save")
         file_menu.addSeparator()

@@ -2,7 +2,7 @@
 
 ## Scope
 
-Survey against main `e6c1842a`: Windows UIA discovery, snapshot construction,
+Survey against main `a2fedad3`: Windows UIA discovery, snapshot construction,
 root deduplication and selector traversal; core locators and event channels;
 Python/JS subscriptions; pytest event recording; integration helpers and
 recommended usage. IA2's separate worker/deadline architecture is unchanged.
@@ -29,6 +29,12 @@ recommended usage. IA2's separate worker/deadline architecture is unchanged.
   The Rust blocking iterator likewise waits for delivery/disconnect instead of
   waking every 100 ms. Python signal checks and JS worker cancellation remain
   unchanged.
+* Qt popup tests now verify cleanup before proceeding. The fixture's New action
+  explicitly closes its menu: UIA invokes `QAction.trigger`, which alone does
+  not perform QMenu's pointer-driven dismissal. Previously a later dialog could
+  happen to hide the leftover popup, making the window-activation test depend
+  on traversal timing. Cleanup waits for native popup disappearance or dialog
+  invisibility, without a fixed settle delay.
 
 No shorter locator polling intervals, reduced deadlines, skipped actionability
 checks, persistent snapshots, or extra background workers are introduced.
@@ -80,28 +86,28 @@ timings. Timings are observations on one desktop, not CI performance thresholds.
 Release-wheel A/B/B/A comparison on Windows, Python 3.12.13 and Qt/PySide6
 6.12.0. Each variant has ten timed samples per workload across two fresh app
 sessions. The same modified benchmark source ran against both wheels. No builds
-or other test suites ran during these four rounds. Baseline is `e6c1842a`.
+or other test suites ran during these four rounds. Baseline is `a2fedad3`.
 
 | Workload | Baseline ms | Changed ms | Change |
 | --- | ---: | ---: | ---: |
-| attach by PID | 4.464 | 4.160 | -6.8% |
-| enumerate windows | 2.288 | 2.220 | -3.0% |
-| read direct children | 6.957 | 2.159 | -69.0% |
-| read shallow tree | 11.692 | 6.983 | -40.3% |
-| capture 32 nodes | 32.225 | 27.575 | -14.4% |
-| exact name | 32.418 | 27.605 | -14.8% |
-| exists miss | 92.123 | 87.416 | -5.1% |
-| first button | 15.269 | 10.723 | -29.8% |
-| count buttons | 90.794 | 86.593 | -4.6% |
-| list buttons | 89.633 | 87.489 | -2.4% |
-| state filter | 105.791 | 93.132 | -12.0% |
-| descendant selector | 107.257 | 102.632 | -4.3% |
-| selector union | 105.829 | 101.396 | -4.2% |
-| ready wait | 35.885 | 31.052 | -13.5% |
-| set text | 45.999 | 41.389 | -10.0% |
-| press to visible dialog control | 298.529 | 286.509 | -4.0% |
-| multi-window tree roots | 10.643 | 9.140 | -14.1% |
-| multi-window unique dialog control | 102.251 | 101.168 | -1.1% |
+| attach by PID | 4.666 | 4.179 | -10.4% |
+| enumerate windows | 2.192 | 2.228 | +1.6% |
+| read direct children | 6.864 | 2.104 | -69.3% |
+| read shallow tree | 11.463 | 7.037 | -38.6% |
+| capture 32 nodes | 31.502 | 27.203 | -13.6% |
+| exact name | 31.941 | 27.496 | -13.9% |
+| exists miss | 91.196 | 87.220 | -4.4% |
+| first button | 14.998 | 10.558 | -29.6% |
+| count buttons | 91.320 | 87.451 | -4.2% |
+| list buttons | 88.130 | 86.922 | -1.4% |
+| state filter | 97.595 | 83.618 | -14.3% |
+| descendant selector | 111.411 | 102.289 | -8.2% |
+| selector union | 109.299 | 100.305 | -8.2% |
+| ready wait | 35.830 | 30.639 | -14.5% |
+| set text | 45.492 | 41.258 | -9.3% |
+| press to visible dialog control | 297.613 | 286.594 | -3.7% |
+| multi-window tree roots | 10.460 | 8.685 | -17.0% |
+| multi-window unique dialog control | 101.658 | 99.731 | -1.9% |
 
 Raw samples: [windows-automation-performance-results.json](windows-automation-performance-results.json).
 Different queries have different costs; these results do not imply a uniform
@@ -120,5 +126,23 @@ result; the open-dialog workload also verifies multiple native windows and a
 unique dialog control. The raw sample JSON records each round rather than only
 its aggregate.
 
-Validation details and local environment limitations are recorded in the PR.
+## Validation
 
+* `cargo test --workspace` passed with a stationary AccessKit fixture present.
+  Some existing Windows unit tests require at least one desktop application;
+  an empty desktop is not a valid environment for those tests.
+* Targeted core/Windows clippy with warnings denied passed. Changed Rust files
+  pass rustfmt, and changed Python files compile.
+* The Windows integration harness's 199 main tests passed, as did its STA-host
+  and two system-aware DPI tests. Its separate UIPI test requires an elevated
+  runner, unavailable in this session, and fails at that prerequisite assertion.
+* The full Windows/Qt Python suite passed: 118 passed, 209 skipped, 2 xfailed,
+  2 xpassed. The existing skips and expected-failure markers were retained.
+* Python binding tests (436), JS binding tests (263), pytest plugin tests (129),
+  Strands tests (263), and harness/matrix self-tests (126) passed during validation.
+  Bindings parity passed.
+* `cargo xtask check` was run. Its aggregate result remains nonzero due to
+  existing generated capability-table drift and an unrelated rustfmt import
+  ordering difference in `dpi_system_aware.rs`. The formatting difference also
+  reproduces on the unmodified baseline. A missing YAML dependency was installed
+  and harness tests rerun; Rust tests were rerun with a stable desktop fixture.
