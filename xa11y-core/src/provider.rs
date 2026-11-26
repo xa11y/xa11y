@@ -36,6 +36,18 @@ pub trait Provider: Send + Sync {
     /// If `element` is `None`, returns top-level application elements.
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>>;
 
+    /// Enumerate children once, allowing snapshot construction beyond the remaining
+    /// capture budget to be deferred until a cycle leaves room for another child.
+    fn capture_children(
+        &self,
+        parent: &ElementData,
+        budget: usize,
+    ) -> Result<(usize, Box<dyn Iterator<Item = ElementData> + '_>)> {
+        let _ = budget;
+        let children = self.get_children(Some(parent))?;
+        Ok((children.len(), Box::new(children.into_iter())))
+    }
+
     /// List an application's windows. Backends whose native window list is
     /// wider than their accessibility tree roots can override this.
     fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
@@ -739,6 +751,13 @@ pub trait Provider: Send + Sync {
 // orphan rules keep this collision-free for downstream crates because `xa11y-core`
 // owns the `Provider` trait.
 impl<T: Provider + ?Sized> Provider for &T {
+    fn capture_children(
+        &self,
+        parent: &ElementData,
+        budget: usize,
+    ) -> Result<(usize, Box<dyn Iterator<Item = ElementData> + '_>)> {
+        (**self).capture_children(parent, budget)
+    }
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         (**self).get_children(element)
     }

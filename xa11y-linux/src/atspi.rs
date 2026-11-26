@@ -3074,6 +3074,69 @@ impl LinuxProvider {
             .collect())
     }
 
+    fn element_child_refs(
+        &self,
+        element_data: &ElementData,
+    ) -> Result<Vec<(AccessibleRef, Option<u32>)>> {
+        let aref = self.get_cached(element_data.handle)?;
+        // A node destroyed after its snapshot has no live descendants.
+        // Keep genuine D-Bus failures visible; do not run the Chromium
+        // empty-tree diagnostic on a vanished window.
+        //
+        // A destroyed node is stale, not childless: core's tree
+        // walks drop a child that went stale mid-walk, and a caller
+        // holding the node learns it is gone.
+        let Some(children) = self.live_atspi_children(&aref)? else {
+            return Err(Error::stale(
+                xa11y_core::StaleReason::Removed,
+                xa11y_core::error::stale_subject(element_data),
+            ));
+        };
+
+        // Pre-filter invalid refs and flatten nested application nodes,
+        // collecting the concrete refs to build in parallel.
+        let mut to_build = Vec::new();
+        for child_ref in &children {
+            if child_ref.path == "/org/a11y/atspi/null"
+                || child_ref.bus_name.is_empty()
+                || child_ref.path.is_empty()
+            {
+                continue;
+            }
+            let role_number = self.get_role_number(child_ref).ok();
+            if role_number == Some(ATSPI_ROLE_APPLICATION) {
+                // Nested application objects can also disappear between
+                // enumeration and this read. Prune only confirmed absence.
+                let grandchildren = match self.live_atspi_children(child_ref) {
+                    Ok(Some(grandchildren)) => grandchildren,
+                    Ok(None) | Err(Error::ElementStale { .. }) => continue,
+                    Err(err) => return Err(err),
+                };
+                for gc_ref in grandchildren {
+                    if gc_ref.path == "/org/a11y/atspi/null"
+                        || gc_ref.bus_name.is_empty()
+                        || gc_ref.path.is_empty()
+                    {
+                        continue;
+                    }
+                    let gc_role = self.get_role_number(&gc_ref).ok();
+                    if gc_role == Some(ATSPI_ROLE_APPLICATION) {
+                        continue;
+                    }
+                    to_build.push((gc_ref, gc_role));
+                }
+                continue;
+            }
+            to_build.push((child_ref.clone(), role_number));
+        }
+
+        if to_build.is_empty() {
+            self.check_chromium_a11y_enabled(&aref, Some(element_data.role))?;
+        }
+
+        Ok(to_build)
+    }
+
     fn query_children(&self, parent: &AccessibleRef) -> Result<Vec<(AccessibleRef, Option<u32>)>> {
         let Some(children) = self.live_atspi_children(parent)? else {
             return Ok(Vec::new());
@@ -3308,83 +3371,39 @@ impl Provider for LinuxProvider {
     }
 
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        match element {
-            None => {
-                // Top-level: delegate to `list_apps()`, the canonical
-                // discovery primitive.
-                self.list_apps()
-            }
-            Some(element_data) => {
-                let aref = self.get_cached(element_data.handle)?;
-                // A node destroyed after its snapshot has no live descendants.
-                // Keep genuine D-Bus failures visible; do not run the Chromium
-                // empty-tree diagnostic on a vanished window.
-                //
-                // A destroyed node is stale, not childless: core's tree
-                // walks drop a child that went stale mid-walk, and a caller
-                // holding the node learns it is gone.
-                let Some(children) = self.live_atspi_children(&aref)? else {
-                    return Err(Error::stale(
-                        xa11y_core::StaleReason::Removed,
-                        xa11y_core::error::stale_subject(element_data),
-                    ));
-                };
-                let pid = element_data.pid;
+        let Some(element) = element else {
+            return self.list_apps();
+        };
+        let (_, children) = self.capture_children(element, usize::MAX)?;
+        Ok(children.collect())
+    }
 
-                // Pre-filter invalid refs and flatten nested application nodes,
-                // collecting the concrete refs to build in parallel.
-                let mut to_build = Vec::new();
-                for child_ref in &children {
-                    if child_ref.path == "/org/a11y/atspi/null"
-                        || child_ref.bus_name.is_empty()
-                        || child_ref.path.is_empty()
-                    {
-                        continue;
-                    }
-                    let role_number = self.get_role_number(child_ref).ok();
-                    if role_number == Some(ATSPI_ROLE_APPLICATION) {
-                        // Nested application objects can also disappear between
-                        // enumeration and this read. Prune only confirmed absence.
-                        let grandchildren = match self.live_atspi_children(child_ref) {
-                            Ok(Some(grandchildren)) => grandchildren,
-                            Ok(None) | Err(Error::ElementStale { .. }) => continue,
-                            Err(err) => return Err(err),
-                        };
-                        for gc_ref in grandchildren {
-                            if gc_ref.path == "/org/a11y/atspi/null"
-                                || gc_ref.bus_name.is_empty()
-                                || gc_ref.path.is_empty()
-                            {
-                                continue;
-                            }
-                            let gc_role = self.get_role_number(&gc_ref).ok();
-                            if gc_role == Some(ATSPI_ROLE_APPLICATION) {
-                                continue;
-                            }
-                            to_build.push((gc_ref, gc_role));
-                        }
-                        continue;
-                    }
-                    to_build.push((child_ref.clone(), role_number));
-                }
-
-                if to_build.is_empty() {
-                    self.check_chromium_a11y_enabled(&aref, Some(element_data.role))?;
-                }
-
-                let memo = AncestorMemo::default();
-                let results: Vec<ElementData> = to_build
-                    .par_iter()
-                    .map(carry_deadline(
-                        |(r, number): &(AccessibleRef, Option<u32>)| {
-                            self.build_element_data_in(r, pid, &memo, *number)
-                        },
-                    ))
-                    .collect();
-
-                Ok(results)
-            }
-        }
+    fn capture_children(
+        &self,
+        element_data: &ElementData,
+        budget: usize,
+    ) -> Result<(usize, Box<dyn Iterator<Item = ElementData> + '_>)> {
+        let refs = self.element_child_refs(element_data)?;
+        let total = refs.len();
+        let refs = refs.into_iter();
+        let pid = element_data.pid;
+        let memo = AncestorMemo::default();
+        let prefix = refs.as_slice()[..budget.min(total)]
+            .par_iter()
+            .map(carry_deadline(
+                |(r, role): &(AccessibleRef, Option<u32>)| {
+                    self.build_element_data_in(r, pid, &memo, *role)
+                },
+            ))
+            .collect::<Vec<_>>();
+        // The tail is demanded only if cycle detection frees a prefix slot.
+        let tail = refs.skip(budget.min(total));
+        Ok((
+            total,
+            Box::new(prefix.into_iter().chain(
+                tail.map(move |(r, role)| self.build_element_data_in(&r, pid, &memo, role)),
+            )),
+        ))
     }
 
     fn find_elements_prefix(

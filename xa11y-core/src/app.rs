@@ -693,7 +693,14 @@ impl App {
         &self,
         options: &crate::capture::CaptureOptions,
     ) -> Result<crate::capture::Capture> {
-        crate::capture::capture_from(self.as_element(), || self.children(), options)
+        crate::capture::capture_from(
+            self.as_element(),
+            |_| {
+                let children = self.children()?;
+                Ok((children.len(), Box::new(children.into_iter())))
+            },
+            options,
+        )
     }
 
     /// Render the application's accessibility tree as an indented string,

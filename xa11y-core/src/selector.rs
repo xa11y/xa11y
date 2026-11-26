@@ -1080,6 +1080,32 @@ pub fn find_elements_in_tree(
         max_depth
     };
 
+    if let [head, tail] = selector.segments.as_slice() {
+        if tail.combinator == Combinator::Descendant && head.simple.nth.is_none() {
+            let mut walk = DescendantWalk {
+                head: &head.simple,
+                tail: &tail.simple,
+                head_depth: phase1_depth,
+                tail_depth: max_depth,
+                anchors: Vec::new(),
+                matches: Vec::new(),
+            };
+            walk.visit(&get_children_fn, root, 0)?;
+            // A nested head may reach deeper than its outer head. Keep the
+            // two-phase resolver's anchor order even across that depth boundary.
+            let mut seen = HashSet::new();
+            let mut hits: Vec<_> = walk
+                .matches
+                .into_iter()
+                .flatten()
+                .filter(|node| seen.insert(node.handle))
+                .collect();
+            apply_nth(&mut hits, tail.simple.nth);
+            hits.truncate(limit.unwrap_or(usize::MAX));
+            return Ok(hits);
+        }
+    }
+
     collect_matching(
         &get_children_fn,
         root,
@@ -1533,6 +1559,54 @@ fn apply_nth(candidates: &mut Vec<ElementData>, nth: Option<usize>) {
         candidates.push(kept);
     } else {
         candidates.clear();
+    }
+}
+
+/// Evaluate a head and its descendant in one pass. Each active anchor owns
+/// a bucket in head discovery order and has its own inclusive depth budget.
+struct DescendantWalk<'a> {
+    head: &'a SimpleSelector,
+    tail: &'a SimpleSelector,
+    head_depth: u32,
+    tail_depth: u32,
+    anchors: Vec<(u64, usize)>,
+    matches: Vec<Vec<ElementData>>,
+}
+
+impl DescendantWalk<'_> {
+    fn visit(
+        &mut self,
+        children: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+        parent: Option<&ElementData>,
+        depth: u64,
+    ) -> Result<()> {
+        let head_in_range = depth <= u64::from(self.head_depth);
+        let owner = self
+            .anchors
+            .iter()
+            .find(|(end, _)| depth <= *end)
+            .map(|(_, index)| *index);
+        if !head_in_range && owner.is_none() {
+            return Ok(());
+        }
+        for node in children(parent)? {
+            let starts = head_in_range && matches_simple(&node, self.head);
+            if starts {
+                self.anchors
+                    .push((depth + 1 + u64::from(self.tail_depth), self.matches.len()));
+                self.matches.push(Vec::new());
+            }
+            if let Some(index) = owner {
+                if matches_simple(&node, self.tail) {
+                    self.matches[index].push(node.clone());
+                }
+            }
+            self.visit(children, Some(&node), depth + 1)?;
+            if starts {
+                self.anchors.pop();
+            }
+        }
+        Ok(())
     }
 }
 

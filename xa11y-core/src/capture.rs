@@ -545,9 +545,9 @@ impl Stop {
 /// Capture the subtree under `root`, whose children `root_children` reads
 /// (an `App` root's children are its windows across every registration, not
 /// its element's children).
-pub(crate) fn capture_from(
+pub(crate) fn capture_from<'a>(
     root: Element,
-    root_children: impl FnOnce() -> Result<Vec<Element>>,
+    root_children: impl FnOnce(usize) -> Result<(usize, Box<dyn Iterator<Item = Element> + 'a>)>,
     options: &CaptureOptions,
 ) -> Result<Capture> {
     options.validate()?;
@@ -561,9 +561,9 @@ pub(crate) fn capture_from(
 }
 
 /// The body of [`capture_from`], run inside the capture's deadline.
-fn walk(
+fn walk<'a>(
     root: Element,
-    root_children: impl FnOnce() -> Result<Vec<Element>>,
+    root_children: impl FnOnce(usize) -> Result<(usize, Box<dyn Iterator<Item = Element> + 'a>)>,
     options: &CaptureOptions,
 ) -> Result<Capture> {
     let started = SystemTime::now();
@@ -621,14 +621,16 @@ fn walk(
             break;
         }
         stats.children_reads += 1;
+        let parent = raw[i].element.clone();
+        let budget = options.max_nodes - raw.len();
         let read = match root_children.take() {
-            Some(read_root) => read_root(),
-            None => raw[i].element.children(),
+            Some(read_root) => read_root(budget),
+            None => parent.capture_children(budget),
         };
         // A read the time budget cut short is this node's failure, even
         // when the backend returned what it had (issue #531).
         let read = crate::deadline::distrust(read);
-        let kids = match read {
+        let (total, mut kids) = match read {
             Ok(kids) => kids,
             // The node went away between being listed and being read. An
             // eviction is not that: the node may still exist, and the walk's
@@ -646,17 +648,18 @@ fn walk(
                 continue;
             }
         };
-        raw[i].children_count = Some(kids.len());
-        if kids.is_empty() {
+        raw[i].children_count = Some(total);
+        if total == 0 {
             continue;
         }
         let depth = raw[i].depth + 1;
-        for kid in kids {
+        for _ in 0..total {
             if raw.len() >= options.max_nodes {
                 raw[i].children_truncated = true;
                 truncated.by_nodes = true;
                 break;
             }
+            let Some(kid) = kids.next() else { break };
             let (fresh, node) = note_identity(
                 &raw,
                 Raw::new(kid, Some(i), depth),
