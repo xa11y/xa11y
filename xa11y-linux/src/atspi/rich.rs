@@ -1242,7 +1242,7 @@ impl LinuxProvider {
         action: &str,
     ) -> Result<AccessibleRef> {
         let aref = self.get_cached(element.handle)?;
-        if self.gtk_generation(&aref.bus_name)? == GtkGeneration::Gtk3 {
+        if self.application_toolkit(&aref.bus_name)? == ApplicationToolkit::Gtk3 {
             self.ensure_attached(&aref)?;
         }
         let ifaces = self.get_interfaces(&aref)?;

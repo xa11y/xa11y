@@ -59,8 +59,8 @@ def test_locator_queries(app, measure):
     measure("first button", buttons.first().element, lambda node: node.role == "button")
     measure("count buttons", buttons.count, lambda count: count >= 3)
     measure("list buttons", buttons.elements, lambda nodes: len(nodes) >= 3)
-    measure("state filter", app.locator('button[enabled="false"]').elements,
-            lambda nodes: any(node.name == "Cancel" for node in nodes))
+    measure("state filter", app.locator('button[enabled="true"]').elements,
+            lambda nodes: any(node.name == "OK" for node in nodes))
     measure("descendant selector", app.locator('[name="Buttons"] button[name="OK"]').element,
             lambda node: node.name == "OK")
     measure("selector union", app.locator('button[name="OK"], button[name="Cancel"]').elements,

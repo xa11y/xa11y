@@ -22,6 +22,13 @@ import xa11y
 ACTION_SETTLE = 0.3
 
 
+def _wait_for_value(locator, expected):
+    locator.wait_until(
+        lambda node: node is not None and (node.value or "") == expected,
+        timeout=3.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Button: press
 # ---------------------------------------------------------------------------
@@ -29,26 +36,19 @@ ACTION_SETTLE = 0.3
 
 def test_button_press_ok_enables_cancel(app, app_config):
     """Pressing OK enables the initially-disabled Cancel button."""
-    import time as _time
-
     ok_name = app_config["ok_button_name"]
     cancel_name = app_config["cancel_button_name"]
-
-    cancel_before = app.locator(f'button[name="{cancel_name}"]').element()
-    # Only assert the initial state if Cancel is reliably disabled (session-fresh).
-    # Some test runs press OK earlier; we just ensure press() doesn't raise.
+    cancel = app.locator(f'button[name="{cancel_name}"]')
     app.locator(f'button[name="{ok_name}"]').press()
-    _time.sleep(ACTION_SETTLE)
-
-    cancel_after = app.locator(f'button[name="{cancel_name}"]').element()
     # Most toolkits wire the primary button to enable the initially-disabled
     # Cancel. The AccessKit test app instead enables Cancel from the checkbox
     # toggle (see handle_action in test-apps/accesskit/src/main.rs), so its
     # config opts out of the coupling — there we only assert press() did not
     # raise and Cancel is still a usable button.
     if app_config.get("ok_press_enables_cancel", True):
-        assert cancel_after.enabled is True
+        assert cancel.wait_enabled(timeout=3.0).enabled is True
     else:
+        cancel_after = cancel.element()
         assert cancel_after.role == "button"
         assert isinstance(cancel_after.enabled, bool)
 
@@ -103,7 +103,6 @@ def test_perform_action_press_equivalent(app, app_config):
     ok_name = app_config["ok_button_name"]
     # No assertion on side-effect — just that the call does not raise.
     app.locator(f'button[name="{ok_name}"]').perform_action("press")
-    time.sleep(ACTION_SETTLE)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +118,6 @@ def test_button_focus(app, app_config):
         loc.focus()
     except xa11y.ActionNotSupportedError:
         pytest.xfail("focus() not exposed by this platform's AT bridge for buttons")
-    time.sleep(ACTION_SETTLE)
     # Property may lag or be suppressed on some bridges; assert it's a bool.
     assert isinstance(loc.element().focused, bool)
 
@@ -343,12 +341,11 @@ def test_textfield_set_value(app, app_name, app_config):
 
     loc = app.locator(sel)
     loc.set_value("test input")
-    time.sleep(ACTION_SETTLE)
-    assert loc.element().value == "test input"
+    _wait_for_value(loc, "test input")
     # Restore
     initial = app_config.get("textfield_initial_value") or "hello world"
     loc.set_value(initial)
-    time.sleep(ACTION_SETTLE)
+    _wait_for_value(loc, initial)
 
 
 @pytest.mark.parametrize(
@@ -372,14 +369,13 @@ def test_textfield_type_text_non_ascii_round_trips(app, app_name, app_config, te
     loc = app.locator(sel)
     try:
         loc.set_value("")
-        time.sleep(ACTION_SETTLE)
+        _wait_for_value(loc, "")
         loc.type_text(text)
-        time.sleep(ACTION_SETTLE)
-        assert loc.element().value == text
+        _wait_for_value(loc, text)
     finally:
         initial = app_config.get("textfield_initial_value") or "hello world"
         loc.set_value(initial)
-        time.sleep(ACTION_SETTLE)
+        _wait_for_value(loc, initial)
 
 
 def test_windows_type_text_advances_caret(app, app_name, app_config):
@@ -414,7 +410,6 @@ def test_button_press_via_element(app, app_config):
     ok_name = app_config["ok_button_name"]
     el = app.locator(f'button[name="{ok_name}"]').element()
     el.press()
-    time.sleep(ACTION_SETTLE)
 
 
 def test_perform_action_press_via_element(app, app_config):
@@ -422,7 +417,6 @@ def test_perform_action_press_via_element(app, app_config):
     ok_name = app_config["ok_button_name"]
     el = app.locator(f'button[name="{ok_name}"]').element()
     el.perform_action("press")
-    time.sleep(ACTION_SETTLE)
 
 
 def test_button_focus_via_element(app, app_config):
@@ -433,7 +427,6 @@ def test_button_focus_via_element(app, app_config):
         el.focus()
     except xa11y.ActionNotSupportedError:
         pytest.xfail("focus() not exposed by this platform's AT bridge for buttons")
-    time.sleep(ACTION_SETTLE)
 
 
 def test_checkbox_toggle_via_element(app, app_name, app_config):
@@ -557,12 +550,11 @@ def test_textfield_set_value_via_element(app, app_name, app_config):
         loc.element().set_value("test input")
     except xa11y.ActionNotSupportedError:
         pytest.xfail("set_value() not exposed for text_field on this platform")
-    time.sleep(ACTION_SETTLE)
-    assert loc.element().value == "test input"
+    _wait_for_value(loc, "test input")
     # Restore.
     initial = app_config.get("textfield_initial_value") or "hello world"
     loc.element().set_value(initial)
-    time.sleep(ACTION_SETTLE)
+    _wait_for_value(loc, initial)
 
 
 def test_snapshot_bound_element_press_twice(app, app_name, app_config):
