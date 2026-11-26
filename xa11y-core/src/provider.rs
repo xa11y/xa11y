@@ -318,6 +318,21 @@ pub trait Provider: Send + Sync {
         )
     }
 
+    /// Number of matching elements after applying the same ordering, deduplication
+    /// and limits as `find_elements_group`. Providers can avoid fetching snapshots
+    /// when the caller needs only the cardinality.
+    fn count_elements_group(
+        &self,
+        root: &ElementData,
+        group: &SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<usize> {
+        Ok(self
+            .find_elements_group(root, group, limit, max_depth)?
+            .len())
+    }
+
     /// Narrow candidates through remaining selector segments (Child/Descendant
     /// combinators), deduplicate, apply final :nth and limit.
     fn narrow_multi_segment(
@@ -774,6 +789,15 @@ impl<T: Provider + ?Sized> Provider for &T {
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
         (**self).find_elements_group(root, group, limit, max_depth)
+    }
+    fn count_elements_group(
+        &self,
+        root: &ElementData,
+        group: &SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<usize> {
+        (**self).count_elements_group(root, group, limit, max_depth)
     }
     fn narrow_multi_segment(
         &self,
