@@ -1344,6 +1344,7 @@ impl WindowsProvider {
         &self,
         parent: Option<&ElementData>,
         request: &IUIAutomationCacheRequest,
+        mut subtree: Option<&mut HashMap<u64, IUIAutomationElement>>,
     ) -> Result<Vec<ElementData>> {
         let Some(parent) = parent else {
             return self.get_children(None);
@@ -1352,9 +1353,50 @@ impl WindowsProvider {
             return self.get_children(Some(parent));
         }
         let element = self.get_cached(parent.handle)?;
-        let children = self
-            .uia_children_requested(&element, request)
-            .map_err(|error| stale_if_gone(parent, error))?;
+        // Only full window roots have this framework field. Projected descendants
+        // carry the cached native parent through the query-local map instead.
+        let cached_parent = if let Some(nodes) = subtree.as_mut() {
+            if let Some(cached) = nodes.remove(&parent.handle) {
+                Some(cached)
+            } else if matches!(parent.role, Role::Window | Role::Dialog)
+                && parent.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF")
+                && cached_own_hwnd(&element)?.is_some()
+            {
+                let tree = uia_call(|| unsafe { request.Clone() })?;
+                let view = uia_call(|| unsafe { self.automation.ControlViewCondition() })?;
+                uia_call(|| unsafe {
+                    tree.SetTreeFilter(&view)?;
+                    tree.SetTreeScope(TreeScope_Subtree)
+                })?;
+                Some(
+                    uia_call(|| unsafe { element.BuildUpdatedCache(&tree) })
+                        .map_err(|error| stale_if_gone(parent, error))?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let from_subtree = cached_parent.is_some();
+        let children = if let Some(cached) = cached_parent {
+            // UIA returns S_OK with a null array for a cached leaf.
+            match unsafe { cached.GetCachedChildren() } {
+                Ok(array) => (0..uia_len(&array)?)
+                    .map(|i| uia_get(&array, i))
+                    .collect::<Result<Vec<_>>>()?,
+                Err(e) if e.code().is_ok() => Vec::new(),
+                Err(e) => {
+                    return Err(Error::platform(
+                        i64::from(e.code().0),
+                        format!("reading cached WPF children failed: {e}"),
+                    ))
+                }
+            }
+        } else {
+            self.uia_children_requested(&element, request)
+                .map_err(|error| stale_if_gone(parent, error))?
+        };
         let mut out = Vec::with_capacity(children.len());
         for child in children {
             let projected = (|| {
@@ -1375,6 +1417,11 @@ impl WindowsProvider {
                 Ok(data)
             })();
             if let Some(data) = live_snapshot(projected)? {
+                if from_subtree {
+                    if let Some(nodes) = subtree.as_mut() {
+                        nodes.insert(data.handle, child);
+                    }
+                }
                 out.push(data);
             }
         }
@@ -5425,8 +5472,16 @@ impl Provider for WindowsProvider {
         let _dpi = crate::dpi::DpiScope::enter()?;
         let request = create_property_request(&self.automation, QUERY_PROPERTIES)?;
         let walk = CanonicalWalk::new(self);
+        let batch =
+            std::cell::RefCell::new((limit.is_none() && max_depth.is_none()).then(HashMap::new));
         xa11y_core::selector::count_elements_in_tree_group(
-            |parent| walk.canonicalize(self.count_children(parent, &request)?),
+            |parent| {
+                walk.canonicalize(self.count_children(
+                    parent,
+                    &request,
+                    batch.borrow_mut().as_mut(),
+                )?)
+            },
             Some(root),
             group,
             limit,
@@ -5488,10 +5543,16 @@ impl Provider for WindowsProvider {
                     let walk = CanonicalWalk::new(self);
                     let complete = std::cell::RefCell::new(HashSet::new());
                     let references = std::cell::RefCell::new(HashMap::new());
+                    let batch = std::cell::RefCell::new(
+                        (limit.is_none() && max_depth.is_none()).then(HashMap::new),
+                    );
                     let matches = xa11y_core::selector::find_elements_in_tree_group(
                         |parent| {
-                            let children =
-                                walk.canonicalize(self.count_children(parent, &request)?)?;
+                            let children = walk.canonicalize(self.count_children(
+                                parent,
+                                &request,
+                                batch.borrow_mut().as_mut(),
+                            )?)?;
                             // A sparse unique query can visit more than the
                             // provider's 65K handle capacity after its first
                             // hit. Own hit references now; the later hydration

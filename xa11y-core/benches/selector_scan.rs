@@ -63,6 +63,13 @@ fn main() {
         ("first", "button", Some(1), 1),
         ("all", "button", None, 10_000),
         ("miss", r#"button[name="Missing"]"#, None, 0),
+        (
+            "descendant",
+            r#"group button[name="Record 9999"]"#,
+            Some(1),
+            1,
+        ),
+        ("first descendant", "group button", Some(1), 1),
         ("child", r#"group:nth(100) > button"#, None, 100),
         (
             "union",

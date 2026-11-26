@@ -5293,7 +5293,7 @@ impl MacOSProvider {
     /// parallel walk.
     fn first_live_match<T>(
         parent: (&AXElement, Role, &str, Option<&str>),
-        simple: &SimpleSelector,
+        clauses: &[&SimpleSelector],
         pid: Option<u32>,
         depth_left: u32,
         accept: &impl Fn(&AXElement) -> Result<Option<T>>,
@@ -5302,7 +5302,9 @@ impl MacOSProvider {
         for child in Self::listed_children(ax, role, raw_role, name)? {
             let role = map_ax_role(&child.role, child.subrole.as_deref());
             let name = OnceCell::new();
-            if matches_ax_with_role(child.ax.as_ptr(), simple, role, &child.role, &name, pid) {
+            if clauses.iter().any(|simple| {
+                matches_ax_with_role(child.ax.as_ptr(), simple, role, &child.role, &name, pid)
+            }) {
                 if let Some(hit) = accept(&child.ax)? {
                     return Ok(Some(hit));
                 }
@@ -5313,7 +5315,7 @@ impl MacOSProvider {
                     .and_then(|name| name.as_deref());
                 if let Some(hit) = Self::first_live_match(
                     (&child.ax, role, &child.role, name),
-                    simple,
+                    clauses,
                     pid,
                     depth_left - 1,
                     accept,
@@ -5343,17 +5345,15 @@ impl MacOSProvider {
             .iter()
             .map(|clause| &clause.segments[0].simple)
             .collect();
-        if let [simple] = clauses.as_slice() {
-            if query.limit == Some(1) && simple.nth.is_none() {
-                let hit = Self::first_live_match(
-                    (&ax, root.role, &raw_role, root.name.as_deref()),
-                    simple,
-                    root.pid,
-                    max_depth,
-                    &|ax| live_query_value(read(ax)),
-                )?;
-                return Ok(hit.into_iter().collect());
-            }
+        if query.limit == Some(1) && clauses.iter().all(|simple| simple.nth.is_none()) {
+            let hit = Self::first_live_match(
+                (&ax, root.role, &raw_role, root.name.as_deref()),
+                &clauses,
+                root.pid,
+                max_depth,
+                &|ax| live_query_value(read(ax)),
+            )?;
+            return Ok(hit.into_iter().collect());
         }
 
         let mut bound = plan.first_stage_limit;

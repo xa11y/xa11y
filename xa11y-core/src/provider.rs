@@ -41,9 +41,8 @@ pub trait Provider: Send + Sync {
     fn capture_children(
         &self,
         parent: &ElementData,
-        budget: usize,
+        _budget: usize,
     ) -> Result<(usize, Box<dyn Iterator<Item = ElementData> + '_>)> {
-        let _ = budget;
         let children = self.get_children(Some(parent))?;
         Ok((children.len(), Box::new(children.into_iter())))
     }

@@ -1050,6 +1050,7 @@ impl Locator {
     }
 
     /// Get an ordered prefix and the total number of matches in the same query.
+    #[doc(hidden)]
     pub fn elements_prefix(&self, prefix: usize) -> Result<(Vec<Element>, usize)> {
         let group = self.parsed_selector()?;
         let (elements, total) = self.resolve_group_with(

@@ -659,7 +659,22 @@ fn walk<'a>(
                 truncated.by_nodes = true;
                 break;
             }
-            let Some(kid) = kids.next() else { break };
+            let kid = match crate::deadline::distrust(Ok(kids.next())) {
+                Ok(Some(kid)) => kid,
+                Ok(None) => {
+                    raw[i].fail(
+                        CaptureStep::Children,
+                        Error::platform(0, "child enumeration ended before its reported count"),
+                    );
+                    raw[i].children_truncated = true;
+                    break;
+                }
+                Err(error) => {
+                    raw[i].fail(CaptureStep::Children, error);
+                    raw[i].children_truncated = true;
+                    break;
+                }
+            };
             let (fresh, node) = note_identity(
                 &raw,
                 Raw::new(kid, Some(i), depth),
