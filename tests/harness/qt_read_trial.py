@@ -79,6 +79,7 @@ def wide():
             line.addWidget(QPushButton("Candidate "+str(row*10+col)))
         layout.addWidget(box)
     main.show()
+    print(os.getpid(), flush=True)
     qt.exec()
 
 
@@ -94,11 +95,11 @@ if __name__ == "__main__":
         run(app,"dialog",["button"],2)
         closer.press()
         closer.wait_hidden(timeout=5)
-        proc = subprocess.Popen([sys.executable,__file__,"wide"])
+        proc = subprocess.Popen([sys.executable,"-u",__file__,"wide"], stdout=subprocess.PIPE, text=True, env={**os.environ, "QT_ACCESSIBILITY": "1"})
         try:
-            wide_app=xa11y.App.by_pid(proc.pid, timeout=10)
+            wide_app=xa11y.App.by_pid(int(proc.stdout.readline()), timeout=15)
             wide_app.locator('button[name="Candidate 0"]').wait_attached(timeout=10)
             run(wide_app,"wide",["button",'button[name="Candidate 119"]'],5)
         finally:
-            proc.terminate()
-            proc.wait()
+            subprocess.run(["taskkill", "/pid", str(proc.pid), "/t", "/f"], capture_output=True)
+            proc.wait(timeout=10)
