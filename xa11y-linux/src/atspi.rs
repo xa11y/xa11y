@@ -3041,17 +3041,20 @@ impl LinuxProvider {
             .map(|c| &c.segments[0].simple)
             .collect();
         let start = self.get_cached(root.handle)?;
-        let hits = self.collect_matching_refs_group(
-            &start,
-            0,
-            &QueryWalk {
-                clauses: &clauses,
-                max_depth,
-                limit: first_stage_limit,
-                pid: root.pid,
-                output,
-            },
-        )?;
+        let walk = QueryWalk {
+            clauses: &clauses,
+            max_depth,
+            limit: first_stage_limit,
+            pid: root.pid,
+            output,
+        };
+        if limit == Some(1) && clauses.iter().all(|simple| simple.nth.is_none()) {
+            return Ok(self
+                .first_query_match(&start, 0, &walk)?
+                .into_iter()
+                .collect());
+        }
+        let hits = self.collect_matching_refs_group(&start, 0, &walk)?;
         let mut positions = vec![0; clauses.len()];
         let mut seen = HashSet::new();
         Ok(hits
@@ -3071,25 +3074,7 @@ impl LinuxProvider {
             .collect())
     }
 
-    /// ONE DFS over the subtree, evaluating each clause's first SimpleSelector
-    /// against every visited node. Emits `(clause_idx, QueryMatch)` pairs
-    /// in document order; a node that matches multiple clauses is emitted
-    /// once per matching clause (the merge step in `find_elements_group`
-    /// collapses these by `(bus_name, path)` identity).
-    ///
-    /// This is the "push-down to the platform query per group" core: a
-    /// selector group like `button, text_field` traverses the AT-SPI tree
-    /// exactly once regardless of clause count, instead of N separate walks.
-    fn collect_matching_refs_group(
-        &self,
-        parent: &AccessibleRef,
-        depth: u32,
-        walk: &QueryWalk<'_>,
-    ) -> Result<Vec<(usize, QueryMatch)>> {
-        if depth > walk.max_depth {
-            return Ok(vec![]);
-        }
-
+    fn query_children(&self, parent: &AccessibleRef) -> Result<Vec<(AccessibleRef, Option<u32>)>> {
         let Some(children) = self.live_atspi_children(parent)? else {
             return Ok(Vec::new());
         };
@@ -3143,6 +3128,68 @@ impl LinuxProvider {
         if to_search.is_empty() {
             self.check_chromium_a11y_enabled(parent, None)?;
         }
+
+        Ok(to_search)
+    }
+
+    /// Search an ordered prefix without scheduling the unneeded sibling subtrees.
+    fn first_query_match(
+        &self,
+        parent: &AccessibleRef,
+        depth: u32,
+        walk: &QueryWalk<'_>,
+    ) -> Result<Option<QueryMatch>> {
+        if depth > walk.max_depth {
+            return Ok(None);
+        }
+        for (child, role_number) in self.query_children(parent)? {
+            let mut reads = QueryReads {
+                role_number,
+                ..Default::default()
+            };
+            if walk
+                .clauses
+                .iter()
+                .any(|simple| self.matches_ref(&child, simple, walk.pid, &mut reads))
+            {
+                return Ok(Some(QueryMatch {
+                    aref: child,
+                    role_number: reads.role_number,
+                    snapshot: reads.snapshot.filter(|snapshot| {
+                        walk.output == QueryOutput::Elements
+                            && handle_is_reusable(snapshot.data.role)
+                    }),
+                }));
+            }
+            match self.first_query_match(&child, depth + 1, walk) {
+                Ok(Some(hit)) => return Ok(Some(hit)),
+                Err(e @ Error::AccessibilityNotEnabled { .. }) => return Err(e),
+                Ok(None) | Err(_) => {}
+            }
+        }
+        Ok(None)
+    }
+
+    /// ONE DFS over the subtree, evaluating each clause's first SimpleSelector
+    /// against every visited node. Emits `(clause_idx, QueryMatch)` pairs
+    /// in document order; a node that matches multiple clauses is emitted
+    /// once per matching clause (the merge step in `find_elements_group`
+    /// collapses these by `(bus_name, path)` identity).
+    ///
+    /// This is the "push-down to the platform query per group" core: a
+    /// selector group like `button, text_field` traverses the AT-SPI tree
+    /// exactly once regardless of clause count, instead of N separate walks.
+    fn collect_matching_refs_group(
+        &self,
+        parent: &AccessibleRef,
+        depth: u32,
+        walk: &QueryWalk<'_>,
+    ) -> Result<Vec<(usize, QueryMatch)>> {
+        if depth > walk.max_depth {
+            return Ok(vec![]);
+        }
+
+        let to_search = self.query_children(parent)?;
 
         // Process each child subtree in parallel: check match against every
         // clause + recurse. Tagging each match with `clause_idx` lets the
@@ -3338,6 +3385,41 @@ impl Provider for LinuxProvider {
                 Ok(results)
             }
         }
+    }
+
+    fn find_elements_prefix(
+        &self,
+        root: &ElementData,
+        group: &xa11y_core::SelectorGroup,
+        prefix: usize,
+    ) -> Result<(Vec<ElementData>, usize)> {
+        group.validate()?;
+        let query = Query::new(group, QueryOutput::Elements, None);
+        if !query.covered_by(|_| true, true) {
+            let mut matches = self.find_elements_group(root, group, None, None)?;
+            let total = matches.len();
+            matches.truncate(prefix);
+            return Ok((matches, total));
+        }
+        let plan = plan_query(query, []);
+        let mut hits = self.flat_query_matches(
+            root,
+            group,
+            None,
+            xa11y_core::MAX_TREE_DEPTH,
+            plan.first_stage_limit,
+            QueryOutput::Elements,
+        )?;
+        let total = hits.len();
+        hits.truncate(prefix);
+        let memo = AncestorMemo::default();
+        let elements = hits
+            .into_par_iter()
+            .map(carry_deadline(|hit| {
+                self.materialize_query_match(hit, root.pid, &memo)
+            }))
+            .collect();
+        Ok((elements, total))
     }
 
     fn count_elements_group(

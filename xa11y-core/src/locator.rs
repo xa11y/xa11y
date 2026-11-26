@@ -1049,6 +1049,28 @@ impl Locator {
             .collect())
     }
 
+    /// Get an ordered prefix and the total number of matches in the same query.
+    pub fn elements_prefix(&self, prefix: usize) -> Result<(Vec<Element>, usize)> {
+        let group = self.parsed_selector()?;
+        let (elements, total) = self.resolve_group_with(
+            group,
+            None,
+            |root| self.provider.find_elements_prefix(root, group, prefix),
+            |mut elements| {
+                let total = elements.len();
+                elements.truncate(prefix);
+                (elements, total)
+            },
+        )?;
+        Ok((
+            elements
+                .into_iter()
+                .map(|data| Element::new(data, Arc::clone(&self.provider)))
+                .collect(),
+            total,
+        ))
+    }
+
     /// Capture the subtree rooted at the matched element as a recursive
     /// snapshot. Resolves the selector once (no auto-wait — inspection ops
     /// should fail fast on selector miss). See [`Element::tree`] for

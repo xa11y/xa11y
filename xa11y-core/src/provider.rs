@@ -318,6 +318,19 @@ pub trait Provider: Send + Sync {
         )
     }
 
+    /// Return the ordered prefix and exact cardinality of one complete query.
+    fn find_elements_prefix(
+        &self,
+        root: &ElementData,
+        group: &SelectorGroup,
+        prefix: usize,
+    ) -> Result<(Vec<ElementData>, usize)> {
+        let mut elements = self.find_elements_group(root, group, None, None)?;
+        let total = elements.len();
+        elements.truncate(prefix);
+        Ok((elements, total))
+    }
+
     /// Number of matching elements after applying the same ordering, deduplication
     /// and limits as `find_elements_group`. Providers can avoid fetching snapshots
     /// when the caller needs only the cardinality.
@@ -789,6 +802,14 @@ impl<T: Provider + ?Sized> Provider for &T {
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
         (**self).find_elements_group(root, group, limit, max_depth)
+    }
+    fn find_elements_prefix(
+        &self,
+        root: &ElementData,
+        group: &SelectorGroup,
+        prefix: usize,
+    ) -> Result<(Vec<ElementData>, usize)> {
+        (**self).find_elements_prefix(root, group, prefix)
     }
     fn count_elements_group(
         &self,
