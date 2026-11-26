@@ -97,3 +97,23 @@ def test_dialog_latency(app, measure):
 
     measure("press to visible dialog control", open_dialog,
             lambda node: node.name == "Close Dialog", close_dialog)
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="UIA root deduplication benchmark")
+def test_multi_window_reads(app, measure):
+    closer = app.locator('button[name="Close Dialog"]')
+    app.locator('button[name="Open Dialog"]').press()
+    closer.wait_visible(timeout=5.0)
+    try:
+        assert len(app.windows()) >= 2
+        # UIA can parent the dialog beneath the main window. Distinct tree
+        # roots need not have the same count as native windows.
+        measure("multi-window tree roots", app.children, bool)
+        measure(
+            "multi-window unique dialog control",
+            closer.elements,
+            lambda nodes: len(nodes) == 1 and nodes[0].name == "Close Dialog",
+        )
+    finally:
+        closer.press()
+        closer.wait_hidden(timeout=5.0)
