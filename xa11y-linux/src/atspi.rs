@@ -613,6 +613,9 @@ impl LinuxProvider {
         parent: &AccessibleRef,
         role_hint: Option<Role>,
     ) -> Result<()> {
+        if role_hint.is_some_and(|role| role != Role::Window) {
+            return Ok(());
+        }
         let app_root = AccessibleRef {
             bus_name: parent.bus_name.clone(),
             path: "/org/a11y/atspi/accessible/root".to_string(),
@@ -1552,7 +1555,7 @@ impl LinuxProvider {
     /// After resolving the role (1-3 sequential D-Bus calls), all remaining
     /// property fetches are independent and run in parallel via rayon::join.
     fn build_element_data(&self, aref: &AccessibleRef, pid: Option<u32>) -> ElementData {
-        self.build_element_data_in(aref, pid, &AncestorMemo::default())
+        self.build_element_data_in(aref, pid, &AncestorMemo::default(), None)
     }
 
     /// [`build_element_data`](Self::build_element_data) sharing `memo` with
@@ -1563,6 +1566,7 @@ impl LinuxProvider {
         aref: &AccessibleRef,
         pid: Option<u32>,
         memo: &AncestorMemo,
+        role_number: Option<u32>,
     ) -> ElementData {
         // GetInterfaces runs alongside the role reads so it costs no extra
         // latency, and its result gates every Text / Value / Component read
@@ -1574,7 +1578,7 @@ impl LinuxProvider {
             || {
                 (
                     self.get_role_name(aref).unwrap_or_default(),
-                    self.get_role_number(aref).unwrap_or(0),
+                    role_number.unwrap_or_else(|| self.get_role_number(aref).unwrap_or(0)),
                 )
             },
             || self.get_interfaces(aref).unwrap_or_default(),
@@ -2717,7 +2721,10 @@ impl LinuxProvider {
     /// Resolve the mapped Role for an accessible ref (1-3 D-Bus calls, plus
     /// an Action probe for AT-SPI `menu`, whose meaning is ambiguous on GTK 3).
     fn resolve_role(&self, aref: &AccessibleRef) -> Role {
-        let role_num = self.get_role_number(aref).unwrap_or(0);
+        self.resolve_role_with_number(aref, self.get_role_number(aref).unwrap_or(0))
+    }
+
+    fn resolve_role_with_number(&self, aref: &AccessibleRef, role_num: u32) -> Role {
         // The name is only consulted when the number does not map, so it is
         // not read at all on the common path.
         let coarse = match try_map_atspi_role_number(role_num) {
@@ -2755,18 +2762,6 @@ impl LinuxProvider {
     /// decision to make (propagated for the runtime guard).
     fn parent_role_is_application(&self, parent: &AccessibleRef) -> Result<bool> {
         Ok(self.get_role_number(parent)? == ATSPI_ROLE_APPLICATION)
-    }
-
-    /// Whether `aref` is an AT-SPI application object, by role *number*.
-    ///
-    /// Used to flatten nested application objects out of a window's
-    /// children. The role name cannot be trusted for this: GTK 4 names its
-    /// top-level window `application` while numbering it a frame, so a name
-    /// check flattened the window itself away (issue #485). An unreadable
-    /// role is not an application, matching the per-field tolerance of the
-    /// surrounding traversal.
-    fn is_application_object(&self, aref: &AccessibleRef) -> bool {
-        self.get_role_number(aref).ok() == Some(ATSPI_ROLE_APPLICATION)
     }
 
     fn ensure_top_level_window_target(&self, element: &ElementData, action: &str) -> Result<()> {
@@ -2825,6 +2820,7 @@ impl LinuxProvider {
         aref: &AccessibleRef,
         simple: &xa11y_core::selector::SimpleSelector,
         pid: Option<u32>,
+        role_number: Option<u32>,
     ) -> bool {
         // Resolve role only if the selector needs it (for either the role
         // segment or any role/checked filter — checked depends on role).
@@ -2834,7 +2830,10 @@ impl LinuxProvider {
                 .iter()
                 .any(|f| matches!(f.attr.as_str(), "role" | "checked"));
         let role = if needs_role {
-            Some(self.resolve_role(aref))
+            Some(match role_number {
+                Some(number) => self.resolve_role_with_number(aref, number),
+                None => self.resolve_role(aref),
+            })
         } else {
             None
         };
@@ -2952,7 +2951,7 @@ impl LinuxProvider {
         // `application` (used by `App::list` / `App::by_name`) match nothing
         // because the app accessibles get dissolved into their windows.
         let parent_is_registry = parent.bus_name == "org.a11y.atspi.Registry";
-        let mut to_search: Vec<AccessibleRef> = Vec::new();
+        let mut to_search = Vec::new();
         for child in children {
             if child.path == "/org/a11y/atspi/null"
                 || child.bus_name.is_empty()
@@ -2961,7 +2960,14 @@ impl LinuxProvider {
                 continue;
             }
 
-            if !parent_is_registry && self.is_application_object(&child) {
+            // Keep a successful flattening probe for role selectors in this
+            // walk. A failed probe remains eligible for the usual match-time retry.
+            let role_number = if parent_is_registry {
+                None
+            } else {
+                self.get_role_number(&child).ok()
+            };
+            if role_number == Some(ATSPI_ROLE_APPLICATION) {
                 let grandchildren = self.get_atspi_children(&child).unwrap_or_default();
                 for gc in grandchildren {
                     if gc.path == "/org/a11y/atspi/null"
@@ -2970,14 +2976,15 @@ impl LinuxProvider {
                     {
                         continue;
                     }
-                    if self.is_application_object(&gc) {
+                    let gc_role = self.get_role_number(&gc).ok();
+                    if gc_role == Some(ATSPI_ROLE_APPLICATION) {
                         continue;
                     }
-                    to_search.push(gc);
+                    to_search.push((gc, gc_role));
                 }
                 continue;
             }
-            to_search.push(child);
+            to_search.push((child, role_number));
         }
 
         // Detect Chromium/Electron's empty-tree signature whenever we
@@ -3003,29 +3010,31 @@ impl LinuxProvider {
         type ChildBatch = (Vec<(usize, AccessibleRef)>, Option<Error>);
         let per_child: Vec<ChildBatch> = to_search
             .par_iter()
-            .map(carry_deadline(|child: &AccessibleRef| {
-                let mut child_results: Vec<(usize, AccessibleRef)> = Vec::new();
-                for (idx, simple) in clauses.iter().enumerate() {
-                    if self.matches_ref(child, simple, pid) {
-                        child_results.push((idx, child.clone()));
+            .map(carry_deadline(
+                |(child, number): &(AccessibleRef, Option<u32>)| {
+                    let mut child_results: Vec<(usize, AccessibleRef)> = Vec::new();
+                    for (idx, simple) in clauses.iter().enumerate() {
+                        if self.matches_ref(child, simple, pid, *number) {
+                            child_results.push((idx, child.clone()));
+                        }
                     }
-                }
-                match self.collect_matching_refs_group(
-                    child,
-                    clauses,
-                    depth + 1,
-                    max_depth,
-                    limit,
-                    pid,
-                ) {
-                    Ok(sub) => {
-                        child_results.extend(sub);
-                        (child_results, None)
+                    match self.collect_matching_refs_group(
+                        child,
+                        clauses,
+                        depth + 1,
+                        max_depth,
+                        limit,
+                        pid,
+                    ) {
+                        Ok(sub) => {
+                            child_results.extend(sub);
+                            (child_results, None)
+                        }
+                        Err(e @ Error::AccessibilityNotEnabled { .. }) => (Vec::new(), Some(e)),
+                        Err(_) => (child_results, None),
                     }
-                    Err(e @ Error::AccessibilityNotEnabled { .. }) => (Vec::new(), Some(e)),
-                    Err(_) => (child_results, None),
-                }
-            }))
+                },
+            ))
             .collect();
 
         // Merge results, respecting limit. The first AccessibilityNotEnabled
@@ -3112,7 +3121,7 @@ impl Provider for LinuxProvider {
 
                 // Pre-filter invalid refs and flatten nested application nodes,
                 // collecting the concrete refs to build in parallel.
-                let mut to_build: Vec<AccessibleRef> = Vec::new();
+                let mut to_build = Vec::new();
                 for child_ref in &children {
                     if child_ref.path == "/org/a11y/atspi/null"
                         || child_ref.bus_name.is_empty()
@@ -3120,7 +3129,8 @@ impl Provider for LinuxProvider {
                     {
                         continue;
                     }
-                    if self.is_application_object(child_ref) {
+                    let role_number = self.get_role_number(child_ref).ok();
+                    if role_number == Some(ATSPI_ROLE_APPLICATION) {
                         // Nested application objects can also disappear between
                         // enumeration and this read. Prune only confirmed absence.
                         let grandchildren = match self.live_atspi_children(child_ref) {
@@ -3135,14 +3145,15 @@ impl Provider for LinuxProvider {
                             {
                                 continue;
                             }
-                            if self.is_application_object(&gc_ref) {
+                            let gc_role = self.get_role_number(&gc_ref).ok();
+                            if gc_role == Some(ATSPI_ROLE_APPLICATION) {
                                 continue;
                             }
-                            to_build.push(gc_ref);
+                            to_build.push((gc_ref, gc_role));
                         }
                         continue;
                     }
-                    to_build.push(child_ref.clone());
+                    to_build.push((child_ref.clone(), role_number));
                 }
 
                 if to_build.is_empty() {
@@ -3152,9 +3163,11 @@ impl Provider for LinuxProvider {
                 let memo = AncestorMemo::default();
                 let results: Vec<ElementData> = to_build
                     .par_iter()
-                    .map(carry_deadline(|r: &AccessibleRef| {
-                        self.build_element_data_in(r, pid, &memo)
-                    }))
+                    .map(carry_deadline(
+                        |(r, number): &(AccessibleRef, Option<u32>)| {
+                            self.build_element_data_in(r, pid, &memo, *number)
+                        },
+                    ))
                     .collect();
 
                 Ok(results)
@@ -3258,7 +3271,10 @@ impl Provider for LinuxProvider {
                     // `root` is always present now, so the PID comes from
                     // the root element. No need to re-resolve via
                     // `get_app_pid` / `get_dbus_pid`.
-                    (*pos, self.build_element_data_in(aref, pid_from_root, &memo))
+                    (
+                        *pos,
+                        self.build_element_data_in(aref, pid_from_root, &memo, None),
+                    )
                 }))
                 .collect();
 
