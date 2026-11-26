@@ -118,6 +118,10 @@ def test_button_queries_follow_the_live_dialog_tree(app):
             assert (got.name, got.visible, got.bounds, got.actions) == (
                 want.name, want.visible, want.bounds, want.actions,
             )
+        enabled = app.locator('button[enabled="true"]').elements()
+        expected_enabled = [node for node in expected if node.enabled]
+        assert len(enabled) == len(expected_enabled)
+        assert all(a.same_as(b) for a, b in zip(enabled, expected_enabled))
         return [node.name for node in actual]
 
     assert "Close Dialog" not in check_buttons()
