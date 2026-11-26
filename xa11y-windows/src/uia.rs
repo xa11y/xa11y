@@ -1693,10 +1693,14 @@ impl SiblingReads {
                     uia_gate("get_children")?;
                     let dpi = crate::dpi::DpiScope::enter()?;
                     let element = provider.get_cached(handle)?;
-                    provider
+                    match provider
                         .child_array_requested(&element, provider.batch_request.get(&dpi))?
-                        .map(|array| uia_call(|| AgileChildArray::new(&array)))
-                        .transpose()
+                    {
+                        Some(array) if uia_len(&array)? > 0 => {
+                            uia_call(|| AgileChildArray::new(&array)).map(Some)
+                        }
+                        _ => Ok(None),
+                    }
                 })
             };
             let (current, later) = rayon::join(|| fetch(p.handle), || fetch(sibling));
@@ -1784,10 +1788,13 @@ impl<'a> CanonicalWalk<'a> {
         let Some(key) = key else { return };
         let nodes = self.visited.get();
         let hits = matches.len() as u64;
-        let sample = (!matches.is_empty()
-            && matches.iter().all(|m| {
-                m.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some(key.toolkit)
-            }))
+        // Qt was identified from the actual window roots. A Qt window can
+        // include native title-bar buttons with a different framework ID.
+        let sample = (key.toolkit == "Qt"
+            || (!matches.is_empty()
+                && matches.iter().all(|m| {
+                    m.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF")
+                })))
         .then(|| match key.toolkit {
             "WPF" => QueryCosts::wpf(nodes, hits),
             _ => QueryCosts::qt(nodes, hits),
@@ -3832,7 +3839,7 @@ impl QueryCosts {
 
     fn qt(nodes: u64, hits: u64) -> Self {
         // A window packet cheaply rejects nodes, but each hit needs a fresh full
-        // record. Prefer it for role lists when the last walk matched fewer than one node in four.
+        // record. Prefer it when fewer than one node in four matches.
         Self {
             full: nodes,
             projected: 4 * hits,
@@ -5648,6 +5655,25 @@ impl Provider for WindowsProvider {
         let application_root = is_synthetic_handle(root.handle);
         let query = Query::new(group, QueryOutput::Elements, limit);
         let history = history_key(query, root.handle, max_depth);
+        // A synthetic application has no framework of its own. The resolver
+        // already needs these window snapshots; consume them on its first read.
+        let windows = history
+            .filter(|key| key.toolkit == "Qt")
+            .map(|_| self.get_children(Some(root)))
+            .transpose()?;
+        let qt_windows = windows.as_ref().is_some_and(|roots| {
+            !roots.is_empty()
+                && roots
+                    .iter()
+                    .all(|w| w.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("Qt"))
+        });
+        let history = history.filter(|key| key.toolkit != "Qt" || qt_windows);
+        let windows = std::cell::Cell::new(windows);
+        let take_windows = |parent: Option<&ElementData>| {
+            parent
+                .filter(|p| p.handle == root.handle)
+                .and_then(|_| windows.take())
+        };
         let sample = history.and_then(|key| {
             self.query_history
                 .lock()
@@ -5661,7 +5687,8 @@ impl Provider for WindowsProvider {
             application_root,
         );
         if application_root {
-            if plan.strategy == ReadStrategy::Projected {
+            let cold_qt_roles = qt_windows && sample.is_none();
+            if plan.strategy == ReadStrategy::Projected || cold_qt_roles {
                 // Resolving a sparse role/name selector (in particular a
                 // unique window action) must walk the whole application,
                 // but need not read every control's text, patterns, geometry
@@ -5679,9 +5706,11 @@ impl Provider for WindowsProvider {
                     let batch = limit.is_none() && max_depth.is_none();
                     let matches = xa11y_core::selector::find_elements_in_tree_group(
                         |parent| {
-                            let children = walk.canonicalize(
-                                self.count_children(parent, &request, &walk, batch)?,
-                            )?;
+                            let children = match take_windows(parent) {
+                                Some(roots) => roots,
+                                None => self.count_children(parent, &request, &walk, batch)?,
+                            };
+                            let children = walk.canonicalize(children)?;
                             // A sparse unique query can visit more than the
                             // provider's 65K handle capacity after its first
                             // hit. Own hit references now; the later hydration
@@ -5713,6 +5742,19 @@ impl Provider for WindowsProvider {
                         walk_limit,
                         max_depth,
                     )?;
+                    // On a cold role list the packet supplies the actual density.
+                    // For a dense window the full walk costs less than fetching
+                    // a new rich snapshot and ancestry for almost every node.
+                    if cold_qt_roles
+                        && uia_query_plan(
+                            QueryCosts::qt(walk.visited.get(), matches.len() as u64).apply(query),
+                            true,
+                        )
+                        .strategy
+                            == ReadStrategy::ResolveElements
+                    {
+                        break;
+                    }
                     // A shared ancestor can only save a read across multiple
                     // hydrations. Single hits do not pay for identity lookups.
                     if matches.len() > 1 {
@@ -5794,14 +5836,17 @@ impl Provider for WindowsProvider {
             let walk = CanonicalWalk::new(self);
             let exhaustive = limit.is_none()
                 && max_depth.is_none()
-                && group.clauses.len() == 1
-                && group.clauses[0].segments.len() == 1
-                && group.clauses[0].segments[0].simple.nth.is_none();
+                && group.clauses.iter().all(|clause| matches!(clause.segments.as_slice(), [segment] if segment.simple.nth.is_none()));
             let siblings = exhaustive.then(|| std::cell::RefCell::new(SiblingReads::default()));
             let matches = xa11y_core::selector::find_elements_in_tree_group(
-                |el| match &siblings {
-                    Some(siblings) => siblings.borrow_mut().children(&walk, el),
-                    None => walk.children(el),
+                |el| {
+                    if let Some(roots) = take_windows(el) {
+                        return walk.canonicalize(roots);
+                    }
+                    match &siblings {
+                        Some(siblings) => siblings.borrow_mut().children(&walk, el),
+                        None => walk.children(el),
+                    }
                 },
                 Some(root),
                 group,
