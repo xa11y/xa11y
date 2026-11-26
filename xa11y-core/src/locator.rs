@@ -555,6 +555,32 @@ impl Locator {
         group: &SelectorGroup,
         limit: Option<usize>,
     ) -> Result<Vec<ElementData>> {
+        self.resolve_group_with(
+            group,
+            limit,
+            |root| self.provider.find_elements_group(root, group, limit, None),
+            std::convert::identity,
+        )
+    }
+
+    fn resolve_count(&self, group: &SelectorGroup, limit: Option<usize>) -> Result<usize> {
+        self.resolve_group_with(
+            group,
+            limit,
+            |root| self.provider.count_elements_group(root, group, limit, None),
+            |nodes| nodes.len(),
+        )
+    }
+
+    // All result forms share scope discovery. Multiple native roots need the
+    // combined traversal to apply nth and deduplicate across registrations.
+    fn resolve_group_with<T>(
+        &self,
+        group: &SelectorGroup,
+        limit: Option<usize>,
+        single_root: impl FnOnce(&ElementData) -> Result<T>,
+        combined: impl FnOnce(Vec<ElementData>) -> T,
+    ) -> Result<T> {
         if let Some(root) = self.root.as_ref() {
             let process_roots;
             let roots: &[ElementData] = if self.process_scope {
@@ -564,14 +590,12 @@ impl Locator {
                 &self.additional_roots
             };
             if roots.is_empty() {
-                return self.provider.find_elements_group(root, group, limit, None);
+                return single_root(root);
             }
             if roots.len() == 1 {
                 // Preserve the native backend's limit pushdown for the common
                 // single-root case (including first-match auto-wait actions).
-                return self
-                    .provider
-                    .find_elements_group(&roots[0], group, limit, None);
+                return single_root(&roots[0]);
             }
             // Evaluate selectors once over the process's combined children.
             // Applying :nth independently to each registration returns the
@@ -599,7 +623,8 @@ impl Locator {
                 group,
                 limit,
                 None,
-            );
+            )
+            .map(combined);
         }
 
         // Rootless: search across all apps. We can't push the outer `limit`
@@ -658,7 +683,7 @@ impl Locator {
         if let Some(l) = limit {
             out.truncate(l);
         }
-        Ok(out)
+        Ok(combined(out))
     }
 
     /// Resolve the selector to a single ElementData.
@@ -968,8 +993,11 @@ impl Locator {
 
     /// Check if a matching element exists.
     pub fn exists(&self) -> Result<bool> {
-        match self.resolve_data() {
-            Ok(_) => Ok(true),
+        let group = SelectorGroup::parse(&self.selector)?;
+        let idx = self.nth.unwrap_or(0);
+        let limit = group.is_single().then(|| idx.saturating_add(1));
+        match self.resolve_count(&group, limit) {
+            Ok(count) => Ok(count > idx),
             Err(Error::SelectorNotMatched { .. }) => Ok(false),
             Err(e) => Err(e),
         }
@@ -978,8 +1006,7 @@ impl Locator {
     /// Count matching elements.
     pub fn count(&self) -> Result<usize> {
         let group = SelectorGroup::parse(&self.selector)?;
-        let matches = self.resolve_group(&group, None)?;
-        Ok(matches.len())
+        self.resolve_count(&group, None)
     }
 
     /// Get a single [`Element`] handle.

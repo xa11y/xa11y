@@ -3079,6 +3079,14 @@ impl LinuxProvider {
     }
 }
 
+fn phase_one_limit(outer: Option<usize>, nth: Option<usize>) -> Option<usize> {
+    match (outer, nth) {
+        (Some(limit), Some(n)) => Some(limit.max(n)),
+        (_, Some(n)) => Some(n),
+        (limit, None) => limit,
+    }
+}
+
 impl Provider for LinuxProvider {
     fn capabilities(&self) -> Result<xa11y_core::Capabilities> {
         xa11y_core::Capabilities::current()
@@ -3188,6 +3196,42 @@ impl Provider for LinuxProvider {
         }
     }
 
+    fn count_elements_group(
+        &self,
+        root: &ElementData,
+        group: &xa11y_core::SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<usize> {
+        group.validate()?;
+        if !group.is_single() || group.clauses[0].segments.len() != 1 {
+            return Ok(self
+                .find_elements_group(root, group, limit, max_depth)?
+                .len());
+        }
+
+        let simple = &group.clauses[0].segments[0].simple;
+        let start = self.get_cached(root.handle)?;
+        let hits = self.collect_matching_refs_group(
+            &start,
+            &[simple],
+            0,
+            max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH),
+            phase_one_limit(limit, simple.nth),
+            root.pid,
+        )?;
+        // nth selects from the ordered hits before the native identity dedup.
+        let count = match simple.nth {
+            Some(n) => usize::from(hits.len() >= n),
+            None => hits
+                .into_iter()
+                .map(|(_, node)| (node.bus_name, node.path))
+                .collect::<HashSet<_>>()
+                .len(),
+        };
+        Ok(limit.map_or(count, |limit| count.min(limit)))
+    }
+
     fn find_elements_group(
         &self,
         root: &ElementData,
@@ -3235,11 +3279,7 @@ impl Provider for LinuxProvider {
             } else {
                 None
             };
-            match (outer, first.nth) {
-                (Some(l), Some(n)) => Some(l.max(n)),
-                (_, Some(n)) => Some(n),
-                (l, None) => l,
-            }
+            phase_one_limit(outer, first.nth)
         } else {
             None
         };

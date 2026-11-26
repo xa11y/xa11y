@@ -1076,7 +1076,6 @@ pub fn find_elements_in_tree(
         &get_children_fn,
         root,
         first,
-        0,
         phase1_depth,
         &mut candidates,
         phase1_limit,
@@ -1107,7 +1106,6 @@ pub fn find_elements_in_tree(
                         &get_children_fn,
                         Some(candidate),
                         &segment.simple,
-                        0,
                         max_depth,
                         &mut next_candidates,
                         None,
@@ -1389,39 +1387,60 @@ fn collect_matching(
     get_children_fn: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
     root: Option<&ElementData>,
     simple: &SimpleSelector,
-    depth: u32,
     max_depth: u32,
     results: &mut Vec<ElementData>,
     limit: Option<usize>,
 ) -> Result<()> {
-    if depth > max_depth {
+    if limit.is_some_and(|limit| results.len() >= limit) {
         return Ok(());
     }
-    if let Some(limit) = limit {
-        if results.len() >= limit {
+
+    collect_from_children(
+        get_children_fn,
+        get_children_fn(root)?,
+        simple,
+        max_depth,
+        results,
+        limit,
+    )
+}
+
+fn collect_from_children(
+    get_children_fn: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+    children: Vec<ElementData>,
+    simple: &SimpleSelector,
+    remaining_depth: u32,
+    results: &mut Vec<ElementData>,
+    limit: Option<usize>,
+) -> Result<()> {
+    for child in children {
+        let matched = matches_simple(&child, simple);
+        if matched && limit == Some(results.len() + 1) {
+            results.push(child);
             return Ok(());
         }
-    }
-
-    let children = get_children_fn(root)?;
-    for child in children {
-        if matches_simple(&child, simple) {
-            results.push(child.clone());
-            if let Some(limit) = limit {
-                if results.len() >= limit {
-                    return Ok(());
-                }
+        // Read descendants before moving the matching snapshot into results.
+        let descendants = if remaining_depth > 0 {
+            get_children_fn(Some(&child))?
+        } else {
+            Vec::new()
+        };
+        if matched {
+            results.push(child);
+        }
+        if !descendants.is_empty() {
+            collect_from_children(
+                get_children_fn,
+                descendants,
+                simple,
+                remaining_depth - 1,
+                results,
+                limit,
+            )?;
+            if limit.is_some_and(|limit| results.len() >= limit) {
+                return Ok(());
             }
         }
-        collect_matching(
-            get_children_fn,
-            Some(&child),
-            simple,
-            depth + 1,
-            max_depth,
-            results,
-            limit,
-        )?;
     }
     Ok(())
 }

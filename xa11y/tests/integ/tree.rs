@@ -1533,6 +1533,38 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn counts_and_existence_agree_with_materialized_matches() {
+        let app = h::app_root();
+        for selector in [
+            "button",
+            "button:nth(2)",
+            "button:nth(99999)",
+            r#"button[name="missing count fixture"]"#,
+            "button, button",
+            "window button",
+        ] {
+            let count = app.locator(selector).elements().unwrap().len();
+            assert_eq!(app.locator(selector).count().unwrap(), count, "{selector}");
+            assert_eq!(
+                app.locator(selector).exists().unwrap(),
+                count > 0,
+                "{selector}"
+            );
+            assert!(
+                !app.locator(selector).nth(count + 1).exists().unwrap(),
+                "{selector}"
+            );
+            if count > 0 {
+                assert!(
+                    app.locator(selector).nth(count).exists().unwrap(),
+                    "{selector}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn sel_role_attribute() {
         let app = h::app_root();
         let results = app.locator(r#"[role="button"]"#).elements().unwrap();
