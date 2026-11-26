@@ -131,12 +131,27 @@ struct QueryReads {
     description: Option<Option<String>>,
     value: Option<Option<String>>,
     state_bits: Option<(u64, bool)>,
-    snapshot: Option<Box<ElementData>>,
+    snapshot: Option<Arc<QuerySnapshot>>,
 }
 
 struct QueryMatch {
     aref: AccessibleRef,
     role_number: Option<u32>,
+    snapshot: Option<Arc<QuerySnapshot>>,
+}
+
+#[derive(Clone)]
+struct QuerySnapshot {
+    data: ElementData,
+    action_indices: Option<HashMap<String, i32>>,
+}
+
+struct QueryWalk<'a> {
+    clauses: &'a [&'a SimpleSelector],
+    max_depth: u32,
+    limit: Option<usize>,
+    pid: Option<u32>,
+    output: QueryOutput,
 }
 
 /// The optional AT-SPI interfaces an object reports via
@@ -1601,6 +1616,17 @@ impl LinuxProvider {
         memo: &AncestorMemo,
         role_number: Option<u32>,
     ) -> ElementData {
+        let snapshot = self.read_element_data_in(aref, pid, memo, role_number);
+        self.register_snapshot(aref, snapshot)
+    }
+
+    fn read_element_data_in(
+        &self,
+        aref: &AccessibleRef,
+        pid: Option<u32>,
+        memo: &AncestorMemo,
+        role_number: Option<u32>,
+    ) -> QuerySnapshot {
         // GetInterfaces runs alongside the role reads so it costs no extra
         // latency, and its result gates every Text / Value / Component read
         // below. A failed read gates them all off: like the other per-field
@@ -1831,11 +1857,6 @@ impl LinuxProvider {
         let description = xa11y_core::text::strip_bidi_opt(description);
         let placeholder = xa11y_core::text::strip_bidi_opt(meta.placeholder.clone());
 
-        let handle = self.cache_element(aref.clone(), role);
-        if let Some(indices) = action_index_map {
-            store_action_indices(&self.action_indices, handle, indices);
-        }
-
         let bounds = match &bounds_read {
             Ok(bounds) => *bounds,
             Err(e) => {
@@ -1863,7 +1884,7 @@ impl LinuxProvider {
             reason => reason,
         };
 
-        let mut data: ElementData = ElementParts {
+        let data = ElementParts {
             heading_level: meta.semantics.heading_level,
             landmark_type: meta.semantics.landmark_type,
             web_role: meta.semantics.web_role,
@@ -1887,11 +1908,26 @@ impl LinuxProvider {
             stable_id: Some(aref.path.clone()),
             pid,
             raw,
-            handle,
+            handle: 0,
         }
         .into();
 
-        if matches!(role, Role::Window | Role::Dialog) && self.is_top_level_window_ref(aref) {
+        QuerySnapshot {
+            data,
+            action_indices: action_index_map,
+        }
+    }
+
+    fn register_snapshot(&self, aref: &AccessibleRef, snapshot: QuerySnapshot) -> ElementData {
+        let QuerySnapshot {
+            mut data,
+            action_indices,
+        } = snapshot;
+        data.handle = self.cache_element(aref.clone(), data.role);
+        if let Some(indices) = action_indices {
+            store_action_indices(&self.action_indices, data.handle, indices);
+        }
+        if matches!(data.role, Role::Window | Role::Dialog) && self.is_top_level_window_ref(aref) {
             let facts = self.window_manager.facts(&data);
             if facts.bounds.is_some() {
                 data.bounds = facts.bounds;
@@ -2743,15 +2779,23 @@ impl LinuxProvider {
     /// Resolve the mapped Role for an accessible ref (1-3 D-Bus calls, plus
     /// an Action probe for AT-SPI `menu`, whose meaning is ambiguous on GTK 3).
     fn resolve_role(&self, aref: &AccessibleRef) -> Role {
-        self.resolve_role_with_number(aref, self.get_role_number(aref).unwrap_or(0))
+        self.resolve_role_with_number(aref, self.get_role_number(aref).unwrap_or(0), &mut None)
     }
 
-    fn resolve_role_with_number(&self, aref: &AccessibleRef, role_num: u32) -> Role {
+    fn resolve_role_with_number(
+        &self,
+        aref: &AccessibleRef,
+        role_num: u32,
+        role_name: &mut Option<String>,
+    ) -> Role {
         // The name is only consulted when the number does not map, so it is
         // not read at all on the common path.
         let coarse = match try_map_atspi_role_number(role_num) {
             Some(role) => role,
-            None => role_from_atspi(role_num, &self.get_role_name(aref).unwrap_or_default()),
+            None => role_from_atspi(
+                role_num,
+                role_name.get_or_insert_with(|| self.get_role_name(aref).unwrap_or_default()),
+            ),
         };
         let role = self.refine_text_role(coarse, aref);
         if role == Role::Menu {
@@ -2857,7 +2901,11 @@ impl LinuxProvider {
                 if reads.role_number.is_none() {
                     reads.role_number = self.get_role_number(aref).ok();
                 }
-                self.resolve_role_with_number(aref, reads.role_number.unwrap_or(0))
+                self.resolve_role_with_number(
+                    aref,
+                    reads.role_number.unwrap_or(0),
+                    &mut reads.role_name,
+                )
             }))
         } else {
             None
@@ -2921,15 +2969,24 @@ impl LinuxProvider {
                 _ => {
                     // Compound reference filters and other fields that depend
                     // on snapshots retain the shared matcher's semantics.
-                    let data = reads.snapshot.get_or_insert_with(|| {
-                        Box::new(self.build_element_data_in(
+                    let snapshot = reads.snapshot.get_or_insert_with(|| {
+                        let mut snapshot = self.read_element_data_in(
                             aref,
                             pid,
                             &AncestorMemo::default(),
                             reads.role_number,
-                        ))
+                        );
+                        // Window facts bind to a registered handle. Keep the
+                        // normal window read at materialization time as well.
+                        if !handle_is_reusable(snapshot.data.role) {
+                            snapshot = QuerySnapshot {
+                                data: self.register_snapshot(aref, snapshot),
+                                action_indices: None,
+                            };
+                        }
+                        Arc::new(snapshot)
                     });
-                    return matches_simple(data, simple);
+                    return matches_simple(&snapshot.data, simple);
                 }
             };
             if !matched {
@@ -2952,6 +3009,21 @@ impl LinuxProvider {
             .as_deref()
     }
 
+    fn materialize_query_match(
+        &self,
+        hit: QueryMatch,
+        pid: Option<u32>,
+        memo: &AncestorMemo,
+    ) -> ElementData {
+        if let Some(snapshot) = hit.snapshot {
+            // Register only selected matches, keeping handles and action
+            // indices live even if the walk touched many rejected nodes.
+            self.register_snapshot(&hit.aref, Arc::unwrap_or_clone(snapshot))
+        } else {
+            self.build_element_data_in(&hit.aref, pid, memo, hit.role_number)
+        }
+    }
+
     /// Select flat matches in document order before building snapshots.
     /// Each clause applies its ordinal before the union deduplicates identities.
     fn flat_query_matches(
@@ -2961,6 +3033,7 @@ impl LinuxProvider {
         limit: Option<usize>,
         max_depth: u32,
         first_stage_limit: Option<usize>,
+        output: QueryOutput,
     ) -> Result<Vec<QueryMatch>> {
         let clauses: Vec<_> = group
             .clauses
@@ -2970,11 +3043,14 @@ impl LinuxProvider {
         let start = self.get_cached(root.handle)?;
         let hits = self.collect_matching_refs_group(
             &start,
-            &clauses,
             0,
-            max_depth,
-            first_stage_limit,
-            root.pid,
+            &QueryWalk {
+                clauses: &clauses,
+                max_depth,
+                limit: first_stage_limit,
+                pid: root.pid,
+                output,
+            },
         )?;
         let mut positions = vec![0; clauses.len()];
         let mut seen = HashSet::new();
@@ -3007,13 +3083,10 @@ impl LinuxProvider {
     fn collect_matching_refs_group(
         &self,
         parent: &AccessibleRef,
-        clauses: &[&SimpleSelector],
         depth: u32,
-        max_depth: u32,
-        limit: Option<usize>,
-        pid: Option<u32>,
+        walk: &QueryWalk<'_>,
     ) -> Result<Vec<(usize, QueryMatch)>> {
-        if depth > max_depth {
+        if depth > walk.max_depth {
             return Ok(vec![]);
         }
 
@@ -3095,25 +3168,29 @@ impl LinuxProvider {
                         role_number: *number,
                         ..Default::default()
                     };
-                    for (idx, simple) in clauses.iter().enumerate() {
-                        if self.matches_ref(child, simple, pid, &mut reads) {
+                    for (idx, simple) in walk.clauses.iter().enumerate() {
+                        if self.matches_ref(child, simple, walk.pid, &mut reads) {
                             child_results.push((
                                 idx,
                                 QueryMatch {
                                     aref: child.clone(),
                                     role_number: reads.role_number,
+                                    snapshot: None,
                                 },
                             ));
                         }
                     }
-                    match self.collect_matching_refs_group(
-                        child,
-                        clauses,
-                        depth + 1,
-                        max_depth,
-                        limit,
-                        pid,
-                    ) {
+                    if let Some(snapshot) = reads.snapshot.filter(|snapshot| {
+                        walk.output == QueryOutput::Elements
+                            && handle_is_reusable(snapshot.data.role)
+                    }) {
+                        // A later clause may have read the snapshot after a
+                        // previous clause matched this same reference.
+                        for (_, hit) in &mut child_results {
+                            hit.snapshot = Some(Arc::clone(&snapshot));
+                        }
+                    }
+                    match self.collect_matching_refs_group(child, depth + 1, walk) {
                         Ok(sub) => {
                             child_results.extend(sub);
                             (child_results, None)
@@ -3143,7 +3220,7 @@ impl LinuxProvider {
             }
             for r in batch {
                 results.push(r);
-                if let Some(limit) = limit {
+                if let Some(limit) = walk.limit {
                     if results.len() >= limit {
                         return Ok(results);
                     }
@@ -3291,6 +3368,7 @@ impl Provider for LinuxProvider {
                     limit,
                     max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH),
                     plan.first_stage_limit,
+                    QueryOutput::Count,
                 )?
                 .len()),
         }
@@ -3312,13 +3390,19 @@ impl Provider for LinuxProvider {
         let query = Query::new(group, QueryOutput::Elements, limit);
         let plan = plan_query(query, []);
         if query.covered_by(|_| true, true) {
-            let refs =
-                self.flat_query_matches(root, group, limit, max_depth_val, plan.first_stage_limit)?;
+            let refs = self.flat_query_matches(
+                root,
+                group,
+                limit,
+                max_depth_val,
+                plan.first_stage_limit,
+                QueryOutput::Elements,
+            )?;
             let memo = AncestorMemo::default();
             return Ok(refs
-                .par_iter()
-                .map(carry_deadline(|node: &QueryMatch| {
-                    self.build_element_data_in(&node.aref, root.pid, &memo, node.role_number)
+                .into_par_iter()
+                .map(carry_deadline(|node| {
+                    self.materialize_query_match(node, root.pid, &memo)
                 }))
                 .collect());
         }
@@ -3333,11 +3417,14 @@ impl Provider for LinuxProvider {
         let pid_from_root = root.pid;
         let phase1: Vec<(usize, QueryMatch)> = self.collect_matching_refs_group(
             &start_ref,
-            &firsts,
             0,
-            max_depth_val,
-            plan.first_stage_limit,
-            pid_from_root,
+            &QueryWalk {
+                clauses: &firsts,
+                max_depth: max_depth_val,
+                limit: plan.first_stage_limit,
+                pid: pid_from_root,
+                output: QueryOutput::Elements,
+            },
         )?;
 
         // Bucket phase-1 hits by clause so each clause's tail can narrow
@@ -3363,25 +3450,17 @@ impl Provider for LinuxProvider {
             }
             let clause = &group.clauses[clause_idx];
             let hits = match clause.segments[0].simple.nth {
-                Some(nth) => hits.get(nth - 1).map(std::slice::from_ref).unwrap_or(&[]),
-                None => hits.as_slice(),
+                Some(nth) => hits.into_iter().nth(nth - 1).into_iter().collect(),
+                None => hits,
             };
             // Build ElementData for this clause's phase-1 hits in parallel.
             let memo = AncestorMemo::default();
             let phase1_data: Vec<(usize, ElementData)> = hits
-                .par_iter()
-                .map(carry_deadline(|(pos, node): &(usize, QueryMatch)| {
-                    // `root` is always present now, so the PID comes from
-                    // the root element. No need to re-resolve via
-                    // `get_app_pid` / `get_dbus_pid`.
+                .into_par_iter()
+                .map(carry_deadline(|(pos, node)| {
                     (
-                        *pos,
-                        self.build_element_data_in(
-                            &node.aref,
-                            pid_from_root,
-                            &memo,
-                            node.role_number,
-                        ),
+                        pos,
+                        self.materialize_query_match(node, pid_from_root, &memo),
                     )
                 }))
                 .collect();
@@ -7956,6 +8035,7 @@ mod tests {
     struct InterfaceProbes {
         role: AtomicU64,
         name: AtomicU64,
+        role_name: AtomicU64,
         state: AtomicU64,
         enabled: std::sync::atomic::AtomicBool,
         text: std::sync::atomic::AtomicUsize,
@@ -7999,7 +8079,7 @@ mod tests {
             match self.role {
                 "application" => ATSPI_ROLE_APPLICATION,
                 "push button" => 43,
-                "entry" => 79,
+                "entry" => 0, // This peer requires the role-name fallback.
                 "slider" => 51,
                 other => panic!("unexpected fixture role {other}"),
             }
@@ -8012,6 +8092,7 @@ mod tests {
         }
 
         fn get_role_name(&self) -> &str {
+            self.probes.role_name.fetch_add(1, Ordering::SeqCst);
             self.role
         }
 
@@ -8315,6 +8396,48 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].role, Role::Slider);
         assert_eq!(fx.slider.role.load(Ordering::SeqCst) - before, 1);
+    }
+
+    #[test]
+    fn snapshot_filters_reuse_the_observation_and_register_only_returned_matches() {
+        let fx = interface_peer();
+        let app = xa11y_core::App::from_data(fx.provider.clone(), fx.root.clone());
+        let count = app.locator(r#"slider[numeric_value="42.0"]"#);
+        assert_eq!(count.count().expect("count matching slider"), 1);
+        let snapshot_reads = fx.slider.value();
+        assert!(snapshot_reads > 0);
+        assert!(!fx
+            .provider
+            .handle_cache
+            .lock()
+            .expect("handles")
+            .by_ref
+            .contains_key(&("org.test.Ifaces".into(), "/slider".into()),));
+
+        for selector in [
+            r#"slider[numeric_value="42.0"]"#,
+            r#"slider, slider[numeric_value="99.0"]"#,
+            r#"slider[numeric_value="42.0"], button > text_field"#,
+        ] {
+            let before = fx.slider.value();
+            let matches = app.locator(selector).elements().expect("slider result");
+            assert_eq!(matches.len(), 1, "{selector}");
+            assert_eq!(matches[0].numeric_value, Some(42.0));
+            assert_eq!(fx.slider.value() - before, snapshot_reads, "{selector}");
+            let aref = fx
+                .provider
+                .get_cached(matches[0].handle)
+                .expect("live handle");
+            assert_eq!(aref.path, "/slider");
+        }
+    }
+
+    #[test]
+    fn query_role_mapping_and_platform_match_share_the_role_name() {
+        let fx = interface_peer();
+        let app = xa11y_core::App::from_data(fx.provider.clone(), fx.root.clone());
+        assert_eq!(app.locator("entry").count().expect("platform role"), 1);
+        assert_eq!(fx.entry.role_name.load(Ordering::SeqCst), 1);
     }
 
     // ── #484: method timeout and unresponsive-peer errors ────────────────
