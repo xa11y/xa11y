@@ -66,6 +66,13 @@ def test_locator_queries(app, measure):
             lambda node: node.name == "OK")
     measure("selector union", app.locator('button[name="OK"], button[name="Cancel"]').elements,
             lambda nodes: {node.name for node in nodes} == {"OK", "Cancel"})
+    union = app.locator('text_field, button')
+    measure("first union match", union.first().element, lambda node: node.role == "button")
+    measure("union exists", union.exists, lambda found: found is True)
+    measure("count metadata union", union.count,
+            lambda count: count == len(union.elements()))
+    measure("count named buttons", app.locator('button[name*="o"]').count,
+            lambda count: count == len(app.locator('button[name*="o"]').elements()))
     measure("ready wait", ok.wait_enabled, lambda node: node.name == "OK")
 
 
@@ -106,6 +113,26 @@ def test_dialog_latency(app, measure):
 
     measure("press to visible dialog control", open_dialog,
             lambda node: node.name == "Close Dialog", close_dialog)
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="UIA root deduplication benchmark")
+def test_multi_window_reads(app, measure):
+    closer = app.locator('button[name="Close Dialog"]')
+    app.locator('button[name="Open Dialog"]').press()
+    closer.wait_visible(timeout=5.0)
+    try:
+        assert len(app.windows()) >= 2
+        # UIA can parent the dialog beneath the main window. Distinct tree
+        # roots need not have the same count as native windows.
+        measure("multi-window tree roots", app.children, bool)
+        measure(
+            "multi-window unique dialog control",
+            closer.elements,
+            lambda nodes: len(nodes) == 1 and nodes[0].name == "Close Dialog",
+        )
+    finally:
+        closer.press()
+        closer.wait_hidden(timeout=5.0)
 
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="measures the AT-SPI window listener")

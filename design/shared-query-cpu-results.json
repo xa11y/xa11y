@@ -1,0 +1,366 @@
+{
+  "base": [
+    {
+      "workload": "10k snapshot exact name",
+      "median_us": 293,
+      "samples_us": [
+        270,
+        272,
+        277,
+        279,
+        290,
+        293,
+        295,
+        297,
+        299,
+        304,
+        309
+      ],
+      "child_reads": null
+    },
+    {
+      "workload": "10k snapshot substring",
+      "median_us": 407,
+      "samples_us": [
+        400,
+        400,
+        401,
+        401,
+        402,
+        407,
+        407,
+        408,
+        409,
+        409,
+        411
+      ],
+      "child_reads": null
+    },
+    {
+      "workload": "10k snapshot role only",
+      "median_us": 206,
+      "samples_us": [
+        203,
+        204,
+        205,
+        205,
+        206,
+        206,
+        206,
+        207,
+        210,
+        215,
+        217
+      ],
+      "child_reads": null
+    },
+    {
+      "workload": "10k traversal first",
+      "median_us": 49,
+      "samples_us": [
+        48,
+        48,
+        49,
+        49,
+        49,
+        49,
+        50,
+        51,
+        55,
+        59,
+        73
+      ],
+      "child_reads": 2
+    },
+    {
+      "workload": "10k traversal all",
+      "median_us": 4593,
+      "samples_us": [
+        4064,
+        4127,
+        4173,
+        4234,
+        4339,
+        4593,
+        4725,
+        4752,
+        4784,
+        4813,
+        4845
+      ],
+      "child_reads": 10101
+    },
+    {
+      "workload": "10k traversal miss",
+      "median_us": 1892,
+      "samples_us": [
+        1708,
+        1709,
+        1751,
+        1791,
+        1874,
+        1892,
+        2597,
+        2833,
+        2920,
+        2994,
+        3349
+      ],
+      "child_reads": 10101
+    },
+    {
+      "workload": "10k traversal child",
+      "median_us": 1606,
+      "samples_us": [
+        1517,
+        1534,
+        1552,
+        1593,
+        1597,
+        1606,
+        1609,
+        1620,
+        1623,
+        1727,
+        1771
+      ],
+      "child_reads": 10001
+    },
+    {
+      "workload": "10k traversal union",
+      "median_us": 6283,
+      "samples_us": [
+        5922,
+        6011,
+        6011,
+        6082,
+        6082,
+        6283,
+        6373,
+        6416,
+        6435,
+        6535,
+        6651
+      ],
+      "child_reads": 10101
+    },
+    {
+      "workload": "10k traversal union first",
+      "median_us": 17146,
+      "samples_us": [
+        16839,
+        16928,
+        16979,
+        17138,
+        17139,
+        17146,
+        17208,
+        17250,
+        17322,
+        17324,
+        20122
+      ],
+      "child_reads": 10101
+    },
+    {
+      "workload": "10k traversal union nth",
+      "median_us": 15127,
+      "samples_us": [
+        14812,
+        14963,
+        14997,
+        15047,
+        15094,
+        15127,
+        15163,
+        15242,
+        15261,
+        15521,
+        15627
+      ],
+      "child_reads": 10101
+    }
+  ],
+  "head": [
+    {
+      "workload": "10k snapshot exact name",
+      "median_us": 269,
+      "samples_us": [
+        265,
+        266,
+        268,
+        268,
+        269,
+        269,
+        270,
+        272,
+        272,
+        274,
+        274
+      ],
+      "child_reads": null
+    },
+    {
+      "workload": "10k snapshot substring",
+      "median_us": 406,
+      "samples_us": [
+        399,
+        402,
+        403,
+        405,
+        405,
+        406,
+        406,
+        406,
+        406,
+        411,
+        427
+      ],
+      "child_reads": null
+    },
+    {
+      "workload": "10k snapshot role only",
+      "median_us": 209,
+      "samples_us": [
+        202,
+        202,
+        203,
+        204,
+        204,
+        209,
+        210,
+        210,
+        210,
+        213,
+        214
+      ],
+      "child_reads": null
+    },
+    {
+      "workload": "10k traversal first",
+      "median_us": 64,
+      "samples_us": [
+        59,
+        61,
+        62,
+        62,
+        64,
+        64,
+        65,
+        66,
+        67,
+        69,
+        70
+      ],
+      "child_reads": 2
+    },
+    {
+      "workload": "10k traversal all",
+      "median_us": 4129,
+      "samples_us": [
+        4036,
+        4079,
+        4085,
+        4089,
+        4110,
+        4129,
+        4674,
+        4726,
+        4727,
+        4768,
+        5134
+      ],
+      "child_reads": 10101
+    },
+    {
+      "workload": "10k traversal miss",
+      "median_us": 1702,
+      "samples_us": [
+        1168,
+        1169,
+        1176,
+        1181,
+        1316,
+        1702,
+        1732,
+        1734,
+        1745,
+        1759,
+        1761
+      ],
+      "child_reads": 10101
+    },
+    {
+      "workload": "10k traversal child",
+      "median_us": 1644,
+      "samples_us": [
+        1588,
+        1598,
+        1606,
+        1636,
+        1641,
+        1644,
+        1647,
+        1649,
+        1698,
+        1716,
+        2147
+      ],
+      "child_reads": 10001
+    },
+    {
+      "workload": "10k traversal union",
+      "median_us": 5302,
+      "samples_us": [
+        5009,
+        5055,
+        5105,
+        5193,
+        5273,
+        5302,
+        5384,
+        5400,
+        5752,
+        5953,
+        6057
+      ],
+      "child_reads": 10101
+    },
+    {
+      "workload": "10k traversal union first",
+      "median_us": 71,
+      "samples_us": [
+        65,
+        66,
+        67,
+        67,
+        69,
+        71,
+        77,
+        85,
+        86,
+        102,
+        131
+      ],
+      "child_reads": 2
+    },
+    {
+      "workload": "10k traversal union nth",
+      "median_us": 76,
+      "samples_us": [
+        65,
+        65,
+        66,
+        66,
+        73,
+        76,
+        80,
+        85,
+        89,
+        105,
+        111
+      ],
+      "child_reads": 2
+    }
+  ]
+}

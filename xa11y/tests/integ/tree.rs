@@ -1536,6 +1536,17 @@ mod tests {
     fn counts_and_existence_agree_with_materialized_matches() {
         let app = h::app_root();
         for selector in [
+            "*",
+            "text_field",
+            "check_box",
+            "radio_button",
+            "table_cell",
+            "tree_item",
+            r#"[role="button"]"#,
+            r#"[name*="Bidi"]"#,
+            "text_field, button:nth(2), button",
+            "button:nth(2), button:nth(1)",
+            r#"button[enabled="true"]"#,
             "button",
             "button:nth(2)",
             "button:nth(99999)",
@@ -1560,6 +1571,38 @@ mod tests {
                     "{selector}"
                 );
             }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn rooted_counts_and_existence_agree_with_materialized_matches() {
+        let app = h::app_root();
+        let window = app
+            .windows()
+            .expect("app windows")
+            .into_iter()
+            .next()
+            .expect("test window");
+        for selector in [
+            "*",
+            "window",
+            "button",
+            "text_field, button",
+            "button:nth(2), button",
+        ] {
+            let locator = Locator::new(
+                window.provider().clone(),
+                Some(window.data().clone()),
+                selector,
+            );
+            let count = locator.elements().expect("materialized matches").len();
+            assert_eq!(locator.count().expect("count"), count, "{selector}");
+            assert_eq!(
+                locator.exists().expect("existence"),
+                count > 0,
+                "{selector}"
+            );
         }
     }
 

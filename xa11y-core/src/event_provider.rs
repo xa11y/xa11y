@@ -114,11 +114,9 @@ impl Subscription {
                     ..Diagnosis::default()
                 }));
             }
-            // Poll with short recv timeouts so we can re-check the deadline,
-            // and break out early on disconnect instead of polling a dead
-            // channel until the outer timeout fires.
-            let poll = remaining.min(Duration::from_millis(10));
-            match self.rx.recv_timeout_status(poll) {
+            // The receiver wakes on both delivery and disconnect, and bounds
+            // its own wait. No periodic wakeups are needed while it is idle.
+            match self.rx.recv_timeout_status(remaining) {
                 RecvStatus::Event(event) => {
                     if predicate(&event) {
                         return Ok(*event);
@@ -188,10 +186,10 @@ impl<'a> Iterator for SubscriptionIter<'a> {
     type Item = Event;
 
     fn next(&mut self) -> Option<Event> {
-        // Block in short intervals so the iterator stays responsive to drop,
-        // but terminate cleanly if the underlying channel disconnects.
+        // Rust has no host-runtime signal checks here. Delivery and sender
+        // disconnect both wake the receiver, so idle polling buys nothing.
         loop {
-            match self.sub.rx.recv_timeout_status(Duration::from_millis(100)) {
+            match self.sub.rx.recv_timeout_status(Duration::MAX) {
                 RecvStatus::Event(event) => return Some(*event),
                 RecvStatus::Timeout => continue,
                 RecvStatus::Disconnected => return None,
@@ -742,6 +740,42 @@ mod tests {
             RecvStatus::Disconnected => {}
             RecvStatus::Timeout => panic!("expected Disconnected, got Timeout"),
             RecvStatus::Event(_) => panic!("unexpected event"),
+        }
+    }
+
+    #[test]
+    fn wait_for_wakes_for_delivery_and_disconnect() {
+        for disconnect in [false, true] {
+            let (tx, rx) = event_channel();
+            let sub = Subscription::new(rx, CancelHandle::noop());
+            let (done_tx, done_rx) = mpsc::channel();
+            let waiter = std::thread::spawn(move || {
+                let result = sub.wait_for(
+                    |e| matches!(e.kind, EventKind::Announcement),
+                    Duration::from_secs(30),
+                );
+                done_tx.send(result).expect("test receiver alive");
+            });
+            tx.send(named(EventKind::FocusChanged)).expect("subscribed");
+            // Let the wait block after rejecting an event. Neither delivery
+            // nor a disconnect should wait for the 30-second deadline.
+            std::thread::sleep(Duration::from_millis(20));
+            if !disconnect {
+                tx.send(named(EventKind::Announcement)).expect("subscribed");
+            }
+            drop(tx);
+            let result = done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("wait must wake promptly");
+            if disconnect {
+                assert!(matches!(result, Err(Error::Timeout { .. })));
+            } else {
+                assert!(matches!(
+                    result.expect("announcement").kind,
+                    EventKind::Announcement
+                ));
+            }
+            waiter.join().expect("no panic");
         }
     }
 

@@ -202,6 +202,8 @@ pub struct WindowsProvider {
     /// Describes which properties and patterns to pre-fetch in bulk queries.
     /// Not a cache — each FindAllBuildCache call takes a fresh snapshot.
     batch_request: crate::coords::BoundsCacheRequest,
+    /// Discovery needs window identity and names, not full element snapshots.
+    discovery_request: IUIAutomationCacheRequest,
     /// Bounds and scroll overflow only: the cheap refresh behind the scroll
     /// clipping in [`Self::children_clip_of`] (issue #502).
     scroll_request: crate::coords::BoundsCacheRequest,
@@ -290,6 +292,7 @@ impl WindowsProvider {
             automation
         };
         let batch_request = create_batch_request(&automation)?;
+        let discovery_request = create_property_request(&automation, DISCOVERY_PROPERTIES)?;
         let scroll_request = create_scroll_request(&automation)?;
         let raw_walker = unsafe { automation.RawViewWalker() }.map_err(|e| {
             Error::platform(
@@ -301,6 +304,7 @@ impl WindowsProvider {
         Ok(Self {
             automation,
             batch_request,
+            discovery_request,
             scroll_request,
             raw_walker,
             handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
@@ -1083,7 +1087,7 @@ impl WindowsProvider {
     /// to, plus notes for the UWP frames that belong to no app. `list_apps`
     /// and `unlisted_apps` share it, so the frames one leaves out are exactly
     /// the ones the other reports (issue #497).
-    fn desktop_app_windows(&self, dpi: &crate::dpi::DpiScope) -> Result<DesktopAppWindows> {
+    fn desktop_app_windows(&self, _dpi: &crate::dpi::DpiScope) -> Result<DesktopAppWindows> {
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         // A desktop-wide UIA query that reaches a hung app stalls
         // for the transaction timeout. Check first and fail the
@@ -1105,7 +1109,7 @@ impl WindowsProvider {
         let condition = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         let (found, elapsed) = timed(|| {
             uia_call(|| unsafe {
-                root.FindAllBuildCache(TreeScope_Children, &condition, self.batch_request.get(dpi))
+                root.FindAllBuildCache(TreeScope_Children, &condition, &self.discovery_request)
             })
         });
         let found = found.map_err(|e| desktop_listing_timeout(e, elapsed))?;
@@ -1182,13 +1186,21 @@ impl WindowsProvider {
         dpi: &crate::dpi::DpiScope,
         element: &IUIAutomationElement,
     ) -> Result<Vec<IUIAutomationElement>> {
+        self.uia_children_requested(element, self.batch_request.get(dpi))
+    }
+
+    fn uia_children_requested(
+        &self,
+        element: &IUIAutomationElement,
+        request: &IUIAutomationCacheRequest,
+    ) -> Result<Vec<IUIAutomationElement>> {
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         // An empty Vec reads downstream as "this element has no children", so
         // every failure propagates (tenet 1) after `uia_call`'s transient
         // retries; only UIA's "S_OK, no array" (windows-rs surfaces it as an
         // error carrying an ok HRESULT) means there are none.
         let arr = match retry_transient(|| unsafe {
-            element.FindAllBuildCache(TreeScope_Children, &true_cond, self.batch_request.get(dpi))
+            element.FindAllBuildCache(TreeScope_Children, &true_cond, request)
         }) {
             Ok(arr) => arr,
             Err(e) if e.code().is_ok() => return Ok(Vec::new()),
@@ -1200,6 +1212,47 @@ impl WindowsProvider {
             }
         };
         (0..uia_len(&arr)?).map(|i| uia_get(&arr, i)).collect()
+    }
+
+    fn count_children(
+        &self,
+        parent: Option<&ElementData>,
+        request: &IUIAutomationCacheRequest,
+    ) -> Result<Vec<ElementData>> {
+        let Some(parent) = parent else {
+            return self.get_children(None);
+        };
+        if is_synthetic_handle(parent.handle) {
+            return self.get_children(Some(parent));
+        }
+        let element = self.get_cached(parent.handle)?;
+        let children = self
+            .uia_children_requested(&element, request)
+            .map_err(|error| stale_if_gone(parent, error))?;
+        let mut out = Vec::with_capacity(children.len());
+        for child in children {
+            let projected = (|| {
+                let metadata = read_snapshot_role(&child, Some(&self.raw_walker))?;
+                let name = unsafe { child.CachedName() }
+                    .ok()
+                    .map(|value| value.to_string())
+                    .filter(|value| !value.is_empty());
+                let mut data = ElementData::for_role(metadata.role);
+                data.name = xa11y_core::text::strip_bidi_opt(name);
+                data.pid = parent.pid;
+                data.handle = self.cache_element(child.clone());
+                data.raw
+                    .insert("control_type_id".into(), metadata.control_type.0.into());
+                if let Some(class_name) = metadata.class_name {
+                    data.raw.insert("class_name".into(), class_name.into());
+                }
+                Ok(data)
+            })();
+            if let Some(data) = live_snapshot(projected)? {
+                out.push(data);
+            }
+        }
+        Ok(out)
     }
 
     /// Fetch the entire subtree with all properties pre-fetched in one COM call.
@@ -1230,12 +1283,13 @@ impl WindowsProvider {
     /// `Error::Platform` has no diagnosis field to attach one to (tenet 6).
     fn has_onscreen_child(
         &self,
-        dpi: &crate::dpi::DpiScope,
+        _dpi: &crate::dpi::DpiScope,
         element: &IUIAutomationElement,
     ) -> Result<bool> {
+        let request = create_property_request(&self.automation, &[UIA_IsOffscreenPropertyId])?;
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         let children = uia_call(|| unsafe {
-            element.FindAllBuildCache(TreeScope_Children, &true_cond, self.batch_request.get(dpi))
+            element.FindAllBuildCache(TreeScope_Children, &true_cond, &request)
         })?;
         for i in 0..uia_len(&children)? {
             let child = uia_get(&children, i)?;
@@ -1425,7 +1479,10 @@ impl<'a> CanonicalWalk<'a> {
     }
 
     fn children(&self, parent: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        let children = self.provider.get_children(parent)?;
+        self.canonicalize(self.provider.get_children(parent)?)
+    }
+
+    fn canonicalize(&self, children: Vec<ElementData>) -> Result<Vec<ElementData>> {
         let mut out = Vec::with_capacity(children.len());
         for mut child in children {
             if let Some(handle) = self.canonical_handle(child.handle)? {
@@ -1678,7 +1735,7 @@ fn top_level_windows_of_pid_with(
     cache: &IUIAutomationCacheRequest,
 ) -> Result<Vec<IUIAutomationElement>> {
     let candidates = native_windows_of_pid_with(autom, pid, cache)?;
-    distinct_uia_roots(autom, cache, candidates)
+    distinct_uia_roots(autom, candidates)
 }
 
 /// How long UIA waits to *connect* to a provider before giving up.
@@ -1737,15 +1794,6 @@ fn window_is_hung(hwnd: HWND) -> bool {
 struct HungWindow {
     hwnd: HWND,
     pid: u32,
-}
-
-/// Every interactive top-level window on the desktop that Windows considers
-/// hung, found before the desktop-wide UIA enumeration so the listing can
-/// fail fast instead of stalling on one for the transaction timeout.
-fn hung_top_level_windows() -> Result<Vec<HungWindow>> {
-    Ok(hung_among(&interactive_top_level_windows(
-        "checking for hung windows",
-    )?))
 }
 
 /// The windows of `windows` that Windows considers hung.
@@ -2558,11 +2606,20 @@ fn native_windows_of_pid_with(
 /// otherwise make app locators visit the same controls twice.
 fn distinct_uia_roots(
     autom: &IUIAutomation,
-    cache: &IUIAutomationCacheRequest,
     candidates: Vec<IUIAutomationElement>,
 ) -> Result<Vec<IUIAutomationElement>> {
+    // With no competing root there can be no duplicated subtree. In
+    // particular, do not fetch every child just to compare it with nobody.
+    if candidates.len() < 2 {
+        return Ok(candidates);
+    }
     let walker = uia_call(|| unsafe { autom.RawViewWalker() })?;
     let true_condition = uia_call(|| unsafe { autom.CreateTrueCondition() })?;
+    // These children are used only for parent/identity comparisons. Fetch
+    // live references in raw view, without the full snapshot's properties,
+    // bounds and action patterns that nobody reads here.
+    let navigation = uia_call(|| unsafe { autom.CreateCacheRequest() })?;
+    uia_call(|| unsafe { navigation.SetTreeFilter(&true_condition) })?;
     let mut out = Vec::with_capacity(candidates.len());
 
     for (index, candidate) in candidates.iter().enumerate() {
@@ -2589,7 +2646,7 @@ fn distinct_uia_roots(
         // accessible content to an app walk. Keep empty roots: absence of
         // children is not evidence of duplication.
         let children = uia_call(|| unsafe {
-            candidate.FindAllBuildCache(TreeScope_Children, &true_condition, cache)
+            candidate.FindAllBuildCache(TreeScope_Children, &true_condition, &navigation)
         })?;
         let len = uia_call(|| unsafe { children.Length() })?;
         let mut all_covered = len > 0;
@@ -2988,24 +3045,21 @@ fn uia_semantics(
     }
 }
 
-/// Build an ElementData snapshot from a pre-fetched UIA element without
-/// retaining the live reference in the provider's handle cache.
-///
-/// Used both by [`WindowsProvider::build_element_data`] (which allocates a
-/// handle and wraps this call) and by event handlers (which pass `handle=0`
-/// because event targets are snapshots — callers don't act on them directly).
-///
-/// `hidden_by_ancestor`: something above the element hides it although UIA
-/// may leave `IsOffscreen` false, and why: a minimized window (issue #501)
-/// or a scrolling ancestor it is scrolled out of (issue #502).
-fn build_snapshot_data(
-    dpi: &crate::dpi::DpiScope,
+// Shared by full snapshots and role/name-only count queries. Keep role
+// refinements in one implementation, including ARIA, MSAA and DataItem parents.
+struct SnapshotRole {
+    control_type: UIA_CONTROLTYPE_ID,
+    legacy_role: Option<i32>,
+    role: Role,
+    class_name: Option<String>,
+    framework: Option<String>,
+    landmark_type_id: Option<i32>,
+}
+
+fn read_snapshot_role(
     element: &IUIAutomationElement,
-    pid: Option<u32>,
-    handle: u64,
     walker: Option<&IUIAutomationTreeWalker>,
-    hidden_by_ancestor: Option<HiddenReason>,
-) -> Result<ElementData> {
+) -> Result<SnapshotRole> {
     let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
     let is_table_item = (control_type == UIA_DataItemControlTypeId
         || control_type == UIA_CustomControlTypeId)
@@ -3082,6 +3136,43 @@ fn build_snapshot_data(
     if landmark_type_id.is_some() && matches!(role, Role::Group | Role::Unknown) {
         role = Role::Landmark;
     }
+
+    Ok(SnapshotRole {
+        control_type,
+        legacy_role,
+        role,
+        class_name,
+        framework,
+        landmark_type_id,
+    })
+}
+
+/// Build an ElementData snapshot from a pre-fetched UIA element without
+/// retaining the live reference in the provider's handle cache.
+///
+/// Used both by [`WindowsProvider::build_element_data`] (which allocates a
+/// handle and wraps this call) and by event handlers (which pass `handle=0`
+/// because event targets are snapshots — callers don't act on them directly).
+///
+/// `hidden_by_ancestor`: something above the element hides it although UIA
+/// may leave `IsOffscreen` false, and why: a minimized window (issue #501)
+/// or a scrolling ancestor it is scrolled out of (issue #502).
+fn build_snapshot_data(
+    dpi: &crate::dpi::DpiScope,
+    element: &IUIAutomationElement,
+    pid: Option<u32>,
+    handle: u64,
+    walker: Option<&IUIAutomationTreeWalker>,
+    hidden_by_ancestor: Option<HiddenReason>,
+) -> Result<ElementData> {
+    let SnapshotRole {
+        control_type,
+        legacy_role,
+        role,
+        class_name,
+        framework,
+        landmark_type_id,
+    } = read_snapshot_role(element, walker)?;
 
     let name = unsafe { element.CachedName() }
         .ok()
@@ -3313,6 +3404,53 @@ pub(crate) fn scroll_properties() -> &'static [UIA_PROPERTY_ID] {
 /// to pre-fetch. Created once per provider, used on every query.
 fn create_batch_request(automation: &IUIAutomation) -> Result<crate::coords::BoundsCacheRequest> {
     create_cache_request(automation, BATCH_PROPERTIES)
+}
+
+fn create_property_request(
+    automation: &IUIAutomation,
+    properties: &[UIA_PROPERTY_ID],
+) -> Result<IUIAutomationCacheRequest> {
+    let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
+    for property in properties {
+        uia_call(|| unsafe { request.AddProperty(*property) })?;
+    }
+    let raw_view = uia_call(|| unsafe { automation.CreateTrueCondition() })?;
+    uia_call(|| unsafe { request.SetTreeFilter(&raw_view) })?;
+    Ok(request)
+}
+
+// Exactly what desktop_app_windows and its attribution pass read. The
+// representative's fallback name remains a live read in build_synthetic_app_data.
+const DISCOVERY_PROPERTIES: &[UIA_PROPERTY_ID] = &[
+    UIA_ControlTypePropertyId,
+    UIA_ProcessIdPropertyId,
+    UIA_NamePropertyId,
+    UIA_NativeWindowHandlePropertyId,
+];
+
+const QUERY_PROPERTIES: &[UIA_PROPERTY_ID] = &[
+    UIA_ControlTypePropertyId,
+    UIA_IsTableItemPatternAvailablePropertyId,
+    UIA_LegacyIAccessibleRolePropertyId,
+    UIA_ClassNamePropertyId,
+    UIA_FrameworkIdPropertyId,
+    UIA_NativeWindowHandlePropertyId,
+    UIA_AriaRolePropertyId,
+    UIA_IsDialogPropertyId,
+    UIA_LandmarkTypePropertyId,
+    UIA_NamePropertyId,
+];
+
+fn metadata_query(group: &xa11y_core::SelectorGroup) -> bool {
+    group.clauses.iter().all(|clause| {
+        clause.segments.len() == 1
+            && clause.segments[0].simple.filters.iter().all(|filter| {
+                matches!(
+                    filter.attr.as_str(),
+                    "name" | "role" | "class_name" | "control_type_id"
+                )
+            })
+    })
 }
 
 /// The cache request event handlers fetch their targets with.
@@ -4819,17 +4957,19 @@ impl Provider for WindowsProvider {
         uia_gate("app_by_pid")?;
         // A hung window of this pid would stall the UIA search below for the
         // transaction timeout; fail fast naming it instead (issue #507).
-        let hung: Vec<HungWindow> = hung_top_level_windows()?
-            .into_iter()
-            .filter(|w| w.pid == pid)
-            .collect();
+        // Filter by owner before the interactivity checks: unrelated desktop
+        // windows cannot contribute to this pid's hung-window diagnosis.
+        let hung = hung_among(&interactive_top_level_windows_owned_by(
+            "checking a pid's windows for hangs",
+            Some(pid),
+        )?);
         if !hung.is_empty() {
             return Err(hung_windows_error(
                 format!("the top-level windows of pid {pid} to respond"),
                 &hung,
             ));
         }
-        let dpi = &crate::dpi::DpiScope::enter()?;
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         let value = pid_variant(pid)?;
         let pid_condition = uia_call(|| unsafe {
@@ -4863,7 +5003,7 @@ impl Provider for WindowsProvider {
         // SelectorNotMatched, so the core poll loop retries — while a
         // failing HRESULT is a genuine UIA error and short-circuits.
         let (found, elapsed) = timed(|| unsafe {
-            root.FindFirstBuildCache(TreeScope_Children, &condition, self.batch_request.get(dpi))
+            root.FindFirstBuildCache(TreeScope_Children, &condition, &self.discovery_request)
         });
         let el = match found {
             Ok(el) => el,
@@ -4879,11 +5019,9 @@ impl Provider for WindowsProvider {
                     crate::uwp::PidFilter::for_pid(pid).packaging()?,
                     crate::uwp::Packaging::Packaged(_)
                 ) {
-                    for el in native_windows_of_pid_with(
-                        &self.automation,
-                        pid,
-                        self.batch_request.get(dpi),
-                    )? {
+                    for el in
+                        native_windows_of_pid_with(&self.automation, pid, &self.discovery_request)?
+                    {
                         let hwnd = unsafe { el.CachedNativeWindowHandle() }.map_err(|e| {
                             Error::platform(
                                 e.code().0 as i64,
@@ -5094,6 +5232,37 @@ impl Provider for WindowsProvider {
         }
 
         Ok(candidates)
+    }
+
+    fn count_elements_group(
+        &self,
+        root: &ElementData,
+        group: &xa11y_core::SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<usize> {
+        uia_gate("count_elements_group")?;
+        group.validate()?;
+        // State, geometry, raw-property and compound selectors need the full
+        // existing resolver; role/name-only selectors need no action payload.
+        // HWND-rooted searches use the native subtree resolver's root and
+        // identity ordering. Keep that contract until it has a projected
+        // native implementation too; do not substitute a descendants walk.
+        if !is_synthetic_handle(root.handle) || !metadata_query(group) {
+            return Ok(self
+                .find_elements_group(root, group, limit, max_depth)?
+                .len());
+        }
+        let _dpi = crate::dpi::DpiScope::enter()?;
+        let request = create_property_request(&self.automation, QUERY_PROPERTIES)?;
+        let walk = CanonicalWalk::new(self);
+        xa11y_core::selector::count_elements_in_tree_group(
+            |parent| walk.canonicalize(self.count_children(parent, &request)?),
+            Some(root),
+            group,
+            limit,
+            max_depth,
+        )
     }
 
     fn find_elements_group(
@@ -6869,47 +7038,6 @@ fn parse_states(
         Err(_) => false,
     };
 
-    // Checked: from TogglePattern. Every pattern read below propagates its
-    // failure (`pattern_read`): a toggle whose state could not be read is
-    // not `Off`, and a test waiting for `checked == off` must not pass
-    // against an element it never read (tenet 1, issue #597).
-    let checked = match role {
-        Role::CheckBox | Role::RadioButton => {
-            if let Some(ref pattern) = patterns.toggle {
-                toggled_from_state(pattern_read(
-                    site,
-                    "TogglePattern.CurrentToggleState",
-                    || unsafe { pattern.CurrentToggleState() },
-                )?)
-            } else if let Some(ref pattern) = patterns.selection_item {
-                // For radio buttons, check SelectionItemPattern
-                if pattern_read(site, "SelectionItemPattern.CurrentIsSelected", || unsafe {
-                    pattern.CurrentIsSelected()
-                })?
-                .as_bool()
-                {
-                    Some(Toggled::On)
-                } else {
-                    Some(Toggled::Off)
-                }
-            } else {
-                Some(Toggled::Off)
-            }
-        }
-        _ => None,
-    };
-
-    // Expanded: from ExpandCollapsePattern
-    let expanded = if let Some(ref pattern) = patterns.expand_collapse {
-        expanded_from_state(pattern_read(
-            site,
-            "ExpandCollapsePattern.CurrentExpandCollapseState",
-            || unsafe { pattern.CurrentExpandCollapseState() },
-        )?)
-    } else {
-        None
-    };
-
     // Selected: SelectionItemPattern where the framework implements it,
     // otherwise the MSAA selection bit.
     //
@@ -6937,6 +7065,43 @@ fn parse_states(
             element,
             UIA_LegacyIAccessibleStatePropertyId,
         )),
+    };
+
+    // Checked: from TogglePattern. Every pattern read below propagates its
+    // failure (`pattern_read`): a toggle whose state could not be read is
+    // not `Off`, and a test waiting for `checked == off` must not pass
+    // against an element it never read (tenet 1, issue #597).
+    let checked = match role {
+        Role::CheckBox | Role::RadioButton => {
+            if let Some(ref pattern) = patterns.toggle {
+                toggled_from_state(pattern_read(
+                    site,
+                    "TogglePattern.CurrentToggleState",
+                    || unsafe { pattern.CurrentToggleState() },
+                )?)
+            } else if patterns.selection_item.is_some() {
+                // Reuse the same observation for checked and selected.
+                if selected {
+                    Some(Toggled::On)
+                } else {
+                    Some(Toggled::Off)
+                }
+            } else {
+                Some(Toggled::Off)
+            }
+        }
+        _ => None,
+    };
+
+    // Expanded: from ExpandCollapsePattern
+    let expanded = if let Some(ref pattern) = patterns.expand_collapse {
+        expanded_from_state(pattern_read(
+            site,
+            "ExpandCollapsePattern.CurrentExpandCollapseState",
+            || unsafe { pattern.CurrentExpandCollapseState() },
+        )?)
+    } else {
+        None
     };
 
     let editable = match role {

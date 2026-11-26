@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 use std::ops::ControlFlow;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::element::{Element, ElementData, HiddenReason, Rect};
@@ -399,6 +399,7 @@ pub struct Locator {
     additional_roots: Vec<ElementData>,
     process_scope: bool,
     selector: String,
+    parsed: Arc<OnceLock<Result<SelectorGroup>>>,
     /// Which match to select (0-based). `None` means first match.
     nth: Option<usize>,
     /// Timeout for auto-wait before action methods. `None` means "resolve
@@ -419,6 +420,7 @@ impl Locator {
             additional_roots: Vec::new(),
             process_scope: false,
             selector: selector.to_string(),
+            parsed: Arc::new(OnceLock::new()),
             nth: None,
             timeout: None,
         }
@@ -439,6 +441,7 @@ impl Locator {
             additional_roots: roots,
             process_scope: false,
             selector: selector.to_string(),
+            parsed: Arc::new(OnceLock::new()),
             nth: None,
             timeout: None,
         }
@@ -491,6 +494,7 @@ impl Locator {
     /// every clause: e.g. `"a, b".child("c") => "a > c, b > c"`.
     pub fn child(mut self, child_selector: &str) -> Self {
         self.selector = chain_combinator(&self.selector, " > ", child_selector);
+        self.parsed = Arc::new(OnceLock::new());
         self.nth = None;
         self
     }
@@ -502,6 +506,7 @@ impl Locator {
     /// every clause: e.g. `"a, b".descendant("c") => "a c, b c"`.
     pub fn descendant(mut self, desc_selector: &str) -> Self {
         self.selector = chain_combinator(&self.selector, " ", desc_selector);
+        self.parsed = Arc::new(OnceLock::new());
         self.nth = None;
         self
     }
@@ -686,19 +691,22 @@ impl Locator {
         Ok(combined(out))
     }
 
+    // Only syntax is cached. Every operation still resolves fresh provider
+    // data; cloned locators share parsing until child/descendant changes it.
+    fn parsed_selector(&self) -> Result<&SelectorGroup> {
+        self.parsed
+            .get_or_init(|| SelectorGroup::parse(&self.selector))
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
     /// Resolve the selector to a single ElementData.
     fn resolve_data(&self) -> Result<ElementData> {
-        let group = SelectorGroup::parse(&self.selector)?;
-        // For multi-clause groups we can't safely truncate at the provider
-        // call to `nth+1` — a low-priority clause's match might come
-        // *before* a high-priority clause's in document order, so we need
-        // the full union to apply `nth` correctly.
-        let provider_limit = if group.is_single() {
-            Some(self.nth.unwrap_or(0) + 1)
-        } else {
-            None
-        };
-        let matches = self.resolve_group(&group, provider_limit)?;
+        let group = self.parsed_selector()?;
+        // Providers apply limits to the document-ordered union, never to
+        // each clause independently. Flat unions can now stop their walk.
+        let provider_limit = Some(self.nth.unwrap_or(0).saturating_add(1));
+        let matches = self.resolve_group(group, provider_limit)?;
         let idx = self.nth.unwrap_or(0);
         let total = matches.len();
         matches.into_iter().nth(idx).ok_or_else(|| {
@@ -814,7 +822,7 @@ impl Locator {
     /// rather than dropped, so the original error keeps surfacing while the
     /// collection failure stays visible (tenet 1: no silent fallbacks).
     fn role_candidates(&self) -> Vec<String> {
-        let Ok(group) = SelectorGroup::parse(&self.selector) else {
+        let Ok(group) = self.parsed_selector() else {
             // Unparseable selectors fail earlier with `InvalidSelector`;
             // a miss can't be reached without a parsed selector.
             return Vec::new();
@@ -993,10 +1001,10 @@ impl Locator {
 
     /// Check if a matching element exists.
     pub fn exists(&self) -> Result<bool> {
-        let group = SelectorGroup::parse(&self.selector)?;
+        let group = self.parsed_selector()?;
         let idx = self.nth.unwrap_or(0);
-        let limit = group.is_single().then(|| idx.saturating_add(1));
-        match self.resolve_count(&group, limit) {
+        let limit = Some(idx.saturating_add(1));
+        match self.resolve_count(group, limit) {
             Ok(count) => Ok(count > idx),
             Err(Error::SelectorNotMatched { .. }) => Ok(false),
             Err(e) => Err(e),
@@ -1005,8 +1013,8 @@ impl Locator {
 
     /// Count matching elements.
     pub fn count(&self) -> Result<usize> {
-        let group = SelectorGroup::parse(&self.selector)?;
-        self.resolve_count(&group, None)
+        let group = self.parsed_selector()?;
+        self.resolve_count(group, None)
     }
 
     /// Get a single [`Element`] handle.
@@ -1027,8 +1035,8 @@ impl Locator {
 
     /// Get all matching elements.
     pub fn elements(&self) -> Result<Vec<Element>> {
-        let group = SelectorGroup::parse(&self.selector)?;
-        let matches = self.resolve_group(&group, None)?;
+        let group = self.parsed_selector()?;
+        let matches = self.resolve_group(group, None)?;
         Ok(matches
             .into_iter()
             .map(|d| Element::new(d, Arc::clone(&self.provider)))
@@ -1156,15 +1164,15 @@ impl Locator {
             return self.auto_wait(action).map(Ok);
         }
         let only_match = || {
-            let group = SelectorGroup::parse(&self.selector)?;
+            let group = self.parsed_selector()?;
             // Two matches are enough to know the answer is "several", so
             // each poll asks for at most two and keeps the backend's limit
             // pushdown. Only a refusal pays for the full list, which is what
             // its candidate diagnosis needs; the element acted on still comes
             // from the single resolution that counted it.
-            let mut first_two = self.resolve_group(&group, Some(2))?;
+            let mut first_two = self.resolve_group(group, Some(2))?;
             if first_two.len() > 1 {
-                return Ok(ControlFlow::Break(self.resolve_group(&group, None)?));
+                return Ok(ControlFlow::Break(self.resolve_group(group, None)?));
             }
             Ok(ControlFlow::Continue(first_two.pop()))
         };
@@ -1897,6 +1905,33 @@ mod tests {
         let loc = root_locator("text_field, button");
         let el = loc.element().expect("element must resolve");
         assert_eq!(el.data().name.as_deref(), Some("Back"));
+    }
+
+    #[test]
+    fn parsed_locator_branches_keep_their_own_selector_and_fresh_results() {
+        let locator = root_locator("toolbar");
+        assert_eq!(locator.count().expect("toolbar"), 1);
+        let children = locator.clone().child("button");
+        assert_eq!(children.count().expect("toolbar buttons"), 2);
+        let descendants = locator.clone().descendant("button").nth(2);
+        assert_eq!(
+            descendants
+                .element()
+                .expect("second button")
+                .name
+                .as_deref(),
+            Some("Forward")
+        );
+        assert_eq!(locator.count().expect("original selector"), 1);
+        assert_eq!(
+            children
+                .first()
+                .element()
+                .expect("first button")
+                .name
+                .as_deref(),
+            Some("Back")
+        );
     }
 
     #[test]

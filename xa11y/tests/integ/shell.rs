@@ -399,6 +399,26 @@ mod tests {
             }
         }
 
+        let app = crate::integ::app_root();
+        let window = app
+            .windows()
+            .expect("enumerate the test app's windows for cleanup")
+            .into_iter()
+            .next()
+            .expect("the test app must have a window to reactivate during cleanup");
+
+        let input = xa11y::input_sim().unwrap_or_else(|e| panic!("create input backend: {e}"));
+        let dismiss = DismissMenu { input, window };
+        // A prior failed run may have left the overflow open. Start closed,
+        // and install cleanup before the first shell interaction can fail.
+        for _ in 0..2 {
+            dismiss
+                .input
+                .keyboard()
+                .press(xa11y::Key::Escape)
+                .expect("dismiss a leftover notification popup");
+        }
+
         let taskbar = ShellSurface::by_kind(ShellSurfaceKind::Taskbar, LOOKUP_TIMEOUT)
             .unwrap_or_else(|e| panic!("no taskbar surface: {e}"));
         let mut fixture_icons = taskbar
@@ -413,10 +433,13 @@ mod tests {
                 .unwrap_or_else(|e| panic!("open the real notification overflow: {e}"));
             let overflow = ShellSurface::by_kind(ShellSurfaceKind::Flyout, LOOKUP_TIMEOUT)
                 .unwrap_or_else(|e| panic!("the notification overflow did not open: {e}"));
-            fixture_icons = overflow
+            // The overflow root appears before XAML publishes its icon bounds.
+            // Wait for the icon, rather than mistaking that intermediate frame
+            // for a missing fixture or imposing a fixed settle delay.
+            fixture_icons = vec![overflow
                 .locator("[name*='xa11y tray fixture'][visible='true']")
-                .elements()
-                .unwrap_or_else(|e| panic!("search the notification overflow: {e}"));
+                .wait_visible(LOOKUP_TIMEOUT)
+                .unwrap_or_else(|e| panic!("wait for the notification icon: {e}"))];
         }
 
         let fixture_icon = fixture_icons.into_iter().next().unwrap_or_else(|| {
@@ -426,20 +449,11 @@ mod tests {
             )
         });
 
-        let app = crate::integ::app_root();
-        let window = app
-            .windows()
-            .expect("enumerate the test app's windows for cleanup")
-            .into_iter()
-            .next()
-            .expect("the test app must have a window to reactivate during cleanup");
-
-        let input = xa11y::input_sim().unwrap_or_else(|e| panic!("create input backend: {e}"));
-        input
+        dismiss
+            .input
             .mouse()
             .right_click(&fixture_icon)
             .unwrap_or_else(|e| panic!("right-click the real notification icon: {e}"));
-        let _dismiss = DismissMenu { input, window };
 
         let deadline = std::time::Instant::now() + LOOKUP_TIMEOUT;
         loop {

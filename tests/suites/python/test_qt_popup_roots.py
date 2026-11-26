@@ -15,8 +15,8 @@ def windows_qt_only(app_name):
         pytest.skip("requires Qt on Windows")
 
 
-def wait_for_native_popup(pid: int) -> None:
-    """Wait until Qt has created its HWND popup, not just reported expanded."""
+def wait_for_native_popup(pid: int, *, visible: bool = True) -> None:
+    """Wait for the native popup to open/close, beyond UIA's expanded state."""
     from ctypes import wintypes
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -48,10 +48,10 @@ def wait_for_native_popup(pid: int) -> None:
 
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        if popup_exists():
+        if popup_exists() == visible:
             return
         time.sleep(0.05)
-    pytest.fail("Qt popup HWND did not open")
+    pytest.fail(f"Qt popup HWND did not {'open' if visible else 'close'}")
 
 
 def test_open_combo_item_has_one_app_match(app):
@@ -66,6 +66,7 @@ def test_open_combo_item_has_one_app_match(app):
         )
     finally:
         combo.collapse()
+        wait_for_native_popup(app.pid, visible=False)
 
 
 def test_open_file_menu_item_has_one_app_match(app):
@@ -78,6 +79,7 @@ def test_open_file_menu_item_has_one_app_match(app):
     finally:
         # Invoke an item to dismiss the test fixture's popup.
         app.locator('menu_item[name="New"]').elements()[0].press()
+        wait_for_native_popup(app.pid, visible=False)
 
 
 def test_owned_dialog_is_in_app_windows(app):
@@ -97,3 +99,6 @@ def test_owned_dialog_is_in_app_windows(app):
         )
     finally:
         app.locator('button[name="Close Dialog"]').press()
+        # Native actions return when accepted, before Qt finishes closing.
+        # Do not leave a disappearing dialog for the next window test.
+        app.locator('button[name="Close Dialog"]').wait_hidden(timeout=5.0)
