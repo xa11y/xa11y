@@ -344,8 +344,7 @@ impl WindowsProvider {
         retry_transient(|| unsafe { self.automation.ElementFromHandle(hwnd) })
     }
 
-    /// Cache a UIA element and return its handle ID.
-    fn cache_element(&self, uia: IUIAutomationElement) -> u64 {
+    fn next_handle() -> u64 {
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
         // Handles minted here increment from 1 and must never enter the
         // synthetic tag space: a tagged handle would be reported as a
@@ -357,6 +356,12 @@ impl WindowsProvider {
             !is_synthetic_handle(handle),
             "cache_element minted handle {handle} inside the synthetic tag space"
         );
+        handle
+    }
+
+    /// Cache a UIA element and return its handle ID.
+    fn cache_element(&self, uia: IUIAutomationElement) -> u64 {
+        let handle = Self::next_handle();
         self.handle_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1344,6 +1349,8 @@ impl WindowsProvider {
         &self,
         parent: Option<&ElementData>,
         request: &IUIAutomationCacheRequest,
+        walk: &CanonicalWalk<'_>,
+        batch_wpf: bool,
     ) -> Result<Vec<ElementData>> {
         let Some(parent) = parent else {
             return self.get_children(None);
@@ -1351,10 +1358,52 @@ impl WindowsProvider {
         if is_synthetic_handle(parent.handle) {
             return self.get_children(Some(parent));
         }
-        let element = self.get_cached(parent.handle)?;
-        let children = self
-            .uia_children_requested(&element, request)
-            .map_err(|error| stale_if_gone(parent, error))?;
+        let cached = walk.subtree.borrow().get(&parent.handle).cloned();
+        let element = match cached.as_ref() {
+            Some(native) => native.clone(),
+            None => self.get_cached(parent.handle)?,
+        };
+        // Only complete top-level WPF window snapshots carry the framework
+        // property. Descendants already belong to the query-local cached tree.
+        let cached_parent = if cached.is_some() {
+            cached
+        } else if batch_wpf
+            && matches!(parent.role, Role::Window | Role::Dialog)
+            && parent.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF")
+            && cached_own_hwnd(&element)?.is_some()
+        {
+            let tree = uia_call(|| unsafe { request.Clone() })?;
+            let view = uia_call(|| unsafe { self.automation.ControlViewCondition() })?;
+            uia_call(|| unsafe {
+                tree.SetTreeFilter(&view)?;
+                tree.SetTreeScope(TreeScope_Subtree)
+            })?;
+            Some(
+                uia_call(|| unsafe { element.BuildUpdatedCache(&tree) })
+                    .map_err(|error| stale_if_gone(parent, error))?,
+            )
+        } else {
+            None
+        };
+        let from_subtree = cached_parent.is_some();
+        let children = if let Some(cached) = cached_parent {
+            // UIA returns S_OK with a null array for a cached leaf.
+            match unsafe { cached.GetCachedChildren() } {
+                Ok(array) => (0..uia_len(&array)?)
+                    .map(|i| uia_get(&array, i))
+                    .collect::<Result<Vec<_>>>()?,
+                Err(e) if e.code().is_ok() => Vec::new(),
+                Err(e) => {
+                    return Err(Error::platform(
+                        i64::from(e.code().0),
+                        format!("reading cached WPF children failed: {e}"),
+                    ))
+                }
+            }
+        } else {
+            self.uia_children_requested(&element, request)
+                .map_err(|error| stale_if_gone(parent, error))?
+        };
         let mut out = Vec::with_capacity(children.len());
         for child in children {
             let projected = (|| {
@@ -1366,7 +1415,11 @@ impl WindowsProvider {
                 let mut data = ElementData::for_role(metadata.role);
                 data.name = xa11y_core::text::strip_bidi_opt(name);
                 data.pid = parent.pid;
-                data.handle = self.cache_element(child.clone());
+                data.handle = if from_subtree {
+                    Self::next_handle()
+                } else {
+                    self.cache_element(child.clone())
+                };
                 data.raw
                     .insert("control_type_id".into(), metadata.control_type.0.into());
                 if let Some(class_name) = metadata.class_name {
@@ -1375,6 +1428,9 @@ impl WindowsProvider {
                 Ok(data)
             })();
             if let Some(data) = live_snapshot(projected)? {
+                if from_subtree {
+                    walk.subtree.borrow_mut().insert(data.handle, child);
+                }
                 out.push(data);
             }
         }
@@ -1602,6 +1658,9 @@ struct ScrollObservation {
 struct CanonicalWalk<'a> {
     provider: &'a WindowsProvider,
     handles: std::cell::RefCell<HashMap<Vec<i32>, u64>>,
+    // Cached subtree packets can refer to their entire window tree. Keep them
+    // out of the provider handle table and release them when this walk ends.
+    subtree: std::cell::RefCell<HashMap<u64, IUIAutomationElement>>,
     reads: std::cell::RefCell<ScrollObservation>,
     visited: std::cell::Cell<u64>,
 }
@@ -1611,9 +1670,18 @@ impl<'a> CanonicalWalk<'a> {
         Self {
             provider,
             handles: std::cell::RefCell::new(HashMap::new()),
+            subtree: Default::default(),
             reads: Default::default(),
             visited: Default::default(),
         }
+    }
+
+    fn native(&self, handle: u64) -> Result<IUIAutomationElement> {
+        self.subtree
+            .borrow()
+            .get(&handle)
+            .cloned()
+            .map_or_else(|| self.provider.get_cached(handle), Ok)
     }
 
     fn children(&self, parent: Option<&ElementData>) -> Result<Vec<ElementData>> {
@@ -1665,7 +1733,7 @@ impl<'a> CanonicalWalk<'a> {
         if is_synthetic_handle(handle) {
             return Ok(Some(handle));
         }
-        let element = self.provider.get_cached(handle)?;
+        let element = self.native(handle)?;
         let Some(id) = live_snapshot(WindowsProvider::runtime_id(&element, handle))? else {
             return Ok(None);
         };
@@ -1674,6 +1742,12 @@ impl<'a> CanonicalWalk<'a> {
         }
         let canonical = *self.handles.borrow_mut().entry(id).or_insert(handle);
         if canonical != handle {
+            let mut subtree = self.subtree.borrow_mut();
+            if let Some(source) = subtree.remove(&handle) {
+                subtree.insert(canonical, source);
+                return Ok(Some(canonical));
+            }
+            subtree.remove(&canonical);
             let mut cache = self
                 .provider
                 .handle_cache
@@ -5425,8 +5499,9 @@ impl Provider for WindowsProvider {
         let _dpi = crate::dpi::DpiScope::enter()?;
         let request = create_property_request(&self.automation, QUERY_PROPERTIES)?;
         let walk = CanonicalWalk::new(self);
+        let batch = limit.is_none() && max_depth.is_none();
         xa11y_core::selector::count_elements_in_tree_group(
-            |parent| walk.canonicalize(self.count_children(parent, &request)?),
+            |parent| walk.canonicalize(self.count_children(parent, &request, &walk, batch)?),
             Some(root),
             group,
             limit,
@@ -5488,16 +5563,18 @@ impl Provider for WindowsProvider {
                     let walk = CanonicalWalk::new(self);
                     let complete = std::cell::RefCell::new(HashSet::new());
                     let references = std::cell::RefCell::new(HashMap::new());
+                    let batch = limit.is_none() && max_depth.is_none();
                     let matches = xa11y_core::selector::find_elements_in_tree_group(
                         |parent| {
-                            let children =
-                                walk.canonicalize(self.count_children(parent, &request)?)?;
+                            let children = walk.canonicalize(
+                                self.count_children(parent, &request, &walk, batch)?,
+                            )?;
                             // A sparse unique query can visit more than the
                             // provider's 65K handle capacity after its first
                             // hit. Own hit references now; the later hydration
                             // must not depend on that handle still being cached.
                             retain_projected_refs(&children, group, &references, |handle| {
-                                self.get_cached(handle)
+                                walk.native(handle)
                             })?;
                             // Synthetic roots already enumerate complete fresh
                             // window snapshots. Preserve those rather than

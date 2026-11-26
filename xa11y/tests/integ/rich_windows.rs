@@ -351,6 +351,61 @@ fn wpf_repeated_queries_observe_scroll_reparenting_and_removal() {
     first
         .wait_for_state(ElementState::Visible, timeout)
         .expect("first row visible");
+    let root = app.as_element();
+    for selector in ["*", "text", "button, text", "button:nth(2), button:nth(1)"] {
+        let group = SelectorGroup::parse(selector).expect("selector");
+        let count = |depth| {
+            app.provider()
+                .count_elements_group(&root, &group, None, depth)
+                .expect("WPF count")
+        };
+        assert_eq!(
+            count(None),
+            count(Some(xa11y_core::MAX_TREE_DEPTH)),
+            "{selector}"
+        );
+    }
+    // Explicit depth uses the ordinary per-parent path; both traversals have
+    // the same effective depth. Check every payload field in document order.
+    for selector in [
+        "button[name='absent']",
+        "button[name='Probe 0']",
+        "button[name^='Probe 1']",
+        "button[name^='Probe']",
+    ] {
+        let group = SelectorGroup::parse(selector).expect("selector");
+        let mut reference = None;
+        for depth in [
+            Some(xa11y_core::MAX_TREE_DEPTH),
+            None,
+            None,
+            Some(xa11y_core::MAX_TREE_DEPTH),
+        ] {
+            let started = std::time::Instant::now();
+            let mut matches = app
+                .provider()
+                .find_elements_group(&root, &group, None, depth)
+                .expect("WPF query");
+            let elapsed = started.elapsed();
+            for data in &mut matches {
+                data.handle = 0;
+            }
+            let payload = serde_json::to_value(&matches).expect("serialize");
+            if let Some(previous) = &reference {
+                assert_eq!(previous, &payload, "{selector}");
+            } else {
+                reference = Some(payload);
+            }
+            use std::io::Write;
+            writeln!(
+                std::io::stdout().lock(),
+                "WPF_QUERY selector={selector} depth={depth:?} hits={} elapsed_ms={}",
+                matches.len(),
+                elapsed.as_millis()
+            )
+            .expect("write benchmark sample");
+        }
+    }
     // The second complete lookup has a cardinality observation from the first.
     for _ in 0..2 {
         let all = rows.elements().expect("all rows");

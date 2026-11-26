@@ -3041,17 +3041,20 @@ impl LinuxProvider {
             .map(|c| &c.segments[0].simple)
             .collect();
         let start = self.get_cached(root.handle)?;
-        let hits = self.collect_matching_refs_group(
-            &start,
-            0,
-            &QueryWalk {
-                clauses: &clauses,
-                max_depth,
-                limit: first_stage_limit,
-                pid: root.pid,
-                output,
-            },
-        )?;
+        let walk = QueryWalk {
+            clauses: &clauses,
+            max_depth,
+            limit: first_stage_limit,
+            pid: root.pid,
+            output,
+        };
+        if limit == Some(1) && clauses.iter().all(|simple| simple.nth.is_none()) {
+            return Ok(self
+                .first_query_match(&start, 0, &walk)?
+                .into_iter()
+                .collect());
+        }
+        let hits = self.collect_matching_refs_group(&start, 0, &walk)?;
         let mut positions = vec![0; clauses.len()];
         let mut seen = HashSet::new();
         Ok(hits
@@ -3069,6 +3072,186 @@ impl LinuxProvider {
             })
             .take(limit.unwrap_or(usize::MAX))
             .collect())
+    }
+
+    fn build_child_snapshots(
+        &self,
+        refs: &[(AccessibleRef, Option<u32>)],
+        pid: Option<u32>,
+        memo: &AncestorMemo,
+    ) -> Vec<ElementData> {
+        refs.par_iter()
+            .map(carry_deadline(
+                |(r, role): &(AccessibleRef, Option<u32>)| {
+                    self.build_element_data_in(r, pid, memo, *role)
+                },
+            ))
+            .collect()
+    }
+
+    fn element_child_refs(
+        &self,
+        element_data: &ElementData,
+    ) -> Result<Vec<(AccessibleRef, Option<u32>)>> {
+        let aref = self.get_cached(element_data.handle)?;
+        // A node destroyed after its snapshot has no live descendants.
+        // Keep genuine D-Bus failures visible; do not run the Chromium
+        // empty-tree diagnostic on a vanished window.
+        //
+        // A destroyed node is stale, not childless: core's tree
+        // walks drop a child that went stale mid-walk, and a caller
+        // holding the node learns it is gone.
+        let Some(children) = self.live_atspi_children(&aref)? else {
+            return Err(Error::stale(
+                xa11y_core::StaleReason::Removed,
+                xa11y_core::error::stale_subject(element_data),
+            ));
+        };
+
+        // Pre-filter invalid refs and flatten nested application nodes,
+        // collecting the concrete refs to build in parallel.
+        let mut to_build = Vec::new();
+        for child_ref in &children {
+            if child_ref.path == "/org/a11y/atspi/null"
+                || child_ref.bus_name.is_empty()
+                || child_ref.path.is_empty()
+            {
+                continue;
+            }
+            let role_number = self.get_role_number(child_ref).ok();
+            if role_number == Some(ATSPI_ROLE_APPLICATION) {
+                // Nested application objects can also disappear between
+                // enumeration and this read. Prune only confirmed absence.
+                let grandchildren = match self.live_atspi_children(child_ref) {
+                    Ok(Some(grandchildren)) => grandchildren,
+                    Ok(None) | Err(Error::ElementStale { .. }) => continue,
+                    Err(err) => return Err(err),
+                };
+                for gc_ref in grandchildren {
+                    if gc_ref.path == "/org/a11y/atspi/null"
+                        || gc_ref.bus_name.is_empty()
+                        || gc_ref.path.is_empty()
+                    {
+                        continue;
+                    }
+                    let gc_role = self.get_role_number(&gc_ref).ok();
+                    if gc_role == Some(ATSPI_ROLE_APPLICATION) {
+                        continue;
+                    }
+                    to_build.push((gc_ref, gc_role));
+                }
+                continue;
+            }
+            to_build.push((child_ref.clone(), role_number));
+        }
+
+        if to_build.is_empty() {
+            self.check_chromium_a11y_enabled(&aref, Some(element_data.role))?;
+        }
+
+        Ok(to_build)
+    }
+
+    // Flatten redundant application nodes everywhere except at the registry.
+    // Visit each concrete ref with its already observed role.
+    fn visit_query_child<T>(
+        &self,
+        child: AccessibleRef,
+        registry: bool,
+        mut visit: impl FnMut(AccessibleRef, Option<u32>) -> Result<Option<T>>,
+    ) -> Result<Option<T>> {
+        if child.is_null() {
+            return Ok(None);
+        }
+        let role = if registry {
+            None
+        } else {
+            self.get_role_number(&child).ok()
+        };
+        if role != Some(ATSPI_ROLE_APPLICATION) {
+            return visit(child, role);
+        }
+        for grandchild in self.get_atspi_children(&child).unwrap_or_default() {
+            if !grandchild.is_null() {
+                let role = self.get_role_number(&grandchild).ok();
+                if role != Some(ATSPI_ROLE_APPLICATION) {
+                    if let Some(hit) = visit(grandchild, role)? {
+                        return Ok(Some(hit));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Favor the first sibling; search later branches in parallel in document
+    /// order. A late hit or miss can still overlap native round trips.
+    fn first_query_match(
+        &self,
+        parent: &AccessibleRef,
+        depth: u32,
+        walk: &QueryWalk<'_>,
+    ) -> Result<Option<QueryMatch>> {
+        if depth > walk.max_depth {
+            return Ok(None);
+        }
+        let Some(children) = self.live_atspi_children(parent)? else {
+            return Ok(None);
+        };
+        let registry = parent.bus_name == "org.a11y.atspi.Registry";
+        let saw_child = std::sync::atomic::AtomicBool::new(false);
+        let search = |child: &AccessibleRef| {
+            self.visit_query_child(child.clone(), registry, |child, role_number| {
+                saw_child.store(true, Ordering::Relaxed);
+                let mut reads = QueryReads {
+                    role_number,
+                    ..Default::default()
+                };
+                if walk
+                    .clauses
+                    .iter()
+                    .any(|simple| self.matches_ref(&child, simple, walk.pid, &mut reads))
+                {
+                    return Ok(Some(QueryMatch {
+                        aref: child,
+                        role_number: reads.role_number,
+                        snapshot: reads.snapshot.filter(|snapshot| {
+                            walk.output == QueryOutput::Elements
+                                && handle_is_reusable(snapshot.data.role)
+                        }),
+                    }));
+                }
+                match self.first_query_match(&child, depth + 1, walk) {
+                    hit @ (Ok(_) | Err(Error::AccessibilityNotEnabled { .. })) => hit,
+                    Err(_) => Ok(None),
+                }
+            })
+        };
+        let search_parallel = carry_deadline(|child: &AccessibleRef| search(child).transpose());
+        // Selective existence probes often miss. Keep siblings concurrent so a
+        // large first branch cannot serialize those misses. For broad predicates
+        // or returned elements, favor an early stop on the common first child.
+        let selective_count = walk.output == QueryOutput::Count
+            && walk.clauses.iter().all(|clause| !clause.filters.is_empty());
+        let hit = if selective_count {
+            children.par_iter().find_map_first(search_parallel)
+        } else if let Some((first, rest)) = children.split_first() {
+            if let Some(hit) = search(first)? {
+                return Ok(Some(hit));
+            }
+            rest.par_iter()
+                .by_exponential_blocks()
+                .find_map_first(search_parallel)
+        } else {
+            None
+        };
+        if let Some(hit) = hit {
+            return hit.map(Some);
+        }
+        if !saw_child.load(Ordering::Relaxed) {
+            self.check_chromium_a11y_enabled(parent, None)?;
+        }
+        Ok(None)
     }
 
     /// ONE DFS over the subtree, evaluating each clause's first SimpleSelector
@@ -3093,53 +3276,14 @@ impl LinuxProvider {
         let Some(children) = self.live_atspi_children(parent)? else {
             return Ok(Vec::new());
         };
-
-        // Filter invalid refs. Application-node flattening (collapsing a
-        // redundant `application` accessible into its grandchildren) is only
-        // valid when the parent is itself an application — i.e. we have already
-        // descended past the registry. At the registry root, the children *are*
-        // the applications and must not be collapsed, otherwise selectors like
-        // `application` (used by `App::list` / `App::by_name`) match nothing
-        // because the app accessibles get dissolved into their windows.
-        let parent_is_registry = parent.bus_name == "org.a11y.atspi.Registry";
+        let registry = parent.bus_name == "org.a11y.atspi.Registry";
         let mut to_search = Vec::new();
         for child in children {
-            if child.path == "/org/a11y/atspi/null"
-                || child.bus_name.is_empty()
-                || child.path.is_empty()
-            {
-                continue;
-            }
-
-            // Keep a successful flattening probe for role selectors in this
-            // walk. A failed probe remains eligible for the usual match-time retry.
-            let role_number = if parent_is_registry {
-                None
-            } else {
-                self.get_role_number(&child).ok()
-            };
-            if role_number == Some(ATSPI_ROLE_APPLICATION) {
-                let grandchildren = self.get_atspi_children(&child).unwrap_or_default();
-                for gc in grandchildren {
-                    if gc.path == "/org/a11y/atspi/null"
-                        || gc.bus_name.is_empty()
-                        || gc.path.is_empty()
-                    {
-                        continue;
-                    }
-                    let gc_role = self.get_role_number(&gc).ok();
-                    if gc_role == Some(ATSPI_ROLE_APPLICATION) {
-                        continue;
-                    }
-                    to_search.push((gc, gc_role));
-                }
-                continue;
-            }
-            to_search.push((child, role_number));
+            self.visit_query_child(child, registry, |child, role| {
+                to_search.push((child, role));
+                Ok(None::<()>)
+            })?;
         }
-
-        // Detect Chromium/Electron's empty-tree signature whenever we
-        // descend into a parent and find no real children.
         if to_search.is_empty() {
             self.check_chromium_a11y_enabled(parent, None)?;
         }
@@ -3261,83 +3405,67 @@ impl Provider for LinuxProvider {
     }
 
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        match element {
-            None => {
-                // Top-level: delegate to `list_apps()`, the canonical
-                // discovery primitive.
-                self.list_apps()
-            }
-            Some(element_data) => {
-                let aref = self.get_cached(element_data.handle)?;
-                // A node destroyed after its snapshot has no live descendants.
-                // Keep genuine D-Bus failures visible; do not run the Chromium
-                // empty-tree diagnostic on a vanished window.
-                //
-                // A destroyed node is stale, not childless: core's tree
-                // walks drop a child that went stale mid-walk, and a caller
-                // holding the node learns it is gone.
-                let Some(children) = self.live_atspi_children(&aref)? else {
-                    return Err(Error::stale(
-                        xa11y_core::StaleReason::Removed,
-                        xa11y_core::error::stale_subject(element_data),
-                    ));
-                };
-                let pid = element_data.pid;
+        let Some(element) = element else {
+            return self.list_apps();
+        };
+        let refs = self.element_child_refs(element)?;
+        Ok(self.build_child_snapshots(&refs, element.pid, &AncestorMemo::default()))
+    }
 
-                // Pre-filter invalid refs and flatten nested application nodes,
-                // collecting the concrete refs to build in parallel.
-                let mut to_build = Vec::new();
-                for child_ref in &children {
-                    if child_ref.path == "/org/a11y/atspi/null"
-                        || child_ref.bus_name.is_empty()
-                        || child_ref.path.is_empty()
-                    {
-                        continue;
-                    }
-                    let role_number = self.get_role_number(child_ref).ok();
-                    if role_number == Some(ATSPI_ROLE_APPLICATION) {
-                        // Nested application objects can also disappear between
-                        // enumeration and this read. Prune only confirmed absence.
-                        let grandchildren = match self.live_atspi_children(child_ref) {
-                            Ok(Some(grandchildren)) => grandchildren,
-                            Ok(None) | Err(Error::ElementStale { .. }) => continue,
-                            Err(err) => return Err(err),
-                        };
-                        for gc_ref in grandchildren {
-                            if gc_ref.path == "/org/a11y/atspi/null"
-                                || gc_ref.bus_name.is_empty()
-                                || gc_ref.path.is_empty()
-                            {
-                                continue;
-                            }
-                            let gc_role = self.get_role_number(&gc_ref).ok();
-                            if gc_role == Some(ATSPI_ROLE_APPLICATION) {
-                                continue;
-                            }
-                            to_build.push((gc_ref, gc_role));
-                        }
-                        continue;
-                    }
-                    to_build.push((child_ref.clone(), role_number));
-                }
+    fn capture_children(
+        &self,
+        element_data: &ElementData,
+        budget: usize,
+    ) -> Result<(usize, Box<dyn Iterator<Item = ElementData> + '_>)> {
+        let refs = self.element_child_refs(element_data)?;
+        let total = refs.len();
+        let refs = refs.into_iter();
+        let pid = element_data.pid;
+        let memo = AncestorMemo::default();
+        let prefix = self.build_child_snapshots(&refs.as_slice()[..budget.min(total)], pid, &memo);
+        // The tail is demanded only if cycle detection frees a prefix slot.
+        let tail = refs.skip(budget.min(total));
+        Ok((
+            total,
+            Box::new(prefix.into_iter().chain(
+                tail.map(move |(r, role)| self.build_element_data_in(&r, pid, &memo, role)),
+            )),
+        ))
+    }
 
-                if to_build.is_empty() {
-                    self.check_chromium_a11y_enabled(&aref, Some(element_data.role))?;
-                }
-
-                let memo = AncestorMemo::default();
-                let results: Vec<ElementData> = to_build
-                    .par_iter()
-                    .map(carry_deadline(
-                        |(r, number): &(AccessibleRef, Option<u32>)| {
-                            self.build_element_data_in(r, pid, &memo, *number)
-                        },
-                    ))
-                    .collect();
-
-                Ok(results)
-            }
+    fn find_elements_prefix(
+        &self,
+        root: &ElementData,
+        group: &xa11y_core::SelectorGroup,
+        prefix: usize,
+    ) -> Result<(Vec<ElementData>, usize)> {
+        group.validate()?;
+        let query = Query::new(group, QueryOutput::Elements, None);
+        if !query.covered_by(|_| true, true) {
+            let mut matches = self.find_elements_group(root, group, None, None)?;
+            let total = matches.len();
+            matches.truncate(prefix);
+            return Ok((matches, total));
         }
+        let plan = plan_query(query, []);
+        let mut hits = self.flat_query_matches(
+            root,
+            group,
+            None,
+            xa11y_core::MAX_TREE_DEPTH,
+            plan.first_stage_limit,
+            QueryOutput::Elements,
+        )?;
+        let total = hits.len();
+        hits.truncate(prefix);
+        let memo = AncestorMemo::default();
+        let elements = hits
+            .into_par_iter()
+            .map(carry_deadline(|hit| {
+                self.materialize_query_match(hit, root.pid, &memo)
+            }))
+            .collect();
+        Ok((elements, total))
     }
 
     fn count_elements_group(
@@ -7681,6 +7809,7 @@ mod tests {
             match self.role {
                 "application" => ATSPI_ROLE_APPLICATION,
                 "panel" => 39,
+                "frame" => 23,
                 "push button" => 43,
                 other => panic!("no role number for fixture role {other:?}"),
             }
@@ -7702,7 +7831,7 @@ mod tests {
     }
 
     fn live_tree_peer(
-        error: &'static str,
+        error: Option<&'static str>,
         vanished_role: &'static str,
     ) -> (Connection, std::sync::Arc<LinuxProvider>, ElementData) {
         let (server_socket, client_socket) =
@@ -7729,7 +7858,7 @@ mod tests {
                         name: "Vanished",
                         role: vanished_role,
                         children: vec![],
-                        children_error: Some(error),
+                        children_error: error,
                         role_number: None,
                     },
                 )
@@ -7769,8 +7898,29 @@ mod tests {
     }
 
     #[test]
+    fn bounded_search_surfaces_an_empty_chromium_window_before_a_later_hit() {
+        let (_server, provider, root) = live_tree_peer(None, "frame");
+        provider
+            .gtk4
+            .toolkits
+            .lock()
+            .expect("toolkits")
+            .insert("org.test.LiveTree".into(), ApplicationToolkit::Chromium);
+        let app = xa11y_core::App::from_data(provider, root);
+        for selector in ["button, slider", "button[name='Survivor']"] {
+            assert!(
+                matches!(
+                    app.locator(selector).exists(),
+                    Err(Error::AccessibilityNotEnabled { .. })
+                ),
+                "{selector}"
+            );
+        }
+    }
+
+    #[test]
     fn dump_tree_and_locators_survive_a_vanished_subtree() {
-        let (_server, provider, root) = live_tree_peer("UnknownObject", "panel");
+        let (_server, provider, root) = live_tree_peer(Some("UnknownObject"), "panel");
         let app = xa11y_core::App::from_data(provider.clone(), root);
         let tree = app.tree(None).expect("tree prunes vanished descendants");
         assert!(tree
@@ -7812,7 +7962,7 @@ mod tests {
 
     #[test]
     fn nested_application_disappearance_does_not_drop_live_siblings() {
-        let (_server, provider, root) = live_tree_peer("UnknownObject", "application");
+        let (_server, provider, root) = live_tree_peer(Some("UnknownObject"), "application");
         let app = xa11y_core::App::from_data(provider, root);
         let dump = app.dump(None).expect("nested application pruned");
         assert!(dump.contains("Survivor"));
@@ -7901,7 +8051,7 @@ mod tests {
 
     #[test]
     fn dump_and_tree_preserve_real_children_failures() {
-        let (_server, provider, root) = live_tree_peer("NoReply", "panel");
+        let (_server, provider, root) = live_tree_peer(Some("NoReply"), "panel");
         let app = xa11y_core::App::from_data(provider, root);
         for result in [app.tree(None).map(|_| ()), app.dump(None).map(|_| ())] {
             assert!(matches!(result, Err(Error::Platform { message, .. })
@@ -8360,6 +8510,28 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].numeric_value, single[0].numeric_value);
         assert_eq!(fx.slider.value() - reads, reads);
+    }
+
+    #[test]
+    fn prefix_queries_and_capture_read_only_the_returned_snapshots() {
+        let fx = interface_peer();
+        let app = xa11y_core::App::from_data(fx.provider.clone(), fx.root.clone());
+        let union = app.locator(r#"button, [name="Volume"]"#);
+        assert!(union.exists().expect("ordered union exists"));
+        assert_eq!(fx.slider.name.load(Ordering::SeqCst), 0);
+        let (prefix, total) = union.elements_prefix(1).expect("prefix and total");
+        assert_eq!(total, 2);
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix[0].name.as_deref(), Some("OK"));
+        assert_eq!(fx.slider.value(), 0);
+        let cap = app
+            .as_element()
+            .capture(&xa11y_core::capture::CaptureOptions::new().max_nodes(2))
+            .expect("bounded capture");
+        assert_eq!(cap.root().children_count, Some(3));
+        assert_eq!(cap.root().children.len(), 1);
+        assert_eq!(fx.slider.value(), 0);
+        assert_eq!(fx.entry.text(), 0);
     }
 
     #[test]

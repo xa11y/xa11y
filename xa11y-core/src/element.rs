@@ -460,6 +460,18 @@ impl Element {
             .collect())
     }
 
+    pub(crate) fn capture_children<'p>(
+        parent: &ElementData,
+        provider: &'p Arc<dyn Provider>,
+        budget: usize,
+    ) -> crate::error::Result<(usize, Box<dyn Iterator<Item = Element> + 'p>)> {
+        let (total, children) = provider.capture_children(parent, budget)?;
+        Ok((
+            total,
+            Box::new(children.map(|data| Element::new(data, Arc::clone(provider)))),
+        ))
+    }
+
     /// Get the parent element, if any (root-level elements have no parent).
     ///
     /// Each call queries the provider — results are not cached.
@@ -499,7 +511,11 @@ impl Element {
         &self,
         options: &crate::capture::CaptureOptions,
     ) -> crate::error::Result<crate::capture::Capture> {
-        crate::capture::capture_from(self.clone(), || self.children(), options)
+        crate::capture::capture_from(
+            self.clone(),
+            |budget| Self::capture_children(self, &self.provider, budget),
+            options,
+        )
     }
 
     /// The elements this one is related to, by kind: who labels it, what it

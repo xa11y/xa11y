@@ -2260,15 +2260,15 @@ fn tool_find(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
             selector,
             &target,
             &[element],
-            limit,
+            1,
             &cli::pointer_center(),
             refs,
         ));
     }
 
     let locator = target.locator(selector);
-    let mut elements = locator.elements()?;
-    if elements.is_empty() {
+    let (mut elements, mut total) = locator.elements_prefix(limit)?;
+    if total == 0 {
         // `elements()` reports a miss as an empty list, so the failure that
         // reaches the model would otherwise carry nothing but the selector it
         // already knows. `element()` is the terminal, diagnosed form of the
@@ -2281,7 +2281,10 @@ fn tool_find(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
             // that is there now beats reporting a miss that is no longer true
             // (tenet 1: no silent fallback either way — this is the honest
             // answer to "what matches now").
-            Ok(el) => elements.push(el),
+            Ok(el) => {
+                total = 1;
+                elements.push(el);
+            }
         }
     }
 
@@ -2289,14 +2292,13 @@ fn tool_find(args: &Value, refs: &RefTable) -> CliResult<ToolOutput> {
         selector,
         &target,
         &elements,
-        limit,
+        total,
         &cli::pointer_center(),
         refs,
     ))
 }
 
-/// The `find` result: at most `limit` of `elements`, with the counts that
-/// say whether the list was cut.
+/// Encode the selected prefix alongside the exact match count.
 ///
 /// `center` says whether each match carries a precomputed `center`; when it
 /// does not, the result carries `center_unavailable` with the reason.
@@ -2304,15 +2306,13 @@ fn find_output(
     selector: &str,
     target: &Target,
     elements: &[Element],
-    limit: usize,
+    total: usize,
     center: &cli::PointerCenter,
     refs: &RefTable,
 ) -> ToolOutput {
-    let total = elements.len();
     let mut capture = refs.begin();
     let matches: Vec<Value> = elements
         .iter()
-        .take(limit)
         .map(|el| {
             let mut encoded = element_data_json(el, center.is_usable());
             if let Some(obj) = encoded.as_object_mut() {
@@ -6267,7 +6267,7 @@ mod tests {
             r#"button[name="Back"]"#,
             &target,
             &elements,
-            FIND_DEFAULT_LIMIT,
+            elements.len(),
             &cli::PointerCenter::Usable,
             &RefTable::default(),
         );
@@ -6294,7 +6294,7 @@ mod tests {
             "button",
             &target,
             &elements,
-            FIND_DEFAULT_LIMIT,
+            elements.len(),
             &policy,
             &RefTable::default(),
         );

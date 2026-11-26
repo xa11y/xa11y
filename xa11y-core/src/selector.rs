@@ -1080,6 +1080,33 @@ pub fn find_elements_in_tree(
         max_depth
     };
 
+    if let [head, tail] = selector.segments.as_slice() {
+        if tail.combinator == Combinator::Descendant && head.simple.nth.is_none() {
+            let mut walk = DescendantWalk {
+                head: &head.simple,
+                tail: &tail.simple,
+                first_only: limit == Some(1) && tail.simple.nth.is_none(),
+                head_depth: phase1_depth,
+                tail_depth: max_depth,
+                anchors: Vec::new(),
+                matches: Vec::new(),
+            };
+            walk.visit(&get_children_fn, root, 0)?;
+            // A nested head may reach deeper than its outer head. Keep the
+            // two-phase resolver's anchor order even across that depth boundary.
+            let mut seen = HashSet::new();
+            let mut hits: Vec<_> = walk
+                .matches
+                .into_iter()
+                .flatten()
+                .filter(|node| seen.insert(node.handle))
+                .collect();
+            apply_nth(&mut hits, tail.simple.nth);
+            hits.truncate(limit.unwrap_or(usize::MAX));
+            return Ok(hits);
+        }
+    }
+
     collect_matching(
         &get_children_fn,
         root,
@@ -1533,6 +1560,61 @@ fn apply_nth(candidates: &mut Vec<ElementData>, nth: Option<usize>) {
         candidates.push(kept);
     } else {
         candidates.clear();
+    }
+}
+
+/// Evaluate a head and its descendant in one pass. Each active anchor owns
+/// a bucket in head discovery order and has its own inclusive depth budget.
+struct DescendantWalk<'a> {
+    head: &'a SimpleSelector,
+    tail: &'a SimpleSelector,
+    first_only: bool,
+    head_depth: u32,
+    tail_depth: u32,
+    anchors: Vec<(u64, usize)>,
+    matches: Vec<Vec<ElementData>>,
+}
+
+impl DescendantWalk<'_> {
+    fn visit(
+        &mut self,
+        children: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+        parent: Option<&ElementData>,
+        depth: u64,
+    ) -> Result<bool> {
+        let head_in_range = depth <= u64::from(self.head_depth);
+        let owner = self
+            .anchors
+            .iter()
+            .find(|(end, _)| depth <= *end)
+            .map(|(_, index)| *index);
+        if !head_in_range && owner.is_none() {
+            return Ok(false);
+        }
+        for node in children(parent)? {
+            let starts = head_in_range && matches_simple(&node, self.head);
+            if starts {
+                self.anchors
+                    .push((depth + 1 + u64::from(self.tail_depth), self.matches.len()));
+                self.matches.push(Vec::new());
+            }
+            if let Some(index) = owner {
+                if matches_simple(&node, self.tail) {
+                    if self.first_only && index == 0 {
+                        self.matches[index].push(node);
+                        return Ok(true);
+                    }
+                    self.matches[index].push(node.clone());
+                }
+            }
+            if self.visit(children, Some(&node), depth + 1)? {
+                return Ok(true);
+            }
+            if starts {
+                self.anchors.pop();
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -3010,6 +3092,42 @@ mod tests {
             .iter()
             .map(|e| e.name.clone().unwrap_or_default())
             .collect()
+    }
+
+    #[test]
+    fn fused_descendants_preserve_anchor_order_and_each_depth_budget() {
+        let tree = group_fixture();
+        for selector in ["* *", "* button:nth(2)", "application button", "toolbar *"] {
+            let selector = Selector::parse(selector).unwrap();
+            for depth in 0..=4 {
+                let expected = find_elements_in_tree_with_paths(
+                    group_get_children(&tree),
+                    None,
+                    &selector,
+                    Some(depth),
+                )
+                .unwrap();
+                let read = std::cell::RefCell::new(HashSet::new());
+                let actual = find_elements_in_tree(
+                    |parent| {
+                        assert!(read.borrow_mut().insert(parent.map(|node| node.handle)));
+                        group_get_children(&tree)(parent)
+                    },
+                    None,
+                    &selector,
+                    None,
+                    Some(depth),
+                )
+                .unwrap();
+                assert_eq!(
+                    actual.iter().map(|node| node.handle).collect::<Vec<_>>(),
+                    expected
+                        .iter()
+                        .map(|(_, node)| node.handle)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
     }
 
     #[test]
