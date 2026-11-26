@@ -1003,20 +1003,28 @@ fn number_to_string(v: Option<f64>) -> Option<String> {
 /// only, **not** full case folding (e.g. Turkish `ı`/`I` and German `ß`/`SS`
 /// do not match). See [`MatchOp`] for details.
 pub fn match_op(op: &MatchOp, expected: &str, actual: Option<&str>) -> bool {
+    let Some(actual) = actual else { return false };
+    // Short ASCII labels can be compared in place. Keep substring search on
+    // long inputs on the standard library's search algorithm.
+    let short_ascii = || actual.len() <= 64 && actual.is_ascii() && expected.is_ascii();
     match op {
-        MatchOp::Exact => actual == Some(expected),
-        MatchOp::Contains => {
-            let fl = expected.to_lowercase();
-            actual.is_some_and(|v| v.to_lowercase().contains(&fl))
+        MatchOp::Exact => actual == expected,
+        MatchOp::Contains if short_ascii() => {
+            expected.is_empty()
+                || actual
+                    .as_bytes()
+                    .windows(expected.len())
+                    .any(|window| window.eq_ignore_ascii_case(expected.as_bytes()))
         }
-        MatchOp::StartsWith => {
-            let fl = expected.to_lowercase();
-            actual.is_some_and(|v| v.to_lowercase().starts_with(&fl))
-        }
-        MatchOp::EndsWith => {
-            let fl = expected.to_lowercase();
-            actual.is_some_and(|v| v.to_lowercase().ends_with(&fl))
-        }
+        MatchOp::StartsWith if short_ascii() => actual
+            .get(..expected.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(expected)),
+        MatchOp::EndsWith if short_ascii() => actual
+            .get(actual.len().saturating_sub(expected.len())..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(expected)),
+        MatchOp::Contains => actual.to_lowercase().contains(&expected.to_lowercase()),
+        MatchOp::StartsWith => actual.to_lowercase().starts_with(&expected.to_lowercase()),
+        MatchOp::EndsWith => actual.to_lowercase().ends_with(&expected.to_lowercase()),
     }
 }
 
@@ -2013,6 +2021,48 @@ mod tests {
         assert!(Selector::parse("*button").is_err());
         assert!(Selector::parse("button*").is_err());
         assert!(Selector::parse("**").is_err());
+    }
+
+    #[test]
+    fn case_insensitive_filters_agree_with_unicode_lowercase() {
+        let labels = [
+            "",
+            "Submit",
+            "PREFIX-SUFFIX",
+            "Kelvin",
+            "ΟΣ",
+            "İ",
+            &"A".repeat(64),
+            &"A".repeat(65),
+        ];
+        for actual in labels {
+            for expected in [
+                "",
+                "sub",
+                "MIT",
+                "fix",
+                "too long for a short label",
+                "k",
+                "ος",
+                "i",
+                "Å",
+            ] {
+                let value = actual.to_lowercase();
+                let needle = expected.to_lowercase();
+                for (op, reference) in [
+                    (MatchOp::Contains, value.contains(&needle)),
+                    (MatchOp::StartsWith, value.starts_with(&needle)),
+                    (MatchOp::EndsWith, value.ends_with(&needle)),
+                ] {
+                    assert_eq!(
+                        match_op(&op, expected, Some(actual)),
+                        reference,
+                        "{actual:?} {op:?} {expected:?}"
+                    );
+                    assert!(!match_op(&op, expected, None));
+                }
+            }
+        }
     }
 
     #[test]
