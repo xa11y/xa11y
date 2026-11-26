@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
+use xa11y_core::query_plan::{plan_query, ExecutionPlan, Query, QueryOutput, ReadStrategy};
 
 use windows::core::{implement, Interface, BOOL};
 use windows::Win32::Foundation::*;
@@ -3441,46 +3442,49 @@ const QUERY_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_NamePropertyId,
 ];
 
-fn metadata_query(group: &xa11y_core::SelectorGroup) -> bool {
-    group.clauses.iter().all(|clause| {
-        clause.segments.len() == 1
-            && clause.segments[0].simple.filters.iter().all(|filter| {
-                matches!(
-                    filter.attr.as_str(),
-                    "name" | "role" | "class_name" | "control_type_id"
-                )
-            })
-    })
+fn uia_query_plan(query: Query<'_>, application_root: bool) -> ExecutionPlan {
+    let can_project = application_root
+        && query.covered_by(
+            |attr| matches!(attr, "name" | "role" | "class_name" | "control_type_id"),
+            query.output == QueryOutput::Count,
+        );
+    plan_query(
+        query,
+        can_project.then_some(ReadStrategy::Projected),
+        uia_query_cost,
+    )
 }
 
-fn projected_find_query(group: &xa11y_core::SelectorGroup, limit: Option<usize>) -> bool {
-    // Per-clause :nth must count complete, live snapshots before choosing
-    // its ordinal. An outer limit (including Locator::nth) is safe: if
-    // hydration loses a bounded hit, the caller re-reads without that bound.
-    metadata_query(group)
-        && group
-            .clauses
-            .iter()
-            .all(|clause| clause.segments[0].simple.nth.is_none())
-        // Dense Qt lists measured slower when every metadata hit needed a
-        // second full snapshot. Keep their original batched full walk;
-        // project small prefixes, named queries and sparse window queries.
-        && (limit.is_some_and(|limit| limit <= 2)
-            || group.clauses.iter().all(|clause| {
-                clause.segments[0]
-                    .simple
-                    .filters
-                    .iter()
-                    .any(|filter| filter.attr == "name")
-            })
-            || group.clauses.iter().all(|clause| {
-                matches!(
-                    clause.segments[0].simple.role,
-                    Some(xa11y_core::selector::RoleMatch::Normalized(
-                        Role::Window | Role::Dialog
-                    ))
-                )
-            }))
+// Relative ranks retain the measured sparse/dense crossover. Replace this
+// policy independently of which native reads are semantically eligible.
+fn uia_query_cost(query: Query<'_>, strategy: ReadStrategy) -> u8 {
+    match strategy {
+        ReadStrategy::ResolveElements => 1,
+        ReadStrategy::Projected => {
+            let sparse = query.output == QueryOutput::Count
+                || query.limit.is_some_and(|limit| limit <= 2)
+                || query.group.clauses.iter().all(|clause| {
+                    clause.segments[0]
+                        .simple
+                        .filters
+                        .iter()
+                        .any(|f| f.attr == "name")
+                })
+                || query.group.clauses.iter().all(|clause| {
+                    matches!(
+                        clause.segments[0].simple.role,
+                        Some(xa11y_core::selector::RoleMatch::Normalized(
+                            Role::Window | Role::Dialog
+                        ))
+                    )
+                });
+            if sparse {
+                0
+            } else {
+                2
+            }
+        }
+    }
 }
 
 /// Keep only prospective hits alive until this query hydrates them. Native
@@ -5300,7 +5304,13 @@ impl Provider for WindowsProvider {
         // HWND-rooted searches use the native subtree resolver's root and
         // identity ordering. Keep that contract until it has a projected
         // native implementation too; do not substitute a descendants walk.
-        if !is_synthetic_handle(root.handle) || !metadata_query(group) {
+        if uia_query_plan(
+            Query::new(group, QueryOutput::Count, limit),
+            is_synthetic_handle(root.handle),
+        )
+        .strategy
+            == ReadStrategy::ResolveElements
+        {
             return Ok(self
                 .find_elements_group(root, group, limit, max_depth)?
                 .len());
@@ -5340,8 +5350,13 @@ impl Provider for WindowsProvider {
         // and each is walked natively. Same shape as the fragment-element
         // fallback further down — the walk is the honest primitive for a
         // root that is not a UIA HWND fragment.
-        if is_synthetic_handle(root.handle) {
-            if projected_find_query(group, limit) {
+        let application_root = is_synthetic_handle(root.handle);
+        let plan = uia_query_plan(
+            Query::new(group, QueryOutput::Elements, limit),
+            application_root,
+        );
+        if application_root {
+            if plan.strategy == ReadStrategy::Projected {
                 // Resolving a sparse role/name selector (in particular a
                 // unique window action) must walk the whole application,
                 // but need not read every control's text, patterns, geometry
@@ -5475,21 +5490,7 @@ impl Provider for WindowsProvider {
         // multiple clauses, phase-1 must collect the full union before
         // truncating because cross-clause doc-order can promote later-clause
         // hits ahead of earlier ones.
-        let phase1_limit = if group.clauses.len() == 1 {
-            let first = &group.clauses[0].segments[0].simple;
-            let outer = if group.clauses[0].segments.len() == 1 {
-                limit
-            } else {
-                None
-            };
-            match (outer, first.nth) {
-                (Some(l), Some(n)) => Some(l.max(n)),
-                (_, Some(n)) => Some(n),
-                (l, None) => l,
-            }
-        } else {
-            None
-        };
+        let phase1_limit = plan.first_stage_limit;
 
         // ── Subtree group walk ─────────────────────────────────────
         // Do ONE `FindAllBuildCache(TreeScope_Subtree)` and evaluate every
@@ -10926,36 +10927,29 @@ mod tests {
 
     #[test]
     fn metadata_queries_require_every_selector_property_to_be_projected() {
-        for selector in [
-            "button",
-            r#"text_field[name="Notes"]"#,
-            r#"button[name*="o"]:nth(2), window"#,
-            r#"[class_name="Edit"]"#,
-            r#"[control_type_id="50000"]"#,
+        for (selector, expected) in [
+            ("button", ReadStrategy::Projected),
+            (r#"text_field[name="Notes"]"#, ReadStrategy::Projected),
+            (
+                r#"button[name*="o"]:nth(2), window"#,
+                ReadStrategy::Projected,
+            ),
+            (r#"[class_name="Edit"]"#, ReadStrategy::Projected),
+            (r#"[control_type_id="50000"]"#, ReadStrategy::Projected),
+            ("window button", ReadStrategy::ResolveElements),
+            (r#"button[enabled="true"]"#, ReadStrategy::ResolveElements),
+            (r#"button[visible="false"]"#, ReadStrategy::ResolveElements),
+            (r#"[value="hello"]"#, ReadStrategy::ResolveElements),
+            (r#"[stable_id="button"]"#, ReadStrategy::ResolveElements),
         ] {
-            assert!(
-                metadata_query(&xa11y_core::SelectorGroup::parse(selector).unwrap()),
-                "{selector}"
+            let group = xa11y_core::SelectorGroup::parse(selector).unwrap();
+            let query = Query::new(&group, QueryOutput::Count, None);
+            assert_eq!(uia_query_plan(query, true).strategy, expected, "{selector}");
+            assert_eq!(
+                uia_query_plan(query, false).strategy,
+                ReadStrategy::ResolveElements
             );
         }
-        for selector in [
-            "window button",
-            r#"button[enabled="true"]"#,
-            r#"button[visible="false"]"#,
-            r#"[value="hello"]"#,
-            r#"[stable_id="button"]"#,
-        ] {
-            assert!(
-                !metadata_query(&xa11y_core::SelectorGroup::parse(selector).unwrap()),
-                "{selector}"
-            );
-        }
-        let ordinal = xa11y_core::SelectorGroup::parse("button:nth(2)").unwrap();
-        assert!(metadata_query(&ordinal), "counts need no hydration");
-        assert!(
-            !projected_find_query(&ordinal, Some(1)),
-            "per-clause ordinals must select among complete live snapshots"
-        );
     }
 
     #[test]
@@ -10987,7 +10981,8 @@ mod tests {
         ] {
             let group = xa11y_core::SelectorGroup::parse(selector).unwrap();
             assert_eq!(
-                projected_find_query(&group, limit),
+                uia_query_plan(Query::new(&group, QueryOutput::Elements, limit), true).strategy
+                    == ReadStrategy::Projected,
                 projected,
                 "{selector}, limit={limit:?}"
             );

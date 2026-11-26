@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
+use xa11y_core::query_plan::{plan_query, ExecutionPlan, Query, QueryOutput, ReadStrategy};
 use xa11y_core::RelationKind;
 
 use bounded::Proxy;
@@ -3096,14 +3097,6 @@ impl LinuxProvider {
     }
 }
 
-fn phase_one_limit(outer: Option<usize>, nth: Option<usize>) -> Option<usize> {
-    match (outer, nth) {
-        (Some(limit), Some(n)) => Some(limit.max(n)),
-        (_, Some(n)) => Some(n),
-        (limit, None) => limit,
-    }
-}
-
 impl Provider for LinuxProvider {
     fn capabilities(&self) -> Result<xa11y_core::Capabilities> {
         xa11y_core::Capabilities::current()
@@ -3221,7 +3214,16 @@ impl Provider for LinuxProvider {
         max_depth: Option<u32>,
     ) -> Result<usize> {
         group.validate()?;
-        if !group.is_single() || group.clauses[0].segments.len() != 1 {
+        let query = Query::new(group, QueryOutput::Count, limit);
+        // The AT-SPI matcher reads any required attributes on demand, but
+        // this count executor only deduplicates a single flat clause.
+        let can_count_refs = group.is_single() && group.clauses[0].segments.len() == 1;
+        let plan = plan_query(
+            query,
+            can_count_refs.then_some(ReadStrategy::Projected),
+            |_, strategy| strategy == ReadStrategy::ResolveElements,
+        );
+        if plan.strategy == ReadStrategy::ResolveElements {
             return Ok(self
                 .find_elements_group(root, group, limit, max_depth)?
                 .len());
@@ -3234,7 +3236,7 @@ impl Provider for LinuxProvider {
             &[simple],
             0,
             max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH),
-            phase_one_limit(limit, simple.nth),
+            plan.first_stage_limit,
             root.pid,
         )?;
         // nth selects from the ordered hits before the native identity dedup.
@@ -3288,18 +3290,8 @@ impl Provider for LinuxProvider {
         // clause M's in doc order, so we need the union before truncating.
         // (Critical on Electron-scale apps where this prevents 50k-node
         // walks.)
-        let phase1_limit = if group.clauses.len() == 1 {
-            let clause = &group.clauses[0];
-            let first = firsts[0];
-            let outer = if clause.segments.len() == 1 {
-                limit
-            } else {
-                None
-            };
-            phase_one_limit(outer, first.nth)
-        } else {
-            None
-        };
+        let phase1_limit = ExecutionPlan::resolve(Query::new(group, QueryOutput::Elements, limit))
+            .first_stage_limit;
 
         let pid_from_root = root.pid;
         let phase1: Vec<(usize, AccessibleRef)> = self.collect_matching_refs_group(
