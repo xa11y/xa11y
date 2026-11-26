@@ -1168,14 +1168,22 @@ where
     // comma group must not multiply UIA/AX/AT-SPI calls by its clause count.
     // The first fetch supplies handles for the rest of this query, so a
     // provider that allocates a fresh handle on every fetch remains safe.
-    let children_by_parent: RefCell<HashMap<Option<u64>, Vec<ElementData>>> =
-        RefCell::new(HashMap::new());
-    let cached_children = |parent: Option<&ElementData>| -> Result<Vec<ElementData>> {
+    use std::rc::Rc;
+
+    let children_by_parent = RefCell::new(HashMap::new());
+    // Most parents in a wide tree are leaves. Share their empty allocation too.
+    let empty_children = Rc::<[ElementData]>::from([]);
+    let cached_children = |parent: Option<&ElementData>| -> Result<Rc<[ElementData]>> {
         let key = parent.map(|data| data.handle);
         if let Some(children) = children_by_parent.borrow().get(&key) {
-            return Ok(children.clone());
+            return Ok(Rc::clone(children));
         }
         let children = get_children_fn(parent)?;
+        let children = if children.is_empty() {
+            Rc::clone(&empty_children)
+        } else {
+            children.into()
+        };
         children_by_parent
             .borrow_mut()
             .insert(key, children.clone());
@@ -1187,8 +1195,7 @@ where
     let mut by_path: std::collections::BTreeMap<Vec<u32>, ElementData> =
         std::collections::BTreeMap::new();
     for clause in &group.clauses {
-        let clause_results =
-            find_elements_in_tree_with_paths(cached_children, root, clause, max_depth)?;
+        let clause_results = find_with_paths(cached_children, root, clause, max_depth)?;
         for (path, data) in clause_results {
             // First clause that matched at this path wins. The query-local
             // cache gives every clause the same snapshot of this node.
@@ -1225,6 +1232,15 @@ pub fn find_elements_in_tree_with_paths<F>(
 where
     F: Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
 {
+    find_with_paths(get_children_fn, root, selector, max_depth)
+}
+
+fn find_with_paths<C: AsRef<[ElementData]>>(
+    get_children_fn: impl Fn(Option<&ElementData>) -> Result<C>,
+    root: Option<&ElementData>,
+    selector: &Selector,
+    max_depth: Option<u32>,
+) -> Result<Vec<(Vec<u32>, ElementData)>> {
     selector.validate()?;
 
     let max_depth = max_depth.unwrap_or(crate::MAX_TREE_DEPTH);
@@ -1263,11 +1279,11 @@ where
             match segment.combinator {
                 Combinator::Child => {
                     let children = get_children_fn(Some(candidate))?;
-                    for (i, child) in children.into_iter().enumerate() {
-                        if matches_simple(&child, &segment.simple) {
+                    for (i, child) in children.as_ref().iter().enumerate() {
+                        if matches_simple(child, &segment.simple) {
                             let mut p = cand_path.clone();
                             p.push(i as u32);
-                            next.push((p, child));
+                            next.push((p, child.clone()));
                         }
                     }
                 }
@@ -1323,8 +1339,8 @@ fn apply_nth_paths(candidates: &mut Vec<(Vec<u32>, ElementData)>, nth: Option<us
 ///
 /// `path` is a scratch buffer pushed/popped at each level so the caller can
 /// share one allocation across the whole walk.
-fn collect_matching_with_paths(
-    get_children_fn: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+fn collect_matching_with_paths<C: AsRef<[ElementData]>>(
+    get_children_fn: &impl Fn(Option<&ElementData>) -> Result<C>,
     root: Option<&ElementData>,
     simple: &SimpleSelector,
     depth: u32,
@@ -1336,14 +1352,14 @@ fn collect_matching_with_paths(
         return Ok(());
     }
     let children = get_children_fn(root)?;
-    for (i, child) in children.into_iter().enumerate() {
+    for (i, child) in children.as_ref().iter().enumerate() {
         path.push(i as u32);
-        if matches_simple(&child, simple) {
+        if matches_simple(child, simple) {
             results.push((path.clone(), child.clone()));
         }
         collect_matching_with_paths(
             get_children_fn,
-            Some(&child),
+            Some(child),
             simple,
             depth + 1,
             max_depth,
