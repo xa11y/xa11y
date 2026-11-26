@@ -228,3 +228,8 @@ time public Python API calls, including native accessibility traffic. Each row
 reports five measured samples after a warm-up. Result checks and fixture resets
 run outside the timer. Compare the same OS and workload across revisions.
 Linux, macOS and Windows CI publish samples and medians in their job summaries.
+
+The Linux Qt job also measures press-to-visible with an existing AT-SPI
+window subscription. It registers before the action, waits for the named
+window to open, then checks the dialog control. Subscription setup is outside
+the timer to represent a listener shared across a sequence of actions.

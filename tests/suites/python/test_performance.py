@@ -97,3 +97,33 @@ def test_dialog_latency(app, measure):
 
     measure("press to visible dialog control", open_dialog,
             lambda node: node.name == "Close Dialog", close_dialog)
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="measures the AT-SPI window listener")
+def test_dialog_latency_with_subscription(app, measure):
+    opener = app.locator('button[name="Open Dialog"]')
+    closer = app.locator('button[name="Close Dialog"]')
+
+    def sample_dialog(kind):
+        return lambda event: (
+            event.event_type == kind
+            and event.target is not None
+            and event.target.name == "Sample Dialog"
+        )
+
+    # Long-lived automations can reuse one listener. Register before pressing
+    # so the transition cannot race setup. Validate the same control as the
+    # ordinary press + wait_visible workload after the window event arrives.
+    with app.subscribe(kinds=["window_opened", "window_closed"], buffer=16) as sub:
+        def open_dialog():
+            opener.press()
+            sub.wait_for(sample_dialog(xa11y.EventType.WINDOW_OPENED), timeout=5.0)
+            return closer.wait_visible(timeout=5.0)
+
+        def close_dialog():
+            closer.press()
+            sub.wait_for(sample_dialog(xa11y.EventType.WINDOW_CLOSED), timeout=5.0)
+            closer.wait_hidden(timeout=5.0)
+
+        measure("press to visible dialog control with existing subscription", open_dialog,
+                lambda node: node.name == "Close Dialog", close_dialog)
