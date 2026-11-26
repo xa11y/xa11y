@@ -1170,6 +1170,18 @@ where
         return find_elements_in_tree(get_children_fn, root, &group.clauses[0], limit, max_depth);
     }
 
+    if group
+        .clauses
+        .iter()
+        .all(|clause| clause.segments.len() == 1)
+    {
+        let mut results = Vec::new();
+        visit_flat_group(get_children_fn, root, group, limit, max_depth, |node| {
+            results.push(node.clone())
+        })?;
+        return Ok(results);
+    }
+
     // Reusing fetched children is important on cross-process backends: a
     // comma group must not multiply UIA/AX/AT-SPI calls by its clause count.
     // The first fetch supplies handles for the rest of this query, so a
@@ -1217,6 +1229,140 @@ where
         out.truncate(l);
     }
     Ok(out)
+}
+
+/// Count a query without retaining matched snapshots when every clause is flat.
+/// Compound selectors retain the ordinary path-based narrowing and deduplication.
+#[doc(hidden)]
+pub fn count_elements_in_tree_group(
+    get_children: impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+    root: Option<&ElementData>,
+    group: &SelectorGroup,
+    limit: Option<usize>,
+    max_depth: Option<u32>,
+) -> Result<usize> {
+    group.validate()?;
+    if group
+        .clauses
+        .iter()
+        .all(|clause| clause.segments.len() == 1)
+    {
+        visit_flat_group(get_children, root, group, limit, max_depth, |_| {})
+    } else {
+        Ok(find_elements_in_tree_group(get_children, root, group, limit, max_depth)?.len())
+    }
+}
+
+// One accumulator serves materialized matches and cardinality-only callers.
+// Per-clause nth counters advance even when an earlier clause matched the node.
+struct FlatGroupWalk<'a> {
+    group: &'a SelectorGroup,
+    counts: Vec<usize>,
+    system_root: bool,
+    max_depth: u32,
+    limit: Option<usize>,
+    found: usize,
+}
+
+impl FlatGroupWalk<'_> {
+    fn complete(&self) -> bool {
+        self.limit.is_some_and(|cap| self.found >= cap)
+    }
+
+    fn collect<C: AsRef<[ElementData]>>(
+        &mut self,
+        get_children: &impl Fn(Option<&ElementData>) -> Result<C>,
+        root: Option<&ElementData>,
+        depth: u32,
+        emit: &mut impl FnMut(&ElementData),
+    ) -> Result<()> {
+        if depth > self.max_depth || self.complete() {
+            return Ok(());
+        }
+        let children = get_children(root)?;
+        for child in children.as_ref() {
+            let mut selected = false;
+            for (clause, count) in self.group.clauses.iter().zip(self.counts.iter_mut()) {
+                let simple = &clause.segments[0].simple;
+                if self.system_root
+                    && depth > 0
+                    && matches!(simple.role, Some(RoleMatch::Normalized(Role::Application)))
+                {
+                    continue;
+                }
+                if matches_simple(child, simple) {
+                    *count = count.saturating_add(1);
+                    selected |= simple.nth.is_none_or(|nth| *count == nth);
+                }
+            }
+            if selected {
+                self.found += 1;
+                emit(child);
+                if self.complete() {
+                    return Ok(());
+                }
+            }
+            self.collect(get_children, Some(child), depth + 1, emit)?;
+            if self.complete() {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn visit_flat_group(
+    get_children: impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+    root: Option<&ElementData>,
+    group: &SelectorGroup,
+    limit: Option<usize>,
+    max_depth: Option<u32>,
+    mut emit: impl FnMut(&ElementData),
+) -> Result<usize> {
+    let applications_only = root.is_none()
+        && group.clauses.iter().all(|clause| {
+            matches!(
+                clause.segments[0].simple.role,
+                Some(RoleMatch::Normalized(Role::Application))
+            )
+        });
+    let mut walk = FlatGroupWalk {
+        group,
+        counts: vec![0; group.clauses.len()],
+        system_root: root.is_none(),
+        max_depth: if applications_only {
+            0
+        } else {
+            max_depth.unwrap_or(crate::MAX_TREE_DEPTH)
+        },
+        limit,
+        found: 0,
+    };
+    if group.is_single() {
+        // A single-clause walk needs no cross-clause child cache. Count-only
+        // queries can release each level as they go rather than retain it.
+        walk.collect(&get_children, root, 0, &mut emit)?;
+        return Ok(walk.found);
+    }
+    use std::rc::Rc;
+    let cache = RefCell::new(HashMap::<Option<u64>, Rc<[ElementData]>>::new());
+    let empty = Rc::<[ElementData]>::from([]);
+    let children = |parent: Option<&ElementData>| -> Result<Rc<[ElementData]>> {
+        let key = parent.map(|node| node.handle);
+        if let Some(nodes) = cache.borrow().get(&key) {
+            return Ok(Rc::clone(nodes));
+        }
+        let nodes = get_children(parent)?;
+        let nodes = if nodes.is_empty() {
+            Rc::clone(&empty)
+        } else {
+            nodes.into()
+        };
+        cache.borrow_mut().insert(key, Rc::clone(&nodes));
+        Ok(nodes)
+    };
+    walk.collect(&children, root, 0, &mut emit)?;
+    Ok(walk.found)
 }
 
 /// Path-tracking variant of [`find_elements_in_tree`].
@@ -2905,6 +3051,96 @@ mod tests {
             find_elements_in_tree_group(group_get_children(&tree), None, &group, None, None)
                 .unwrap();
         assert_eq!(names(&results), vec!["Clear", "Save", "Cancel"]);
+    }
+
+    #[test]
+    fn flat_union_and_count_match_path_reference_with_nth_depth_and_limits() {
+        let tree = group_fixture();
+        for query in [
+            "button, text_field",
+            "text_field, button",
+            "button, button",
+            "button:nth(2), button:nth(1)",
+            "button, button:nth(2)",
+            "button:nth(999), text_field:nth(1)",
+            "application, button",
+        ] {
+            let group = SelectorGroup::parse(query).expect("valid query");
+            for depth in [None, Some(0), Some(1), Some(2)] {
+                let mut reference = std::collections::BTreeMap::new();
+                for clause in &group.clauses {
+                    for (path, node) in find_elements_in_tree_with_paths(
+                        group_get_children(&tree),
+                        None,
+                        clause,
+                        depth,
+                    )
+                    .expect("reference walk")
+                    {
+                        reference.entry(path).or_insert(node);
+                    }
+                }
+                let reference: Vec<_> = reference.into_values().collect();
+                for limit in [None, Some(0), Some(1), Some(2), Some(99)] {
+                    let expected =
+                        &reference[..limit.unwrap_or(reference.len()).min(reference.len())];
+                    let actual = find_elements_in_tree_group(
+                        group_get_children(&tree),
+                        None,
+                        &group,
+                        limit,
+                        depth,
+                    )
+                    .expect("flat walk");
+                    assert_eq!(
+                        names(&actual),
+                        names(expected),
+                        "{query}, {depth:?}, {limit:?}"
+                    );
+                    assert_eq!(
+                        count_elements_in_tree_group(
+                            group_get_children(&tree),
+                            None,
+                            &group,
+                            limit,
+                            depth,
+                        )
+                        .expect("count walk"),
+                        expected.len(),
+                        "{query}, {depth:?}, {limit:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flat_union_stops_before_unneeded_children_but_propagates_needed_errors() {
+        let group = SelectorGroup::parse("text_field, button").expect("valid union");
+        let reads = std::cell::Cell::new(0);
+        let children = |parent: Option<&ElementData>| {
+            reads.set(reads.get() + 1);
+            if parent.is_none() {
+                let mut button = ElementData::for_role(Role::Button);
+                button.handle = 1;
+                Ok(vec![button])
+            } else {
+                Err(Error::platform(-7, "tail read"))
+            }
+        };
+        assert_eq!(
+            find_elements_in_tree_group(children, None, &group, Some(1), None)
+                .expect("first match")
+                .len(),
+            1
+        );
+        assert_eq!(reads.get(), 1);
+        assert!(find_elements_in_tree_group(children, None, &group, None, None).is_err());
+        assert_eq!(
+            count_elements_in_tree_group(children, None, &group, Some(0), None)
+                .expect("zero bound"),
+            0
+        );
     }
 
     #[test]

@@ -66,6 +66,13 @@ def test_locator_queries(app, measure):
             lambda node: node.name == "OK")
     measure("selector union", app.locator('button[name="OK"], button[name="Cancel"]').elements,
             lambda nodes: {node.name for node in nodes} == {"OK", "Cancel"})
+    union = app.locator('text_field, button')
+    measure("first union match", union.first().element, lambda node: node.role == "button")
+    measure("union exists", union.exists, lambda found: found is True)
+    measure("count metadata union", union.count,
+            lambda count: count == len(union.elements()))
+    measure("count named buttons", app.locator('button[name*="o"]').count,
+            lambda count: count == len(app.locator('button[name*="o"]').elements()))
     measure("ready wait", ok.wait_enabled, lambda node: node.name == "OK")
 
 

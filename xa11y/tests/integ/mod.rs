@@ -115,17 +115,10 @@ pub fn one(app: &App, selector: &str) -> Element {
 /// Find first element whose name contains `substring` (case-insensitive).
 pub fn named(app: &App, substring: &str) -> Element {
     let selector = format!("[name*=\"{}\"]", substring);
-    let results = app
-        .locator(&selector)
-        .elements()
-        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. App: {}", selector, e, app));
-    assert!(
-        !results.is_empty(),
-        "No element with name containing '{}'. App: {}",
-        substring,
-        app
-    );
-    results.into_iter().next().unwrap()
+    app.locator(&selector)
+        .first()
+        .element()
+        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. App: {}", selector, e, app))
 }
 
 /// Try to perform an action on an element by name. Returns the result without panicking.

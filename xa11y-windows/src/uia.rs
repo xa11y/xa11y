@@ -292,7 +292,7 @@ impl WindowsProvider {
             automation
         };
         let batch_request = create_batch_request(&automation)?;
-        let discovery_request = create_discovery_request(&automation)?;
+        let discovery_request = create_property_request(&automation, DISCOVERY_PROPERTIES)?;
         let scroll_request = create_scroll_request(&automation)?;
         let raw_walker = unsafe { automation.RawViewWalker() }.map_err(|e| {
             Error::platform(
@@ -1186,13 +1186,21 @@ impl WindowsProvider {
         dpi: &crate::dpi::DpiScope,
         element: &IUIAutomationElement,
     ) -> Result<Vec<IUIAutomationElement>> {
+        self.uia_children_requested(element, self.batch_request.get(dpi))
+    }
+
+    fn uia_children_requested(
+        &self,
+        element: &IUIAutomationElement,
+        request: &IUIAutomationCacheRequest,
+    ) -> Result<Vec<IUIAutomationElement>> {
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         // An empty Vec reads downstream as "this element has no children", so
         // every failure propagates (tenet 1) after `uia_call`'s transient
         // retries; only UIA's "S_OK, no array" (windows-rs surfaces it as an
         // error carrying an ok HRESULT) means there are none.
         let arr = match retry_transient(|| unsafe {
-            element.FindAllBuildCache(TreeScope_Children, &true_cond, self.batch_request.get(dpi))
+            element.FindAllBuildCache(TreeScope_Children, &true_cond, request)
         }) {
             Ok(arr) => arr,
             Err(e) if e.code().is_ok() => return Ok(Vec::new()),
@@ -1204,6 +1212,47 @@ impl WindowsProvider {
             }
         };
         (0..uia_len(&arr)?).map(|i| uia_get(&arr, i)).collect()
+    }
+
+    fn count_children(
+        &self,
+        parent: Option<&ElementData>,
+        request: &IUIAutomationCacheRequest,
+    ) -> Result<Vec<ElementData>> {
+        let Some(parent) = parent else {
+            return self.get_children(None);
+        };
+        if is_synthetic_handle(parent.handle) {
+            return self.get_children(Some(parent));
+        }
+        let element = self.get_cached(parent.handle)?;
+        let children = self
+            .uia_children_requested(&element, request)
+            .map_err(|error| stale_if_gone(parent, error))?;
+        let mut out = Vec::with_capacity(children.len());
+        for child in children {
+            let projected = (|| {
+                let metadata = read_snapshot_role(&child, Some(&self.raw_walker))?;
+                let name = unsafe { child.CachedName() }
+                    .ok()
+                    .map(|value| value.to_string())
+                    .filter(|value| !value.is_empty());
+                let mut data = ElementData::for_role(metadata.role);
+                data.name = xa11y_core::text::strip_bidi_opt(name);
+                data.pid = parent.pid;
+                data.handle = self.cache_element(child.clone());
+                data.raw
+                    .insert("control_type_id".into(), metadata.control_type.0.into());
+                if let Some(class_name) = metadata.class_name {
+                    data.raw.insert("class_name".into(), class_name.into());
+                }
+                Ok(data)
+            })();
+            if let Some(data) = live_snapshot(projected)? {
+                out.push(data);
+            }
+        }
+        Ok(out)
     }
 
     /// Fetch the entire subtree with all properties pre-fetched in one COM call.
@@ -1234,12 +1283,13 @@ impl WindowsProvider {
     /// `Error::Platform` has no diagnosis field to attach one to (tenet 6).
     fn has_onscreen_child(
         &self,
-        dpi: &crate::dpi::DpiScope,
+        _dpi: &crate::dpi::DpiScope,
         element: &IUIAutomationElement,
     ) -> Result<bool> {
+        let request = create_property_request(&self.automation, &[UIA_IsOffscreenPropertyId])?;
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         let children = uia_call(|| unsafe {
-            element.FindAllBuildCache(TreeScope_Children, &true_cond, self.batch_request.get(dpi))
+            element.FindAllBuildCache(TreeScope_Children, &true_cond, &request)
         })?;
         for i in 0..uia_len(&children)? {
             let child = uia_get(&children, i)?;
@@ -1429,7 +1479,10 @@ impl<'a> CanonicalWalk<'a> {
     }
 
     fn children(&self, parent: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        let children = self.provider.get_children(parent)?;
+        self.canonicalize(self.provider.get_children(parent)?)
+    }
+
+    fn canonicalize(&self, children: Vec<ElementData>) -> Result<Vec<ElementData>> {
         let mut out = Vec::with_capacity(children.len());
         for mut child in children {
             if let Some(handle) = self.canonical_handle(child.handle)? {
@@ -2992,24 +3045,21 @@ fn uia_semantics(
     }
 }
 
-/// Build an ElementData snapshot from a pre-fetched UIA element without
-/// retaining the live reference in the provider's handle cache.
-///
-/// Used both by [`WindowsProvider::build_element_data`] (which allocates a
-/// handle and wraps this call) and by event handlers (which pass `handle=0`
-/// because event targets are snapshots — callers don't act on them directly).
-///
-/// `hidden_by_ancestor`: something above the element hides it although UIA
-/// may leave `IsOffscreen` false, and why: a minimized window (issue #501)
-/// or a scrolling ancestor it is scrolled out of (issue #502).
-fn build_snapshot_data(
-    dpi: &crate::dpi::DpiScope,
+// Shared by full snapshots and role/name-only count queries. Keep role
+// refinements in one implementation, including ARIA, MSAA and DataItem parents.
+struct SnapshotRole {
+    control_type: UIA_CONTROLTYPE_ID,
+    legacy_role: Option<i32>,
+    role: Role,
+    class_name: Option<String>,
+    framework: Option<String>,
+    landmark_type_id: Option<i32>,
+}
+
+fn read_snapshot_role(
     element: &IUIAutomationElement,
-    pid: Option<u32>,
-    handle: u64,
     walker: Option<&IUIAutomationTreeWalker>,
-    hidden_by_ancestor: Option<HiddenReason>,
-) -> Result<ElementData> {
+) -> Result<SnapshotRole> {
     let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
     let is_table_item = (control_type == UIA_DataItemControlTypeId
         || control_type == UIA_CustomControlTypeId)
@@ -3086,6 +3136,43 @@ fn build_snapshot_data(
     if landmark_type_id.is_some() && matches!(role, Role::Group | Role::Unknown) {
         role = Role::Landmark;
     }
+
+    Ok(SnapshotRole {
+        control_type,
+        legacy_role,
+        role,
+        class_name,
+        framework,
+        landmark_type_id,
+    })
+}
+
+/// Build an ElementData snapshot from a pre-fetched UIA element without
+/// retaining the live reference in the provider's handle cache.
+///
+/// Used both by [`WindowsProvider::build_element_data`] (which allocates a
+/// handle and wraps this call) and by event handlers (which pass `handle=0`
+/// because event targets are snapshots — callers don't act on them directly).
+///
+/// `hidden_by_ancestor`: something above the element hides it although UIA
+/// may leave `IsOffscreen` false, and why: a minimized window (issue #501)
+/// or a scrolling ancestor it is scrolled out of (issue #502).
+fn build_snapshot_data(
+    dpi: &crate::dpi::DpiScope,
+    element: &IUIAutomationElement,
+    pid: Option<u32>,
+    handle: u64,
+    walker: Option<&IUIAutomationTreeWalker>,
+    hidden_by_ancestor: Option<HiddenReason>,
+) -> Result<ElementData> {
+    let SnapshotRole {
+        control_type,
+        legacy_role,
+        role,
+        class_name,
+        framework,
+        landmark_type_id,
+    } = read_snapshot_role(element, walker)?;
 
     let name = unsafe { element.CachedName() }
         .ok()
@@ -3319,9 +3406,12 @@ fn create_batch_request(automation: &IUIAutomation) -> Result<crate::coords::Bou
     create_cache_request(automation, BATCH_PROPERTIES)
 }
 
-fn create_discovery_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+fn create_property_request(
+    automation: &IUIAutomation,
+    properties: &[UIA_PROPERTY_ID],
+) -> Result<IUIAutomationCacheRequest> {
     let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
-    for property in DISCOVERY_PROPERTIES {
+    for property in properties {
         uia_call(|| unsafe { request.AddProperty(*property) })?;
     }
     let raw_view = uia_call(|| unsafe { automation.CreateTrueCondition() })?;
@@ -3337,6 +3427,31 @@ const DISCOVERY_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_NamePropertyId,
     UIA_NativeWindowHandlePropertyId,
 ];
+
+const QUERY_PROPERTIES: &[UIA_PROPERTY_ID] = &[
+    UIA_ControlTypePropertyId,
+    UIA_IsTableItemPatternAvailablePropertyId,
+    UIA_LegacyIAccessibleRolePropertyId,
+    UIA_ClassNamePropertyId,
+    UIA_FrameworkIdPropertyId,
+    UIA_NativeWindowHandlePropertyId,
+    UIA_AriaRolePropertyId,
+    UIA_IsDialogPropertyId,
+    UIA_LandmarkTypePropertyId,
+    UIA_NamePropertyId,
+];
+
+fn metadata_query(group: &xa11y_core::SelectorGroup) -> bool {
+    group.clauses.iter().all(|clause| {
+        clause.segments.len() == 1
+            && clause.segments[0].simple.filters.iter().all(|filter| {
+                matches!(
+                    filter.attr.as_str(),
+                    "name" | "role" | "class_name" | "control_type_id"
+                )
+            })
+    })
+}
 
 /// The cache request event handlers fetch their targets with.
 fn create_event_cache_request(
@@ -5117,6 +5232,37 @@ impl Provider for WindowsProvider {
         }
 
         Ok(candidates)
+    }
+
+    fn count_elements_group(
+        &self,
+        root: &ElementData,
+        group: &xa11y_core::SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<usize> {
+        uia_gate("count_elements_group")?;
+        group.validate()?;
+        // State, geometry, raw-property and compound selectors need the full
+        // existing resolver; role/name-only selectors need no action payload.
+        // HWND-rooted searches use the native subtree resolver's root and
+        // identity ordering. Keep that contract until it has a projected
+        // native implementation too; do not substitute a descendants walk.
+        if !is_synthetic_handle(root.handle) || !metadata_query(group) {
+            return Ok(self
+                .find_elements_group(root, group, limit, max_depth)?
+                .len());
+        }
+        let _dpi = crate::dpi::DpiScope::enter()?;
+        let request = create_property_request(&self.automation, QUERY_PROPERTIES)?;
+        let walk = CanonicalWalk::new(self);
+        xa11y_core::selector::count_elements_in_tree_group(
+            |parent| walk.canonicalize(self.count_children(parent, &request)?),
+            Some(root),
+            group,
+            limit,
+            max_depth,
+        )
     }
 
     fn find_elements_group(

@@ -70,6 +70,8 @@ fn main() {
             None,
             2,
         ),
+        ("union first", "text_field, button", Some(1), 1),
+        ("union nth", "button:nth(2), button:nth(1)", Some(1), 1),
     ] {
         let selector = SelectorGroup::parse(query).unwrap();
         let reads = Cell::new(0);
