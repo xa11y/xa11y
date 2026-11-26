@@ -214,3 +214,17 @@ xa11y-python/tests/    <- Python unit tests + CLI unit tests
   test_locator.py
   ...
 ```
+
+### Automation latency benchmarks
+
+Run `cargo bench --locked -p xa11y-core --bench selector_scan` for release-mode
+filtering and traversal over 10,000 buttons. The synthetic provider counts
+child reads, including reads of empty children. Snapshot filtering excludes
+fixture construction and selector parsing.
+
+`cargo xtask test-qt` runs the live workloads in
+`tests/suites/python/test_performance.py` against the Qt desktop fixture. These
+time public Python API calls, including native accessibility traffic. Each row
+reports five measured samples after a warm-up. Result checks and fixture resets
+run outside the timer. Compare the same OS and workload across revisions.
+Linux, macOS and Windows CI publish samples and medians in their job summaries.
