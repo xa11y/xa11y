@@ -351,6 +351,20 @@ fn wpf_repeated_queries_observe_scroll_reparenting_and_removal() {
     first
         .wait_for_state(ElementState::Visible, timeout)
         .expect("first row visible");
+    let root = app.as_element();
+    for selector in ["*", "text", "button, text", "button:nth(2), button:nth(1)"] {
+        let group = SelectorGroup::parse(selector).expect("selector");
+        let count = |depth| {
+            app.provider()
+                .count_elements_group(&root, &group, None, depth)
+                .expect("WPF count")
+        };
+        assert_eq!(
+            count(None),
+            count(Some(xa11y_core::MAX_TREE_DEPTH)),
+            "{selector}"
+        );
+    }
     // Explicit depth uses the ordinary per-parent path; both traversals have
     // the same effective depth. Check every payload field in document order.
     for selector in [
@@ -370,7 +384,7 @@ fn wpf_repeated_queries_observe_scroll_reparenting_and_removal() {
             let started = std::time::Instant::now();
             let mut matches = app
                 .provider()
-                .find_elements_group(&app.as_element(), &group, None, depth)
+                .find_elements_group(&root, &group, None, depth)
                 .expect("WPF query");
             let elapsed = started.elapsed();
             for data in &mut matches {

@@ -621,11 +621,11 @@ fn walk<'a>(
             break;
         }
         stats.children_reads += 1;
-        let parent = raw[i].element.clone();
+        let provider = Arc::clone(raw[i].element.provider());
         let budget = options.max_nodes - raw.len();
         let read = match root_children.take() {
             Some(read_root) => read_root(budget),
-            None => parent.capture_children(budget),
+            None => Element::capture_children(&raw[i].element, &provider, budget),
         };
         // A read the time budget cut short is this node's failure, even
         // when the backend returned what it had (issue #531).

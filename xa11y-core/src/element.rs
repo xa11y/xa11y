@@ -460,14 +460,15 @@ impl Element {
             .collect())
     }
 
-    pub(crate) fn capture_children(
-        &self,
+    pub(crate) fn capture_children<'p>(
+        parent: &ElementData,
+        provider: &'p Arc<dyn Provider>,
         budget: usize,
-    ) -> crate::error::Result<(usize, Box<dyn Iterator<Item = Element> + '_>)> {
-        let (total, children) = self.provider.capture_children(&self.data, budget)?;
+    ) -> crate::error::Result<(usize, Box<dyn Iterator<Item = Element> + 'p>)> {
+        let (total, children) = provider.capture_children(parent, budget)?;
         Ok((
             total,
-            Box::new(children.map(|data| Element::new(data, Arc::clone(&self.provider)))),
+            Box::new(children.map(|data| Element::new(data, Arc::clone(provider)))),
         ))
     }
 
@@ -512,7 +513,7 @@ impl Element {
     ) -> crate::error::Result<crate::capture::Capture> {
         crate::capture::capture_from(
             self.clone(),
-            |budget| self.capture_children(budget),
+            |budget| Self::capture_children(self, &self.provider, budget),
             options,
         )
     }

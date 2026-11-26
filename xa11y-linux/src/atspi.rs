@@ -3227,19 +3227,26 @@ impl LinuxProvider {
                 }
             })
         };
-        if let Some((first, rest)) = children.split_first() {
+        let search_parallel = carry_deadline(|child: &AccessibleRef| search(child).transpose());
+        // Selective existence probes often miss. Keep siblings concurrent so a
+        // large first branch cannot serialize those misses. For broad predicates
+        // or returned elements, favor an early stop on the common first child.
+        let selective_count = walk.output == QueryOutput::Count
+            && walk.clauses.iter().all(|clause| !clause.filters.is_empty());
+        let hit = if selective_count {
+            children.par_iter().find_map_first(search_parallel)
+        } else if let Some((first, rest)) = children.split_first() {
             if let Some(hit) = search(first)? {
                 return Ok(Some(hit));
             }
-            if let Some(hit) =
-                rest.par_iter()
-                    .by_exponential_blocks()
-                    .find_map_first(carry_deadline(|child: &AccessibleRef| {
-                        search(child).transpose()
-                    }))
-            {
-                return hit.map(Some);
-            }
+            rest.par_iter()
+                .by_exponential_blocks()
+                .find_map_first(search_parallel)
+        } else {
+            None
+        };
+        if let Some(hit) = hit {
+            return hit.map(Some);
         }
         if !saw_child.load(Ordering::Relaxed) {
             self.check_chromium_a11y_enabled(parent, None)?;
@@ -7802,6 +7809,7 @@ mod tests {
             match self.role {
                 "application" => ATSPI_ROLE_APPLICATION,
                 "panel" => 39,
+                "frame" => 23,
                 "push button" => 43,
                 other => panic!("no role number for fixture role {other:?}"),
             }
@@ -7823,7 +7831,7 @@ mod tests {
     }
 
     fn live_tree_peer(
-        error: &'static str,
+        error: Option<&'static str>,
         vanished_role: &'static str,
     ) -> (Connection, std::sync::Arc<LinuxProvider>, ElementData) {
         let (server_socket, client_socket) =
@@ -7850,7 +7858,7 @@ mod tests {
                         name: "Vanished",
                         role: vanished_role,
                         children: vec![],
-                        children_error: Some(error),
+                        children_error: error,
                         role_number: None,
                     },
                 )
@@ -7890,8 +7898,29 @@ mod tests {
     }
 
     #[test]
+    fn bounded_search_surfaces_an_empty_chromium_window_before_a_later_hit() {
+        let (_server, provider, root) = live_tree_peer(None, "frame");
+        provider
+            .gtk4
+            .toolkits
+            .lock()
+            .expect("toolkits")
+            .insert("org.test.LiveTree".into(), ApplicationToolkit::Chromium);
+        let app = xa11y_core::App::from_data(provider, root);
+        for selector in ["button, slider", "button[name='Survivor']"] {
+            assert!(
+                matches!(
+                    app.locator(selector).exists(),
+                    Err(Error::AccessibilityNotEnabled { .. })
+                ),
+                "{selector}"
+            );
+        }
+    }
+
+    #[test]
     fn dump_tree_and_locators_survive_a_vanished_subtree() {
-        let (_server, provider, root) = live_tree_peer("UnknownObject", "panel");
+        let (_server, provider, root) = live_tree_peer(Some("UnknownObject"), "panel");
         let app = xa11y_core::App::from_data(provider.clone(), root);
         let tree = app.tree(None).expect("tree prunes vanished descendants");
         assert!(tree
@@ -7933,7 +7962,7 @@ mod tests {
 
     #[test]
     fn nested_application_disappearance_does_not_drop_live_siblings() {
-        let (_server, provider, root) = live_tree_peer("UnknownObject", "application");
+        let (_server, provider, root) = live_tree_peer(Some("UnknownObject"), "application");
         let app = xa11y_core::App::from_data(provider, root);
         let dump = app.dump(None).expect("nested application pruned");
         assert!(dump.contains("Survivor"));
@@ -8022,7 +8051,7 @@ mod tests {
 
     #[test]
     fn dump_and_tree_preserve_real_children_failures() {
-        let (_server, provider, root) = live_tree_peer("NoReply", "panel");
+        let (_server, provider, root) = live_tree_peer(Some("NoReply"), "panel");
         let app = xa11y_core::App::from_data(provider, root);
         for result in [app.tree(None).map(|_| ()), app.dump(None).map(|_| ())] {
             assert!(matches!(result, Err(Error::Platform { message, .. })
@@ -8487,7 +8516,7 @@ mod tests {
     fn prefix_queries_and_capture_read_only_the_returned_snapshots() {
         let fx = interface_peer();
         let app = xa11y_core::App::from_data(fx.provider.clone(), fx.root.clone());
-        let union = app.locator(r#"[name="OK"], [name="Volume"]"#);
+        let union = app.locator(r#"button, [name="Volume"]"#);
         assert!(union.exists().expect("ordered union exists"));
         assert_eq!(fx.slider.name.load(Ordering::SeqCst), 0);
         let (prefix, total) = union.elements_prefix(1).expect("prefix and total");
