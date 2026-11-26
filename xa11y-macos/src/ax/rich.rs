@@ -660,7 +660,7 @@ pub(super) type Metadata = (
 /// [`Role::List`] (selectors written against that role keep working), but
 /// `NSOutlineView` is an `NSTableView` and has the same `AXRows`,
 /// `AXColumns` and per-column `AXHeader` a table has.
-fn has_table_api(role: Role, ax_role: &str) -> bool {
+pub(super) fn has_table_api(role: Role, ax_role: &str) -> bool {
     role == Role::Table || ax_role == "AXOutline"
 }
 
