@@ -1369,7 +1369,8 @@ impl WindowsProvider {
             cached
         } else if batch_wpf
             && matches!(parent.role, Role::Window | Role::Dialog)
-            && parent.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF")
+            && (parent.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF")
+                || std::env::var("XA11Y_QT_TRIAL").as_deref() == Ok("packet"))
             && cached_own_hwnd(&element)?.is_some()
         {
             let tree = uia_call(|| unsafe { request.Clone() })?;
@@ -5548,7 +5549,13 @@ impl Provider for WindowsProvider {
             application_root,
         );
         if application_root {
-            if plan.strategy == ReadStrategy::Projected {
+            let trial = std::env::var("XA11Y_QT_TRIAL").unwrap_or_default();
+            let force_project = matches!(trial.as_str(), "packet" | "project")
+                && query.covered_by(
+                    |field| matches!(field, "name" | "role" | "class_name" | "control_type_id"),
+                    false,
+                );
+            if plan.strategy == ReadStrategy::Projected || force_project {
                 // Resolving a sparse role/name selector (in particular a
                 // unique window action) must walk the whole application,
                 // but need not read every control's text, patterns, geometry
@@ -5679,8 +5686,54 @@ impl Provider for WindowsProvider {
                 }
             }
             let walk = CanonicalWalk::new(self);
+            let workers = trial
+                .strip_prefix("pool")
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(0);
+            static POOLS: [OnceLock<rayon::ThreadPool>; 9] = [const { OnceLock::new() }; 9];
+            let pool = (workers > 0 && workers <= 8).then(|| {
+                POOLS[workers].get_or_init(|| {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(workers)
+                        .build()
+                        .expect("benchmark worker pool")
+                })
+            });
+            let ready = std::cell::RefCell::new(HashMap::<u64, Result<Vec<ElementData>>>::new());
             let matches = xa11y_core::selector::find_elements_in_tree_group(
-                |el| walk.children(el),
+                |el| {
+                    let Some(pool) = pool.as_ref() else {
+                        return walk.children(el);
+                    };
+                    let children =
+                        match el.and_then(|p: &ElementData| ready.borrow_mut().remove(&p.handle)) {
+                            Some(record) => walk.canonicalize(record?)?,
+                            None => walk.children(el)?,
+                        };
+                    if children.len() > 1 {
+                        use rayon::prelude::*;
+                        let deadline = xa11y_core::deadline::Deadline::current();
+                        let fetched: Vec<_> = pool.install(|| {
+                            children
+                                .par_iter()
+                                .map(|child| {
+                                    let records = xa11y_core::deadline::Deadline::scope_opt(
+                                        deadline.clone(),
+                                        || {
+                                            self.observed_children(
+                                                Some(child),
+                                                &mut ScrollObservation::default(),
+                                            )
+                                        },
+                                    );
+                                    (child.handle, records)
+                                })
+                                .collect()
+                        });
+                        ready.borrow_mut().extend(fetched);
+                    }
+                    Ok(children)
+                },
                 Some(root),
                 group,
                 limit,

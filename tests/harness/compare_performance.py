@@ -30,6 +30,11 @@ def run_variant(label: str, python: str, output: Path, app: str = "qt") -> dict:
             XA11Y_TEST_APP_NAME=name,
             XA11Y_REQUIRE_FRONTMOST="1",
         )
+        if label == "head" and sys.platform == "win32" and app == "qt":
+            trial = subprocess.run([python, "-u", "tests/harness/qt_read_trial.py", str(pid)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            (output / "qt-read-trial.log").write_text(trial.stdout, encoding="utf-8")
+            print(trial.stdout, flush=True)
+            trial.check_returncode()
         summaries = []
         failed = False
         operations = output / f"{label}-operations.jsonl"
