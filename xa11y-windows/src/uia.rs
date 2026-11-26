@@ -3453,6 +3453,58 @@ fn metadata_query(group: &xa11y_core::SelectorGroup) -> bool {
     })
 }
 
+fn projected_find_query(group: &xa11y_core::SelectorGroup, limit: Option<usize>) -> bool {
+    // Per-clause :nth must count complete, live snapshots before choosing
+    // its ordinal. An outer limit (including Locator::nth) is safe: if
+    // hydration loses a bounded hit, the caller re-reads without that bound.
+    metadata_query(group)
+        && group
+            .clauses
+            .iter()
+            .all(|clause| clause.segments[0].simple.nth.is_none())
+        // Dense Qt lists measured slower when every metadata hit needed a
+        // second full snapshot. Keep their original batched full walk;
+        // project small prefixes, named queries and sparse window queries.
+        && (limit.is_some_and(|limit| limit <= 2)
+            || group.clauses.iter().all(|clause| {
+                clause.segments[0]
+                    .simple
+                    .filters
+                    .iter()
+                    .any(|filter| filter.attr == "name")
+            })
+            || group.clauses.iter().all(|clause| {
+                matches!(
+                    clause.segments[0].simple.role,
+                    Some(xa11y_core::selector::RoleMatch::Normalized(
+                        Role::Window | Role::Dialog
+                    ))
+                )
+            }))
+}
+
+/// Keep only prospective hits alive until this query hydrates them. Native
+/// references, unlike provider handles, cannot expire through cache eviction.
+fn retain_projected_refs<T>(
+    children: &[ElementData],
+    group: &xa11y_core::SelectorGroup,
+    references: &std::cell::RefCell<HashMap<u64, T>>,
+    native: impl Fn(u64) -> Result<T>,
+) -> Result<()> {
+    for child in children {
+        if group
+            .clauses
+            .iter()
+            .any(|clause| matches_simple(child, &clause.segments[0].simple))
+        {
+            references
+                .borrow_mut()
+                .insert(child.handle, native(child.handle)?);
+        }
+    }
+    Ok(())
+}
+
 /// The cache request event handlers fetch their targets with.
 fn create_event_cache_request(
     automation: &IUIAutomation,
@@ -5289,6 +5341,123 @@ impl Provider for WindowsProvider {
         // fallback further down — the walk is the honest primitive for a
         // root that is not a UIA HWND fragment.
         if is_synthetic_handle(root.handle) {
+            if projected_find_query(group, limit) {
+                // Resolving a sparse role/name selector (in particular a
+                // unique window action) must walk the whole application,
+                // but need not read every control's text, patterns, geometry
+                // and rich attributes. Use the same fresh metadata traversal
+                // as count(), then fetch complete snapshots only for hits.
+                // Every traversal and returned snapshot is fresh. Hydration reads
+                // ancestry explicitly so minimized hosts and scroll clipping
+                // retain the full walk's actionability semantics.
+                let request = create_property_request(&self.automation, QUERY_PROPERTIES)?;
+                let mut walk_limit = limit;
+                loop {
+                    let walk = CanonicalWalk::new(self);
+                    let complete = std::cell::RefCell::new(HashSet::new());
+                    let references = std::cell::RefCell::new(HashMap::new());
+                    let matches = xa11y_core::selector::find_elements_in_tree_group(
+                        |parent| {
+                            let children =
+                                walk.canonicalize(self.count_children(parent, &request)?)?;
+                            // A sparse unique query can visit more than the
+                            // provider's 65K handle capacity after its first
+                            // hit. Own hit references now; the later hydration
+                            // must not depend on that handle still being cached.
+                            retain_projected_refs(&children, group, &references, |handle| {
+                                self.get_cached(handle)
+                            })?;
+                            // Synthetic roots already enumerate complete fresh
+                            // window snapshots. Preserve those rather than
+                            // paying for a second read of a first-match window.
+                            if parent.is_some_and(|parent| is_synthetic_handle(parent.handle)) {
+                                complete
+                                    .borrow_mut()
+                                    .extend(children.iter().map(|child| child.handle));
+                            } else {
+                                // UIA can reparent a window during this walk.
+                                // If a partial child aliases an earlier full
+                                // root, its canonical handle no longer proves
+                                // that the selected payload is complete.
+                                let mut complete = complete.borrow_mut();
+                                for child in &children {
+                                    complete.remove(&child.handle);
+                                }
+                            }
+                            Ok(children)
+                        },
+                        Some(root),
+                        group,
+                        walk_limit,
+                        max_depth,
+                    )?;
+                    let mut out = Vec::with_capacity(matches.len());
+                    let mut dropped = false;
+                    for matched in matches {
+                        let element = references
+                            .borrow()
+                            .get(&matched.handle)
+                            .cloned()
+                            .ok_or_else(|| {
+                                Error::platform(
+                                    -1,
+                                    format!(
+                                        "projected query lost its native reference for handle {}",
+                                        matched.handle
+                                    ),
+                                )
+                            })?;
+                        if complete.borrow().contains(&matched.handle) {
+                            let mut cache = self
+                                .handle_cache
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            if cache.get(&matched.handle).is_none() {
+                                cache.insert(matched.handle, element);
+                            }
+                            out.push(matched);
+                            continue;
+                        }
+                        let hydrate = (|| {
+                            let fresh = uia_call(|| unsafe {
+                                element.BuildUpdatedCache(self.batch_request.get(dpi))
+                            })?;
+                            let host = self.host_hwnd_of(matched.handle, &fresh)?;
+                            let clip = self.inherited_clip_of(dpi, matched.handle, &fresh)?;
+                            self.build_element_data_in(
+                                dpi,
+                                &fresh,
+                                matched.pid,
+                                host,
+                                HostHint::Parent,
+                                &clip,
+                            )
+                        })();
+                        match live_snapshot(hydrate)? {
+                            Some(data)
+                                if group.clauses.iter().any(|clause| {
+                                    matches_simple(&data, &clause.segments[0].simple)
+                                }) =>
+                            {
+                                out.push(data)
+                            }
+                            Some(_) => dropped = true,
+                            None => dropped = true,
+                        }
+                    }
+                    if !dropped || walk_limit.is_none() {
+                        if let Some(limit) = limit {
+                            out.truncate(limit);
+                        }
+                        return Ok(out);
+                    }
+                    // A hit that vanished or ceased matching during hydration
+                    // may have consumed a bounded traversal's slot. Re-read
+                    // without the bound so it cannot hide a later live match
+                    // (the AX resolver uses the same rule for vanished hits).
+                    walk_limit = None;
+                }
+            }
             let walk = CanonicalWalk::new(self);
             return xa11y_core::selector::find_elements_in_tree_group(
                 |el| walk.children(el),
@@ -10752,6 +10921,116 @@ mod tests {
         assert!(
             BATCH_PROPERTIES.contains(&UIA_IsTableItemPatternAvailablePropertyId),
             "TableItem availability must be cached to distinguish DataItem cells from rows"
+        );
+    }
+
+    #[test]
+    fn metadata_queries_require_every_selector_property_to_be_projected() {
+        for selector in [
+            "button",
+            r#"text_field[name="Notes"]"#,
+            r#"button[name*="o"]:nth(2), window"#,
+            r#"[class_name="Edit"]"#,
+            r#"[control_type_id="50000"]"#,
+        ] {
+            assert!(
+                metadata_query(&xa11y_core::SelectorGroup::parse(selector).unwrap()),
+                "{selector}"
+            );
+        }
+        for selector in [
+            "window button",
+            r#"button[enabled="true"]"#,
+            r#"button[visible="false"]"#,
+            r#"[value="hello"]"#,
+            r#"[stable_id="button"]"#,
+        ] {
+            assert!(
+                !metadata_query(&xa11y_core::SelectorGroup::parse(selector).unwrap()),
+                "{selector}"
+            );
+        }
+        let ordinal = xa11y_core::SelectorGroup::parse("button:nth(2)").unwrap();
+        assert!(metadata_query(&ordinal), "counts need no hydration");
+        assert!(
+            !projected_find_query(&ordinal, Some(1)),
+            "per-clause ordinals must select among complete live snapshots"
+        );
+    }
+
+    #[test]
+    fn projected_find_keeps_dense_lists_on_the_full_walk() {
+        for (selector, limit, projected) in [
+            ("button", None, false),
+            ("button", Some(1), true),
+            ("button", Some(2), true),
+            ("button", Some(3), false),
+            ("button", Some(50), false),
+            ("*", None, false),
+            ("*", Some(2), true),
+            ("*", Some(50), false),
+            ("button, text_field", None, false),
+            ("button, text_field", Some(1), true),
+            (r#"text_field[name="Notes"]"#, None, true),
+            (r#"button[name*="o"]"#, Some(50), true),
+            (r#"button[name="OK"], button[name="Cancel"]"#, None, true),
+            (r#"button[name="OK"], button"#, None, false),
+            ("window", None, true),
+            ("window", Some(50), true),
+            ("dialog", None, true),
+            ("window, dialog", None, true),
+            ("window, button", None, false),
+            ("button:nth(2)", Some(1), false),
+            (r#"button[name="OK"]:nth(1)"#, None, false),
+            (r#"window[visible="true"]"#, Some(1), false),
+            ("window button", Some(1), false),
+        ] {
+            let group = xa11y_core::SelectorGroup::parse(selector).unwrap();
+            assert_eq!(
+                projected_find_query(&group, limit),
+                projected,
+                "{selector}, limit={limit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn projected_hits_own_native_refs_after_the_provider_handle_is_evicted() {
+        let provider = WindowsProvider::new().expect("UIA provider");
+        *provider.handle_cache.lock().unwrap() = BoundedHandleCache::new(2);
+        // The desktop supplies a real COM reference without a large fixture.
+        // Synthetic metadata makes it a prospective selector hit; this test
+        // checks ownership and eviction, not the desktop's accessibility role.
+        let native = unsafe { provider.automation.GetRootElement() }.expect("desktop root");
+        let mut hit = ElementData::for_role(Role::Button);
+        hit.name = Some("Target".into());
+        hit.handle = provider.cache_element(native.clone());
+        let mut unrelated = ElementData::for_role(Role::Button);
+        unrelated.name = Some("Unrelated".into());
+        unrelated.handle = provider.cache_element(native.clone());
+        let group = xa11y_core::SelectorGroup::parse(r#"button[name="Target"]"#).unwrap();
+        let references = std::cell::RefCell::new(HashMap::new());
+        retain_projected_refs(&[hit.clone(), unrelated], &group, &references, |handle| {
+            provider.get_cached(handle)
+        })
+        .expect("retain only selector hits");
+        for _ in 0..3 {
+            provider.cache_element(native.clone());
+        }
+        assert!(matches!(
+            provider.get_cached(hit.handle),
+            Err(Error::ElementStale {
+                reason: xa11y_core::StaleReason::Evicted,
+                ..
+            })
+        ));
+        let references = references.borrow();
+        assert_eq!(references.len(), 1, "unrelated nodes must not be retained");
+        let retained = references.get(&hit.handle).expect("owned query reference");
+        assert!(
+            unsafe { provider.automation.CompareElements(&native, retained) }
+                .expect("retained COM reference remains usable")
+                .as_bool()
         );
     }
 

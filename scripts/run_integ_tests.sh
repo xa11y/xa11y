@@ -10,6 +10,21 @@
 
 set -euo pipefail
 
+# Select the same build profile for the fixture, CLI and test executables.
+TEST_PROFILE="${XA11Y_TEST_PROFILE:-debug}"
+CARGO_PROFILE_ARG=""
+case "$TEST_PROFILE" in
+    debug) ;;
+    release) CARGO_PROFILE_ARG="--release" ;;
+    *) echo "error: XA11Y_TEST_PROFILE must be debug or release" >&2; exit 1 ;;
+esac
+TARGET_BIN_DIR="${CARGO_TARGET_DIR:-target}/$TEST_PROFILE"
+case "$TARGET_BIN_DIR" in
+    /*) ;;
+    *) TARGET_BIN_DIR="$PWD/$TARGET_BIN_DIR" ;;
+esac
+export XA11Y_TEST_APP_BIN="${XA11Y_TEST_APP_BIN:-$TARGET_BIN_DIR/xa11y-test-app}"
+
 # If we're not already inside a D-Bus session, re-exec under dbus-run-session.
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     echo "No D-Bus session found, re-launching under dbus-run-session..."
@@ -61,7 +76,7 @@ CLEANUP_PIDS+=($!)
 sleep 1
 
 # 2. Start AT-SPI2 (bus launcher + registryd) and flip the Status flags.
-#    Single source of truth — shared with the per-app harness and the
+#    Single source of truth â€” shared with the per-app harness and the
 #    setup-a11y CI action. The daemons it backgrounds live for the rest of
 #    this dbus-run-session, which exits when the script does.
 # shellcheck source=setup_linux_a11y.sh
@@ -69,7 +84,7 @@ source "$(cd "$(dirname "$0")" && pwd)/setup_linux_a11y.sh"
 
 # 3. Build everything
 echo "Building workspace..."
-cargo build --workspace --features xa11y/strict-roles 2>&1
+cargo build ${CARGO_PROFILE_ARG:+"$CARGO_PROFILE_ARG"} --workspace --features xa11y/strict-roles 2>&1
 
 # Support BUILD_ONLY mode (for pre-warming the build cache)
 if [ "${BUILD_ONLY:-}" = "1" ]; then
@@ -80,7 +95,7 @@ fi
 # 4. Launch the desktop panel fixture.
 #
 #    The Linux shell-surface classifier matches an AT-SPI frame carrying
-#    `window-type:dock`, and a bare Xvfb display vends none — no desktop
+#    `window-type:dock`, and a bare Xvfb display vends none â€” no desktop
 #    environment runs here. Without this fixture the shell tests in
 #    xa11y/tests/integ/shell.rs could only skip on an empty enumeration,
 #    which is the coverage hole issue #383 is about, so the panel is a hard
@@ -128,7 +143,7 @@ CLEANUP_PIDS+=($!)
 echo "Waiting for the panel to register as a shell surface..."
 PANEL_READY=0
 for _ in $(seq 1 20); do
-    if ./target/debug/xa11y shell 2>/dev/null | grep -q "^panel"; then
+    if "$TARGET_BIN_DIR/xa11y" shell 2>/dev/null | grep -q "^panel"; then
         PANEL_READY=1
         break
     fi
@@ -139,12 +154,12 @@ if [ "$PANEL_READY" != "1" ]; then
     echo "--- $PANEL_LOG ---" >&2
     cat "$PANEL_LOG" >&2 || true
     echo "--- xa11y shell ---" >&2
-    ./target/debug/xa11y shell >&2 || true
+    "$TARGET_BIN_DIR/xa11y" shell >&2 || true
     echo "--- xa11y apps ---" >&2
-    ./target/debug/xa11y apps >&2 || true
+    "$TARGET_BIN_DIR/xa11y" apps >&2 || true
     exit 1
 fi
-./target/debug/xa11y shell
+"$TARGET_BIN_DIR/xa11y" shell
 
 # 4b. Launch the rich-content fixture: a GTK 3 window with a table, a tree,
 #     a list and a formatted multi-line text view, for
@@ -159,7 +174,7 @@ echo "Launching xa11y rich fixture ($PANEL_PY, log: $RICH_LOG)..."
 CLEANUP_PIDS+=($!)
 RICH_READY=0
 for _ in $(seq 1 20); do
-    if ./target/debug/xa11y apps 2>/dev/null | grep -q "xa11y-rich-fixture"; then
+    if "$TARGET_BIN_DIR/xa11y" apps 2>/dev/null | grep -q "xa11y-rich-fixture"; then
         RICH_READY=1
         break
     fi
@@ -170,7 +185,7 @@ if [ "$RICH_READY" != "1" ]; then
     echo "--- $RICH_LOG ---" >&2
     cat "$RICH_LOG" >&2 || true
     echo "--- xa11y apps ---" >&2
-    ./target/debug/xa11y apps >&2 || true
+    "$TARGET_BIN_DIR/xa11y" apps >&2 || true
     exit 1
 fi
 
@@ -187,7 +202,7 @@ export XA11Y_PANEL_PYTHON="$PANEL_PY"
 CLEANUP_PIDS+=($!)
 STALE_READY=0
 for _ in $(seq 1 20); do
-    if ./target/debug/xa11y apps 2>/dev/null | grep -q "xa11y-stale-fixture"; then
+    if "$TARGET_BIN_DIR/xa11y" apps 2>/dev/null | grep -q "xa11y-stale-fixture"; then
         STALE_READY=1
         break
     fi
@@ -198,14 +213,14 @@ if [ "$STALE_READY" != "1" ]; then
     echo "--- $STALE_LOG ---" >&2
     cat "$STALE_LOG" >&2 || true
     echo "--- xa11y apps ---" >&2
-    ./target/debug/xa11y apps >&2 || true
+    "$TARGET_BIN_DIR/xa11y" apps >&2 || true
     exit 1
 fi
 
 # 5. Launch the test application (run binary directly, not via cargo run,
 #    because cargo run changes the process owner name in AT-SPI)
 echo "Launching xa11y-test-app..."
-./target/debug/xa11y-test-app --headless &
+"$TARGET_BIN_DIR/xa11y-test-app" --headless &
 CLEANUP_PIDS+=($!)
 
 # Wait for the app to start and register with AT-SPI
@@ -221,9 +236,9 @@ if [ "${INTEG_NOCAPTURE:-0}" = "1" ]; then
     NOCAPTURE_ARG="--nocapture"
 fi
 if [ -n "$TEST_FILTER" ]; then
-    cargo test -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 $NOCAPTURE_ARG $TEST_FILTER 2>&1
+    cargo test ${CARGO_PROFILE_ARG:+"$CARGO_PROFILE_ARG"} -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 $NOCAPTURE_ARG $TEST_FILTER 2>&1
 else
-    cargo test -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 $NOCAPTURE_ARG 2>&1
+    cargo test ${CARGO_PROFILE_ARG:+"$CARGO_PROFILE_ARG"} -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 $NOCAPTURE_ARG 2>&1
 fi
 TEST_EXIT=$?
 if [ -z "$TEST_FILTER" ]; then
@@ -231,7 +246,7 @@ if [ -z "$TEST_FILTER" ]; then
     # window manager, which the fluxbox display above cannot provide: native
     # identity retention, and close() through ICCCM WM_DELETE_WINDOW on a
     # bare X server (issue #464), including against the real winit test app.
-    cargo test -p xa11y-linux --lib window::tests::x11_ -- --ignored --test-threads=1 2>&1
+    cargo test ${CARGO_PROFILE_ARG:+"$CARGO_PROFILE_ARG"} -p xa11y-linux --lib window::tests::x11_ -- --ignored --test-threads=1 2>&1
     X11_IDENTITY_EXIT=$?
     if [ "$X11_IDENTITY_EXIT" -ne 0 ]; then
         TEST_EXIT=$X11_IDENTITY_EXIT

@@ -35,6 +35,20 @@ def measure(app_name, capsys):
         )
         with capsys.disabled():
             print(line, flush=True)
+        if report := os.getenv("XA11Y_PERF_JSONL"):
+            with open(report, "a", encoding="utf-8") as stream:
+                print(
+                    json.dumps(
+                        {
+                            "platform": platform.system(),
+                            "app": app_name,
+                            "operation": label,
+                            "median_ms": statistics.median(samples),
+                            "samples_ms": samples,
+                        }
+                    ),
+                    file=stream,
+                )
         if summary := os.getenv("GITHUB_STEP_SUMMARY"):
             with open(summary, "a", encoding="utf-8") as stream:
                 print(f"- {line}", file=stream)

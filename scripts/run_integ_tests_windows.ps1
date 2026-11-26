@@ -7,6 +7,14 @@
 
 $ErrorActionPreference = "Stop"
 
+$testProfile = if ($env:XA11Y_TEST_PROFILE) { $env:XA11Y_TEST_PROFILE } else { "debug" }
+if ($testProfile -cnotin @("debug", "release")) {
+    throw "XA11Y_TEST_PROFILE must be debug or release"
+}
+[string[]]$cargoProfileArgs = @(if ($testProfile -eq "release") { "--release" })
+$targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }
+$targetBinDir = Join-Path $targetRoot $testProfile
+
 $testFilter = $args[0]
 if ($testFilter -eq 'ia2') {
     & "$PSScriptRoot/run_ia2_tests_windows.ps1"
@@ -18,7 +26,7 @@ Write-Host "=== xa11y Windows integration test harness ==="
 # 1. Build everything
 Write-Host "Building workspace..."
 # xtask.exe can be the parent process; Windows locks running executables.
-cargo build --workspace --exclude xtask 2>&1 | Write-Host
+cargo build @cargoProfileArgs --workspace --exclude xtask 2>&1 | Write-Host
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $testExit = 1
@@ -48,7 +56,7 @@ try {
         Start-Sleep -Milliseconds 100
     } while ($true)
     Write-Host "Launching xa11y-test-app..."
-    $testApp = Start-Process -FilePath ".\target\debug\xa11y-test-app.exe" -ArgumentList "--headless" -PassThru -WindowStyle Hidden
+    $testApp = Start-Process -FilePath (Join-Path $targetBinDir "xa11y-test-app.exe") -ArgumentList "--headless" -PassThru -WindowStyle Hidden
 
     # Wait for accessibility registration
     Write-Host "Waiting for test app and tray fixture to register..."
@@ -57,9 +65,9 @@ try {
     # 3. Run integration tests
     Write-Host "Running integration tests..."
     if ($testFilter) {
-        cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 $testFilter 2>&1 | Write-Host
+        cargo test @cargoProfileArgs -p xa11y --test integ_test -- --ignored --test-threads=1 $testFilter 2>&1 | Write-Host
     } else {
-        cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 2>&1 | Write-Host
+        cargo test @cargoProfileArgs -p xa11y --test integ_test -- --ignored --test-threads=1 2>&1 | Write-Host
     }
     $testExit = $LASTEXITCODE
 
@@ -67,7 +75,7 @@ try {
     # issue #499. Needs windows on the desktop; its own binary.
     if (-not $testFilter) {
         Write-Host "Running STA-host test..."
-        cargo test -p xa11y-windows --test sta_host -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
+        cargo test @cargoProfileArgs -p xa11y-windows --test sta_host -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
         if ($LASTEXITCODE -ne 0 -and $testExit -eq 0) { $testExit = $LASTEXITCODE }
     }
 
@@ -75,7 +83,7 @@ try {
     # #503. Needs the app up; its own binary, so it runs separately.
     if (-not $testFilter) {
         Write-Host "Running medium-integrity UIPI test..."
-        cargo test -p xa11y-windows --test uipi_medium -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
+        cargo test @cargoProfileArgs -p xa11y-windows --test uipi_medium -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
         if ($LASTEXITCODE -ne 0 -and $testExit -eq 0) { $testExit = $LASTEXITCODE }
     }
 
@@ -85,7 +93,7 @@ try {
     # xa11y-windows/src/coords.rs. Its own process, so it runs separately.
     if (-not $testFilter) {
         Write-Host "Running system-aware host DPI test..."
-        cargo test -p xa11y-windows --test dpi_system_aware -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
+        cargo test @cargoProfileArgs -p xa11y-windows --test dpi_system_aware -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
         if ($LASTEXITCODE -ne 0 -and $testExit -eq 0) { $testExit = $LASTEXITCODE }
     }
 } finally {

@@ -3,6 +3,11 @@
 This process only queries UIA and never registers event handlers. Its control
 bypasses InputSim pacing intentionally; mismatches there are measurements,
 not failures of the production API. InputSim mismatches make the process fail.
+
+Each shape reports wall time separately for resetting the field, observing
+the reset, submitting input (including production pacing), and observing the
+completed value. The measurements keep provider reads visible rather than
+attributing the entire attempt to input simulation.
 """
 
 from __future__ import annotations
@@ -162,14 +167,22 @@ def compare(pid, repeats):
                 failures = []
                 bad = 0
                 started = time.monotonic()
+                timings = dict.fromkeys(
+                    ("reset", "reset_read", "input", "completion_read"), 0.0
+                )
                 attempts = repeats * 2 if mode == "control" else repeats
                 for attempt in range(attempts):
                     typed = _sample(shape, attempt)
                     expected = _normalized(typed)
+                    phase_started = time.monotonic()
                     notes.set_value("")
+                    timings["reset"] += time.monotonic() - phase_started
+                    phase_started = time.monotonic()
                     assert _wait_value(notes, "", read_timeouts) == "", (
                         "Notes reset never completed"
                     )
+                    timings["reset_read"] += time.monotonic() - phase_started
+                    phase_started = time.monotonic()
                     if mode == "control":
                         _unpaced_type(typed)
                     elif shape == "composed":
@@ -177,9 +190,12 @@ def compare(pid, repeats):
                             sim.type_text(character)
                     else:
                         sim.type_text(typed)
+                    timings["input"] += time.monotonic() - phase_started
+                    phase_started = time.monotonic()
                     actual = _wait_value(
                         notes, expected, read_timeouts, complete_length=True
                     )
+                    timings["completion_read"] += time.monotonic() - phase_started
                     if actual != expected:
                         bad += 1
                         if len(failures) < 3:
@@ -196,6 +212,9 @@ def compare(pid, repeats):
                     "bad": bad,
                     "examples": failures,
                     "elapsed": round(time.monotonic() - started, 2),
+                    "phase_seconds": {
+                        key: round(value, 4) for key, value in timings.items()
+                    },
                 }
     finally:
         notes.set_value(original)

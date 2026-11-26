@@ -125,7 +125,17 @@ fn dedup_processes(apps: Vec<ElementData>) -> Vec<ElementData> {
 /// the candidate list a consumer would otherwise produce by hand-logging
 /// `App::list()` around the failure.
 fn running_apps_diagnosis(provider: &Arc<dyn Provider>) -> Diagnosis {
-    let candidates = match provider.list_apps() {
+    running_apps_diagnosis_with(provider, provider.list_apps())
+}
+
+/// Reuse the last enumeration from this lookup when it already read the
+/// applications. This is local to a single call, not a cache: later lookups
+/// enumerate again, and a timeout describes the actual final observation.
+fn running_apps_diagnosis_with(
+    provider: &Arc<dyn Provider>,
+    observed: Result<Vec<ElementData>>,
+) -> Diagnosis {
+    let candidates = match observed {
         Ok(apps) => {
             let total = apps.len();
             let mut out: Vec<String> = apps
@@ -302,6 +312,7 @@ impl App {
         D: Fn() -> String,
     {
         let diag_provider = Arc::clone(&provider);
+        let last_apps = std::cell::RefCell::new(Vec::new());
         poll_lookup(
             timeout,
             || {
@@ -319,14 +330,17 @@ impl App {
                 if tag_focus {
                     tag_focused(&provider, &mut apps)?;
                 }
-                for data in apps {
-                    if predicate(&data)? {
-                        return Ok(Self::from_data(Arc::clone(&provider), data));
+                // Save the observation before user predicates run: a predicate
+                // can itself return the retryable SelectorNotMatched variant.
+                last_apps.replace(apps);
+                for data in last_apps.borrow().iter() {
+                    if predicate(data)? {
+                        return Ok(Self::from_data(Arc::clone(&provider), data.clone()));
                     }
                 }
                 Err(Error::selector_not_matched(describe()))
             },
-            || running_apps_diagnosis(&diag_provider),
+            || running_apps_diagnosis_with(&diag_provider, Ok(last_apps.take())),
         )
     }
 
@@ -1881,6 +1895,29 @@ mod tests {
         let err = App::find_with(provider, Duration::ZERO, |_| false)
             .expect_err("a never-true predicate must not match any app");
         assert!(matches!(err, Error::SelectorNotMatched { .. }));
+    }
+
+    #[test]
+    fn missed_name_lookup_diagnoses_its_final_read_without_reenumerating() {
+        let provider = Arc::new(SplitPidAppProvider::new(false));
+        for expected_calls in 1..=2 {
+            let any: Arc<dyn Provider> = provider.clone();
+            let err = App::by_name_with(any, "Missing", Duration::ZERO)
+                .expect_err("the absent application must not match");
+            assert!(err
+                .diagnosis()
+                .expect("the miss needs candidates")
+                .candidates
+                .iter()
+                .any(|candidate| candidate.contains("SharedApp")));
+            assert_eq!(
+                provider
+                    .list_apps_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                expected_calls,
+                "each lookup reads fresh once; its diagnostic reuses that observation"
+            );
+        }
     }
 
     #[test]
