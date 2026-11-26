@@ -280,9 +280,11 @@ the timer to represent a listener shared across a sequence of actions.
 The **Desktop performance** workflow compares the PR base and head on the same
 Linux, macOS and Windows runners. It builds both Python bindings in release
 mode before measurement, freezes identical Python dependencies, and uses the
-same head Qt fixture and tests for both versions. Each version gets a fresh
-fixture. The unchanged operation trials run first, followed by the complete
-Python and Python window suites. Suite timings exclude compilation, setup and
+same head fixture and tests for both versions. Each version gets a fresh
+fixture. Qt runs on all three platforms; WPF also runs on Windows, retaining
+the full 180-attempt typing comparison. The unchanged Qt operation trials run
+first, followed by the complete Python and Python window suites for each app.
+Suite timings exclude compilation, setup and
 fixture startup; JUnit counts retain skips and failures. Job artifacts contain
 operation JSONL, suite JSON, JUnit reports and logs, with timings in the job
 summary. Correctness failures fail the job; performance differences are reported

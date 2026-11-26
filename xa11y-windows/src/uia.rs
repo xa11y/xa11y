@@ -3453,7 +3453,7 @@ fn metadata_query(group: &xa11y_core::SelectorGroup) -> bool {
     })
 }
 
-fn projected_find_query(group: &xa11y_core::SelectorGroup) -> bool {
+fn projected_find_query(group: &xa11y_core::SelectorGroup, limit: Option<usize>) -> bool {
     // Per-clause :nth must count complete, live snapshots before choosing
     // its ordinal. An outer limit (including Locator::nth) is safe: if
     // hydration loses a bounded hit, the caller re-reads without that bound.
@@ -3462,6 +3462,25 @@ fn projected_find_query(group: &xa11y_core::SelectorGroup) -> bool {
             .clauses
             .iter()
             .all(|clause| clause.segments[0].simple.nth.is_none())
+        // Dense Qt lists measured slower when every metadata hit needed a
+        // second full snapshot. Keep their original batched full walk;
+        // project small prefixes, named queries and sparse window queries.
+        && (limit.is_some_and(|limit| limit <= 2)
+            || group.clauses.iter().all(|clause| {
+                clause.segments[0]
+                    .simple
+                    .filters
+                    .iter()
+                    .any(|filter| filter.attr == "name")
+            })
+            || group.clauses.iter().all(|clause| {
+                matches!(
+                    clause.segments[0].simple.role,
+                    Some(xa11y_core::selector::RoleMatch::Normalized(
+                        Role::Window | Role::Dialog
+                    ))
+                )
+            }))
 }
 
 /// Keep only prospective hits alive until this query hydrates them. Native
@@ -5322,7 +5341,7 @@ impl Provider for WindowsProvider {
         // fallback further down — the walk is the honest primitive for a
         // root that is not a UIA HWND fragment.
         if is_synthetic_handle(root.handle) {
-            if projected_find_query(group) {
+            if projected_find_query(group, limit) {
                 // Resolving a sparse role/name selector (in particular a
                 // unique window action) must walk the whole application,
                 // but need not read every control's text, patterns, geometry
@@ -10934,9 +10953,45 @@ mod tests {
         let ordinal = xa11y_core::SelectorGroup::parse("button:nth(2)").unwrap();
         assert!(metadata_query(&ordinal), "counts need no hydration");
         assert!(
-            !projected_find_query(&ordinal),
+            !projected_find_query(&ordinal, Some(1)),
             "per-clause ordinals must select among complete live snapshots"
         );
+    }
+
+    #[test]
+    fn projected_find_keeps_dense_lists_on_the_full_walk() {
+        for (selector, limit, projected) in [
+            ("button", None, false),
+            ("button", Some(1), true),
+            ("button", Some(2), true),
+            ("button", Some(3), false),
+            ("button", Some(50), false),
+            ("*", None, false),
+            ("*", Some(2), true),
+            ("*", Some(50), false),
+            ("button, text_field", None, false),
+            ("button, text_field", Some(1), true),
+            (r#"text_field[name="Notes"]"#, None, true),
+            (r#"button[name*="o"]"#, Some(50), true),
+            (r#"button[name="OK"], button[name="Cancel"]"#, None, true),
+            (r#"button[name="OK"], button"#, None, false),
+            ("window", None, true),
+            ("window", Some(50), true),
+            ("dialog", None, true),
+            ("window, dialog", None, true),
+            ("window, button", None, false),
+            ("button:nth(2)", Some(1), false),
+            (r#"button[name="OK"]:nth(1)"#, None, false),
+            (r#"window[visible="true"]"#, Some(1), false),
+            ("window button", Some(1), false),
+        ] {
+            let group = xa11y_core::SelectorGroup::parse(selector).unwrap();
+            assert_eq!(
+                projected_find_query(&group, limit),
+                projected,
+                "{selector}, limit={limit:?}"
+            );
+        }
     }
 
     #[test]

@@ -17,6 +17,7 @@ on:
       - "tests/strict_frontmost.py"
       - "tests/requirements.txt"
       - "test-apps/qt/**"
+      - "test-apps/wpf/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "pytest.ini"
@@ -45,13 +46,21 @@ env:
 
 jobs:
   release-comparison:
-    name: Release Qt on ${{ matrix.os }}
+    name: Release ${{ matrix.app }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            app: qt
+          - os: macos-latest
+            app: qt
+          - os: windows-latest
+            app: qt
+          - os: windows-latest
+            app: wpf
     steps:
       - uses: actions/checkout@v7
         with:
@@ -91,7 +100,10 @@ jobs:
             head_python=.venv-perf-head/bin/python
             base_python=.venv-perf-base/bin/python
           fi
-          "$head_python" -m pip install maturin -r tests/requirements.txt -r test-apps/qt/requirements.txt
+          "$head_python" -m pip install maturin -r tests/requirements.txt
+          if [[ "${{ matrix.app }}" == "qt" ]]; then
+            "$head_python" -m pip install -r test-apps/qt/requirements.txt
+          fi
           "$head_python" -m pip freeze > perf-dependencies.txt
           "$base_python" -m pip install -r perf-dependencies.txt
           echo "HEAD_PYTHON=$("$head_python" -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
@@ -119,19 +131,26 @@ jobs:
           bash scripts/grant_macos_tcc.sh "$BASE_PYTHON"
           bash scripts/grant_macos_tcc.sh "$HEAD_PYTHON"
 
+      - name: Build identical release WPF fixture
+        if: matrix.app == 'wpf'
+        # Keep the launcher's established path; both variants use this one
+        # head fixture, compiled with the Release configuration before timing.
+        run: dotnet build test-apps/wpf -c Release -o test-apps/wpf/bin/Debug/net8.0-windows
+
       - name: Compare release operations and complete Python suites
         shell: bash
         run: |
           "$HEAD_PYTHON" -m tests.harness.compare_performance \
             --baseline-python "$BASE_PYTHON" --head-python "$HEAD_PYTHON" \
             --baseline-ref "$BASE_SHA" --head-ref "$HEAD_SHA" \
+            --app "${{ matrix.app }}" \
             --output desktop-performance
 
       - name: Upload measurements and test reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: desktop-performance-${{ matrix.os }}
+          name: desktop-performance-${{ matrix.os }}-${{ matrix.app }}
           path: |
             desktop-performance/
             perf-dependencies.txt
