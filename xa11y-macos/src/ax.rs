@@ -1,12 +1,13 @@
 //! macOS AXUIElement-based accessibility provider.
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
-use xa11y_core::query_plan::{plan_query, Query, QueryOutput};
+use xa11y_core::query_plan::{plan_query, ExecutionPlan, Query, QueryOutput, ReadStrategy};
 
 use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
@@ -300,6 +301,7 @@ pub mod ax_counters {
     pub static COPY_ATTR: AtomicU64 = AtomicU64::new(0);
     /// Batch attribute fetch (AXUIElementCopyMultipleAttributeValues).
     pub static COPY_MULTI_ATTR: AtomicU64 = AtomicU64::new(0);
+    pub static COPY_SNAPSHOT_ATTRS: AtomicU64 = AtomicU64::new(0);
     /// Action names fetch (AXUIElementCopyActionNames).
     pub static COPY_ACTIONS: AtomicU64 = AtomicU64::new(0);
 
@@ -309,6 +311,7 @@ pub mod ax_counters {
     pub fn reset_all() {
         COPY_ATTR.store(0, Ordering::SeqCst);
         COPY_MULTI_ATTR.store(0, Ordering::SeqCst);
+        COPY_SNAPSHOT_ATTRS.store(0, Ordering::SeqCst);
         COPY_ACTIONS.store(0, Ordering::SeqCst);
     }
 
@@ -681,8 +684,6 @@ fn ffi_copy_multiple_attribute_values(
     attributes: CFArrayRef,
     values: *mut CFArrayRef,
 ) -> i32 {
-    #[cfg(test)]
-    ax_counters::COPY_MULTI_ATTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     ax_bounded(
         element,
         || "reading an element's attributes".to_string(),
@@ -1257,6 +1258,60 @@ fn listed_by_a_row(table: &AXElement, parent: &AXElement, cell: &AXElement) -> R
     Ok(strict_element_attr(row.as_ptr(), "AXParent")?.is_some_and(|t| t.same_as(table)))
 }
 
+/// Validate that the node still answers, distinguishing an absent role from a failed read.
+fn read_snapshot_role(element: AXUIElementRef) -> Result<String> {
+    let role_read_start = Instant::now();
+    let role_read = read_raw_attr(element, "AXRole");
+    let role_read_elapsed = role_read_start.elapsed();
+    Ok(match role_read {
+        RawAttr::Value(v) => {
+            if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
+                // `cf_string_owned` releases the +1 copy; a string it
+                // cannot read (the wrapper caught an exception) is as
+                // malformed as a non-string.
+                cf_string_owned(v).ok_or_else(|| {
+                    Error::platform(-1, "AXRole returned a string that could not be read")
+                })?
+            } else {
+                // A value of another type is a malformed answer, not the
+                // definitive "no role" the `Absent` arm covers: turning
+                // it into an empty role would rebuild the ghost this
+                // error-preserving read exists to prevent (tenet 1),
+                // the same distinction `ax_windows` makes for a
+                // non-array `AXWindows`.
+                unsafe { safe_cf_release(v) };
+                return Err(Error::platform(
+                    -1,
+                    "AXRole returned a non-string value; the provider answered \
+                                  malformed, not role-less"
+                        .to_string(),
+                ));
+            }
+        }
+        RawAttr::Absent => String::new(),
+        // Say which process did not answer, and whether it timed out.
+        // PID only: callers such as `list_apps` and attach read this as a
+        // retry signal and may discard it.
+        RawAttr::Unanswered(AX_ERROR_CANNOT_COMPLETE) => {
+            return Err(cannot_complete_error(
+                element,
+                "AXRole read failed while building an element snapshot",
+                role_read_elapsed,
+                CannotCompleteContext::Snapshot,
+            ));
+        }
+        RawAttr::Unanswered(code) => {
+            return Err(Error::platform(
+                code as i64,
+                format!(
+                    "AXRole read failed while building an element snapshot (AXError \
+                         {code}); the element is unreadable, not role-less"
+                ),
+            ));
+        }
+    })
+}
+
 /// The `AXRole` a snapshot was built with, or read now when it has none.
 fn captured_ax_role(data: &ElementData, ax: &AXElement) -> Result<String> {
     if let Some(role) = data.raw.get("ax_role").and_then(|v| v.as_str()) {
@@ -1436,6 +1491,32 @@ fn dedup_by_ax_identity<T>(items: Vec<(usize, AXElement, T)>, limit: Option<usiz
         out.push(item);
     }
     out
+}
+
+/// Only live hits reach the ordinal and identity selection stages.
+fn live_query_value<T>(read: Result<T>) -> Result<Option<T>> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if matches!(classify_element_churn(&err), ElementChurn::Gone) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+type QueryHitMemo<T> = HashMap<u64, Vec<(AXElement, Option<T>)>>;
+
+fn observe_query_hit<T: Clone>(
+    memo: &mut QueryHitMemo<T>,
+    ax: &AXElement,
+    read: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    let hash = unsafe { safe_cf_hash(ax.as_ptr() as CFTypeRef) };
+    let bucket = memo.entry(hash).or_default();
+    if let Some((_, value)) = bucket.iter().find(|(previous, _)| previous.same_as(ax)) {
+        return Ok(value.clone());
+    }
+    let value = live_query_value(read())?;
+    bucket.push((ax.clone(), value.clone()));
+    Ok(value)
 }
 
 /// The close button of a window, or `None` when there is none.
@@ -1810,64 +1891,81 @@ mod attr_idx {
 /// Raw values returned by a single batch AX fetch. Values are borrowed
 /// CFTypeRefs (owned by the CFArray) — valid only while `_values_array`
 /// is alive.
-struct BatchAttrs {
+struct BatchAttrs<const N: usize = { attr_idx::COUNT }> {
     /// Owning CFArray — values are only valid while this is alive.
     _values_array: CFArrayRef,
     /// Borrowed pointers into the array (may be null or AXValueIllegalType).
-    vals: [CFTypeRef; attr_idx::COUNT],
+    vals: [CFTypeRef; N],
 }
 
 impl BatchAttrs {
     /// Fetch all element attributes in a single Mach IPC round-trip.
     fn fetch(element: AXUIElementRef) -> Option<Self> {
         // Build CFArray of attribute name CFStrings.
-        let attr_names: [CFString; attr_idx::COUNT] = [
-            CFString::new("AXRole"),
-            CFString::new("AXSubrole"),
-            CFString::new("AXTitle"),
-            CFString::new("AXDescription"),
-            CFString::new("AXHelp"),
-            CFString::new("AXValue"),
-            CFString::new("AXEnabled"),
-            CFString::new("AXFocused"),
-            CFString::new("AXSelected"),
-            CFString::new("AXHidden"),
-            CFString::new("AXExpanded"),
-            CFString::new("AXModal"),
-            CFString::new("AXPosition"),
-            CFString::new("AXSize"),
-            CFString::new("AXIdentifier"),
-            CFString::new("AXMinimized"),
-            CFString::new("AXFullScreen"),
-            CFString::new("AXRowCount"),
-            CFString::new("AXColumnCount"),
-            CFString::new("AXRowIndexRange"),
-            CFString::new("AXColumnIndexRange"),
-            CFString::new("AXIndex"),
-            CFString::new("AXDisclosureLevel"),
-            CFString::new("AXARIAPosInSet"),
-            CFString::new("AXARIASetSize"),
-            CFString::new("AXARIALive"),
-            CFString::new("AXARIAAtomic"),
-            CFString::new("AXARIARelevant"),
-            CFString::new("AXURL"),
-            CFString::new("AXPlaceholderValue"),
-        ];
-        let ptrs: Vec<CFTypeRef> = attr_names
-            .iter()
-            .map(|s| s.as_concrete_TypeRef() as CFTypeRef)
-            .collect();
+        Self::fetch_named(
+            element,
+            [
+                "AXRole",
+                "AXSubrole",
+                "AXTitle",
+                "AXDescription",
+                "AXHelp",
+                "AXValue",
+                "AXEnabled",
+                "AXFocused",
+                "AXSelected",
+                "AXHidden",
+                "AXExpanded",
+                "AXModal",
+                "AXPosition",
+                "AXSize",
+                "AXIdentifier",
+                "AXMinimized",
+                "AXFullScreen",
+                "AXRowCount",
+                "AXColumnCount",
+                "AXRowIndexRange",
+                "AXColumnIndexRange",
+                "AXIndex",
+                "AXDisclosureLevel",
+                "AXARIAPosInSet",
+                "AXARIASetSize",
+                "AXARIALive",
+                "AXARIAAtomic",
+                "AXARIARelevant",
+                "AXURL",
+                "AXPlaceholderValue",
+            ],
+        )
+    }
+}
 
+impl<const N: usize> BatchAttrs<N> {
+    fn fetch_named(element: AXUIElementRef, names: [&str; N]) -> Option<Self> {
+        let attr_names = names.map(CFString::new);
+        let ptrs = attr_names
+            .each_ref()
+            .map(|s| s.as_concrete_TypeRef() as CFTypeRef);
         let cf_attrs = unsafe { safe_cf_array_create(ptrs.as_ptr(), ptrs.len() as CFIndex) };
         if cf_attrs.is_null() {
             return None;
         }
 
         let mut values: CFArrayRef = std::ptr::null();
+        #[cfg(test)]
+        {
+            ax_counters::COPY_MULTI_ATTR.fetch_add(1, Ordering::Relaxed);
+            if N == attr_idx::COUNT {
+                ax_counters::COPY_SNAPSHOT_ATTRS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         let err = ffi_copy_multiple_attribute_values(element, cf_attrs, &mut values);
         unsafe { safe_cf_release(cf_attrs) };
 
         if err != AX_ERROR_SUCCESS || values.is_null() {
+            if !values.is_null() {
+                unsafe { safe_cf_release(values) };
+            }
             return None;
         }
         // The reply is indexed as a CFArray below; a misbehaving app can hand
@@ -1880,8 +1978,8 @@ impl BatchAttrs {
         }
 
         let count = unsafe { safe_cf_array_get_count(values) } as usize;
-        let mut vals = [std::ptr::null(); attr_idx::COUNT];
-        for (i, slot) in vals.iter_mut().enumerate().take(count.min(attr_idx::COUNT)) {
+        let mut vals = [std::ptr::null(); N];
+        for (i, slot) in vals.iter_mut().enumerate().take(count.min(N)) {
             let v = unsafe { safe_cf_array_get_value(values, i as CFIndex) };
             *slot = v;
         }
@@ -1906,7 +2004,9 @@ impl BatchAttrs {
             }
         }
     }
+}
 
+impl BatchAttrs {
     /// Read a value as a URL string (CFURL).
     fn url(&self, idx: usize) -> Option<String> {
         cf_url_string(self.vals[idx])
@@ -2030,7 +2130,7 @@ impl BatchAttrs {
     }
 }
 
-impl Drop for BatchAttrs {
+impl<const N: usize> Drop for BatchAttrs<N> {
     fn drop(&mut self) {
         if !self._values_array.is_null() {
             unsafe { safe_cf_release(self._values_array) };
@@ -2159,56 +2259,7 @@ impl ResolvedAttrs {
     /// element, and the remaining attributes keep the tree-walk tolerance
     /// `ax_attr` documents.
     fn from_individual(element: AXUIElementRef) -> Result<Self> {
-        let role_read_start = Instant::now();
-        let role_read = read_raw_attr(element, "AXRole");
-        let role_read_elapsed = role_read_start.elapsed();
-        let role_str = match role_read {
-            RawAttr::Value(v) => {
-                if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
-                    // `cf_string_owned` releases the +1 copy; a string it
-                    // cannot read (the wrapper caught an exception) is as
-                    // malformed as a non-string.
-                    cf_string_owned(v).ok_or_else(|| {
-                        Error::platform(-1, "AXRole returned a string that could not be read")
-                    })?
-                } else {
-                    // A value of another type is a malformed answer, not the
-                    // definitive "no role" the `Absent` arm covers: turning
-                    // it into an empty role would rebuild the ghost this
-                    // error-preserving read exists to prevent (tenet 1),
-                    // the same distinction `ax_windows` makes for a
-                    // non-array `AXWindows`.
-                    unsafe { safe_cf_release(v) };
-                    return Err(Error::platform(
-                        -1,
-                        "AXRole returned a non-string value; the provider answered \
-                                  malformed, not role-less"
-                            .to_string(),
-                    ));
-                }
-            }
-            RawAttr::Absent => String::new(),
-            // Say which process did not answer, and whether it timed out.
-            // PID only: callers such as `list_apps` and attach read this as a
-            // retry signal and may discard it.
-            RawAttr::Unanswered(AX_ERROR_CANNOT_COMPLETE) => {
-                return Err(cannot_complete_error(
-                    element,
-                    "AXRole read failed while building an element snapshot",
-                    role_read_elapsed,
-                    CannotCompleteContext::Snapshot,
-                ));
-            }
-            RawAttr::Unanswered(code) => {
-                return Err(Error::platform(
-                    code as i64,
-                    format!(
-                        "AXRole read failed while building an element snapshot (AXError \
-                         {code}); the element is unreadable, not role-less"
-                    ),
-                ));
-            }
-        };
+        let role_str = read_snapshot_role(element)?;
         let subrole_str = ax_string(element, "AXSubrole");
         let rich =
             rich::PositionAttrs::read_individually(element, &role_str, subrole_str.as_deref());
@@ -4114,7 +4165,13 @@ use xa11y_core::selector::{match_op, SimpleSelector};
 /// ElementData (15-20 AX API calls) for elements that will be discarded.
 #[cfg(test)]
 fn matches_ax(ax: AXUIElementRef, simple: &SimpleSelector) -> bool {
-    matches_ax_with_role(ax, simple, None, None)
+    if ax.is_null() {
+        return false;
+    }
+    let raw_role = ax_string(ax, "AXRole").unwrap_or_default();
+    let subrole = ax_string(ax, "AXSubrole");
+    let role = map_ax_role(&raw_role, subrole.as_deref());
+    matches_ax_with_role(ax, simple, role, &raw_role, &OnceCell::new(), None)
 }
 
 /// Attributes the lightweight `matches_ax_with_role` fast path knows how to
@@ -4130,7 +4187,9 @@ const FAST_PATH_ATTRS: &[&str] = &["role", "name", "value", "description"];
 fn matches_ax_with_role(
     ax: AXUIElementRef,
     simple: &SimpleSelector,
-    precomputed_role: Option<Role>,
+    role: Role,
+    raw_role: &str,
+    name: &OnceCell<Option<String>>,
     pid: Option<u32>,
 ) -> bool {
     // If any filter targets an attr the fast path can't resolve, fall through
@@ -4159,54 +4218,25 @@ fn matches_ax_with_role(
         return xa11y_core::selector::matches_simple(&data, simple);
     }
 
-    // Resolve role only if the selector cares about it and it wasn't pre-computed.
-    let needs_role = simple.role.is_some() || simple.filters.iter().any(|f| f.attr == "role");
-
-    let role = if needs_role {
-        match precomputed_role {
-            Some(r) => Some(r),
-            None => {
-                let role_str = match ax_string(ax, "AXRole") {
-                    Some(s) => s,
-                    None => return false,
-                };
-                let subrole_str = ax_string(ax, "AXSubrole");
-                Some(map_ax_role(&role_str, subrole_str.as_deref()))
-            }
-        }
-    } else {
-        precomputed_role
-    };
-
-    if let Some(ref role_match) = simple.role {
-        match role_match {
-            xa11y_core::selector::RoleMatch::Normalized(expected) => {
-                if role != Some(*expected) {
-                    return false;
-                }
-            }
-            xa11y_core::selector::RoleMatch::Platform(platform_role) => {
-                // Match against the original AX role string
-                let ax_role = ax_string(ax, "AXRole").unwrap_or_default();
-                if ax_role != *platform_role {
-                    return false;
-                }
-            }
-        }
+    use xa11y_core::selector::RoleMatch;
+    match &simple.role {
+        Some(RoleMatch::Normalized(expected)) if role != *expected => return false,
+        Some(RoleMatch::Platform(expected)) if raw_role != expected => return false,
+        _ => {}
     }
 
     for filter in &simple.filters {
         let attr_value: Option<String> = match filter.attr.as_str() {
-            "role" => role.map(|r| r.to_snake_case().to_string()),
+            "role" => Some(role.to_snake_case().to_string()),
             "name" => {
                 // Mirror build_element_data name logic.
-                derived_ax_name(ax, role)
+                name.get_or_init(|| derived_ax_name(ax, Some(role))).clone()
             }
             "value" => ax_value_string(ax),
             "description" => {
                 let description = ax_string(ax, "AXDescription");
                 let name = accessible_name(
-                    role,
+                    Some(role),
                     ax_string(ax, "AXTitle"),
                     || ax_value_string(ax),
                     || description.clone(),
@@ -4568,6 +4598,26 @@ impl MacOSProvider {
         let handle = self.cache_element(ax.clone());
         build_snapshot_data(ax.as_ptr(), pid, handle)
     }
+}
+
+/// A count needs to establish that the node still answers. Windows and
+/// tables also perform strict native reads during snapshot construction.
+fn validate_count_hit(ax: &AXElement, pid: Option<u32>) -> Result<()> {
+    let element = ax.as_ptr();
+    let (raw_role, subrole) = match BatchAttrs::fetch_named(element, ["AXRole", "AXSubrole"])
+        .and_then(|batch| Some((batch.string(0)?, batch.string(1))))
+    {
+        Some(roles) => roles,
+        None => (
+            read_snapshot_role(element)?,
+            ax_string(element, "AXSubrole"),
+        ),
+    };
+    let role = map_ax_role(&raw_role, subrole.as_deref());
+    if matches!(role, Role::Window | Role::Dialog) || rich::has_table_api(role, &raw_role) {
+        build_snapshot_data(element, pid, 0)?;
+    }
+    Ok(())
 }
 
 /// Build a snapshot `ElementData` from a raw `AXUIElementRef` without touching
@@ -5106,8 +5156,14 @@ impl MacOSProvider {
         let listed: Vec<Option<ListedChild>> = children
             .into_par_iter()
             .map(carry_deadline(|ax: AXElement| {
-                let role = ax_string(ax.as_ptr(), "AXRole").unwrap_or_default();
-                let subrole = ax_string(ax.as_ptr(), "AXSubrole");
+                let (role, subrole) = BatchAttrs::fetch_named(ax.as_ptr(), ["AXRole", "AXSubrole"])
+                    .and_then(|batch| Some((batch.string(0)?, batch.string(1))))
+                    .unwrap_or_else(|| {
+                        (
+                            ax_string(ax.as_ptr(), "AXRole").unwrap_or_default(),
+                            ax_string(ax.as_ptr(), "AXSubrole"),
+                        )
+                    });
                 let chrome = Self::should_filter_child_with_role(
                     parent_role,
                     parent_name,
@@ -5182,19 +5238,29 @@ impl MacOSProvider {
                 let child = &listed.ax;
                 let child_role = map_ax_role(&listed.role, listed.subrole.as_deref());
 
+                let name = OnceCell::new();
                 for (idx, simple) in clauses.iter().enumerate() {
-                    if matches_ax_with_role(child.as_ptr(), simple, Some(child_role), pid) {
+                    if matches_ax_with_role(
+                        child.as_ptr(),
+                        simple,
+                        child_role,
+                        &listed.role,
+                        &name,
+                        pid,
+                    ) {
                         child_results.push((idx, child.clone()));
                     }
                 }
 
                 // Recurse into subtree.
-                let child_name = derived_ax_name(child.as_ptr(), Some(child_role));
+                let child_name = (depth < max_depth && child_role == Role::Window)
+                    .then(|| name.get_or_init(|| derived_ax_name(child.as_ptr(), Some(child_role))))
+                    .and_then(|name| name.as_deref());
                 let sub = self.collect_matching_ax_group(
                     child,
                     child_role,
                     &listed.role,
-                    child_name.as_deref(),
+                    child_name,
                     clauses,
                     pid,
                     depth + 1,
@@ -5220,6 +5286,114 @@ impl MacOSProvider {
             }
         }
         Ok(results)
+    }
+
+    /// Visit one branch at a time, stopping when the caller accepts a live hit.
+    /// Child listing still applies the same window chrome and table rules as the
+    /// parallel walk.
+    fn first_live_match<T>(
+        parent: (&AXElement, Role, &str, Option<&str>),
+        simple: &SimpleSelector,
+        pid: Option<u32>,
+        depth_left: u32,
+        accept: &impl Fn(&AXElement) -> Result<Option<T>>,
+    ) -> Result<Option<T>> {
+        let (ax, role, raw_role, name) = parent;
+        for child in Self::listed_children(ax, role, raw_role, name)? {
+            let role = map_ax_role(&child.role, child.subrole.as_deref());
+            let name = OnceCell::new();
+            if matches_ax_with_role(child.ax.as_ptr(), simple, role, &child.role, &name, pid) {
+                if let Some(hit) = accept(&child.ax)? {
+                    return Ok(Some(hit));
+                }
+            }
+            if depth_left > 0 {
+                let name = (role == Role::Window)
+                    .then(|| name.get_or_init(|| derived_ax_name(child.ax.as_ptr(), Some(role))))
+                    .and_then(|name| name.as_deref());
+                if let Some(hit) = Self::first_live_match(
+                    (&child.ax, role, &child.role, name),
+                    simple,
+                    pid,
+                    depth_left - 1,
+                    accept,
+                )? {
+                    return Ok(Some(hit));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Flat counts and element queries select the same live hits, using
+    /// either a liveness probe or the snapshot itself to accept each hit.
+    fn resolve_flat_query<T: Clone>(
+        &self,
+        root: &ElementData,
+        query: Query<'_>,
+        plan: ExecutionPlan,
+        max_depth: u32,
+        read: impl Fn(&AXElement) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let ax = self.get_cached(root.handle)?;
+        let raw_role = captured_ax_role(root, &ax)?;
+        let clauses: Vec<_> = query
+            .group
+            .clauses
+            .iter()
+            .map(|clause| &clause.segments[0].simple)
+            .collect();
+        if let [simple] = clauses.as_slice() {
+            if query.limit == Some(1) && simple.nth.is_none() {
+                let hit = Self::first_live_match(
+                    (&ax, root.role, &raw_role, root.name.as_deref()),
+                    simple,
+                    root.pid,
+                    max_depth,
+                    &|ax| live_query_value(read(ax)),
+                )?;
+                return Ok(hit.into_iter().collect());
+            }
+        }
+
+        let mut bound = plan.first_stage_limit;
+        loop {
+            let hits = self.collect_matching_ax_group(
+                &ax,
+                root.role,
+                &raw_role,
+                root.name.as_deref(),
+                &clauses,
+                root.pid,
+                0,
+                max_depth,
+                bound,
+            )?;
+            let mut memo = HashMap::new();
+            let mut clause_counts = vec![0; clauses.len()];
+            let mut selected = Vec::new();
+            let mut dropped = false;
+            for (pos, (idx, ax)) in hits.into_iter().enumerate() {
+                let value = if clauses.len() > 1 {
+                    observe_query_hit(&mut memo, &ax, || read(&ax))?
+                } else {
+                    live_query_value(read(&ax))?
+                };
+                let Some(value) = value else {
+                    dropped = true;
+                    continue;
+                };
+                clause_counts[idx] += 1;
+                if clauses[idx].nth.is_none_or(|nth| nth == clause_counts[idx]) {
+                    selected.push((pos, ax, value));
+                }
+            }
+            if !dropped || bound.is_none() {
+                return Ok(dedup_by_ax_identity(selected, query.limit));
+            }
+            // A vanished hit may have used up the bound ahead of a live one.
+            bound = None;
+        }
     }
 
     // ── Shell surfaces ───────────────────────────────────────────────────
@@ -5792,6 +5966,38 @@ impl Provider for MacOSProvider {
         self.snapshot_children(app, &windows)
     }
 
+    fn count_elements_group(
+        &self,
+        root: &ElementData,
+        group: &xa11y_core::SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<usize> {
+        group.validate()?;
+        let query = Query::new(group, QueryOutput::Count, limit);
+        let plan = plan_query(
+            query,
+            query
+                .covered_by(|field| matches!(field, "role" | "name"), true)
+                .then_some(ReadStrategy::Projected),
+        );
+        if plan.strategy == ReadStrategy::ResolveElements {
+            return Ok(self
+                .find_elements_group(root, group, limit, max_depth)?
+                .len());
+        }
+
+        Ok(self
+            .resolve_flat_query(
+                root,
+                query,
+                plan,
+                max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH),
+                |ax| validate_count_hit(ax, root.pid),
+            )?
+            .len())
+    }
+
     fn find_elements_group(
         &self,
         root: &ElementData,
@@ -5804,21 +6010,19 @@ impl Provider for MacOSProvider {
         // only first, 1-based `:nth`). Reject it before traversal.
         group.validate()?;
 
-        // ONE AX walk that evaluates every clause's first SimpleSelector
-        // inline. Each match is tagged with its clause index; per-clause
-        // phase-2 narrowing follows. The cross-clause merge deduplicates by
-        // AXUIElement pointer identity — that's the only identifier stable
-        // across narrowings within a single call (handles are minted fresh
-        // on every `build_element_data`).
-        //
-        // App discovery is handled separately by `list_apps()` — `root` is
-        // always present here.
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
+        let query = Query::new(group, QueryOutput::Elements, limit);
+        let plan = plan_query(query, []);
+        if query.covered_by(|_| true, true) {
+            return self.resolve_flat_query(root, query, plan, max_depth_val, |ax| {
+                self.build_element_data(ax, root.pid)
+            });
+        }
 
+        // Compound queries collect clause heads, then narrow each clause.
         let root_data = root;
-
-        let root_ax = self.get_cached(root_data.handle)?;
-        let root_ax_role = captured_ax_role(root_data, &root_ax)?;
+        let root_ax = self.get_cached(root.handle)?;
+        let root_ax_role = captured_ax_role(root, &root_ax)?;
 
         let firsts: Vec<&SimpleSelector> = group
             .clauses
@@ -5826,27 +6030,7 @@ impl Provider for MacOSProvider {
             .map(|c| &c.segments[0].simple)
             .collect();
 
-        // N=1 phase-1 limit short-circuit: when there's exactly one clause,
-        // propagate the user's `limit` (adjusted for `:nth`) to the AX walk
-        // so e.g. `app.locator("button").first()` stops at the first match.
-        // For N>=2, phase-1 must collect the full union before truncating
-        // because cross-clause doc-order can promote later-clause hits
-        // ahead of earlier ones.
-        let phase1_walk_limit =
-            plan_query(Query::new(group, QueryOutput::Elements, limit), []).first_stage_limit;
-
-        // Phase 1 walks and snapshots in one pass. A hit that died between
-        // the AX walk and its snapshot is dropped — it is not a match any
-        // more, and a bare miss is exactly the retry signal auto-wait polls
-        // on (`ElementChurn::Gone`); a hit the process did not answer for
-        // fails the search rather than shrinking the match set (tenet 1).
-        // A bounded walk (`phase1_walk_limit`, the
-        // `first()` / `nth()` short-circuit) stops before matches past the
-        // bound, so a dropped hit can have consumed the bound before a live
-        // match was ever examined. Re-walk unbounded when that happens: a
-        // second pass has no bound left to hide a match, and a drop there is
-        // the ordinary concurrent-mutation case the retry signal covers.
-        let mut walk_limit = phase1_walk_limit;
+        let mut walk_limit = plan.first_stage_limit;
         let phase1_data_by_clause: Vec<Vec<(usize, AXElement, ElementData)>> = loop {
             let phase1: Vec<(usize, AXElement)> = self.collect_matching_ax_group(
                 &root_ax,
@@ -5867,12 +6051,11 @@ impl Provider for MacOSProvider {
             let mut data_by_clause: Vec<Vec<(usize, AXElement, ElementData)>> =
                 (0..group.clauses.len()).map(|_| Vec::new()).collect();
             for (pos, (clause_idx, ax)) in phase1.into_iter().enumerate() {
-                match self.build_element_data(&ax, root_data.pid) {
-                    Ok(data) => data_by_clause[clause_idx].push((pos, ax, data)),
-                    Err(err) => match classify_element_churn(&err) {
-                        ElementChurn::Gone => dropped = true,
-                        ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
-                    },
+                let snapshot = live_query_value(self.build_element_data(&ax, root_data.pid))?;
+                if let Some(data) = snapshot {
+                    data_by_clause[clause_idx].push((pos, ax, data));
+                } else {
+                    dropped = true;
                 }
             }
 
@@ -9028,8 +9211,9 @@ mod tests {
         // back to per-attribute fetches. If batch were bypassed, copy_multi
         // would be ~0 and copy_attr would spike instead.
         assert_eq!(
-            copy_multi, copy_actions,
-            "Batch fetches should equal action-name fetches (1 per child).\n\
+            ax_counters::COPY_SNAPSHOT_ATTRS.load(Ordering::Relaxed),
+            copy_actions,
+            "Snapshot batch fetches should equal action-name fetches (1 per child).\n\
              copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}",
         );
     }
