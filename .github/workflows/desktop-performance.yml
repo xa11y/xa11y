@@ -103,8 +103,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          "$HEAD_PYTHON" -m maturin build --locked --release --manifest-path .perf-base/xa11y-python/Cargo.toml --interpreter "$BASE_PYTHON" --out perf-wheels/base
-          "$HEAD_PYTHON" -m maturin build --locked --release --manifest-path xa11y-python/Cargo.toml --interpreter "$HEAD_PYTHON" --out perf-wheels/head
+          # These wheels run only on this host. Use its native Linux libraries
+          # instead of auditwheel repair/bundling; ignored on Windows/macOS.
+          "$HEAD_PYTHON" -m maturin build --locked --release --compatibility linux --manifest-path .perf-base/xa11y-python/Cargo.toml --interpreter "$BASE_PYTHON" --out perf-wheels/base
+          "$HEAD_PYTHON" -m maturin build --locked --release --compatibility linux --manifest-path xa11y-python/Cargo.toml --interpreter "$HEAD_PYTHON" --out perf-wheels/head
           "$BASE_PYTHON" -m pip install perf-wheels/base/*.whl
           "$HEAD_PYTHON" -m pip install perf-wheels/head/*.whl
           "$BASE_PYTHON" -m pip install --no-deps -e pytest-xa11y

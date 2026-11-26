@@ -5355,6 +5355,15 @@ impl Provider for WindowsProvider {
                                 complete
                                     .borrow_mut()
                                     .extend(children.iter().map(|child| child.handle));
+                            } else {
+                                // UIA can reparent a window during this walk.
+                                // If a partial child aliases an earlier full
+                                // root, its canonical handle no longer proves
+                                // that the selected payload is complete.
+                                let mut complete = complete.borrow_mut();
+                                for child in &children {
+                                    complete.remove(&child.handle);
+                                }
                             }
                             Ok(children)
                         },
