@@ -88,8 +88,8 @@ pub struct LinuxProvider {
 /// Cleared with the handle cache on a reconnect, which reuses bus names.
 #[derive(Default)]
 struct Gtk4Geometry {
-    /// Each application bus's [`GtkGeneration`].
-    generations: Mutex<HashMap<String, GtkGeneration>>,
+    /// Each application bus's [`ApplicationToolkit`].
+    toolkits: Mutex<HashMap<String, ApplicationToolkit>>,
     /// Each GTK 4 application bus's process id.
     pids: Mutex<HashMap<String, u32>>,
     /// `bus + path` → the top-level window's `(bus, path)`. Bounded by
@@ -519,7 +519,7 @@ impl LinuxProvider {
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
             self.gtk4
-                .generations
+                .toolkits
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
@@ -616,29 +616,39 @@ impl LinuxProvider {
         if role_hint.is_some_and(|role| role != Role::Window) {
             return Ok(());
         }
-        let app_root = AccessibleRef {
-            bus_name: parent.bus_name.clone(),
-            path: "/org/a11y/atspi/accessible/root".to_string(),
-        };
-        let toolkit = match self
-            .make_proxy(
-                &app_root.bus_name,
-                &app_root.path,
-                "org.a11y.atspi.Application",
-            )
-            .ok()
-            .and_then(|proxy| proxy.get_property::<String>("ToolkitName").ok())
-        {
-            Some(t) => t,
-            None => return Ok(()),
-        };
-        if !toolkit.eq_ignore_ascii_case("Chromium") {
-            return Ok(());
+        // A successful ToolkitName read is stable for a unique application bus.
+        // Reuse the same classification used for geometry and GTK liveness.
+        // On a cache miss keep this diagnostic's best-effort property probe.
+        let known = self.cached_toolkit(&parent.bus_name);
+        match known {
+            Some(
+                ApplicationToolkit::Gtk3 | ApplicationToolkit::Gtk4 | ApplicationToolkit::Other,
+            ) => {
+                return Ok(());
+            }
+            Some(ApplicationToolkit::Chromium) => {}
+            None | Some(ApplicationToolkit::MissingApplicationInterface) => {
+                let toolkit = self
+                    .make_proxy(
+                        &parent.bus_name,
+                        APP_ROOT_PATH,
+                        "org.a11y.atspi.Application",
+                    )
+                    .ok()
+                    .and_then(|proxy| proxy.get_property::<String>("ToolkitName").ok());
+                if !toolkit.is_some_and(|name| name.eq_ignore_ascii_case("Chromium")) {
+                    return Ok(());
+                }
+            }
         }
         let role = role_hint.unwrap_or_else(|| self.resolve_role(parent));
         if role != Role::Window {
             return Ok(());
         }
+        let app_root = AccessibleRef {
+            bus_name: parent.bus_name.clone(),
+            path: APP_ROOT_PATH.to_owned(),
+        };
         let app_name = self.get_name(&app_root).unwrap_or_default();
         Err(Error::AccessibilityNotEnabled {
             app: app_name,
@@ -988,12 +998,21 @@ impl LinuxProvider {
     }
 
     /// Whether the application on `bus` is GTK 4 (see
-    /// [`gtk_generation`](Self::gtk_generation)).
+    /// [`application_toolkit`](Self::application_toolkit)).
     fn is_gtk4(&self, bus: &str) -> Result<bool> {
-        Ok(self.gtk_generation(bus)? == GtkGeneration::Gtk4)
+        Ok(self.application_toolkit(bus)? == ApplicationToolkit::Gtk4)
     }
 
-    /// Which GTK major version the application on `bus` runs, from
+    fn cached_toolkit(&self, bus: &str) -> Option<ApplicationToolkit> {
+        self.gtk4
+            .toolkits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(bus)
+            .copied()
+    }
+
+    /// Classify the toolkit of the application on `bus` from
     /// `Application.ToolkitName` / `Version`, cached per bus.
     ///
     /// An unreadable answer is an error, not "neither": treating it as "not
@@ -1004,15 +1023,9 @@ impl LinuxProvider {
     /// root object has no `Application` interface at all. GTK 4 always
     /// exports one there; WebKitGTK's web process, which serves a Tauri
     /// app's page content, does not.
-    fn gtk_generation(&self, bus: &str) -> Result<GtkGeneration> {
-        if let Some(known) = self
-            .gtk4
-            .generations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(bus)
-        {
-            return Ok(*known);
+    fn application_toolkit(&self, bus: &str) -> Result<ApplicationToolkit> {
+        if let Some(known) = self.cached_toolkit(bus) {
+            return Ok(known);
         }
         let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application")?;
         let read = |property: &str| {
@@ -1030,13 +1043,13 @@ impl LinuxProvider {
                 }
             })
         };
-        let generation = match read("ToolkitName") {
+        let toolkit = match read("ToolkitName") {
             Ok(name) if name.eq_ignore_ascii_case("GTK") => {
                 // The toolkit's version is the `Version` property (GTK 4 has
                 // no `ToolkitVersion`; `AtspiVersion` is the protocol's).
-                gtk_generation_of(&name, &read("Version")?)
+                classify_toolkit(&name, &read("Version")?)
             }
-            Ok(_) => GtkGeneration::Neither,
+            Ok(name) => classify_toolkit(&name, ""),
             // A peer that does not answer has not said it lacks the
             // interface either; asking it to introspect would wait again.
             Err(error @ Error::Timeout { .. }) => return Err(error),
@@ -1044,15 +1057,15 @@ impl LinuxProvider {
                 if self.root_exports_application(bus)? {
                     return Err(error);
                 }
-                GtkGeneration::Neither
+                ApplicationToolkit::MissingApplicationInterface
             }
         };
         self.gtk4
-            .generations
+            .toolkits
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(bus.to_owned(), generation);
-        Ok(generation)
+            .insert(bus.to_owned(), toolkit);
+        Ok(toolkit)
     }
 
     /// Screen extents (physical pixels) for a GTK 4 object.
@@ -2891,6 +2904,23 @@ impl LinuxProvider {
                     });
                     Some(state_attr_to_string(attr, s))
                 }
+                "stable_id" | "object_path" | "bus_name" => {
+                    // These snapshot fields are copied verbatim from the reference.
+                    let value = if attr == "bus_name" {
+                        &aref.bus_name
+                    } else {
+                        &aref.path
+                    };
+                    if !xa11y_core::selector::match_op(&filter.op, &filter.value, Some(value)) {
+                        return false;
+                    }
+                    if simple.role.is_none() && simple.filters.len() == 1 {
+                        return true;
+                    }
+                    // For a compound hit, retain the full matcher's normalized
+                    // role and attribute comparisons on the surviving candidate.
+                    None
+                }
                 _ => None, // Routed through full ElementData below.
             };
 
@@ -3066,6 +3096,14 @@ impl LinuxProvider {
     }
 }
 
+fn phase_one_limit(outer: Option<usize>, nth: Option<usize>) -> Option<usize> {
+    match (outer, nth) {
+        (Some(limit), Some(n)) => Some(limit.max(n)),
+        (_, Some(n)) => Some(n),
+        (limit, None) => limit,
+    }
+}
+
 impl Provider for LinuxProvider {
     fn capabilities(&self) -> Result<xa11y_core::Capabilities> {
         xa11y_core::Capabilities::current()
@@ -3175,6 +3213,42 @@ impl Provider for LinuxProvider {
         }
     }
 
+    fn count_elements_group(
+        &self,
+        root: &ElementData,
+        group: &xa11y_core::SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<usize> {
+        group.validate()?;
+        if !group.is_single() || group.clauses[0].segments.len() != 1 {
+            return Ok(self
+                .find_elements_group(root, group, limit, max_depth)?
+                .len());
+        }
+
+        let simple = &group.clauses[0].segments[0].simple;
+        let start = self.get_cached(root.handle)?;
+        let hits = self.collect_matching_refs_group(
+            &start,
+            &[simple],
+            0,
+            max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH),
+            phase_one_limit(limit, simple.nth),
+            root.pid,
+        )?;
+        // nth selects from the ordered hits before the native identity dedup.
+        let count = match simple.nth {
+            Some(n) => usize::from(hits.len() >= n),
+            None => hits
+                .into_iter()
+                .map(|(_, node)| (node.bus_name, node.path))
+                .collect::<HashSet<_>>()
+                .len(),
+        };
+        Ok(limit.map_or(count, |limit| count.min(limit)))
+    }
+
     fn find_elements_group(
         &self,
         root: &ElementData,
@@ -3222,11 +3296,7 @@ impl Provider for LinuxProvider {
             } else {
                 None
             };
-            match (outer, first.nth) {
-                (Some(l), Some(n)) => Some(l.max(n)),
-                (_, Some(n)) => Some(n),
-                (l, None) => l,
-            }
+            phase_one_limit(outer, first.nth)
         } else {
             None
         };
@@ -4956,26 +5026,28 @@ fn introspection_lists_interface(xml: &str, interface: &str) -> bool {
     xml.contains(&format!("<interface name=\"{interface}\""))
 }
 
-/// The GTK major version an application runs, as far as the backend
-/// treats GTK versions differently: GTK 4's window-relative extents
-/// (#487) and GTK 3's destroyed widgets that keep answering (#586).
+/// Application identity used by geometry, GTK liveness and Chromium bridge diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GtkGeneration {
+enum ApplicationToolkit {
     Gtk3,
     Gtk4,
-    /// Another toolkit, or a GTK major version with neither quirk.
-    Neither,
+    Chromium,
+    Other,
+    MissingApplicationInterface,
 }
 
-/// The [`GtkGeneration`] `Application.ToolkitName` / `Version` name.
-fn gtk_generation_of(name: &str, version: &str) -> GtkGeneration {
+/// The [`ApplicationToolkit`] `Application.ToolkitName` / `Version` name.
+fn classify_toolkit(name: &str, version: &str) -> ApplicationToolkit {
+    if name.eq_ignore_ascii_case("Chromium") {
+        return ApplicationToolkit::Chromium;
+    }
     if !name.eq_ignore_ascii_case("GTK") {
-        return GtkGeneration::Neither;
+        return ApplicationToolkit::Other;
     }
     match version.trim().split('.').next() {
-        Some("3") => GtkGeneration::Gtk3,
-        Some("4") => GtkGeneration::Gtk4,
-        _ => GtkGeneration::Neither,
+        Some("3") => ApplicationToolkit::Gtk3,
+        Some("4") => ApplicationToolkit::Gtk4,
+        _ => ApplicationToolkit::Other,
     }
 }
 
@@ -6296,18 +6368,19 @@ mod tests {
     }
 
     #[test]
-    fn gtk_generation_is_detected_from_toolkit_name_and_major_version() {
-        use GtkGeneration::*;
-        assert_eq!(gtk_generation_of("GTK", "4.14.5"), Gtk4);
-        assert_eq!(gtk_generation_of("gtk", "4.16.0"), Gtk4);
-        assert_eq!(gtk_generation_of("GTK", "3.24.41"), Gtk3);
-        assert_eq!(gtk_generation_of("GTK", " 3.24.49 "), Gtk3);
-        assert_eq!(gtk_generation_of("GTK", "40.1"), Neither);
-        assert_eq!(gtk_generation_of("GTK", "30.1"), Neither);
-        assert_eq!(gtk_generation_of("GTK", "2.24.33"), Neither);
-        assert_eq!(gtk_generation_of("Qt", "4.8.7"), Neither);
-        assert_eq!(gtk_generation_of("Qt", "3.3.8"), Neither);
-        assert_eq!(gtk_generation_of("GTK", ""), Neither);
+    fn application_toolkit_is_detected_from_toolkit_name_and_major_version() {
+        use ApplicationToolkit::*;
+        assert_eq!(classify_toolkit("CHROMIUM", ""), Chromium);
+        assert_eq!(classify_toolkit("GTK", "4.14.5"), Gtk4);
+        assert_eq!(classify_toolkit("gtk", "4.16.0"), Gtk4);
+        assert_eq!(classify_toolkit("GTK", "3.24.41"), Gtk3);
+        assert_eq!(classify_toolkit("GTK", " 3.24.49 "), Gtk3);
+        assert_eq!(classify_toolkit("GTK", "40.1"), Other);
+        assert_eq!(classify_toolkit("GTK", "30.1"), Other);
+        assert_eq!(classify_toolkit("GTK", "2.24.33"), Other);
+        assert_eq!(classify_toolkit("Qt", "4.8.7"), Other);
+        assert_eq!(classify_toolkit("Qt", "3.3.8"), Other);
+        assert_eq!(classify_toolkit("GTK", ""), Other);
     }
 
     #[test]

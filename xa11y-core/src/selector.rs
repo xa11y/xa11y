@@ -1003,20 +1003,28 @@ fn number_to_string(v: Option<f64>) -> Option<String> {
 /// only, **not** full case folding (e.g. Turkish `ı`/`I` and German `ß`/`SS`
 /// do not match). See [`MatchOp`] for details.
 pub fn match_op(op: &MatchOp, expected: &str, actual: Option<&str>) -> bool {
+    let Some(actual) = actual else { return false };
+    // Short ASCII labels can be compared in place. Keep substring search on
+    // long inputs on the standard library's search algorithm.
+    let short_ascii = || actual.len() <= 64 && actual.is_ascii() && expected.is_ascii();
     match op {
-        MatchOp::Exact => actual == Some(expected),
-        MatchOp::Contains => {
-            let fl = expected.to_lowercase();
-            actual.is_some_and(|v| v.to_lowercase().contains(&fl))
+        MatchOp::Exact => actual == expected,
+        MatchOp::Contains if short_ascii() => {
+            expected.is_empty()
+                || actual
+                    .as_bytes()
+                    .windows(expected.len())
+                    .any(|window| window.eq_ignore_ascii_case(expected.as_bytes()))
         }
-        MatchOp::StartsWith => {
-            let fl = expected.to_lowercase();
-            actual.is_some_and(|v| v.to_lowercase().starts_with(&fl))
-        }
-        MatchOp::EndsWith => {
-            let fl = expected.to_lowercase();
-            actual.is_some_and(|v| v.to_lowercase().ends_with(&fl))
-        }
+        MatchOp::StartsWith if short_ascii() => actual
+            .get(..expected.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(expected)),
+        MatchOp::EndsWith if short_ascii() => actual
+            .get(actual.len().saturating_sub(expected.len())..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(expected)),
+        MatchOp::Contains => actual.to_lowercase().contains(&expected.to_lowercase()),
+        MatchOp::StartsWith => actual.to_lowercase().starts_with(&expected.to_lowercase()),
+        MatchOp::EndsWith => actual.to_lowercase().ends_with(&expected.to_lowercase()),
     }
 }
 
@@ -1076,7 +1084,6 @@ pub fn find_elements_in_tree(
         &get_children_fn,
         root,
         first,
-        0,
         phase1_depth,
         &mut candidates,
         phase1_limit,
@@ -1107,7 +1114,6 @@ pub fn find_elements_in_tree(
                         &get_children_fn,
                         Some(candidate),
                         &segment.simple,
-                        0,
                         max_depth,
                         &mut next_candidates,
                         None,
@@ -1168,14 +1174,22 @@ where
     // comma group must not multiply UIA/AX/AT-SPI calls by its clause count.
     // The first fetch supplies handles for the rest of this query, so a
     // provider that allocates a fresh handle on every fetch remains safe.
-    let children_by_parent: RefCell<HashMap<Option<u64>, Vec<ElementData>>> =
-        RefCell::new(HashMap::new());
-    let cached_children = |parent: Option<&ElementData>| -> Result<Vec<ElementData>> {
+    use std::rc::Rc;
+
+    let children_by_parent = RefCell::new(HashMap::new());
+    // Most parents in a wide tree are leaves. Share their empty allocation too.
+    let empty_children = Rc::<[ElementData]>::from([]);
+    let cached_children = |parent: Option<&ElementData>| -> Result<Rc<[ElementData]>> {
         let key = parent.map(|data| data.handle);
         if let Some(children) = children_by_parent.borrow().get(&key) {
-            return Ok(children.clone());
+            return Ok(Rc::clone(children));
         }
         let children = get_children_fn(parent)?;
+        let children = if children.is_empty() {
+            Rc::clone(&empty_children)
+        } else {
+            children.into()
+        };
         children_by_parent
             .borrow_mut()
             .insert(key, children.clone());
@@ -1187,8 +1201,7 @@ where
     let mut by_path: std::collections::BTreeMap<Vec<u32>, ElementData> =
         std::collections::BTreeMap::new();
     for clause in &group.clauses {
-        let clause_results =
-            find_elements_in_tree_with_paths(cached_children, root, clause, max_depth)?;
+        let clause_results = find_with_paths(cached_children, root, clause, max_depth)?;
         for (path, data) in clause_results {
             // First clause that matched at this path wins. The query-local
             // cache gives every clause the same snapshot of this node.
@@ -1225,6 +1238,15 @@ pub fn find_elements_in_tree_with_paths<F>(
 where
     F: Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
 {
+    find_with_paths(get_children_fn, root, selector, max_depth)
+}
+
+fn find_with_paths<C: AsRef<[ElementData]>>(
+    get_children_fn: impl Fn(Option<&ElementData>) -> Result<C>,
+    root: Option<&ElementData>,
+    selector: &Selector,
+    max_depth: Option<u32>,
+) -> Result<Vec<(Vec<u32>, ElementData)>> {
     selector.validate()?;
 
     let max_depth = max_depth.unwrap_or(crate::MAX_TREE_DEPTH);
@@ -1263,11 +1285,11 @@ where
             match segment.combinator {
                 Combinator::Child => {
                     let children = get_children_fn(Some(candidate))?;
-                    for (i, child) in children.into_iter().enumerate() {
-                        if matches_simple(&child, &segment.simple) {
+                    for (i, child) in children.as_ref().iter().enumerate() {
+                        if matches_simple(child, &segment.simple) {
                             let mut p = cand_path.clone();
                             p.push(i as u32);
-                            next.push((p, child));
+                            next.push((p, child.clone()));
                         }
                     }
                 }
@@ -1323,8 +1345,8 @@ fn apply_nth_paths(candidates: &mut Vec<(Vec<u32>, ElementData)>, nth: Option<us
 ///
 /// `path` is a scratch buffer pushed/popped at each level so the caller can
 /// share one allocation across the whole walk.
-fn collect_matching_with_paths(
-    get_children_fn: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+fn collect_matching_with_paths<C: AsRef<[ElementData]>>(
+    get_children_fn: &impl Fn(Option<&ElementData>) -> Result<C>,
     root: Option<&ElementData>,
     simple: &SimpleSelector,
     depth: u32,
@@ -1336,14 +1358,14 @@ fn collect_matching_with_paths(
         return Ok(());
     }
     let children = get_children_fn(root)?;
-    for (i, child) in children.into_iter().enumerate() {
+    for (i, child) in children.as_ref().iter().enumerate() {
         path.push(i as u32);
-        if matches_simple(&child, simple) {
+        if matches_simple(child, simple) {
             results.push((path.clone(), child.clone()));
         }
         collect_matching_with_paths(
             get_children_fn,
-            Some(&child),
+            Some(child),
             simple,
             depth + 1,
             max_depth,
@@ -1373,39 +1395,60 @@ fn collect_matching(
     get_children_fn: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
     root: Option<&ElementData>,
     simple: &SimpleSelector,
-    depth: u32,
     max_depth: u32,
     results: &mut Vec<ElementData>,
     limit: Option<usize>,
 ) -> Result<()> {
-    if depth > max_depth {
+    if limit.is_some_and(|limit| results.len() >= limit) {
         return Ok(());
     }
-    if let Some(limit) = limit {
-        if results.len() >= limit {
+
+    collect_from_children(
+        get_children_fn,
+        get_children_fn(root)?,
+        simple,
+        max_depth,
+        results,
+        limit,
+    )
+}
+
+fn collect_from_children(
+    get_children_fn: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+    children: Vec<ElementData>,
+    simple: &SimpleSelector,
+    remaining_depth: u32,
+    results: &mut Vec<ElementData>,
+    limit: Option<usize>,
+) -> Result<()> {
+    for child in children {
+        let matched = matches_simple(&child, simple);
+        if matched && limit == Some(results.len() + 1) {
+            results.push(child);
             return Ok(());
         }
-    }
-
-    let children = get_children_fn(root)?;
-    for child in children {
-        if matches_simple(&child, simple) {
-            results.push(child.clone());
-            if let Some(limit) = limit {
-                if results.len() >= limit {
-                    return Ok(());
-                }
+        // Read descendants before moving the matching snapshot into results.
+        let descendants = if remaining_depth > 0 {
+            get_children_fn(Some(&child))?
+        } else {
+            Vec::new()
+        };
+        if matched {
+            results.push(child);
+        }
+        if !descendants.is_empty() {
+            collect_from_children(
+                get_children_fn,
+                descendants,
+                simple,
+                remaining_depth - 1,
+                results,
+                limit,
+            )?;
+            if limit.is_some_and(|limit| results.len() >= limit) {
+                return Ok(());
             }
         }
-        collect_matching(
-            get_children_fn,
-            Some(&child),
-            simple,
-            depth + 1,
-            max_depth,
-            results,
-            limit,
-        )?;
     }
     Ok(())
 }
@@ -1978,6 +2021,48 @@ mod tests {
         assert!(Selector::parse("*button").is_err());
         assert!(Selector::parse("button*").is_err());
         assert!(Selector::parse("**").is_err());
+    }
+
+    #[test]
+    fn case_insensitive_filters_agree_with_unicode_lowercase() {
+        let labels = [
+            "",
+            "Submit",
+            "PREFIX-SUFFIX",
+            "Kelvin",
+            "ΟΣ",
+            "İ",
+            &"A".repeat(64),
+            &"A".repeat(65),
+        ];
+        for actual in labels {
+            for expected in [
+                "",
+                "sub",
+                "MIT",
+                "fix",
+                "too long for a short label",
+                "k",
+                "ος",
+                "i",
+                "Å",
+            ] {
+                let value = actual.to_lowercase();
+                let needle = expected.to_lowercase();
+                for (op, reference) in [
+                    (MatchOp::Contains, value.contains(&needle)),
+                    (MatchOp::StartsWith, value.starts_with(&needle)),
+                    (MatchOp::EndsWith, value.ends_with(&needle)),
+                ] {
+                    assert_eq!(
+                        match_op(&op, expected, Some(actual)),
+                        reference,
+                        "{actual:?} {op:?} {expected:?}"
+                    );
+                    assert!(!match_op(&op, expected, None));
+                }
+            }
+        }
     }
 
     #[test]

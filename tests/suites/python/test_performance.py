@@ -1,5 +1,6 @@
 """Public API benchmarks on the same Qt fixture on Linux, macOS and Windows."""
 
+import json
 import os
 import platform
 import statistics
@@ -59,13 +60,21 @@ def test_locator_queries(app, measure):
     measure("first button", buttons.first().element, lambda node: node.role == "button")
     measure("count buttons", buttons.count, lambda count: count >= 3)
     measure("list buttons", buttons.elements, lambda nodes: len(nodes) >= 3)
-    measure("state filter", app.locator('button[enabled="false"]').elements,
-            lambda nodes: any(node.name == "Cancel" for node in nodes))
+    measure("state filter", app.locator('button[enabled="true"]').elements,
+            lambda nodes: any(node.name == "OK" for node in nodes))
     measure("descendant selector", app.locator('[name="Buttons"] button[name="OK"]').element,
             lambda node: node.name == "OK")
     measure("selector union", app.locator('button[name="OK"], button[name="Cancel"]').elements,
             lambda nodes: {node.name for node in nodes} == {"OK", "Cancel"})
     measure("ready wait", ok.wait_enabled, lambda node: node.name == "OK")
+
+
+def test_stable_id_query(app, measure):
+    button = app.locator('button[name="OK"]').element()
+    if not button.stable_id:
+        pytest.skip("Qt bridge does not expose a stable ID for this button")
+    locator = app.locator(f"[stable_id={json.dumps(button.stable_id, ensure_ascii=False)}]")
+    measure("resolve stable ID", locator.element, button.same_as)
 
 
 def test_text_edit(app, measure):
@@ -117,3 +126,33 @@ def test_multi_window_reads(app, measure):
     finally:
         closer.press()
         closer.wait_hidden(timeout=5.0)
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="measures the AT-SPI window listener")
+def test_dialog_latency_with_subscription(app, measure):
+    opener = app.locator('button[name="Open Dialog"]')
+    closer = app.locator('button[name="Close Dialog"]')
+
+    def sample_dialog(kind):
+        return lambda event: (
+            event.event_type == kind
+            and event.target is not None
+            and event.target.name == "Sample Dialog"
+        )
+
+    # Long-lived automations can reuse one listener. Register before pressing
+    # so the transition cannot race setup. Validate the same control as the
+    # ordinary press + wait_visible workload after the window event arrives.
+    with app.subscribe(kinds=["window_opened", "window_closed"], buffer=16) as sub:
+        def open_dialog():
+            opener.press()
+            sub.wait_for(sample_dialog(xa11y.EventType.WINDOW_OPENED), timeout=5.0)
+            return closer.wait_visible(timeout=5.0)
+
+        def close_dialog():
+            closer.press()
+            sub.wait_for(sample_dialog(xa11y.EventType.WINDOW_CLOSED), timeout=5.0)
+            closer.wait_hidden(timeout=5.0)
+
+        measure("press to visible dialog control with existing subscription", open_dialog,
+                lambda node: node.name == "Close Dialog", close_dialog)
