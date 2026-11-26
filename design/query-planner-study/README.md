@@ -90,19 +90,31 @@ difference between two runs selecting the same strategy is timing variation.
 At 31 hits, switching strategies saved 23.1 ms (5.8%) against the existing
 choice. These coefficients describe one tree shape and provider on one host.
 
-## Implications
+## Production implementation
 
-The measurements support a cache for shared ancestor and viewport reads on
-this workload. A production implementation would need a lifetime confined
-to one observation, fresh reads after actions and on every poll, and tests
-for scrolling, reparenting, destroyed ancestors and visibility revalidation.
-The static fixture establishes read savings and stationary result parity.
-It does not establish those churn guarantees.
+UIA owns one scroll observation per tree walk. Siblings share viewport
+validation for the same retained native source. When several projected hits
+need full records, hydration also shares inherited clips by ancestor runtime
+ID. A new traversal, retry or poll starts with empty maps. Single-hit
+hydration skips the ancestor identity lookup. The Windows integration
+fixture scrolls, destroys the scroll container, reparents its surviving
+controls in reverse order and repeats the same selector after each action.
 
-Match density can improve plan selection when a prior observation is
-available cheaply. Before adopting a default model, test its prediction on
-different tree depths, toolkit providers and stale estimates. Any bad
-prediction must still execute a legal plan.
+The shared planner accepts cost estimates only for ranking legal reads.
+The Windows provider keeps up to 128 query fingerprints with the visited
+node count and match count from completed, unbounded, app-scoped searches
+with a normalized role and one name filter. Estimates apply to the same
+scope, selector and depth when the previous matches reported WPF. Empty
+or mixed-toolkit results discard an existing estimate. The history contains
+only cardinalities and lasts for the lifetime of the provider.
+
+With both caches active, the 0- and 16-hit measurements above estimate
+full work at 4,390 units per visited node and projected work at 1,780 per
+node plus 7,156 per hydrated hit. The estimate describes relative work on
+the measured WPF fixture. A changed tree or different shape can make the
+choice slower. Every execution still reads and validates its live matches.
+Other backends, cold queries, counts and bounded searches use the same
+planner with their existing eligibility and cost ordering.
 
 [Individual timings](timings.csv) and [per-observation read counts](read-counts.csv)
 include both series. The raw mode names are full, projected, view (viewport
@@ -110,3 +122,31 @@ cache), memo (ancestor cache), estimated and count. Only scroll-parent and
 viewport-refresh have instrumented durations. A missing operation had no
 observed calls. The [benchmark patch and fixture](https://github.com/xa11y/xa11y/pull/728#issuecomment-7198133250)
 apply to the measured revision, `2f08e3d`.
+
+## Production versus the preceding build
+
+The same fixture and selector ran against the shared-planner baseline
+(`d00260d`) and the production implementation including both caches and
+history. A separate measurement build forced each eligible read strategy.
+Each mode used its own long-lived provider. After four warm-up rounds, we
+interleaved twelve timed queries per mode per density in balanced order.
+Every result had the same normalized payload hash as the other modes.
+
+| Matches | Baseline ms | Production ms | Forced full ms | Forced projected ms | Warm production plan |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 0 | 150.4 | 150.6 | 359.6 | 149.6 | projected |
+| 1 | 156.3 | 158.9 | 358.3 | 156.6 | projected |
+| 16 | 285.4 | 264.0 | 358.7 | 263.5 | projected |
+| 26 | 355.7 | 324.7 | 353.0 | 326.1 | projected |
+| 28 | 384.8 | 349.3 | 364.9 | 349.0 | projected |
+| 30 | 394.6 | 356.7 | 358.0 | 359.1 | full |
+| 31 | 405.7 | 361.2 | 359.3 | 368.3 | full |
+| 32 | 412.1 | 359.9 | 358.7 | 378.0 | full |
+
+At 16 hits both builds used projected reads, so the 7.5% reduction came
+with the observation cache. At 32 hits the combined reduction was 12.7%.
+On the production measurement build, full beat projected by 19.3 ms at
+that density. At 30 hits the 1.1 ms separation is too small to distinguish
+the strategies reliably. The zero- and one-hit cases showed no speedup.
+These are warm-query medians on one host. [Individual timings](production-timings.csv)
+are in microseconds.

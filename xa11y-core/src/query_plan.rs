@@ -31,6 +31,7 @@ pub struct Query<'a> {
     pub group: &'a SelectorGroup,
     pub output: QueryOutput,
     pub limit: Option<usize>,
+    estimated_costs: Option<(u64, u64)>,
 }
 
 impl<'a> Query<'a> {
@@ -39,7 +40,15 @@ impl<'a> Query<'a> {
             group,
             output,
             limit,
+            estimated_costs: None,
         }
+    }
+
+    /// Relative costs inferred from a completed observation of the same query.
+    /// Estimates rank eligible strategies; they never affect match evaluation.
+    pub fn with_estimated_costs(mut self, resolve: u64, projected: u64) -> Self {
+        self.estimated_costs = Some((resolve, projected));
+        self
     }
 
     /// Bound for a native walk which collects every clause's first segment
@@ -93,7 +102,13 @@ pub fn plan_query(
 
 // Relative ranks retain the measured sparse/dense crossover. Replace this
 // policy independently of which native reads are semantically eligible.
-fn read_cost(query: Query<'_>, strategy: ReadStrategy) -> u8 {
+fn read_cost(query: Query<'_>, strategy: ReadStrategy) -> u64 {
+    if let Some((resolve, projected)) = query.estimated_costs {
+        return match strategy {
+            ReadStrategy::ResolveElements => resolve,
+            ReadStrategy::Projected => projected,
+        };
+    }
     match strategy {
         ReadStrategy::ResolveElements => 1,
         ReadStrategy::Projected => {
