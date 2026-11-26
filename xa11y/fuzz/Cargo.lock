@@ -1369,6 +1369,7 @@ dependencies = [
 name = "xa11y-windows"
 version = "0.16.1"
 dependencies = [
+ "rayon",
  "serde_json",
  "windows",
  "windows-core",

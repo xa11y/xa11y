@@ -1245,6 +1245,15 @@ impl WindowsProvider {
         element: &IUIAutomationElement,
         request: &IUIAutomationCacheRequest,
     ) -> Result<Vec<IUIAutomationElement>> {
+        let array = self.child_array_requested(element, request)?;
+        child_array_items(array)
+    }
+
+    fn child_array_requested(
+        &self,
+        element: &IUIAutomationElement,
+        request: &IUIAutomationCacheRequest,
+    ) -> Result<Option<IUIAutomationElementArray>> {
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         // An empty Vec reads downstream as "this element has no children", so
         // every failure propagates (tenet 1) after `uia_call`'s transient
@@ -1254,7 +1263,7 @@ impl WindowsProvider {
             element.FindAllBuildCache(TreeScope_Children, &true_cond, request)
         }) {
             Ok(arr) => arr,
-            Err(e) if e.code().is_ok() => return Ok(Vec::new()),
+            Err(e) if e.code().is_ok() => return Ok(None),
             Err(e) => {
                 return Err(Error::platform(
                     e.code().0 as i64,
@@ -1262,13 +1271,14 @@ impl WindowsProvider {
                 ))
             }
         };
-        (0..uia_len(&arr)?).map(|i| uia_get(&arr, i)).collect()
+        Ok(Some(arr))
     }
 
     fn observed_children(
         &self,
         element: Option<&ElementData>,
         reads: &mut ScrollObservation,
+        prefetched: Option<Result<Option<AgileChildArray>>>,
     ) -> Result<Vec<ElementData>> {
         uia_gate("get_children")?;
         let dpi = &crate::dpi::DpiScope::enter()?;
@@ -1307,9 +1317,14 @@ impl WindowsProvider {
                 let uia = self.get_cached(element_data.handle)?;
                 // The parent having gone is its own staleness, not "no
                 // children".
-                let children = self
-                    .uia_children(dpi, &uia)
-                    .map_err(|e| stale_if_gone(element_data, e))?;
+                let children = match prefetched {
+                    Some(packet) => packet.and_then(|array| {
+                        let array = array.map(|a| uia_call(|| a.resolve())).transpose()?;
+                        child_array_items(array)
+                    }),
+                    None => self.uia_children(dpi, &uia),
+                }
+                .map_err(|e| stale_if_gone(element_data, e))?;
                 if children.is_empty() {
                     return Ok(Vec::new());
                 }
@@ -1638,6 +1653,76 @@ impl WindowsProvider {
     }
 }
 
+fn child_array_items(
+    array: Option<IUIAutomationElementArray>,
+) -> Result<Vec<IUIAutomationElement>> {
+    match array {
+        Some(array) => (0..uia_len(&array)?)
+            .map(|index| uia_get(&array, index))
+            .collect(),
+        None => Ok(Vec::new()),
+    }
+}
+
+type AgileChildArray = windows::core::AgileReference<IUIAutomationElementArray>;
+
+/// Overlap two native child-list reads while the resolver consumes snapshots in DFS order.
+/// Only the later sibling's native array crosses the traversal boundary. xa11y handles,
+/// clip validation and match evaluation still happen when the resolver visits that parent.
+#[derive(Default)]
+struct SiblingReads {
+    next: HashMap<u64, u64>,
+    ready: HashMap<u64, Result<Option<AgileChildArray>>>,
+}
+
+impl SiblingReads {
+    fn children(
+        &mut self,
+        walk: &CanonicalWalk<'_>,
+        parent: Option<&ElementData>,
+    ) -> Result<Vec<ElementData>> {
+        let provider = walk.provider;
+        let packet = parent.and_then(|p| {
+            if let Some(packet) = self.ready.remove(&p.handle) {
+                return Some(packet);
+            }
+            let sibling = self.next.remove(&p.handle)?;
+            let deadline = xa11y_core::deadline::Deadline::current();
+            let fetch = |handle| {
+                xa11y_core::deadline::Deadline::scope_opt(deadline.clone(), || {
+                    uia_gate("get_children")?;
+                    let dpi = crate::dpi::DpiScope::enter()?;
+                    let element = provider.get_cached(handle)?;
+                    provider
+                        .child_array_requested(&element, provider.batch_request.get(&dpi))?
+                        .map(|array| uia_call(|| AgileChildArray::new(&array)))
+                        .transpose()
+                })
+            };
+            let (current, later) = rayon::join(|| fetch(p.handle), || fetch(sibling));
+            self.ready.insert(sibling, later);
+            Some(current)
+        });
+        let children = walk.canonicalize(provider.observed_children(
+            parent,
+            &mut walk.reads.borrow_mut(),
+            packet,
+        )?)?;
+        // Start a pair only if the resolver asks for the first child's children.
+        // At the depth limit neither sibling is read. No work survives this query.
+        for pair in children.as_chunks::<2>().0 {
+            if pair[0].handle != pair[1].handle
+                && pair
+                    .iter()
+                    .all(|c| c.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("Qt"))
+            {
+                self.next.insert(pair[0].handle, pair[1].handle);
+            }
+        }
+        Ok(children)
+    }
+}
+
 /// Read-only facts from one traversal. Each retry, poll or subsequent call
 /// starts another observation, including after a scroll or reparenting.
 #[derive(Default)]
@@ -1688,10 +1773,11 @@ impl<'a> CanonicalWalk<'a> {
     }
 
     fn children(&self, parent: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        self.canonicalize(
-            self.provider
-                .observed_children(parent, &mut self.reads.borrow_mut())?,
-        )
+        self.canonicalize(self.provider.observed_children(
+            parent,
+            &mut self.reads.borrow_mut(),
+            None,
+        )?)
     }
 
     fn remember_cardinality(&self, key: Option<QueryFingerprint>, matches: &[ElementData]) {
@@ -4913,7 +4999,7 @@ impl Provider for WindowsProvider {
     }
 
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        self.observed_children(element, &mut ScrollObservation::default())
+        self.observed_children(element, &mut ScrollObservation::default(), None)
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
@@ -5706,8 +5792,17 @@ impl Provider for WindowsProvider {
                 }
             }
             let walk = CanonicalWalk::new(self);
+            let exhaustive = limit.is_none()
+                && max_depth.is_none()
+                && group.clauses.len() == 1
+                && group.clauses[0].segments.len() == 1
+                && group.clauses[0].segments[0].simple.nth.is_none();
+            let siblings = exhaustive.then(|| std::cell::RefCell::new(SiblingReads::default()));
             let matches = xa11y_core::selector::find_elements_in_tree_group(
-                |el| walk.children(el),
+                |el| match &siblings {
+                    Some(siblings) => siblings.borrow_mut().children(&walk, el),
+                    None => walk.children(el),
+                },
                 Some(root),
                 group,
                 limit,
