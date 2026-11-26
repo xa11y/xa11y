@@ -38,8 +38,9 @@ def client(pid, fixture, label):
             else:
                 assert reference==[snapshot(e) for e in hits]
                 assert len(hits)==len(first) and all(x.same_as(y) for x,y in zip(first,hits))
+        total=app.locator("*").count()
         digest=hashlib.sha256(json.dumps(reference,sort_keys=True).encode()).hexdigest()
-        print(json.dumps(dict(fixture=fixture,selector=selector,variant=label,hits=len(first),hash=digest,cold=times[0],samples=times[1:])),flush=True)
+        print(json.dumps(dict(fixture=fixture,selector=selector,variant=label,nodes=total,hits=len(first),hash=digest,cold=times[0],samples=times[1:])),flush=True)
 
 
 def compare(args):
