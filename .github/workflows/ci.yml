@@ -58,7 +58,7 @@ jobs:
       - name: Install desktop fixtures
         run: sudo apt-get update && sudo apt-get install -y python3-gi gir1.2-gtk-3.0 fluxbox
 
-      - name: Measure 10k snapshot selector
+      - name: Measure 10k snapshot and traversal queries
         shell: bash
         run: cargo bench --locked -p xa11y-core --bench selector_scan | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -180,7 +180,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Measure 10k snapshot selector
+      - name: Measure 10k snapshot and traversal queries
         shell: bash
         run: cargo bench --locked -p xa11y-core --bench selector_scan | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -224,7 +224,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Measure 10k snapshot selector
+      - name: Measure 10k snapshot and traversal queries
         shell: bash
         run: cargo bench --locked -p xa11y-core --bench selector_scan | tee -a "$GITHUB_STEP_SUMMARY"
 
