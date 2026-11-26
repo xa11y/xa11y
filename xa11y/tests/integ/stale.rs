@@ -267,7 +267,18 @@ fn actions_through_a_locator_reach_the_rebuilt_gtk3_widgets() {
     // widget, so the same paths succeed against the fresh targets.
     let _restore = RestoreForeground;
     let app = fixture();
+    let union = app.locator(&format!("{ENTRY}, {BUTTON}, {ENTRY}"));
+    let before = union.elements().expect("initial union matches");
+    assert_eq!(before.len(), 2);
+    assert_eq!(union.count().expect("initial union count"), 2);
     rebuild(&app);
+    let after = union.elements().expect("rebuilt union matches");
+    assert_eq!(union.count().expect("rebuilt union count"), 2);
+    assert_eq!(after.len(), before.len());
+    for (old, new) in before.iter().zip(&after) {
+        assert_eq!(old.name, new.name);
+        assert_ne!(old.stable_id, new.stable_id);
+    }
 
     let entry = app.locator(ENTRY);
     entry.focus().expect("focus the fresh entry");

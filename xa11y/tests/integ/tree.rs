@@ -1614,6 +1614,20 @@ mod tests {
         assert_eq!(first.len(), 1);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn missing_head_ordinal_does_not_match_descendants() {
+        let app = h::app_root();
+        assert!(app
+            .locator("window button")
+            .exists()
+            .expect("window buttons"));
+        let locator = app.locator("window:nth(99999) button");
+        assert!(locator.elements().expect("ordinal matches").is_empty());
+        assert_eq!(locator.count().expect("ordinal count"), 0);
+    }
+
     #[test]
     #[ignore]
     fn counts_and_existence_agree_with_materialized_matches() {

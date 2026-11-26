@@ -2948,6 +2948,49 @@ impl LinuxProvider {
         true
     }
 
+    /// Select flat matches in document order before building snapshots.
+    /// Each clause applies its ordinal before the union deduplicates identities.
+    fn flat_query_matches(
+        &self,
+        root: &ElementData,
+        group: &xa11y_core::SelectorGroup,
+        limit: Option<usize>,
+        max_depth: u32,
+        first_stage_limit: Option<usize>,
+    ) -> Result<Vec<AccessibleRef>> {
+        let clauses: Vec<_> = group
+            .clauses
+            .iter()
+            .map(|c| &c.segments[0].simple)
+            .collect();
+        let start = self.get_cached(root.handle)?;
+        let hits = self.collect_matching_refs_group(
+            &start,
+            &clauses,
+            0,
+            max_depth,
+            first_stage_limit,
+            root.pid,
+        )?;
+        let mut positions = vec![0; clauses.len()];
+        let mut seen = HashSet::new();
+        Ok(hits
+            .into_iter()
+            .filter_map(|(clause, node)| {
+                positions[clause] += 1;
+                if clauses[clause]
+                    .nth
+                    .is_some_and(|nth| nth != positions[clause])
+                    || !seen.insert((node.bus_name.clone(), node.path.clone()))
+                {
+                    return None;
+                }
+                Some(node)
+            })
+            .take(limit.unwrap_or(usize::MAX))
+            .collect())
+    }
+
     /// ONE DFS over the subtree, evaluating each clause's first SimpleSelector
     /// against every visited node. Emits `(clause_idx, AccessibleRef)` pairs
     /// in document order; a node that matches multiple clauses is emitted
@@ -3215,36 +3258,28 @@ impl Provider for LinuxProvider {
     ) -> Result<usize> {
         group.validate()?;
         let query = Query::new(group, QueryOutput::Count, limit);
-        // The AT-SPI matcher reads any required attributes on demand, but
-        // this count executor only deduplicates a single flat clause.
-        let can_count_refs = group.is_single() && group.clauses[0].segments.len() == 1;
-        let plan = plan_query(query, can_count_refs.then_some(ReadStrategy::Projected));
-        if plan.strategy == ReadStrategy::ResolveElements {
-            return Ok(self
+        // The matcher resolves any required field on demand. The ref-only
+        // executor can evaluate flat unions, including per-clause ordinals.
+        let plan = plan_query(
+            query,
+            query
+                .covered_by(|_| true, true)
+                .then_some(ReadStrategy::Projected),
+        );
+        match plan.strategy {
+            ReadStrategy::ResolveElements => Ok(self
                 .find_elements_group(root, group, limit, max_depth)?
-                .len());
+                .len()),
+            ReadStrategy::Projected => Ok(self
+                .flat_query_matches(
+                    root,
+                    group,
+                    limit,
+                    max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH),
+                    plan.first_stage_limit,
+                )?
+                .len()),
         }
-
-        let simple = &group.clauses[0].segments[0].simple;
-        let start = self.get_cached(root.handle)?;
-        let hits = self.collect_matching_refs_group(
-            &start,
-            &[simple],
-            0,
-            max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH),
-            plan.first_stage_limit,
-            root.pid,
-        )?;
-        // nth selects from the ordered hits before the native identity dedup.
-        let count = match simple.nth {
-            Some(n) => usize::from(hits.len() >= n),
-            None => hits
-                .into_iter()
-                .map(|(_, node)| (node.bus_name, node.path))
-                .collect::<HashSet<_>>()
-                .len(),
-        };
-        Ok(limit.map_or(count, |limit| count.min(limit)))
     }
 
     fn find_elements_group(
@@ -3259,43 +3294,35 @@ impl Provider for LinuxProvider {
         // only first, 1-based `:nth`). Reject it before traversal.
         group.validate()?;
 
-        // ONE AT-SPI walk that evaluates every clause's first SimpleSelector
-        // against each visited node, then per-clause phase-2 narrowing on
-        // the small candidate sets that fall out. Dedup uses
-        // `(bus_name, path)` — the only AT-SPI identifier that's stable
-        // across the per-clause narrowings (handles are minted fresh on
-        // each `build_element_data` call).
-        //
-        // App discovery is handled separately by `list_apps()` — `root` is
-        // always present here.
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
+        let query = Query::new(group, QueryOutput::Elements, limit);
+        let plan = plan_query(query, []);
+        if query.covered_by(|_| true, true) {
+            let refs =
+                self.flat_query_matches(root, group, limit, max_depth_val, plan.first_stage_limit)?;
+            let memo = AncestorMemo::default();
+            return Ok(refs
+                .par_iter()
+                .map(carry_deadline(|node: &AccessibleRef| {
+                    self.build_element_data_in(node, root.pid, &memo, None)
+                }))
+                .collect());
+        }
 
-        let firsts: Vec<&xa11y_core::selector::SimpleSelector> = group
+        // Multi-segment clauses narrow the first-stage hits through the tail.
+        let firsts: Vec<_> = group
             .clauses
             .iter()
             .map(|c| &c.segments[0].simple)
             .collect();
-
         let start_ref = self.get_cached(root.handle)?;
-
-        // ── Phase-1 limit short-circuit ───────────────────────────
-        // When there's exactly one clause, propagate the user's `limit`
-        // (adjusted for `:nth`) to the AT-SPI walk so e.g.
-        // `app.locator("button").first()` stops at the first match. With
-        // multiple clauses, phase-1 hits for clause N might come before
-        // clause M's in doc order, so we need the union before truncating.
-        // (Critical on Electron-scale apps where this prevents 50k-node
-        // walks.)
-        let phase1_limit =
-            plan_query(Query::new(group, QueryOutput::Elements, limit), []).first_stage_limit;
-
         let pid_from_root = root.pid;
         let phase1: Vec<(usize, AccessibleRef)> = self.collect_matching_refs_group(
             &start_ref,
             &firsts,
             0,
             max_depth_val,
-            phase1_limit,
+            plan.first_stage_limit,
             pid_from_root,
         )?;
 
@@ -3321,6 +3348,10 @@ impl Provider for LinuxProvider {
                 continue;
             }
             let clause = &group.clauses[clause_idx];
+            let hits = match clause.segments[0].simple.nth {
+                Some(nth) => hits.get(nth - 1).map(std::slice::from_ref).unwrap_or(&[]),
+                None => hits.as_slice(),
+            };
             // Build ElementData for this clause's phase-1 hits in parallel.
             let memo = AncestorMemo::default();
             let phase1_data: Vec<(usize, ElementData)> = hits
@@ -3337,18 +3368,7 @@ impl Provider for LinuxProvider {
                 .collect();
 
             if clause.segments.len() == 1 {
-                // Apply :nth on the first segment (per-clause, then merged).
-                let mut candidates = phase1_data;
-                if let Some(nth) = clause.segments[0].simple.nth {
-                    if nth <= candidates.len() {
-                        let kept = candidates.remove(nth - 1);
-                        candidates.clear();
-                        candidates.push(kept);
-                    } else {
-                        candidates.clear();
-                    }
-                }
-                merged.extend(candidates);
+                merged.extend(phase1_data);
                 continue;
             }
 
@@ -8192,6 +8212,30 @@ mod tests {
             0,
             "matcher read Value on a node without Value"
         );
+    }
+
+    #[test]
+    fn flat_union_counts_without_hydrating_and_hydrates_each_hit_once() {
+        let fx = interface_peer();
+        let app = xa11y_core::App::from_data(fx.provider.clone(), fx.root.clone());
+        // The same slider matches both clauses. Its Value interface is only
+        // needed when building the returned snapshot.
+        let union = app.locator(r#"[name="Volume"], *:nth(3)"#);
+        assert_eq!(union.count().expect("union count"), 1);
+        assert!(union.exists().expect("union exists"));
+        assert_eq!(fx.slider.value(), 0);
+
+        let single = app
+            .locator(r#"[name="Volume"]"#)
+            .elements()
+            .expect("single match");
+        let reads = fx.slider.value();
+        assert!(reads > 0);
+
+        let matches = union.elements().expect("union matches");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].numeric_value, single[0].numeric_value);
+        assert_eq!(fx.slider.value() - reads, reads);
     }
 
     // ── #484: method timeout and unresponsive-peer errors ────────────────
