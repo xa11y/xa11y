@@ -16,6 +16,8 @@ pub mod identity;
 pub mod input;
 pub mod locator;
 pub mod provider;
+#[doc(hidden)]
+pub mod query_plan;
 pub mod role;
 pub mod screenshot;
 pub mod selector;

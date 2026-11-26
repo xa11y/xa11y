@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
+use xa11y_core::query_plan::{plan_query, ExecutionPlan, Query, QueryOutput, ReadStrategy};
 
 use windows::core::{implement, Interface, BOOL};
 use windows::Win32::Foundation::*;
@@ -232,6 +233,8 @@ pub struct WindowsProvider {
     /// process exited and whose PID was reused by another process surfaces an
     /// error rather than silently retargeting to the new process.
     synthetic_apps: Mutex<BoundedHandleCache<SyntheticAppIdentity>>,
+    // Completed query cardinalities only. Contains no native references or element data.
+    query_history: Mutex<BoundedHandleCache<Option<WpfQuerySample>>>,
 }
 
 // UIA's client objects (IUIAutomation, elements, cache requests, walkers)
@@ -311,6 +314,7 @@ impl WindowsProvider {
             host_hwnds: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             clips: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             synthetic_apps: Mutex::new(BoundedHandleCache::new(MAX_SYNTHETIC_APPS)),
+            query_history: Mutex::new(BoundedHandleCache::new(128)),
         })
     }
 
@@ -628,10 +632,11 @@ impl WindowsProvider {
         dpi: &crate::dpi::DpiScope,
         handle: u64,
         element: &IUIAutomationElement,
+        reads: &mut ScrollObservation,
     ) -> Result<Clip> {
         let fresh =
             uia_call(|| unsafe { element.BuildUpdatedCache(self.scroll_request.get(dpi)) })?;
-        self.inherited_clip_of(dpi, handle, &fresh)?
+        self.inherited_clip_of(dpi, handle, &fresh, reads)?
             .below(dpi, &fresh)
     }
 
@@ -648,6 +653,7 @@ impl WindowsProvider {
         dpi: &crate::dpi::DpiScope,
         handle: u64,
         fresh: &IUIAutomationElement,
+        reads: &mut ScrollObservation,
     ) -> Result<Clip> {
         // Read as `build_element_data_in` reads it: a failure is no bounds,
         // and no bounds never reuses a record.
@@ -661,12 +667,12 @@ impl WindowsProvider {
         if let Some(record) = remembered {
             if !no_bounds(&bounds)
                 && record.bounds == bounds
-                && self.clip_still_holds(dpi, &record.inherited)?
+                && self.clip_still_holds(dpi, &record.inherited, reads)?
             {
                 return Ok(record.inherited);
             }
         }
-        let inherited = self.walk_inherited_clip(dpi, fresh)?;
+        let inherited = self.walk_inherited_clip(dpi, fresh, reads)?;
         self.clips.lock().unwrap_or_else(|e| e.into_inner()).insert(
             handle,
             ClipRecord {
@@ -679,17 +685,33 @@ impl WindowsProvider {
 
     /// Whether every ancestor `clip` came from still overflows with the same
     /// viewport. One that has gone away means the clip no longer holds.
-    fn clip_still_holds(&self, dpi: &crate::dpi::DpiScope, clip: &Clip) -> Result<bool> {
+    fn clip_still_holds(
+        &self,
+        dpi: &crate::dpi::DpiScope,
+        clip: &Clip,
+        reads: &mut ScrollObservation,
+    ) -> Result<bool> {
         for source in clip.sources.iter() {
-            let Some(fresh) = live_snapshot(uia_call(|| unsafe {
-                source
-                    .element
-                    .BuildUpdatedCache(self.scroll_request.get(dpi))
-            }))?
-            else {
-                return Ok(false);
+            // ClipSource clones retain the same COM interface. Holding that
+            // reference in the observation also prevents address reuse.
+            let key = source.element.as_raw() as usize;
+            let viewport = match reads.viewports.entry(key) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.get().1,
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let Some(fresh) = live_snapshot(uia_call(|| unsafe {
+                        source
+                            .element
+                            .BuildUpdatedCache(self.scroll_request.get(dpi))
+                    }))?
+                    else {
+                        return Ok(false);
+                    };
+                    let viewport = cached_viewport(dpi, &fresh)?;
+                    entry.insert((source.element.clone(), viewport));
+                    viewport
+                }
             };
-            if cached_viewport(dpi, &fresh)? != Some(source.viewport) {
+            if viewport != Some(source.viewport) {
                 return Ok(false);
             }
         }
@@ -726,7 +748,12 @@ impl WindowsProvider {
     ) -> Result<Option<Vec<Clip>>> {
         let fresh_root =
             uia_call(|| unsafe { uia_root.BuildUpdatedCache(self.scroll_request.get(dpi)) })?;
-        let base = self.inherited_clip_of(dpi, root_handle, &fresh_root)?;
+        let base = self.inherited_clip_of(
+            dpi,
+            root_handle,
+            &fresh_root,
+            &mut ScrollObservation::default(),
+        )?;
         let len = count.max(0) as usize;
         let elements: Vec<IUIAutomationElement> = (0..count)
             .map(|i| uia_get(subtree, i))
@@ -828,7 +855,11 @@ impl WindowsProvider {
             .cloned();
         if let Some(record) = remembered {
             if !cached_own_hwnd(child)?.is_some_and(resets_clip)
-                && self.clip_still_holds(dpi, &record.inherited)?
+                && self.clip_still_holds(
+                    dpi,
+                    &record.inherited,
+                    &mut ScrollObservation::default(),
+                )?
             {
                 let mut sources = record.inherited.sources;
                 if let Some(nearest) = sources.last() {
@@ -845,7 +876,7 @@ impl WindowsProvider {
                 return Ok(Clip { rect, sources });
             }
         }
-        self.walk_inherited_clip(dpi, parent)
+        self.walk_inherited_clip(dpi, parent, &mut ScrollObservation::default())
     }
 
     /// The clip `element` sits under, found by walking the raw view up to
@@ -857,11 +888,13 @@ impl WindowsProvider {
         &self,
         dpi: &crate::dpi::DpiScope,
         element: &IUIAutomationElement,
+        reads: &mut ScrollObservation,
     ) -> Result<Clip> {
         if cached_own_hwnd(element)?.is_some_and(resets_clip) {
             return Ok(Clip::default());
         }
         let mut ancestors = Vec::new();
+        let mut inherited = Clip::default();
         let mut current = element.clone();
         let mut reached_top = false;
         for _ in 0..HOST_WINDOW_WALK_LIMIT {
@@ -885,7 +918,17 @@ impl WindowsProvider {
                     ))
                 }
             };
-            ancestors.push(current.clone());
+            let mut key = None;
+            if let Some(memo) = &reads.ancestors {
+                let id = Self::runtime_id(&current, 0)?;
+                if let Some(clip) = memo.get(&id) {
+                    inherited = clip.clone();
+                    reached_top = true;
+                    break;
+                }
+                key = (!id.is_empty()).then_some(id);
+            }
+            ancestors.push((key, current.clone()));
             // A popup's own viewport still clips its content; what is above
             // it does not.
             if cached_own_hwnd(&current)?.is_some_and(resets_clip) {
@@ -902,10 +945,13 @@ impl WindowsProvider {
                 ),
             ));
         }
-        ancestors
-            .iter()
-            .rev()
-            .try_fold(Clip::default(), |clip, ancestor| clip.below(dpi, ancestor))
+        for (id, ancestor) in ancestors.into_iter().rev() {
+            inherited = inherited.below(dpi, &ancestor)?;
+            if let (Some(memo), Some(id)) = (&mut reads.ancestors, id) {
+                memo.insert(id, inherited.clone());
+            }
+        }
+        Ok(inherited)
     }
 
     /// The nearest native window of an element this provider built, from
@@ -1214,6 +1260,86 @@ impl WindowsProvider {
         (0..uia_len(&arr)?).map(|i| uia_get(&arr, i)).collect()
     }
 
+    fn observed_children(
+        &self,
+        element: Option<&ElementData>,
+        reads: &mut ScrollObservation,
+    ) -> Result<Vec<ElementData>> {
+        uia_gate("get_children")?;
+        let dpi = &crate::dpi::DpiScope::enter()?;
+        match element {
+            None => {
+                // Top-level: enumerate the desktop root's named top-level
+                // windows, then group them by pid — one synthesized
+                // Application node per process, in first-seen (z-) order,
+                // with that pid's first window as the representative. The old
+                // code returned one entry per window (issue #304's shape);
+                // grouping now reports one Application node per process on
+                // every platform, and the windows are the node's children.
+                let (windows, _unlisted) = self.desktop_app_windows(dpi)?;
+
+                let mut seen = HashSet::new();
+                let mut results = Vec::new();
+                for (el, pid) in windows {
+                    if !seen.insert(pid) {
+                        continue;
+                    }
+                    results.push(self.build_synthetic_app_data(pid, &el)?);
+                }
+                Ok(results)
+            }
+            Some(element_data) => {
+                // A synthesized Application node answers with the process's
+                // top-level windows — a process-wide UIA query, not a tree
+                // walk, because the node deliberately has no live element
+                // behind it. This uniform "windows are the Application node's
+                // children" answer is what makes `App::windows` identical
+                // across platforms, and an empty result is the truth of a
+                // process whose last window closed.
+                if let Some(identity) = self.synthetic_app_identity_checked(element_data.handle)? {
+                    return self.synthetic_app_windows(dpi, element_data, identity, true);
+                }
+                let uia = self.get_cached(element_data.handle)?;
+                // The parent having gone is its own staleness, not "no
+                // children".
+                let children = self
+                    .uia_children(dpi, &uia)
+                    .map_err(|e| stale_if_gone(element_data, e))?;
+                if children.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // The parent's nearest window, remembered when it was built,
+                // so the whole level costs one lookup. A parent that
+                // vanished during a fallback walk has no children to report.
+                let Some(host_hwnd) = live_snapshot(self.host_hwnd_of(element_data.handle, &uia))?
+                else {
+                    return Ok(Vec::new());
+                };
+                // Likewise the scroll clip: one refresh of the parent.
+                let Some(clip) =
+                    live_snapshot(self.children_clip_of(dpi, element_data.handle, &uia, reads))?
+                else {
+                    return Ok(Vec::new());
+                };
+                let pid = element_data.pid;
+                let mut data = Vec::with_capacity(children.len());
+                for child in children {
+                    if let Some(child) = live_snapshot(self.build_element_data_in(
+                        dpi,
+                        &child,
+                        pid,
+                        host_hwnd,
+                        HostHint::Parent,
+                        &clip,
+                    ))? {
+                        data.push(child);
+                    }
+                }
+                Ok(data)
+            }
+        }
+    }
+
     fn count_children(
         &self,
         parent: Option<&ElementData>,
@@ -1453,6 +1579,14 @@ impl WindowsProvider {
     }
 }
 
+/// Read-only facts from one traversal. Each retry, poll or subsequent call
+/// starts another observation, including after a scroll or reparenting.
+#[derive(Default)]
+struct ScrollObservation {
+    viewports: HashMap<usize, (IUIAutomationElement, Option<RECT>)>,
+    ancestors: Option<HashMap<Vec<i32>, Clip>>,
+}
+
 /// Identity-stable `get_children` for one query's tree walk (issue #571).
 ///
 /// `WindowsProvider` mints a fresh handle each time it builds an element, so
@@ -1468,6 +1602,8 @@ impl WindowsProvider {
 struct CanonicalWalk<'a> {
     provider: &'a WindowsProvider,
     handles: std::cell::RefCell<HashMap<Vec<i32>, u64>>,
+    reads: std::cell::RefCell<ScrollObservation>,
+    visited: std::cell::Cell<u64>,
 }
 
 impl<'a> CanonicalWalk<'a> {
@@ -1475,14 +1611,44 @@ impl<'a> CanonicalWalk<'a> {
         Self {
             provider,
             handles: std::cell::RefCell::new(HashMap::new()),
+            reads: Default::default(),
+            visited: Default::default(),
         }
     }
 
     fn children(&self, parent: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        self.canonicalize(self.provider.get_children(parent)?)
+        self.canonicalize(
+            self.provider
+                .observed_children(parent, &mut self.reads.borrow_mut())?,
+        )
+    }
+
+    fn remember_cardinality(&self, key: Option<u64>, matches: &[ElementData]) {
+        let Some(key) = key else { return };
+        let sample = (!matches.is_empty()
+            && matches
+                .iter()
+                .all(|m| m.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF")))
+        .then(|| WpfQuerySample {
+            nodes: self.visited.get(),
+            hits: matches.len() as u64,
+        });
+        let mut history = self
+            .provider
+            .query_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if sample.is_some() {
+            history.insert(key, sample);
+        } else if let Some(previous) = history.get_mut(&key) {
+            // Discard a prior WPF estimate if the result now belongs to a
+            // different toolkit or is empty. Cold misses need no table entry.
+            *previous = None;
+        }
     }
 
     fn canonicalize(&self, children: Vec<ElementData>) -> Result<Vec<ElementData>> {
+        self.visited.set(self.visited.get() + children.len() as u64);
         let mut out = Vec::with_capacity(children.len());
         for mut child in children {
             if let Some(handle) = self.canonical_handle(child.handle)? {
@@ -3441,46 +3607,63 @@ const QUERY_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_NamePropertyId,
 ];
 
-fn metadata_query(group: &xa11y_core::SelectorGroup) -> bool {
-    group.clauses.iter().all(|clause| {
-        clause.segments.len() == 1
-            && clause.segments[0].simple.filters.iter().all(|filter| {
-                matches!(
-                    filter.attr.as_str(),
-                    "name" | "role" | "class_name" | "control_type_id"
-                )
-            })
-    })
+/// The calibrated model applies to complete, application-scoped WPF name
+/// searches. The handle includes application identity. A fingerprint collision
+/// can change only the cost estimate, never the query or its result.
+fn history_key(query: Query<'_>, root: u64, depth: Option<u32>) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    if !is_synthetic_handle(root) || query.limit.is_some() || query.output != QueryOutput::Elements
+    {
+        return None;
+    }
+    let [clause] = query.group.clauses.as_slice() else {
+        return None;
+    };
+    let [segment] = clause.segments.as_slice() else {
+        return None;
+    };
+    let [filter] = segment.simple.filters.as_slice() else {
+        return None;
+    };
+    let Some(xa11y_core::selector::RoleMatch::Normalized(role)) = segment.simple.role else {
+        return None;
+    };
+    if filter.attr != "name" || segment.simple.nth.is_some() {
+        return None;
+    }
+    let mut key = std::collections::hash_map::DefaultHasher::new();
+    (
+        root,
+        depth,
+        role,
+        std::mem::discriminant(&filter.op),
+        &filter.value,
+    )
+        .hash(&mut key);
+    Some(key.finish())
 }
 
-fn projected_find_query(group: &xa11y_core::SelectorGroup, limit: Option<usize>) -> bool {
-    // Per-clause :nth must count complete, live snapshots before choosing
-    // its ordinal. An outer limit (including Locator::nth) is safe: if
-    // hydration loses a bounded hit, the caller re-reads without that bound.
-    metadata_query(group)
-        && group
-            .clauses
-            .iter()
-            .all(|clause| clause.segments[0].simple.nth.is_none())
-        // Dense Qt lists measured slower when every metadata hit needed a
-        // second full snapshot. Keep their original batched full walk;
-        // project small prefixes, named queries and sparse window queries.
-        && (limit.is_some_and(|limit| limit <= 2)
-            || group.clauses.iter().all(|clause| {
-                clause.segments[0]
-                    .simple
-                    .filters
-                    .iter()
-                    .any(|filter| filter.attr == "name")
-            })
-            || group.clauses.iter().all(|clause| {
-                matches!(
-                    clause.segments[0].simple.role,
-                    Some(xa11y_core::selector::RoleMatch::Normalized(
-                        Role::Window | Role::Dialog
-                    ))
-                )
-            }))
+#[derive(Clone, Copy)]
+struct WpfQuerySample {
+    nodes: u64,
+    hits: u64,
+}
+
+impl WpfQuerySample {
+    fn apply(self, query: Query<'_>) -> Query<'_> {
+        // Relative work per visited node and per hydrated hit, fitted to
+        // the cached WPF measurements in design/query-planner-study.
+        query.with_estimated_costs(4390 * self.nodes, 1780 * self.nodes + 7156 * self.hits)
+    }
+}
+
+fn uia_query_plan(query: Query<'_>, application_root: bool) -> ExecutionPlan {
+    let can_project = application_root
+        && query.covered_by(
+            |attr| matches!(attr, "name" | "role" | "class_name" | "control_type_id"),
+            query.output == QueryOutput::Count,
+        );
+    plan_query(query, can_project.then_some(ReadStrategy::Projected))
 }
 
 /// Keep only prospective hits alive until this query hydrates them. Native
@@ -4629,79 +4812,7 @@ impl Provider for WindowsProvider {
     }
 
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        uia_gate("get_children")?;
-        let dpi = &crate::dpi::DpiScope::enter()?;
-        match element {
-            None => {
-                // Top-level: enumerate the desktop root's named top-level
-                // windows, then group them by pid — one synthesized
-                // Application node per process, in first-seen (z-) order,
-                // with that pid's first window as the representative. The old
-                // code returned one entry per window (issue #304's shape);
-                // grouping now reports one Application node per process on
-                // every platform, and the windows are the node's children.
-                let (windows, _unlisted) = self.desktop_app_windows(dpi)?;
-
-                let mut seen = HashSet::new();
-                let mut results = Vec::new();
-                for (el, pid) in windows {
-                    if !seen.insert(pid) {
-                        continue;
-                    }
-                    results.push(self.build_synthetic_app_data(pid, &el)?);
-                }
-                Ok(results)
-            }
-            Some(element_data) => {
-                // A synthesized Application node answers with the process's
-                // top-level windows — a process-wide UIA query, not a tree
-                // walk, because the node deliberately has no live element
-                // behind it. This uniform "windows are the Application node's
-                // children" answer is what makes `App::windows` identical
-                // across platforms, and an empty result is the truth of a
-                // process whose last window closed.
-                if let Some(identity) = self.synthetic_app_identity_checked(element_data.handle)? {
-                    return self.synthetic_app_windows(dpi, element_data, identity, true);
-                }
-                let uia = self.get_cached(element_data.handle)?;
-                // The parent having gone is its own staleness, not "no
-                // children".
-                let children = self
-                    .uia_children(dpi, &uia)
-                    .map_err(|e| stale_if_gone(element_data, e))?;
-                if children.is_empty() {
-                    return Ok(Vec::new());
-                }
-                // The parent's nearest window, remembered when it was built,
-                // so the whole level costs one lookup. A parent that
-                // vanished during a fallback walk has no children to report.
-                let Some(host_hwnd) = live_snapshot(self.host_hwnd_of(element_data.handle, &uia))?
-                else {
-                    return Ok(Vec::new());
-                };
-                // Likewise the scroll clip: one refresh of the parent.
-                let Some(clip) =
-                    live_snapshot(self.children_clip_of(dpi, element_data.handle, &uia))?
-                else {
-                    return Ok(Vec::new());
-                };
-                let pid = element_data.pid;
-                let mut data = Vec::with_capacity(children.len());
-                for child in children {
-                    if let Some(child) = live_snapshot(self.build_element_data_in(
-                        dpi,
-                        &child,
-                        pid,
-                        host_hwnd,
-                        HostHint::Parent,
-                        &clip,
-                    ))? {
-                        data.push(child);
-                    }
-                }
-                Ok(data)
-            }
-        }
+        self.observed_children(element, &mut ScrollObservation::default())
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
@@ -5300,7 +5411,13 @@ impl Provider for WindowsProvider {
         // HWND-rooted searches use the native subtree resolver's root and
         // identity ordering. Keep that contract until it has a projected
         // native implementation too; do not substitute a descendants walk.
-        if !is_synthetic_handle(root.handle) || !metadata_query(group) {
+        if uia_query_plan(
+            Query::new(group, QueryOutput::Count, limit),
+            is_synthetic_handle(root.handle),
+        )
+        .strategy
+            == ReadStrategy::ResolveElements
+        {
             return Ok(self
                 .find_elements_group(root, group, limit, max_depth)?
                 .len());
@@ -5340,8 +5457,23 @@ impl Provider for WindowsProvider {
         // and each is walked natively. Same shape as the fragment-element
         // fallback further down — the walk is the honest primitive for a
         // root that is not a UIA HWND fragment.
-        if is_synthetic_handle(root.handle) {
-            if projected_find_query(group, limit) {
+        let application_root = is_synthetic_handle(root.handle);
+        let query = Query::new(group, QueryOutput::Elements, limit);
+        let history = history_key(query, root.handle, max_depth);
+        let sample = history.and_then(|key| {
+            self.query_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .copied()
+                .flatten()
+        });
+        let plan = uia_query_plan(
+            sample.map_or(query, |sample| sample.apply(query)),
+            application_root,
+        );
+        if application_root {
+            if plan.strategy == ReadStrategy::Projected {
                 // Resolving a sparse role/name selector (in particular a
                 // unique window action) must walk the whole application,
                 // but need not read every control's text, patterns, geometry
@@ -5391,6 +5523,11 @@ impl Provider for WindowsProvider {
                         walk_limit,
                         max_depth,
                     )?;
+                    // A shared ancestor can only save a read across multiple
+                    // hydrations. Single hits do not pay for identity lookups.
+                    if matches.len() > 1 {
+                        walk.reads.borrow_mut().ancestors = Some(HashMap::new());
+                    }
                     let mut out = Vec::with_capacity(matches.len());
                     let mut dropped = false;
                     for matched in matches {
@@ -5423,7 +5560,12 @@ impl Provider for WindowsProvider {
                                 element.BuildUpdatedCache(self.batch_request.get(dpi))
                             })?;
                             let host = self.host_hwnd_of(matched.handle, &fresh)?;
-                            let clip = self.inherited_clip_of(dpi, matched.handle, &fresh)?;
+                            let clip = self.inherited_clip_of(
+                                dpi,
+                                matched.handle,
+                                &fresh,
+                                &mut walk.reads.borrow_mut(),
+                            )?;
                             self.build_element_data_in(
                                 dpi,
                                 &fresh,
@@ -5449,6 +5591,7 @@ impl Provider for WindowsProvider {
                         if let Some(limit) = limit {
                             out.truncate(limit);
                         }
+                        walk.remember_cardinality(history, &out);
                         return Ok(out);
                     }
                     // A hit that vanished or ceased matching during hydration
@@ -5459,13 +5602,15 @@ impl Provider for WindowsProvider {
                 }
             }
             let walk = CanonicalWalk::new(self);
-            return xa11y_core::selector::find_elements_in_tree_group(
+            let matches = xa11y_core::selector::find_elements_in_tree_group(
                 |el| walk.children(el),
                 Some(root),
                 group,
                 limit,
                 max_depth,
-            );
+            )?;
+            walk.remember_cardinality(history, &matches);
+            return Ok(matches);
         }
 
         // ── Phase-1 limit short-circuit ───────────────────────────
@@ -5475,21 +5620,7 @@ impl Provider for WindowsProvider {
         // multiple clauses, phase-1 must collect the full union before
         // truncating because cross-clause doc-order can promote later-clause
         // hits ahead of earlier ones.
-        let phase1_limit = if group.clauses.len() == 1 {
-            let first = &group.clauses[0].segments[0].simple;
-            let outer = if group.clauses[0].segments.len() == 1 {
-                limit
-            } else {
-                None
-            };
-            match (outer, first.nth) {
-                (Some(l), Some(n)) => Some(l.max(n)),
-                (_, Some(n)) => Some(n),
-                (l, None) => l,
-            }
-        } else {
-            None
-        };
+        let phase1_limit = plan.first_stage_limit;
 
         // ── Subtree group walk ─────────────────────────────────────
         // Do ONE `FindAllBuildCache(TreeScope_Subtree)` and evaluate every
@@ -10926,36 +11057,62 @@ mod tests {
 
     #[test]
     fn metadata_queries_require_every_selector_property_to_be_projected() {
-        for selector in [
-            "button",
-            r#"text_field[name="Notes"]"#,
-            r#"button[name*="o"]:nth(2), window"#,
-            r#"[class_name="Edit"]"#,
-            r#"[control_type_id="50000"]"#,
+        for (selector, expected) in [
+            ("button", ReadStrategy::Projected),
+            (r#"text_field[name="Notes"]"#, ReadStrategy::Projected),
+            (
+                r#"button[name*="o"]:nth(2), window"#,
+                ReadStrategy::Projected,
+            ),
+            (r#"[class_name="Edit"]"#, ReadStrategy::Projected),
+            (r#"[control_type_id="50000"]"#, ReadStrategy::Projected),
+            ("window button", ReadStrategy::ResolveElements),
+            (r#"button[enabled="true"]"#, ReadStrategy::ResolveElements),
+            (r#"button[visible="false"]"#, ReadStrategy::ResolveElements),
+            (r#"[value="hello"]"#, ReadStrategy::ResolveElements),
+            (r#"[stable_id="button"]"#, ReadStrategy::ResolveElements),
         ] {
-            assert!(
-                metadata_query(&xa11y_core::SelectorGroup::parse(selector).unwrap()),
-                "{selector}"
+            let group = xa11y_core::SelectorGroup::parse(selector).unwrap();
+            let query = Query::new(&group, QueryOutput::Count, None);
+            assert_eq!(uia_query_plan(query, true).strategy, expected, "{selector}");
+            assert_eq!(
+                uia_query_plan(query, false).strategy,
+                ReadStrategy::ResolveElements
             );
         }
-        for selector in [
-            "window button",
-            r#"button[enabled="true"]"#,
-            r#"button[visible="false"]"#,
-            r#"[value="hello"]"#,
-            r#"[stable_id="button"]"#,
-        ] {
-            assert!(
-                !metadata_query(&xa11y_core::SelectorGroup::parse(selector).unwrap()),
-                "{selector}"
-            );
-        }
-        let ordinal = xa11y_core::SelectorGroup::parse("button:nth(2)").unwrap();
-        assert!(metadata_query(&ordinal), "counts need no hydration");
-        assert!(
-            !projected_find_query(&ordinal, Some(1)),
-            "per-clause ordinals must select among complete live snapshots"
+    }
+
+    #[test]
+    fn history_only_ranks_legal_reads_for_the_same_unbounded_search() {
+        let group = xa11y_core::SelectorGroup::parse("button[name^='Probe']").expect("selector");
+        let query = Query::new(&group, QueryOutput::Elements, None);
+        let root = SYNTHETIC_APP_TAG | 42;
+        let key = history_key(query, root, None).expect("complete named search");
+        assert_ne!(history_key(query, root, Some(1)), Some(key));
+        assert_ne!(history_key(query, root + 1, None), Some(key));
+        assert_eq!(
+            history_key(
+                Query::new(&group, QueryOutput::Elements, Some(1)),
+                root,
+                None
+            ),
+            None
         );
+        assert_eq!(
+            history_key(Query::new(&group, QueryOutput::Count, None), root, None),
+            None
+        );
+        for (hits, expected) in [
+            (1, ReadStrategy::Projected),
+            (32, ReadStrategy::ResolveElements),
+        ] {
+            let estimated = WpfQuerySample { nodes: 79, hits }.apply(query);
+            assert_eq!(uia_query_plan(estimated, true).strategy, expected);
+            assert_eq!(
+                uia_query_plan(estimated, false).strategy,
+                ReadStrategy::ResolveElements
+            );
+        }
     }
 
     #[test]
@@ -10987,7 +11144,8 @@ mod tests {
         ] {
             let group = xa11y_core::SelectorGroup::parse(selector).unwrap();
             assert_eq!(
-                projected_find_query(&group, limit),
+                uia_query_plan(Query::new(&group, QueryOutput::Elements, limit), true).strategy
+                    == ReadStrategy::Projected,
                 projected,
                 "{selector}, limit={limit:?}"
             );

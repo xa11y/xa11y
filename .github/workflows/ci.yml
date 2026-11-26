@@ -240,6 +240,9 @@ jobs:
         timeout-minutes: 15
         run: cargo xtask test-integ ia2
 
+      - name: Check repeated WPF queries after scrolling and reparenting
+        run: cargo xtask test-integ wpf_repeated_queries_observe_scroll_reparenting_and_removal
+
       # strands-xa11y claims macOS, Windows and Linux. A headless runner
       # cannot drive a desktop, but it can prove the package imports and that
       # both tool schemas build here. Linux is covered by the `strands` job.

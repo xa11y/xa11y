@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
+use xa11y_core::query_plan::{plan_query, Query, QueryOutput};
 
 use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
@@ -5831,22 +5832,8 @@ impl Provider for MacOSProvider {
         // For N>=2, phase-1 must collect the full union before truncating
         // because cross-clause doc-order can promote later-clause hits
         // ahead of earlier ones.
-        let phase1_walk_limit = if group.clauses.len() == 1 {
-            let clause = &group.clauses[0];
-            let first = firsts[0];
-            let outer = if clause.segments.len() == 1 {
-                limit
-            } else {
-                None
-            };
-            match (outer, first.nth) {
-                (Some(l), Some(n)) => Some(l.max(n)),
-                (_, Some(n)) => Some(n),
-                (l, None) => l,
-            }
-        } else {
-            None
-        };
+        let phase1_walk_limit =
+            plan_query(Query::new(group, QueryOutput::Elements, limit), []).first_stage_limit;
 
         // Phase 1 walks and snapshots in one pass. A hit that died between
         // the AX walk and its snapshot is dropped — it is not a match any

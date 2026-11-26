@@ -240,7 +240,8 @@ impl WindowsProvider {
         e: &IUIAutomationElement,
     ) -> Result<ElementData> {
         let fresh = uia_call(|| self.populate_cache(dpi, e))?;
-        let clip = self.walk_inherited_clip(dpi, &fresh)?;
+        let clip =
+            self.walk_inherited_clip(dpi, &fresh, &mut super::ScrollObservation::default())?;
         let host = self.walk_to_host_hwnd(&fresh)?;
         let pid = uia_call(|| unsafe { fresh.CachedProcessId() })?;
         let pid = u32::try_from(pid).map_err(|_| {

@@ -317,3 +317,67 @@ fn windows_rich_button_refuses_text() {
     assert!(button.cell.is_none());
     assert!(button.collection.is_none());
 }
+
+#[test]
+#[ignore]
+fn wpf_repeated_queries_observe_scroll_reparenting_and_removal() {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Child, Command};
+
+    struct Fixture(Child);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            // The window may already have closed; always reap the child.
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-apps/wpf/query-scroll.ps1");
+    let child = Fixture(
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-STA", "-File"])
+            .arg(script)
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW for the console host
+            .spawn()
+            .expect("launch WPF scrolling fixture"),
+    );
+    let timeout = Duration::from_secs(10);
+    let app = App::by_pid(child.0.id(), timeout).expect("attach to WPF");
+    let first = app.locator("button[name='Probe 0']");
+    let last = app.locator("button[name='Probe 31']");
+    let rows = app.locator("button[name^='Probe']");
+    first
+        .wait_for_state(ElementState::Visible, timeout)
+        .expect("first row visible");
+    // The second complete lookup has a cardinality observation from the first.
+    for _ in 0..2 {
+        let all = rows.elements().expect("all rows");
+        assert_eq!(all.len(), 32);
+        assert!(all[0].states.visible);
+        assert!(!all[31].states.visible);
+    }
+    first.press().expect("scroll to end");
+    last.wait_for_state(ElementState::Visible, timeout)
+        .expect("last row visible");
+    let all = rows.elements().expect("scrolled rows");
+    assert!(!all[0].states.visible);
+    assert!(all[31].states.visible);
+
+    last.press().expect("replace scroll container");
+    app.locator("button[name='Probe 1']")
+        .wait_for_state(ElementState::Detached, timeout)
+        .expect("removed row detached");
+    for _ in 0..2 {
+        let remaining = rows.elements().expect("reparented rows");
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|e| e.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("Probe 31"), Some("Probe 0")]
+        );
+        assert!(remaining.iter().all(|e| e.states.visible));
+    }
+}
