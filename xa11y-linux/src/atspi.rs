@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
 use xa11y_core::query_plan::{plan_query, Query, QueryOutput, ReadStrategy};
+use xa11y_core::selector::{match_op, matches_simple, RoleMatch, SimpleSelector};
 use xa11y_core::RelationKind;
 
 use bounded::Proxy;
@@ -118,6 +119,24 @@ impl AccessibleRef {
     fn is_null(&self) -> bool {
         self.path == "/org/a11y/atspi/null" || self.bus_name.is_empty() || self.path.is_empty()
     }
+}
+
+/// Live values observed while evaluating the clauses for one visited node.
+#[derive(Default)]
+struct QueryReads {
+    role_number: Option<u32>,
+    role: Option<Role>,
+    role_name: Option<String>,
+    name: Option<Option<String>>,
+    description: Option<Option<String>>,
+    value: Option<Option<String>>,
+    state_bits: Option<(u64, bool)>,
+    snapshot: Option<Box<ElementData>>,
+}
+
+struct QueryMatch {
+    aref: AccessibleRef,
+    role_number: Option<u32>,
 }
 
 /// The optional AT-SPI interfaces an object reports via
@@ -2166,24 +2185,7 @@ impl LinuxProvider {
         }
     }
 
-    /// Parse AT-SPI2 state bitfield into xa11y StateSet.
-    ///
-    /// Serves only the selector fast path, which never asks it for
-    /// `password`: that flag comes from the raw AT-SPI role rather than the
-    /// state bits, so `state_attr_to_string` has no arm for it and a
-    /// `[password=..]` filter takes the full-`ElementData` route instead. The
-    /// `false` passed here is therefore never read.
-    fn parse_states(&self, aref: &AccessibleRef, role: Role) -> StateSet {
-        self.parse_states_with_bits(aref, role, false).0
-    }
-
-    /// Like [`parse_states`], but also returns the raw AT-SPI state bitset so
-    /// callers can surface provider-only facts (notably DEFUNCT) that have no
-    /// cross-platform `StateSet` field.
-    ///
-    /// `password` is decided by the caller from the raw role (see
-    /// [`is_password_role`]); the mapped `Role` cannot carry it, because a
-    /// password field maps to `TextField` like any other entry.
+    /// Read and decode AT-SPI state, preserving its bits and read status.
     fn parse_states_with_bits(
         &self,
         aref: &AccessibleRef,
@@ -2191,7 +2193,14 @@ impl LinuxProvider {
         password: bool,
     ) -> (StateSet, u64, bool) {
         let (bits, state_read_ok) = self.state_bits(aref);
+        (
+            Self::decode_states(bits, state_read_ok, role, password),
+            bits,
+            state_read_ok,
+        )
+    }
 
+    fn decode_states(bits: u64, state_read_ok: bool, role: Role, password: bool) -> StateSet {
         // AT-SPI2 state bit positions: each is `1 << ordinal` of the
         // `AtspiStateType` enum in at-spi2-core's `atspi/atspi-constants.h`
         // (ICONIFIED=15, MODAL=16, SELECTED=23, VISIBLE=30, ...). Kept in
@@ -2234,7 +2243,7 @@ impl LinuxProvider {
             None
         };
 
-        let states = StateParts {
+        StateParts {
             enabled,
             visible,
             // An unread state set is not one read as empty: its zero bits
@@ -2278,8 +2287,7 @@ impl LinuxProvider {
             fullscreen: None,
             password,
         }
-        .into();
-        (states, bits, state_read_ok)
+        .into()
     }
 
     /// Find an application by PID.
@@ -2816,136 +2824,132 @@ impl LinuxProvider {
         }
     }
 
-    /// Check if an accessible ref matches a simple selector, fetching only the
-    /// attributes the selector actually requires.
-    ///
-    /// Filter routing (cheapest first):
-    ///   * `role` / `name` / `value` / `description` — single targeted D-Bus
-    ///     call against this accessible.
-    ///   * Normalized state attrs (`enabled`, `checked`, `focused`, …) —
-    ///     one shared `GetState` call, cached for the rest of this match.
-    ///   * Anything else (custom `raw` keys, `bounds`, numeric values) — fall
-    ///     through to building a full `ElementData` and delegating to
-    ///     [`xa11y_core::selector::matches_simple`]. This is slower but keeps
-    ///     selectors with rare attribute filters semantically equivalent to
-    ///     the default tree-traversal path.
+    /// Read only the fields required by this clause, sharing observations
+    /// with the other clauses evaluated at the same visit.
     fn matches_ref(
         &self,
         aref: &AccessibleRef,
-        simple: &xa11y_core::selector::SimpleSelector,
+        simple: &SimpleSelector,
         pid: Option<u32>,
-        role_number: Option<u32>,
+        reads: &mut QueryReads,
     ) -> bool {
-        // Resolve role only if the selector needs it (for either the role
-        // segment or any role/checked filter — checked depends on role).
+        // These values are already in the reference. Check them before any
+        // remote selector reads, regardless of their order in the clause.
+        if simple.filters.iter().any(|filter| {
+            let value = match filter.attr.as_str() {
+                "bus_name" => &aref.bus_name,
+                "stable_id" | "object_path" => &aref.path,
+                _ => return false,
+            };
+            !match_op(&filter.op, &filter.value, Some(value))
+        }) {
+            return false;
+        }
+
+        // Checked and the StaticText name fallback depend on normalized role.
         let needs_role = simple.role.is_some()
             || simple
                 .filters
                 .iter()
                 .any(|f| matches!(f.attr.as_str(), "role" | "checked"));
         let role = if needs_role {
-            Some(match role_number {
-                Some(number) => self.resolve_role_with_number(aref, number),
-                None => self.resolve_role(aref),
-            })
+            Some(*reads.role.get_or_insert_with(|| {
+                if reads.role_number.is_none() {
+                    reads.role_number = self.get_role_number(aref).ok();
+                }
+                self.resolve_role_with_number(aref, reads.role_number.unwrap_or(0))
+            }))
         } else {
             None
         };
 
-        if let Some(ref role_match) = simple.role {
-            match role_match {
-                xa11y_core::selector::RoleMatch::Normalized(expected) => {
-                    if role != Some(*expected) {
-                        return false;
-                    }
-                }
-                xa11y_core::selector::RoleMatch::Platform(platform_role) => {
-                    let raw_role = self.get_role_name(aref).unwrap_or_default();
-                    if raw_role != *platform_role {
-                        return false;
-                    }
+        match &simple.role {
+            Some(RoleMatch::Normalized(expected)) if role != Some(*expected) => return false,
+            Some(RoleMatch::Platform(expected)) => {
+                let role_name = reads
+                    .role_name
+                    .get_or_insert_with(|| self.get_role_name(aref).unwrap_or_default());
+                if role_name != expected {
+                    return false;
                 }
             }
+            _ => {}
         }
 
-        let mut state_set: Option<StateSet> = None;
-        // Fetched at most once per match, and only if a filter reads Text /
-        // Value; a failed read gates both off, as in build_element_data.
-        let mut ifaces: Option<Interfaces> = None;
-        let mut value_of = |aref: &AccessibleRef| {
-            let ifaces =
-                *ifaces.get_or_insert_with(|| self.get_interfaces(aref).unwrap_or_default());
-            self.get_value(aref, ifaces)
-        };
+        let mut states = None;
 
         for filter in &simple.filters {
             let attr = filter.attr.as_str();
-            let resolved: Option<Option<String>> = match attr {
-                "role" => Some(role.map(|r| r.to_snake_case().to_string())),
+            let matches = |value| match_op(&filter.op, &filter.value, value);
+            let matched = match attr {
+                "role" => matches(role.map(Role::to_snake_case)),
                 "name" => {
-                    let name = self.get_name(aref).ok().filter(|s| !s.is_empty());
-                    // Mirror build_element_data: StaticText carries its name
-                    // in the Text interface's Value when Name is empty.
-                    let resolved = if name.is_none() && role == Some(Role::StaticText) {
-                        value_of(aref)
+                    let name = reads
+                        .name
+                        .get_or_insert_with(|| self.get_name(aref).ok().filter(|s| !s.is_empty()));
+                    // StaticText can carry its name in the Text interface.
+                    matches(if name.is_none() && role == Some(Role::StaticText) {
+                        self.query_value(aref, &mut reads.value)
                     } else {
-                        name
-                    };
-                    Some(resolved)
+                        name.as_deref()
+                    })
                 }
-                "value" => Some(value_of(aref)),
-                "description" => Some(self.get_description(aref).ok().filter(|s| !s.is_empty())),
+                "value" => matches(self.query_value(aref, &mut reads.value)),
+                "description" => matches(
+                    reads
+                        .description
+                        .get_or_insert_with(|| {
+                            self.get_description(aref).ok().filter(|s| !s.is_empty())
+                        })
+                        .as_deref(),
+                ),
                 "enabled" | "visible" | "focused" | "active" | "focusable" | "selected"
                 | "editable" | "modal" | "required" | "busy" | "expanded" | "checked" => {
-                    let s = state_set.get_or_insert_with(|| {
-                        // `parse_states` reads `checked` based on role; pass
-                        // whatever we already resolved (Unknown is a no-op for
-                        // the role-gated `checked` mapping).
-                        self.parse_states(aref, role.unwrap_or(Role::Unknown))
+                    let states = states.get_or_insert_with(|| {
+                        let (bits, ok) = *reads
+                            .state_bits
+                            .get_or_insert_with(|| self.state_bits(aref));
+                        Self::decode_states(bits, ok, role.unwrap_or(Role::Unknown), false)
                     });
-                    Some(state_attr_to_string(attr, s))
+                    matches(state_attr_to_string(attr, states).as_deref())
                 }
-                "stable_id" | "object_path" | "bus_name" => {
-                    // These snapshot fields are copied verbatim from the reference.
-                    let value = if attr == "bus_name" {
-                        &aref.bus_name
-                    } else {
-                        &aref.path
-                    };
-                    if !xa11y_core::selector::match_op(&filter.op, &filter.value, Some(value)) {
-                        return false;
-                    }
-                    if simple.role.is_none() && simple.filters.len() == 1 {
-                        return true;
-                    }
-                    // For a compound hit, retain the full matcher's normalized
-                    // role and attribute comparisons on the surviving candidate.
-                    None
+                "stable_id" | "object_path" | "bus_name"
+                    if simple.role.is_none() && simple.filters.len() == 1 =>
+                {
+                    return true;
                 }
-                _ => None, // Routed through full ElementData below.
+                _ => {
+                    // Compound reference filters and other fields that depend
+                    // on snapshots retain the shared matcher's semantics.
+                    let data = reads.snapshot.get_or_insert_with(|| {
+                        Box::new(self.build_element_data_in(
+                            aref,
+                            pid,
+                            &AncestorMemo::default(),
+                            reads.role_number,
+                        ))
+                    });
+                    return matches_simple(data, simple);
+                }
             };
-
-            match resolved {
-                Some(value) => {
-                    if !xa11y_core::selector::match_op(&filter.op, &filter.value, value.as_deref())
-                    {
-                        return false;
-                    }
-                }
-                None => {
-                    // Filter targets an attribute the fast path doesn't know
-                    // (e.g. `bounds`, `numeric_value`, a custom `raw` key).
-                    // Build the full ElementData once and let the shared
-                    // matcher handle every remaining filter — it dispatches
-                    // to `ElementData` fields and the `raw` map identically
-                    // to the default tree-traversal path.
-                    let data = self.build_element_data(aref, pid);
-                    return xa11y_core::selector::matches_simple(&data, simple);
-                }
+            if !matched {
+                return false;
             }
         }
-
         true
+    }
+
+    fn query_value<'a>(
+        &self,
+        aref: &AccessibleRef,
+        value: &'a mut Option<Option<String>>,
+    ) -> Option<&'a str> {
+        value
+            .get_or_insert_with(|| {
+                let ifaces = self.get_interfaces(aref).unwrap_or_default();
+                self.get_value(aref, ifaces)
+            })
+            .as_deref()
     }
 
     /// Select flat matches in document order before building snapshots.
@@ -2957,7 +2961,7 @@ impl LinuxProvider {
         limit: Option<usize>,
         max_depth: u32,
         first_stage_limit: Option<usize>,
-    ) -> Result<Vec<AccessibleRef>> {
+    ) -> Result<Vec<QueryMatch>> {
         let clauses: Vec<_> = group
             .clauses
             .iter()
@@ -2981,7 +2985,7 @@ impl LinuxProvider {
                 if clauses[clause]
                     .nth
                     .is_some_and(|nth| nth != positions[clause])
-                    || !seen.insert((node.bus_name.clone(), node.path.clone()))
+                    || !seen.insert((node.aref.bus_name.clone(), node.aref.path.clone()))
                 {
                     return None;
                 }
@@ -2992,7 +2996,7 @@ impl LinuxProvider {
     }
 
     /// ONE DFS over the subtree, evaluating each clause's first SimpleSelector
-    /// against every visited node. Emits `(clause_idx, AccessibleRef)` pairs
+    /// against every visited node. Emits `(clause_idx, QueryMatch)` pairs
     /// in document order; a node that matches multiple clauses is emitted
     /// once per matching clause (the merge step in `find_elements_group`
     /// collapses these by `(bus_name, path)` identity).
@@ -3003,12 +3007,12 @@ impl LinuxProvider {
     fn collect_matching_refs_group(
         &self,
         parent: &AccessibleRef,
-        clauses: &[&xa11y_core::selector::SimpleSelector],
+        clauses: &[&SimpleSelector],
         depth: u32,
         max_depth: u32,
         limit: Option<usize>,
         pid: Option<u32>,
-    ) -> Result<Vec<(usize, AccessibleRef)>> {
+    ) -> Result<Vec<(usize, QueryMatch)>> {
         if depth > max_depth {
             return Ok(vec![]);
         }
@@ -3081,15 +3085,25 @@ impl LinuxProvider {
         // that variant specifically and keep tolerating everything else.
         // Per-child batches: matches collected during that child's subtree
         // walk, plus the first AccessibilityNotEnabled error (if any).
-        type ChildBatch = (Vec<(usize, AccessibleRef)>, Option<Error>);
+        type ChildBatch = (Vec<(usize, QueryMatch)>, Option<Error>);
         let per_child: Vec<ChildBatch> = to_search
             .par_iter()
             .map(carry_deadline(
                 |(child, number): &(AccessibleRef, Option<u32>)| {
-                    let mut child_results: Vec<(usize, AccessibleRef)> = Vec::new();
+                    let mut child_results: Vec<(usize, QueryMatch)> = Vec::new();
+                    let mut reads = QueryReads {
+                        role_number: *number,
+                        ..Default::default()
+                    };
                     for (idx, simple) in clauses.iter().enumerate() {
-                        if self.matches_ref(child, simple, pid, *number) {
-                            child_results.push((idx, child.clone()));
+                        if self.matches_ref(child, simple, pid, &mut reads) {
+                            child_results.push((
+                                idx,
+                                QueryMatch {
+                                    aref: child.clone(),
+                                    role_number: reads.role_number,
+                                },
+                            ));
                         }
                     }
                     match self.collect_matching_refs_group(
@@ -3303,8 +3317,8 @@ impl Provider for LinuxProvider {
             let memo = AncestorMemo::default();
             return Ok(refs
                 .par_iter()
-                .map(carry_deadline(|node: &AccessibleRef| {
-                    self.build_element_data_in(node, root.pid, &memo, None)
+                .map(carry_deadline(|node: &QueryMatch| {
+                    self.build_element_data_in(&node.aref, root.pid, &memo, node.role_number)
                 }))
                 .collect());
         }
@@ -3317,7 +3331,7 @@ impl Provider for LinuxProvider {
             .collect();
         let start_ref = self.get_cached(root.handle)?;
         let pid_from_root = root.pid;
-        let phase1: Vec<(usize, AccessibleRef)> = self.collect_matching_refs_group(
+        let phase1: Vec<(usize, QueryMatch)> = self.collect_matching_refs_group(
             &start_ref,
             &firsts,
             0,
@@ -3329,7 +3343,7 @@ impl Provider for LinuxProvider {
         // Bucket phase-1 hits by clause so each clause's tail can narrow
         // independently. `walk_pos` preserves the doc-order rank from the
         // single walk for the final merge.
-        let mut by_clause: Vec<Vec<(usize, AccessibleRef)>> =
+        let mut by_clause: Vec<Vec<(usize, QueryMatch)>> =
             (0..group.clauses.len()).map(|_| Vec::new()).collect();
         for (walk_pos, (clause_idx, aref)) in phase1.into_iter().enumerate() {
             by_clause[clause_idx].push((walk_pos, aref));
@@ -3356,13 +3370,18 @@ impl Provider for LinuxProvider {
             let memo = AncestorMemo::default();
             let phase1_data: Vec<(usize, ElementData)> = hits
                 .par_iter()
-                .map(carry_deadline(|(pos, aref): &(usize, AccessibleRef)| {
+                .map(carry_deadline(|(pos, node): &(usize, QueryMatch)| {
                     // `root` is always present now, so the PID comes from
                     // the root element. No need to re-resolve via
                     // `get_app_pid` / `get_dbus_pid`.
                     (
                         *pos,
-                        self.build_element_data_in(aref, pid_from_root, &memo, None),
+                        self.build_element_data_in(
+                            &node.aref,
+                            pid_from_root,
+                            &memo,
+                            node.role_number,
+                        ),
                     )
                 }))
                 .collect();
@@ -7932,10 +7951,13 @@ mod tests {
         assert!(msg.contains("/org/a11y/atspi/accessible/3"), "{msg}");
     }
 
-    /// Per-object counters for the Text / Value reads a fake atk-bridge
-    /// object answers even when it does not report those interfaces.
+    /// Per-object read counters for the simulated AT-SPI peer.
     #[derive(Default)]
     struct InterfaceProbes {
+        role: AtomicU64,
+        name: AtomicU64,
+        state: AtomicU64,
+        enabled: std::sync::atomic::AtomicBool,
         text: std::sync::atomic::AtomicUsize,
         value: std::sync::atomic::AtomicUsize,
     }
@@ -7955,6 +7977,7 @@ mod tests {
         role: &'static str,
         children: Vec<&'static str>,
         interfaces: Vec<&'static str>,
+        probes: Arc<InterfaceProbes>,
     }
 
     #[zbus::interface(name = "org.a11y.atspi.Accessible")]
@@ -7971,6 +7994,23 @@ mod tests {
                 .collect()
         }
 
+        fn get_role(&self) -> u32 {
+            self.probes.role.fetch_add(1, Ordering::SeqCst);
+            match self.role {
+                "application" => ATSPI_ROLE_APPLICATION,
+                "push button" => 43,
+                "entry" => 79,
+                "slider" => 51,
+                other => panic!("unexpected fixture role {other}"),
+            }
+        }
+
+        fn get_state(&self) -> Vec<u32> {
+            self.probes.state.fetch_add(1, Ordering::SeqCst);
+            let enabled_bit = u32::from(self.probes.enabled.load(Ordering::SeqCst)) << 8;
+            vec![enabled_bit, 0]
+        }
+
         fn get_role_name(&self) -> &str {
             self.role
         }
@@ -7981,6 +8021,7 @@ mod tests {
 
         #[zbus(property)]
         fn name(&self) -> &str {
+            self.probes.name.fetch_add(1, Ordering::SeqCst);
             self.name
         }
     }
@@ -8101,6 +8142,7 @@ mod tests {
                             role: "application",
                             children: vec!["/plain", "/entry", "/slider"],
                             interfaces: vec![ACC],
+                            probes: Default::default(),
                         },
                     )
                     .expect("root interface");
@@ -8113,6 +8155,7 @@ mod tests {
                             role,
                             children: vec![],
                             interfaces,
+                            probes: probes.clone(),
                         },
                     )
                     .expect("accessible")
@@ -8236,6 +8279,42 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].numeric_value, single[0].numeric_value);
         assert_eq!(fx.slider.value() - reads, reads);
+    }
+
+    #[test]
+    fn query_reads_are_shared_across_clauses_and_refreshed_on_the_next_query() {
+        let fx = interface_peer();
+        let app = xa11y_core::App::from_data(fx.provider.clone(), fx.root.clone());
+        let slider = &fx.slider;
+        slider.enabled.store(true, Ordering::SeqCst);
+        let locator = app.locator(
+            r#"slider[name="Volume"][enabled="true"], slider[name^="Vol"][enabled="true"]"#,
+        );
+
+        assert_eq!(locator.count().expect("count enabled slider"), 1);
+        assert_eq!(slider.name.load(Ordering::SeqCst), 1);
+        assert_eq!(slider.state.load(Ordering::SeqCst), 1);
+
+        slider.enabled.store(false, Ordering::SeqCst);
+        assert_eq!(locator.count().expect("count disabled slider"), 0);
+        assert_eq!(slider.name.load(Ordering::SeqCst), 2);
+        assert_eq!(slider.state.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn reference_filters_reject_before_property_reads_and_hits_reuse_the_role_probe() {
+        let fx = interface_peer();
+        let app = xa11y_core::App::from_data(fx.provider.clone(), fx.root.clone());
+        let missing = app.locator(r#"slider[name="Volume"][enabled="true"][stable_id="/missing"]"#);
+        assert_eq!(missing.count().expect("missing identifier"), 0);
+        assert_eq!(fx.slider.name.load(Ordering::SeqCst), 0);
+        assert_eq!(fx.slider.state.load(Ordering::SeqCst), 0);
+
+        let before = fx.slider.role.load(Ordering::SeqCst);
+        let found = app.locator("slider").elements().expect("slider snapshot");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].role, Role::Slider);
+        assert_eq!(fx.slider.role.load(Ordering::SeqCst) - before, 1);
     }
 
     // ── #484: method timeout and unresponsive-peer errors ────────────────
