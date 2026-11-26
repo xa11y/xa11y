@@ -4166,7 +4166,7 @@ use xa11y_core::selector::{match_op, SimpleSelector};
 #[cfg(test)]
 fn matches_ax(ax: AXUIElementRef, simple: &SimpleSelector) -> bool {
     if ax.is_null() {
-        return false;
+        return simple.role.is_none() && simple.filters.is_empty();
     }
     let raw_role = ax_string(ax, "AXRole").unwrap_or_default();
     let subrole = ax_string(ax, "AXSubrole");
