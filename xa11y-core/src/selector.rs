@@ -872,13 +872,23 @@ pub fn matches_simple(element: &ElementData, simple: &SimpleSelector) -> bool {
 /// The format produced here is the match contract consumers depend on — it
 /// must stay byte-for-byte identical to what a now-removed
 /// `populate_attributes`-driven map would have yielded.
-fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
+fn resolve_attr<'a>(element: &'a ElementData, name: &str) -> Option<std::borrow::Cow<'a, str>> {
+    use std::borrow::Cow;
     match name {
-        "role" => Some(element.role.to_snake_case().to_string()),
-        "name" => element.name.clone(),
-        "value" => element.value.clone(),
-        "description" => element.description.clone(),
-        "placeholder" => element.placeholder.clone(),
+        "role" => Some(Cow::Borrowed(element.role.to_snake_case())),
+        "name" => element.name.as_deref().map(Cow::Borrowed),
+        "value" => element.value.as_deref().map(Cow::Borrowed),
+        "description" => element.description.as_deref().map(Cow::Borrowed),
+        "placeholder" => element.placeholder.as_deref().map(Cow::Borrowed),
+        "stable_id" => element.stable_id.as_deref().map(Cow::Borrowed),
+        "web_role" => element.web_role.as_deref().map(Cow::Borrowed),
+        "url" => element.link_url.as_deref().map(Cow::Borrowed),
+        _ => formatted_attr(element, name).map(Cow::Owned),
+    }
+}
+
+fn formatted_attr(element: &ElementData, name: &str) -> Option<String> {
+    match name {
         "bounds" => element.bounds.as_ref().map(|b| {
             serde_json::json!({
                 "x": b.x, "y": b.y, "width": b.width, "height": b.height,
@@ -888,7 +898,6 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
         "numeric_value" => number_to_string(element.numeric_value),
         "min_value" => number_to_string(element.min_value),
         "max_value" => number_to_string(element.max_value),
-        "stable_id" => element.stable_id.clone(),
         // Table and collection positions. `row` is the grid row the element
         // is in: a cell's row, or a row's own index.
         "row" => element
@@ -922,8 +931,6 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
             .map(|h| h.to_snake_case().to_string()),
         "heading_level" => element.heading_level.map(|n| n.to_string()),
         "landmark_type" => element.landmark_type.map(|l| l.to_snake_case().to_string()),
-        "web_role" => element.web_role.clone(),
-        "url" => element.link_url.clone(),
         "live" => element
             .live_region
             .as_ref()
