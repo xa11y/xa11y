@@ -90,6 +90,56 @@ def test_locator_queries(app, measure):
     measure("ready wait", ok.wait_enabled, lambda node: node.name == "OK")
 
 
+@pytest.mark.skipif(platform.system() != "Linux", reason="AT-SPI query benchmarks")
+def test_atspi_query_reads(app, measure):
+    def identities(nodes):
+        return [node.stable_id for node in nodes]
+
+    buttons = app.locator("button").elements()
+    expected_buttons = identities(buttons)
+    assert len(expected_buttons) >= 3 and all(expected_buttons)
+
+    overlapping = app.locator('button, button[name*="o"]')
+    measure(
+        "overlapping button union count", overlapping.count,
+        lambda count: count == len(expected_buttons),
+    )
+    measure("overlapping button union exists", overlapping.exists, lambda found: found is True)
+    measure(
+        "overlapping button union elements", overlapping.elements,
+        lambda nodes: identities(nodes) == expected_buttons,
+    )
+
+    expected_filtered = sum(
+        node.enabled and any(letter in (node.name or "").lower() for letter in ("o", "k"))
+        for node in buttons
+    )
+    assert expected_filtered > 0
+    name_and_state = app.locator(
+        'button[name*="o"][enabled="true"], button[name*="k"][enabled="true"]'
+    )
+    measure(
+        "overlapping name and state count", name_and_state.count,
+        lambda count: count == expected_filtered,
+    )
+
+    by_bus = app.locator('button[bus_name^=":"]')
+    measure(
+        "compound button reference lookup", by_bus.elements,
+        lambda nodes: identities(nodes) == expected_buttons,
+    )
+
+    slider = app.locator("slider").element()
+    value = slider.numeric_value
+    assert value is not None
+    numeric = app.locator(f"slider[numeric_value={json.dumps(str(value))}]")
+    measure("numeric-value slider count", numeric.count, lambda count: count == 1)
+    measure(
+        "numeric-value slider lookup", numeric.element,
+        lambda node: slider.same_as(node) and node.numeric_value == value,
+    )
+
+
 def test_stable_id_query(app, measure):
     button = app.locator('button[name="OK"]').element()
     if not button.stable_id:
