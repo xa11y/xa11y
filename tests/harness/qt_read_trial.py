@@ -19,10 +19,19 @@ def snapshot(node):
 
 
 def run(app, fixture, selectors, rounds=8):
-    modes = ["ordinary", "packet", "pool2", "pool4", "project", "pool8"]
+    modes = ["ordinary", "packet", "pool2", "pool4", "project", "pool8", "pool1"]
     results = defaultdict(list)
     errors = {}
     print("FRAMEWORK", fixture, [(w.name, w.raw.get("uia_framework_id")) for w in app.children()], flush=True)
+    os.environ["XA11Y_QT_TRIAL"] = "ordinary"
+    all_nodes = app.locator("*").elements()
+    for role in ["*"] + sorted({el.role for el in all_nodes}):
+        expected_count = app.locator(role).count()
+        os.environ["XA11Y_QT_TRIAL"] = "packet"
+        count = app.locator(role).count()
+        os.environ["XA11Y_QT_TRIAL"] = "ordinary"
+        if count != expected_count:
+            print("COUNT_MISMATCH", fixture, role, expected_count, count, flush=True)
     for sel in selectors:
         loc = app.locator(sel)
         os.environ["XA11Y_QT_TRIAL"] = "ordinary"
