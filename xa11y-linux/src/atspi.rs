@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
-use xa11y_core::query_plan::{plan_query, ExecutionPlan, Query, QueryOutput, ReadStrategy};
+use xa11y_core::query_plan::{plan_query, Query, QueryOutput, ReadStrategy};
 use xa11y_core::RelationKind;
 
 use bounded::Proxy;
@@ -3218,11 +3218,7 @@ impl Provider for LinuxProvider {
         // The AT-SPI matcher reads any required attributes on demand, but
         // this count executor only deduplicates a single flat clause.
         let can_count_refs = group.is_single() && group.clauses[0].segments.len() == 1;
-        let plan = plan_query(
-            query,
-            can_count_refs.then_some(ReadStrategy::Projected),
-            |_, strategy| strategy == ReadStrategy::ResolveElements,
-        );
+        let plan = plan_query(query, can_count_refs.then_some(ReadStrategy::Projected));
         if plan.strategy == ReadStrategy::ResolveElements {
             return Ok(self
                 .find_elements_group(root, group, limit, max_depth)?
@@ -3290,8 +3286,8 @@ impl Provider for LinuxProvider {
         // clause M's in doc order, so we need the union before truncating.
         // (Critical on Electron-scale apps where this prevents 50k-node
         // walks.)
-        let phase1_limit = ExecutionPlan::resolve(Query::new(group, QueryOutput::Elements, limit))
-            .first_stage_limit;
+        let phase1_limit =
+            plan_query(Query::new(group, QueryOutput::Elements, limit), []).first_stage_limit;
 
         let pid_from_root = root.pid;
         let phase1: Vec<(usize, AccessibleRef)> = self.collect_matching_refs_group(

@@ -3,8 +3,8 @@
 Windows UI Automation can walk full records in batches or walk projected
 role/name records and fetch each matching element in full. This experiment
 forces both legal strategies for the same selector. It also tests two
-short-lived caches and a replaceable cost function. The production planner
-keeps the existing provider policies.
+short-lived caches and a replaceable cost function. All three native providers
+now use one planner and cost policy. Each supplies the read strategies it can execute for the given scope and selector.
 
 ## Workload and controls
 
@@ -108,4 +108,5 @@ prediction must still execute a legal plan.
 include both series. The raw mode names are full, projected, view (viewport
 cache), memo (ancestor cache), estimated and count. Only scroll-parent and
 viewport-refresh have instrumented durations. A missing operation had no
-observed calls. The PR includes the isolated benchmark patch and fixture.
+observed calls. The [benchmark patch and fixture](https://github.com/xa11y/xa11y/pull/728#issuecomment-7198133250)
+apply to the measured revision, `2f08e3d`.

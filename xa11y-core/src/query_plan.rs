@@ -81,21 +81,50 @@ pub struct ExecutionPlan {
     pub first_stage_limit: Option<usize>,
 }
 
-impl ExecutionPlan {
-    /// A backend with one element resolver still shares the limit analysis.
-    pub fn resolve(query: Query<'_>) -> Self {
-        Self {
-            strategy: ReadStrategy::ResolveElements,
-            first_stage_limit: query.first_stage_limit(),
+/// Plan a native query from the legal reads the provider offers for this
+/// scope. All providers use the same production cost policy. An empty set
+/// of alternatives still receives the shared traversal-limit analysis.
+pub fn plan_query(
+    query: Query<'_>,
+    alternatives: impl IntoIterator<Item = ReadStrategy>,
+) -> ExecutionPlan {
+    choose_plan(query, alternatives, read_cost)
+}
+
+// Relative ranks retain the measured sparse/dense crossover. Replace this
+// policy independently of which native reads are semantically eligible.
+fn read_cost(query: Query<'_>, strategy: ReadStrategy) -> u8 {
+    match strategy {
+        ReadStrategy::ResolveElements => 1,
+        ReadStrategy::Projected => {
+            let sparse = query.output == QueryOutput::Count
+                || query.limit.is_some_and(|limit| limit <= 2)
+                || query.group.clauses.iter().all(|clause| {
+                    clause.segments[0]
+                        .simple
+                        .filters
+                        .iter()
+                        .any(|f| f.attr == "name")
+                })
+                || query.group.clauses.iter().all(|clause| {
+                    matches!(
+                        clause.segments[0].simple.role,
+                        Some(crate::selector::RoleMatch::Normalized(
+                            crate::Role::Window | crate::Role::Dialog
+                        ))
+                    )
+                });
+            if sparse {
+                0
+            } else {
+                2
+            }
         }
     }
 }
 
-/// Select the lowest-cost legal strategy. The provider supplies scope and
-/// capability checks by offering only legal alternatives. A model can close
-/// over measurements from prior calls. Costs need only be comparable within
-/// this query. Ties keep the ordinary resolver.
-pub fn plan_query<C: Ord>(
+/// Costs are comparable within a single query. Equal costs keep the ordinary resolver.
+fn choose_plan<C: Ord>(
     query: Query<'_>,
     alternatives: impl IntoIterator<Item = ReadStrategy>,
     cost: impl Fn(Query<'_>, ReadStrategy) -> C,
@@ -120,21 +149,21 @@ mod tests {
         let query = Query::new(&group, QueryOutput::Elements, Some(1));
         let cheap_projection = |_: Query<'_>, strategy| strategy == ReadStrategy::ResolveElements;
         assert_eq!(
-            plan_query(query, [ReadStrategy::Projected], cheap_projection).strategy,
+            choose_plan(query, [ReadStrategy::Projected], cheap_projection).strategy,
             ReadStrategy::Projected
         );
         assert_eq!(
-            plan_query(query, [ReadStrategy::Projected], |_, s| s
+            choose_plan(query, [ReadStrategy::Projected], |_, s| s
                 == ReadStrategy::Projected)
             .strategy,
             ReadStrategy::ResolveElements
         );
         assert_eq!(
-            plan_query(query, [ReadStrategy::Projected], |_, _| 0).strategy,
+            choose_plan(query, [ReadStrategy::Projected], |_, _| 0).strategy,
             ReadStrategy::ResolveElements
         );
         assert_eq!(
-            plan_query(query, [], cheap_projection).strategy,
+            choose_plan(query, [], cheap_projection).strategy,
             ReadStrategy::ResolveElements
         );
     }
@@ -151,7 +180,7 @@ mod tests {
         ] {
             let group = SelectorGroup::parse(selector).unwrap();
             assert_eq!(
-                Query::new(&group, QueryOutput::Elements, limit).first_stage_limit(),
+                plan_query(Query::new(&group, QueryOutput::Elements, limit), []).first_stage_limit,
                 expected,
                 "{selector}"
             );

@@ -3448,43 +3448,7 @@ fn uia_query_plan(query: Query<'_>, application_root: bool) -> ExecutionPlan {
             |attr| matches!(attr, "name" | "role" | "class_name" | "control_type_id"),
             query.output == QueryOutput::Count,
         );
-    plan_query(
-        query,
-        can_project.then_some(ReadStrategy::Projected),
-        uia_query_cost,
-    )
-}
-
-// Relative ranks retain the measured sparse/dense crossover. Replace this
-// policy independently of which native reads are semantically eligible.
-fn uia_query_cost(query: Query<'_>, strategy: ReadStrategy) -> u8 {
-    match strategy {
-        ReadStrategy::ResolveElements => 1,
-        ReadStrategy::Projected => {
-            let sparse = query.output == QueryOutput::Count
-                || query.limit.is_some_and(|limit| limit <= 2)
-                || query.group.clauses.iter().all(|clause| {
-                    clause.segments[0]
-                        .simple
-                        .filters
-                        .iter()
-                        .any(|f| f.attr == "name")
-                })
-                || query.group.clauses.iter().all(|clause| {
-                    matches!(
-                        clause.segments[0].simple.role,
-                        Some(xa11y_core::selector::RoleMatch::Normalized(
-                            Role::Window | Role::Dialog
-                        ))
-                    )
-                });
-            if sparse {
-                0
-            } else {
-                2
-            }
-        }
-    }
+    plan_query(query, can_project.then_some(ReadStrategy::Projected))
 }
 
 /// Keep only prospective hits alive until this query hydrates them. Native

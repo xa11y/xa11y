@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use xa11y_core::handle_cache::{BoundedHandleCache, MAX_CACHED_ELEMENTS};
-use xa11y_core::query_plan::{ExecutionPlan, Query, QueryOutput};
+use xa11y_core::query_plan::{plan_query, Query, QueryOutput};
 
 use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
@@ -5833,8 +5833,7 @@ impl Provider for MacOSProvider {
         // because cross-clause doc-order can promote later-clause hits
         // ahead of earlier ones.
         let phase1_walk_limit =
-            ExecutionPlan::resolve(Query::new(group, QueryOutput::Elements, limit))
-                .first_stage_limit;
+            plan_query(Query::new(group, QueryOutput::Elements, limit), []).first_stage_limit;
 
         // Phase 1 walks and snapshots in one pass. A hit that died between
         // the AX walk and its snapshot is dropped — it is not a match any
