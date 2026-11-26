@@ -102,3 +102,34 @@ def test_owned_dialog_is_in_app_windows(app):
         # Native actions return when accepted, before Qt finishes closing.
         # Do not leave a disappearing dialog for the next window test.
         app.locator('button[name="Close Dialog"]').wait_hidden(timeout=5.0)
+
+
+def test_button_queries_follow_the_live_dialog_tree(app):
+    """Compare metadata queries with a full traversal as a dialog comes and goes."""
+    buttons = app.locator("button")
+    closer = app.locator('button[name="Close Dialog"]')
+
+    def check_buttons():
+        expected = [node for node in app.locator("*").elements() if node.role == "button"]
+        actual = buttons.elements()
+        assert buttons.count() == len(actual) == len(expected)
+        for want, got in zip(expected, actual, strict=True):
+            assert want.same_as(got)
+            assert (got.name, got.visible, got.bounds, got.actions) == (
+                want.name, want.visible, want.bounds, want.actions,
+            )
+        enabled = app.locator('button[enabled="true"]').elements()
+        expected_enabled = [node for node in expected if node.enabled]
+        assert len(enabled) == len(expected_enabled)
+        assert all(a.same_as(b) for a, b in zip(enabled, expected_enabled))
+        return [node.name for node in actual]
+
+    assert "Close Dialog" not in check_buttons()
+    app.locator('button[name="Open Dialog"]').press()
+    try:
+        closer.wait_visible(timeout=5)
+        assert check_buttons().count("Close Dialog") == 1
+    finally:
+        closer.press()
+        closer.wait_hidden(timeout=5)
+    assert "Close Dialog" not in check_buttons()

@@ -234,7 +234,7 @@ pub struct WindowsProvider {
     /// error rather than silently retargeting to the new process.
     synthetic_apps: Mutex<BoundedHandleCache<SyntheticAppIdentity>>,
     // Completed query cardinalities only. Contains no native references or element data.
-    query_history: Mutex<BoundedHandleCache<Option<WpfQuerySample>>>,
+    query_history: Mutex<BoundedHandleCache<Option<QueryCosts>>>,
 }
 
 // UIA's client objects (IUIAutomation, elements, cache requests, walkers)
@@ -1245,6 +1245,15 @@ impl WindowsProvider {
         element: &IUIAutomationElement,
         request: &IUIAutomationCacheRequest,
     ) -> Result<Vec<IUIAutomationElement>> {
+        let array = self.child_array_requested(element, request)?;
+        child_array_items(array)
+    }
+
+    fn child_array_requested(
+        &self,
+        element: &IUIAutomationElement,
+        request: &IUIAutomationCacheRequest,
+    ) -> Result<Option<IUIAutomationElementArray>> {
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         // An empty Vec reads downstream as "this element has no children", so
         // every failure propagates (tenet 1) after `uia_call`'s transient
@@ -1254,7 +1263,7 @@ impl WindowsProvider {
             element.FindAllBuildCache(TreeScope_Children, &true_cond, request)
         }) {
             Ok(arr) => arr,
-            Err(e) if e.code().is_ok() => return Ok(Vec::new()),
+            Err(e) if e.code().is_ok() => return Ok(None),
             Err(e) => {
                 return Err(Error::platform(
                     e.code().0 as i64,
@@ -1262,13 +1271,14 @@ impl WindowsProvider {
                 ))
             }
         };
-        (0..uia_len(&arr)?).map(|i| uia_get(&arr, i)).collect()
+        Ok(Some(arr))
     }
 
     fn observed_children(
         &self,
         element: Option<&ElementData>,
         reads: &mut ScrollObservation,
+        prefetched: Option<Result<Option<AgileChildArray>>>,
     ) -> Result<Vec<ElementData>> {
         uia_gate("get_children")?;
         let dpi = &crate::dpi::DpiScope::enter()?;
@@ -1307,9 +1317,14 @@ impl WindowsProvider {
                 let uia = self.get_cached(element_data.handle)?;
                 // The parent having gone is its own staleness, not "no
                 // children".
-                let children = self
-                    .uia_children(dpi, &uia)
-                    .map_err(|e| stale_if_gone(element_data, e))?;
+                let children = match prefetched {
+                    Some(packet) => packet.and_then(|array| {
+                        let array = array.map(|a| uia_call(|| a.resolve())).transpose()?;
+                        child_array_items(array)
+                    }),
+                    None => self.uia_children(dpi, &uia),
+                }
+                .map_err(|e| stale_if_gone(element_data, e))?;
                 if children.is_empty() {
                     return Ok(Vec::new());
                 }
@@ -1350,7 +1365,7 @@ impl WindowsProvider {
         parent: Option<&ElementData>,
         request: &IUIAutomationCacheRequest,
         walk: &CanonicalWalk<'_>,
-        batch_wpf: bool,
+        batch_window: bool,
     ) -> Result<Vec<ElementData>> {
         let Some(parent) = parent else {
             return self.get_children(None);
@@ -1363,13 +1378,16 @@ impl WindowsProvider {
             Some(native) => native.clone(),
             None => self.get_cached(parent.handle)?,
         };
-        // Only complete top-level WPF window snapshots carry the framework
-        // property. Descendants already belong to the query-local cached tree.
+        // A complete window snapshot identifies its provider. Descendants of
+        // a batched window already belong to this query-local tree.
         let cached_parent = if cached.is_some() {
             cached
-        } else if batch_wpf
+        } else if batch_window
             && matches!(parent.role, Role::Window | Role::Dialog)
-            && parent.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF")
+            && matches!(
+                parent.raw.get("uia_framework_id").and_then(|v| v.as_str()),
+                Some("WPF" | "Qt")
+            )
             && cached_own_hwnd(&element)?.is_some()
         {
             let tree = uia_call(|| unsafe { request.Clone() })?;
@@ -1396,7 +1414,7 @@ impl WindowsProvider {
                 Err(e) => {
                     return Err(Error::platform(
                         i64::from(e.code().0),
-                        format!("reading cached WPF children failed: {e}"),
+                        format!("reading cached UIA children failed: {e}"),
                     ))
                 }
             }
@@ -1635,6 +1653,80 @@ impl WindowsProvider {
     }
 }
 
+fn child_array_items(
+    array: Option<IUIAutomationElementArray>,
+) -> Result<Vec<IUIAutomationElement>> {
+    match array {
+        Some(array) => (0..uia_len(&array)?)
+            .map(|index| uia_get(&array, index))
+            .collect(),
+        None => Ok(Vec::new()),
+    }
+}
+
+type AgileChildArray = windows::core::AgileReference<IUIAutomationElementArray>;
+
+/// Overlap two native child-list reads while the resolver consumes snapshots in DFS order.
+/// Only the later sibling's native array crosses the traversal boundary. xa11y handles,
+/// clip validation and match evaluation still happen when the resolver visits that parent.
+#[derive(Default)]
+struct SiblingReads {
+    next: HashMap<u64, u64>,
+    ready: HashMap<u64, Result<Option<AgileChildArray>>>,
+}
+
+impl SiblingReads {
+    fn children(
+        &mut self,
+        walk: &CanonicalWalk<'_>,
+        parent: Option<&ElementData>,
+    ) -> Result<Vec<ElementData>> {
+        let provider = walk.provider;
+        let packet = parent.and_then(|p| {
+            if let Some(packet) = self.ready.remove(&p.handle) {
+                return Some(packet);
+            }
+            let sibling = self.next.remove(&p.handle)?;
+            let deadline = xa11y_core::deadline::Deadline::current();
+            let fetch = |handle| {
+                xa11y_core::deadline::Deadline::scope_opt(deadline.clone(), || {
+                    uia_gate("get_children")?;
+                    let dpi = crate::dpi::DpiScope::enter()?;
+                    let element = provider.get_cached(handle)?;
+                    match provider
+                        .child_array_requested(&element, provider.batch_request.get(&dpi))?
+                    {
+                        Some(array) if uia_len(&array)? > 0 => {
+                            uia_call(|| AgileChildArray::new(&array)).map(Some)
+                        }
+                        _ => Ok(None),
+                    }
+                })
+            };
+            let (current, later) = rayon::join(|| fetch(p.handle), || fetch(sibling));
+            self.ready.insert(sibling, later);
+            Some(current)
+        });
+        let children = walk.canonicalize(provider.observed_children(
+            parent,
+            &mut walk.reads.borrow_mut(),
+            packet,
+        )?)?;
+        // Start a pair only if the resolver asks for the first child's children.
+        // At the depth limit neither sibling is read. No work survives this query.
+        for pair in children.as_chunks::<2>().0 {
+            if pair[0].handle != pair[1].handle
+                && pair
+                    .iter()
+                    .all(|c| c.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("Qt"))
+            {
+                self.next.insert(pair[0].handle, pair[1].handle);
+            }
+        }
+        Ok(children)
+    }
+}
+
 /// Read-only facts from one traversal. Each retry, poll or subsequent call
 /// starts another observation, including after a scroll or reparenting.
 #[derive(Default)]
@@ -1685,21 +1777,27 @@ impl<'a> CanonicalWalk<'a> {
     }
 
     fn children(&self, parent: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        self.canonicalize(
-            self.provider
-                .observed_children(parent, &mut self.reads.borrow_mut())?,
-        )
+        self.canonicalize(self.provider.observed_children(
+            parent,
+            &mut self.reads.borrow_mut(),
+            None,
+        )?)
     }
 
-    fn remember_cardinality(&self, key: Option<u64>, matches: &[ElementData]) {
+    fn remember_cardinality(&self, key: Option<QueryFingerprint>, matches: &[ElementData]) {
         let Some(key) = key else { return };
-        let sample = (!matches.is_empty()
-            && matches
-                .iter()
-                .all(|m| m.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF")))
-        .then(|| WpfQuerySample {
-            nodes: self.visited.get(),
-            hits: matches.len() as u64,
+        let nodes = self.visited.get();
+        let hits = matches.len() as u64;
+        // Qt was identified from the actual window roots. A Qt window can
+        // include native title-bar buttons with a different framework ID.
+        let sample = (key.toolkit == "Qt"
+            || (!matches.is_empty()
+                && matches.iter().all(|m| {
+                    m.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("WPF")
+                })))
+        .then(|| match key.toolkit {
+            "WPF" => QueryCosts::wpf(nodes, hits),
+            _ => QueryCosts::qt(nodes, hits),
         });
         let mut history = self
             .provider
@@ -1707,9 +1805,9 @@ impl<'a> CanonicalWalk<'a> {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if sample.is_some() {
-            history.insert(key, sample);
-        } else if let Some(previous) = history.get_mut(&key) {
-            // Discard a prior WPF estimate if the result now belongs to a
+            history.insert(key.hash, sample);
+        } else if let Some(previous) = history.get_mut(&key.hash) {
+            // Discard a prior estimate if the result now belongs to a
             // different toolkit or is empty. Cold misses need no table entry.
             *previous = None;
         }
@@ -3681,53 +3779,75 @@ const QUERY_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_NamePropertyId,
 ];
 
-/// The calibrated model applies to complete, application-scoped WPF name
-/// searches. The handle includes application identity. A fingerprint collision
-/// can change only the cost estimate, never the query or its result.
-fn history_key(query: Query<'_>, root: u64, depth: Option<u32>) -> Option<u64> {
+/// The hash only ranks legal plans; it never selects any elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QueryFingerprint {
+    hash: u64,
+    toolkit: &'static str,
+}
+
+fn history_key(query: Query<'_>, root: u64, depth: Option<u32>) -> Option<QueryFingerprint> {
     use std::hash::{Hash, Hasher};
     if !is_synthetic_handle(root) || query.limit.is_some() || query.output != QueryOutput::Elements
     {
         return None;
     }
-    let [clause] = query.group.clauses.as_slice() else {
-        return None;
-    };
-    let [segment] = clause.segments.as_slice() else {
-        return None;
-    };
-    let [filter] = segment.simple.filters.as_slice() else {
-        return None;
-    };
-    let Some(xa11y_core::selector::RoleMatch::Normalized(role)) = segment.simple.role else {
-        return None;
-    };
-    if filter.attr != "name" || segment.simple.nth.is_some() {
-        return None;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    (root, depth).hash(&mut hash);
+    let mut toolkit = "Qt";
+    for clause in &query.group.clauses {
+        let [segment] = clause.segments.as_slice() else {
+            return None;
+        };
+        let Some(xa11y_core::selector::RoleMatch::Normalized(role)) = segment.simple.role else {
+            return None;
+        };
+        if segment.simple.nth.is_some() {
+            return None;
+        }
+        role.hash(&mut hash);
+        match segment.simple.filters.as_slice() {
+            [] if depth.is_none() => {}
+            [filter] if query.group.clauses.len() == 1 && filter.attr == "name" => {
+                toolkit = "WPF";
+                (std::mem::discriminant(&filter.op), &filter.value).hash(&mut hash);
+            }
+            _ => return None,
+        }
     }
-    let mut key = std::collections::hash_map::DefaultHasher::new();
-    (
-        root,
-        depth,
-        role,
-        std::mem::discriminant(&filter.op),
-        &filter.value,
-    )
-        .hash(&mut key);
-    Some(key.finish())
+    toolkit.hash(&mut hash);
+    Some(QueryFingerprint {
+        hash: hash.finish(),
+        toolkit,
+    })
 }
 
 #[derive(Clone, Copy)]
-struct WpfQuerySample {
-    nodes: u64,
-    hits: u64,
+struct QueryCosts {
+    full: u64,
+    projected: u64,
 }
 
-impl WpfQuerySample {
+impl QueryCosts {
+    fn wpf(nodes: u64, hits: u64) -> Self {
+        // Fitted to the WPF fixture in design/query-planner-study.
+        Self {
+            full: 4390 * nodes,
+            projected: 1780 * nodes + 7156 * hits,
+        }
+    }
+
+    fn qt(nodes: u64, hits: u64) -> Self {
+        // A window packet cheaply rejects nodes, but each hit needs a fresh full
+        // record. Prefer it when fewer than one node in four matches.
+        Self {
+            full: nodes,
+            projected: 4 * hits,
+        }
+    }
+
     fn apply(self, query: Query<'_>) -> Query<'_> {
-        // Relative work per visited node and per hydrated hit, fitted to
-        // the cached WPF measurements in design/query-planner-study.
-        query.with_estimated_costs(4390 * self.nodes, 1780 * self.nodes + 7156 * self.hits)
+        query.with_estimated_costs(self.full, self.projected)
     }
 }
 
@@ -4886,7 +5006,7 @@ impl Provider for WindowsProvider {
     }
 
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        self.observed_children(element, &mut ScrollObservation::default())
+        self.observed_children(element, &mut ScrollObservation::default(), None)
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
@@ -5535,11 +5655,30 @@ impl Provider for WindowsProvider {
         let application_root = is_synthetic_handle(root.handle);
         let query = Query::new(group, QueryOutput::Elements, limit);
         let history = history_key(query, root.handle, max_depth);
+        // A synthetic application has no framework of its own. The resolver
+        // already needs these window snapshots; consume them on its first read.
+        let windows = history
+            .filter(|key| key.toolkit == "Qt")
+            .map(|_| self.get_children(Some(root)))
+            .transpose()?;
+        let qt_windows = windows.as_ref().is_some_and(|roots| {
+            !roots.is_empty()
+                && roots
+                    .iter()
+                    .all(|w| w.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("Qt"))
+        });
+        let history = history.filter(|key| key.toolkit != "Qt" || qt_windows);
+        let windows = std::cell::Cell::new(windows);
+        let take_windows = |parent: Option<&ElementData>| {
+            parent
+                .filter(|p| p.handle == root.handle)
+                .and_then(|_| windows.take())
+        };
         let sample = history.and_then(|key| {
             self.query_history
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .get(&key)
+                .get(&key.hash)
                 .copied()
                 .flatten()
         });
@@ -5548,7 +5687,8 @@ impl Provider for WindowsProvider {
             application_root,
         );
         if application_root {
-            if plan.strategy == ReadStrategy::Projected {
+            let cold_qt_roles = qt_windows && sample.is_none();
+            if plan.strategy == ReadStrategy::Projected || cold_qt_roles {
                 // Resolving a sparse role/name selector (in particular a
                 // unique window action) must walk the whole application,
                 // but need not read every control's text, patterns, geometry
@@ -5566,9 +5706,11 @@ impl Provider for WindowsProvider {
                     let batch = limit.is_none() && max_depth.is_none();
                     let matches = xa11y_core::selector::find_elements_in_tree_group(
                         |parent| {
-                            let children = walk.canonicalize(
-                                self.count_children(parent, &request, &walk, batch)?,
-                            )?;
+                            let children = match take_windows(parent) {
+                                Some(roots) => roots,
+                                None => self.count_children(parent, &request, &walk, batch)?,
+                            };
+                            let children = walk.canonicalize(children)?;
                             // A sparse unique query can visit more than the
                             // provider's 65K handle capacity after its first
                             // hit. Own hit references now; the later hydration
@@ -5600,6 +5742,19 @@ impl Provider for WindowsProvider {
                         walk_limit,
                         max_depth,
                     )?;
+                    // On a cold role list the packet supplies the actual density.
+                    // For a dense window the full walk costs less than fetching
+                    // a new rich snapshot and ancestry for almost every node.
+                    if cold_qt_roles
+                        && uia_query_plan(
+                            QueryCosts::qt(walk.visited.get(), matches.len() as u64).apply(query),
+                            true,
+                        )
+                        .strategy
+                            == ReadStrategy::ResolveElements
+                    {
+                        break;
+                    }
                     // A shared ancestor can only save a read across multiple
                     // hydrations. Single hits do not pay for identity lookups.
                     if matches.len() > 1 {
@@ -5679,8 +5834,20 @@ impl Provider for WindowsProvider {
                 }
             }
             let walk = CanonicalWalk::new(self);
+            let exhaustive = limit.is_none()
+                && max_depth.is_none()
+                && group.clauses.iter().all(|clause| matches!(clause.segments.as_slice(), [segment] if segment.simple.nth.is_none()));
+            let siblings = exhaustive.then(|| std::cell::RefCell::new(SiblingReads::default()));
             let matches = xa11y_core::selector::find_elements_in_tree_group(
-                |el| walk.children(el),
+                |el| {
+                    if let Some(roots) = take_windows(el) {
+                        return walk.canonicalize(roots);
+                    }
+                    match &siblings {
+                        Some(siblings) => siblings.borrow_mut().children(&walk, el),
+                        None => walk.children(el),
+                    }
+                },
                 Some(root),
                 group,
                 limit,
@@ -11183,11 +11350,32 @@ mod tests {
             (1, ReadStrategy::Projected),
             (32, ReadStrategy::ResolveElements),
         ] {
-            let estimated = WpfQuerySample { nodes: 79, hits }.apply(query);
+            let estimated = QueryCosts::wpf(79, hits).apply(query);
             assert_eq!(uia_query_plan(estimated, true).strategy, expected);
             assert_eq!(
                 uia_query_plan(estimated, false).strategy,
                 ReadStrategy::ResolveElements
+            );
+        }
+    }
+
+    #[test]
+    fn qt_packets_favor_sparse_unbounded_role_lists() {
+        let group = xa11y_core::SelectorGroup::parse("text_field, button").expect("selector");
+        let query = Query::new(&group, QueryOutput::Elements, None);
+        let root = SYNTHETIC_APP_TAG | 7;
+        assert_eq!(
+            history_key(query, root, None).expect("role list").toolkit,
+            "Qt"
+        );
+        assert!(history_key(query, root, Some(2)).is_none());
+        for (hits, expected) in [
+            (16, ReadStrategy::Projected),
+            (120, ReadStrategy::ResolveElements),
+        ] {
+            assert_eq!(
+                uia_query_plan(QueryCosts::qt(140, hits).apply(query), true).strategy,
+                expected
             );
         }
     }
