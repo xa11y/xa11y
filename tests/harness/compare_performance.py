@@ -124,6 +124,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--app", choices=["qt", "wpf"], default="qt")
     args = parser.parse_args()
+    if sys.platform == "win32" and args.app == "qt":
+        from tests.harness.qt_production_probe import compare
+        return compare(args)
+    print("Windows/Qt-only measurement branch")
+    return 0
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     results = []
