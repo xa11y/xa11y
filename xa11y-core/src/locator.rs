@@ -632,11 +632,11 @@ impl Locator {
             .map(combined);
         }
 
-        // Rootless: search across all apps. We can't push the outer `limit`
-        // down to each per-app call because matches from a later app would
-        // be wrongly excluded; truncate after the merge instead. (Scoped
-        // searches via the single-app fast path above still get phase-1
-        // limit pushdown inside the native backend.)
+        // Rootless results are concatenated in app-enumeration order. Each
+        // app therefore needs at most the outer limit, and later apps cannot
+        // change a completed prefix. Keep the full limit (not the remaining
+        // count): an app-anchored clause above may already have emitted some
+        // of the same descendants, which the merge must deduplicate first.
         let apps = self.provider.list_apps()?;
         let mut out: Vec<ElementData> = Vec::new();
         let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -677,12 +677,18 @@ impl Locator {
                 }
             }
 
+            if limit.is_some_and(|limit| out.len() >= limit) {
+                break;
+            }
             // (2b) Descendant matches inside the app's subtree.
-            let per_app = self.provider.find_elements_group(app, group, None, None)?;
+            let per_app = self.provider.find_elements_group(app, group, limit, None)?;
             for d in per_app {
                 if seen.insert(d.handle) {
                     out.push(d);
                 }
+            }
+            if limit.is_some_and(|limit| out.len() >= limit) {
+                break;
             }
         }
         if let Some(l) = limit {
@@ -2795,6 +2801,104 @@ mod tests {
                 self.inner.$name(e $(, $arg)*)
             })*
         };
+    }
+
+    struct MultiAppProvider {
+        inner: Arc<crate::mock::MockProvider>,
+        queries: std::sync::Mutex<Vec<(u64, Option<usize>)>>,
+    }
+
+    impl Provider for MultiAppProvider {
+        fn list_apps(&self) -> Result<Vec<ElementData>> {
+            Ok((1..=3)
+                .map(|handle| {
+                    let mut app = ElementData::for_role(crate::Role::Application);
+                    app.handle = handle;
+                    app.name = Some(format!("App {handle}"));
+                    app
+                })
+                .collect())
+        }
+        fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+            let Some(app) = element.filter(|e| e.role == crate::Role::Application) else {
+                return Ok(Vec::new());
+            };
+            Ok((1..=3)
+                .map(|index| {
+                    let mut button = ElementData::for_role(crate::Role::Button);
+                    button.handle = app.handle * 10 + index;
+                    button.name = Some(format!("Button {}-{index}", app.handle));
+                    button
+                })
+                .collect())
+        }
+        fn find_elements_group(
+            &self,
+            root: &ElementData,
+            group: &SelectorGroup,
+            limit: Option<usize>,
+            max_depth: Option<u32>,
+        ) -> Result<Vec<ElementData>> {
+            self.queries.lock().unwrap().push((root.handle, limit));
+            crate::selector::find_elements_in_tree_group(
+                |element| self.get_children(element),
+                Some(root),
+                group,
+                limit,
+                max_depth,
+            )
+        }
+        fn get_parent(&self, _: &ElementData) -> Result<Option<ElementData>> {
+            Ok(None)
+        }
+        fn focused_app(&self) -> Result<ElementData> {
+            self.inner.focused_app()
+        }
+        fn list_shell_surfaces(
+            &self,
+        ) -> Result<Vec<(crate::shell::ShellSurfaceKind, ElementData)>> {
+            self.inner.list_shell_surfaces()
+        }
+        forward! {
+            press() -> (); focus() -> (); blur() -> (); toggle() -> (); select() -> ();
+            expand() -> (); collapse() -> (); show_menu() -> (); increment() -> ();
+            decrement() -> (); scroll_into_view() -> (); set_value(v: &str) -> ();
+            set_numeric_value(v: f64) -> (); type_text(t: &str) -> ();
+            set_text_selection(s: u32, f: u32) -> (); perform_action(a: &str) -> ();
+            activate() -> (); minimize() -> (); maximize() -> (); enter_fullscreen() -> ();
+            restore() -> (); close() -> (); move_to(x: i32, y: i32) -> ();
+            resize_to(w: u32, h: u32) -> ();
+            subscribe() -> crate::event_provider::Subscription;
+        }
+    }
+
+    #[test]
+    fn rootless_bounded_search_keeps_the_unbounded_prefix_without_later_app_queries() {
+        let provider = Arc::new(MultiAppProvider {
+            inner: build_provider(),
+            queries: std::sync::Mutex::new(Vec::new()),
+        });
+        for selector in ["button", "button:nth(2)", "button, application button"] {
+            let locator = Locator::new(provider.clone(), None, selector);
+            let all = locator.elements().expect("all matches");
+            for (index, expected) in all.iter().enumerate() {
+                provider.queries.lock().unwrap().clear();
+                let actual = locator.clone().nth(index + 1).element().expect("nth match");
+                assert_eq!(
+                    actual.handle,
+                    expected.handle,
+                    "{selector} nth {}",
+                    index + 1
+                );
+                let queries = provider.queries.lock().unwrap();
+                // App-anchored multi-segment clauses narrow before the
+                // descendant query; their own queries remain unbounded.
+                if selector != "button, application button" {
+                    assert!(queries.iter().all(|(_, limit)| *limit == Some(index + 1)));
+                }
+                assert!(queries.iter().all(|(app, _)| *app <= expected.handle / 10));
+            }
+        }
     }
 
     impl Provider for ShiftingProvider {

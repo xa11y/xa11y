@@ -16,6 +16,89 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn flat_role_queries_return_complete_fresh_snapshots() {
+        // Windows can resolve role/name-only selectors using projected
+        // metadata. A tautological state filter forces its full traversal;
+        // both must return the same complete payload, not partial metadata.
+        let app = h::app_root();
+        for role in ["button", "text_field", "window", "slider", "check_box"] {
+            let full = app
+                .locator(&format!(
+                    r#"{role}[enabled="true"], {role}[enabled="false"]"#
+                ))
+                .elements()
+                .expect("full state query");
+            assert!(!full.is_empty(), "fixture must contain {role}");
+            for index in [0, full.len() - 1] {
+                let projected = app
+                    .locator(role)
+                    .nth(index + 1)
+                    .element()
+                    .expect("bounded flat role query");
+                let mut projected = projected.data().clone();
+                let mut full = full[index].data().clone();
+                // Handles identify reads and are freshly minted by providers.
+                projected.handle = 0;
+                full.handle = 0;
+                assert_eq!(
+                    serde_json::to_value(projected).expect("projected payload"),
+                    serde_json::to_value(full).expect("full payload"),
+                    "{role} snapshot differs"
+                );
+            }
+        }
+        // The AccessKit AT-SPI adapter exposes Value but not EditableText.
+        // Exercise fresh values on every backend with a semantic range edit.
+        let slider = app.locator("slider");
+        let original = slider
+            .element()
+            .expect("slider")
+            .numeric_value
+            .expect("range value");
+        let changed = if original > 50.0 { 25.0 } else { 75.0 };
+        let result = (|| {
+            slider.set_numeric_value(changed)?;
+            slider.wait_until(
+                |node| node.is_some_and(|node| node.numeric_value == Some(changed)),
+                std::time::Duration::from_secs(5),
+            )?;
+            Ok::<_, xa11y::Error>(slider.element()?.numeric_value)
+        })();
+        slider.set_numeric_value(original).expect("restore slider");
+        assert_eq!(result.expect("fresh range read"), Some(changed));
+
+        // Also cover text hydration on the backend whose traversal changed.
+        #[cfg(target_os = "windows")]
+        {
+            let notes = app.locator(r#"text_field[name="Name"]"#);
+            let original = notes
+                .element()
+                .expect("Name field")
+                .value
+                .clone()
+                .unwrap_or_default();
+            let result = (|| {
+                notes.set_value("fresh projected snapshot")?;
+                notes.wait_until(
+                    |node| {
+                        node.is_some_and(|node| {
+                            node.value.as_deref() == Some("fresh projected snapshot")
+                        })
+                    },
+                    std::time::Duration::from_secs(5),
+                )?;
+                Ok::<_, xa11y::Error>(notes.element()?.value.clone())
+            })();
+            notes.set_value(&original).expect("restore Name field");
+            assert_eq!(
+                result.expect("fresh value read").as_deref(),
+                Some("fresh projected snapshot")
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn check_permissions_granted() {
         // Permissions are checked automatically by App constructors.
         // If this fails with PermissionDenied, accessibility or screen

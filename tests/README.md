@@ -129,6 +129,49 @@ cargo xtask test-integ-container
 cargo xtask check
 ```
 
+### Comparing desktop performance
+
+The Rust integration harness defaults to debug builds. Select release builds
+for the fixture, CLI and test executables together with
+`XA11Y_TEST_PROFILE=release`; other values besides `debug` and `release` are
+rejected before setup. The harness uses `CARGO_TARGET_DIR` when locating the
+built fixture and CLI.
+
+```bash
+XA11Y_TEST_PROFILE=release cargo xtask test-integ
+```
+
+```powershell
+$env:XA11Y_TEST_PROFILE = "release"
+cargo xtask test-integ
+```
+
+Build both revisions in release mode and save their binaries before measuring.
+Start one fixture and keep its process, desktop session and window state the
+same for both runs. The probe measures standalone CLI processes and a persistent
+MCP session; it records individual samples, medians and the executable hash.
+Compilation and fixture startup are outside the measured interval.
+
+```bash
+python tests/harness/desktop_perf_probe.py --binary path/to/before/xa11y --pid PID --repeats 5 --output before.json
+python tests/harness/desktop_perf_probe.py --binary path/to/after/xa11y --pid PID --repeats 5 --output after.json
+```
+
+Add `--window-actions` to measure minimize/restore, maximize/restore,
+fullscreen/restore and move/restore when the fixture advertises them. macOS
+minimize/restore is reported as unmeasured because fresh enumeration removes
+minimized windows, leaving no selector target for restore. Run against a fixture with
+a normal, movable window. Each operation includes a fresh accessibility read
+to verify its effect, and the report separates dispatch from observation.
+Keep other automation idle while measuring; typing, provider queries and
+window mutations can interfere with each other.
+
+For full suites, use the harness's per-suite elapsed times and pytest durations
+after the release builds and fixture setup finish. Preserve timeout tests and
+stress repetitions when comparing revisions: their intentional waits remain
+part of suite execution. The probes supplement the integration suites; they
+do not replace their assertions or coverage.
+
 The `cli` suite needs the `xa11y` binary (`cargo build -p xa11y`) and the `js`
 suite needs the built bindings; `scripts/run_app_suite.sh` builds both on
 demand. If the CLI binary is missing the harness **fails** rather than skipping
@@ -233,3 +276,15 @@ The Linux Qt job also measures press-to-visible with an existing AT-SPI
 window subscription. It registers before the action, waits for the named
 window to open, then checks the dialog control. Subscription setup is outside
 the timer to represent a listener shared across a sequence of actions.
+
+The **Desktop performance** workflow compares the PR base and head on the same
+Linux, macOS and Windows runners. It builds both Python bindings in release
+mode before measurement, freezes identical Python dependencies, and uses the
+same head Qt fixture and tests for both versions. Each version gets a fresh
+fixture. The unchanged operation trials run first, followed by the complete
+Python and Python window suites. Suite timings exclude compilation, setup and
+fixture startup; JUnit counts retain skips and failures. Job artifacts contain
+operation JSONL, suite JSON, JUnit reports and logs, with timings in the job
+summary. Correctness failures fail the job; performance differences are reported
+for review without an arbitrary speed threshold. To compare another baseline,
+run the workflow manually with its `base_ref` input.

@@ -1,0 +1,136 @@
+name: Desktop performance
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "xa11y-core/**"
+      - "xa11y-windows/**"
+      - "xa11y-linux/**"
+      - "xa11y-macos/**"
+      - "xa11y/**"
+      - "xa11y-python/**"
+      - "pytest-xa11y/**"
+      - "tests/harness/**"
+      - "tests/suites/python/**"
+      - "tests/launchers.py"
+      - "tests/strict_frontmost.py"
+      - "tests/requirements.txt"
+      - "test-apps/qt/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "pytest.ini"
+      - ".cargo/**"
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/desktop-performance.yml"
+      - "scripts/grant_macos_tcc.sh"
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Baseline commit or branch to compare with the selected head
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-performance-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  release-comparison:
+    name: Release Qt on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha || inputs.base_ref }}
+          path: .perf-base
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: desktop-performance
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up Linux desktop accessibility
+        if: runner.os == 'Linux'
+        uses: xa11y/setup-a11y@v1
+        with:
+          package-groups: base gtk electron
+          apt-cache-version: "3"
+          setup-window-manager: "true"
+
+      - name: Prepare identical Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .venv-perf-head
+          python -m venv .venv-perf-base
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            head_python=.venv-perf-head/Scripts/python.exe
+            base_python=.venv-perf-base/Scripts/python.exe
+          else
+            head_python=.venv-perf-head/bin/python
+            base_python=.venv-perf-base/bin/python
+          fi
+          "$head_python" -m pip install maturin -r tests/requirements.txt -r test-apps/qt/requirements.txt
+          "$head_python" -m pip freeze > perf-dependencies.txt
+          "$base_python" -m pip install -r perf-dependencies.txt
+          echo "HEAD_PYTHON=$("$head_python" -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          echo "BASE_PYTHON=$("$base_python" -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          echo "BASE_SHA=$(git -C .perf-base rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "HEAD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Build and install both release bindings before timing
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$HEAD_PYTHON" -m maturin build --locked --release --manifest-path .perf-base/xa11y-python/Cargo.toml --interpreter "$BASE_PYTHON" --out perf-wheels/base
+          "$HEAD_PYTHON" -m maturin build --locked --release --manifest-path xa11y-python/Cargo.toml --interpreter "$HEAD_PYTHON" --out perf-wheels/head
+          "$BASE_PYTHON" -m pip install perf-wheels/base/*.whl
+          "$HEAD_PYTHON" -m pip install perf-wheels/head/*.whl
+          "$BASE_PYTHON" -m pip install --no-deps -e pytest-xa11y
+          "$HEAD_PYTHON" -m pip install --no-deps -e pytest-xa11y
+
+      - name: Grant macOS accessibility to both interpreters
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bash scripts/grant_macos_tcc.sh "$BASE_PYTHON"
+          bash scripts/grant_macos_tcc.sh "$HEAD_PYTHON"
+
+      - name: Compare release operations and complete Python suites
+        shell: bash
+        run: |
+          "$HEAD_PYTHON" -m tests.harness.compare_performance \
+            --baseline-python "$BASE_PYTHON" --head-python "$HEAD_PYTHON" \
+            --baseline-ref "$BASE_SHA" --head-ref "$HEAD_SHA" \
+            --output desktop-performance
+
+      - name: Upload measurements and test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-performance-${{ matrix.os }}
+          path: |
+            desktop-performance/
+            perf-dependencies.txt
+          if-no-files-found: error
