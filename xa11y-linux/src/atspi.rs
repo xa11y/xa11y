@@ -2904,6 +2904,23 @@ impl LinuxProvider {
                     });
                     Some(state_attr_to_string(attr, s))
                 }
+                "stable_id" | "object_path" | "bus_name" => {
+                    // These snapshot fields are copied verbatim from the reference.
+                    let value = if attr == "bus_name" {
+                        &aref.bus_name
+                    } else {
+                        &aref.path
+                    };
+                    if !xa11y_core::selector::match_op(&filter.op, &filter.value, Some(value)) {
+                        return false;
+                    }
+                    if simple.role.is_none() && simple.filters.len() == 1 {
+                        return true;
+                    }
+                    // For a compound hit, retain the full matcher's normalized
+                    // role and attribute comparisons on the surviving candidate.
+                    None
+                }
                 _ => None, // Routed through full ElementData below.
             };
 

@@ -1,5 +1,6 @@
 """Public API benchmarks on the same Qt fixture on Linux, macOS and Windows."""
 
+import json
 import os
 import platform
 import statistics
@@ -66,6 +67,14 @@ def test_locator_queries(app, measure):
     measure("selector union", app.locator('button[name="OK"], button[name="Cancel"]').elements,
             lambda nodes: {node.name for node in nodes} == {"OK", "Cancel"})
     measure("ready wait", ok.wait_enabled, lambda node: node.name == "OK")
+
+
+def test_stable_id_query(app, measure):
+    button = app.locator('button[name="OK"]').element()
+    if not button.stable_id:
+        pytest.skip("Qt bridge does not expose a stable ID for this button")
+    locator = app.locator(f"[stable_id={json.dumps(button.stable_id, ensure_ascii=False)}]")
+    measure("resolve stable ID", locator.element, button.same_as)
 
 
 def test_text_edit(app, measure):
