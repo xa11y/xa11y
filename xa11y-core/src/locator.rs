@@ -1793,6 +1793,12 @@ impl Locator {
         condition: &str,
     ) -> Result<Option<Element>> {
         let start = std::time::Instant::now();
+        let mut next_interval =
+            if cfg!(target_os = "macos") && condition == state_label(ElementState::Visible) {
+                Duration::from_millis(20)
+            } else {
+                WAIT_POLL_INTERVAL
+            };
         let mut ever_matched = false;
         let mut previous: Option<ElementData> = None;
 
@@ -1820,8 +1826,7 @@ impl Locator {
                 return Ok(matched.map(|data| Element::new(data, Arc::clone(&self.provider))));
             }
 
-            if start.elapsed() >= timeout
-                || !crate::deadline::pause(start, timeout, WAIT_POLL_INTERVAL)
+            if start.elapsed() >= timeout || !crate::deadline::pause(start, timeout, next_interval)
             {
                 return Err(self.diagnose_timeout(
                     start.elapsed(),
@@ -1831,6 +1836,7 @@ impl Locator {
                     None,
                 ));
             }
+            next_interval = WAIT_POLL_INTERVAL;
             previous = matched;
         }
     }

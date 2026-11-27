@@ -5787,7 +5787,15 @@ impl Provider for WindowsProvider {
                     let walk = CanonicalWalk::new(self);
                     let complete = std::cell::RefCell::new(HashSet::new());
                     let references = std::cell::RefCell::new(HashMap::new());
-                    let batch = limit.is_none() && max_depth.is_none();
+                    let named_first = limit == Some(1)
+                        && group.clauses.iter().all(|clause| {
+                            clause.segments[0]
+                                .simple
+                                .filters
+                                .iter()
+                                .any(|filter| filter.attr == "name")
+                        });
+                    let batch = max_depth.is_none() && (limit.is_none() || named_first);
                     let matches = xa11y_core::selector::find_elements_in_tree_group(
                         |parent| {
                             let children = match take_windows(parent) {
