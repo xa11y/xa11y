@@ -217,6 +217,11 @@ if [ "$STALE_READY" != "1" ]; then
     exit 1
 fi
 
+# The host embeds a second accessibility bus peer at a GtkSocket. Its test
+# waits for the plug to attach before checking ordered results.
+"$PANEL_PY" test-apps/collection/embedded.py > target/xa11y-test-collection.log 2>&1 &
+CLEANUP_PIDS+=($!)
+
 # 5. Launch the test application (run binary directly, not via cargo run,
 #    because cargo run changes the process owner name in AT-SPI)
 echo "Launching xa11y-test-app..."

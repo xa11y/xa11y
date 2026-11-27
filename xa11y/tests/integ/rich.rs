@@ -644,3 +644,46 @@ fn capture_formatting_detail_reads_the_same_runs_as_text_runs() {
     assert!(text.runs_truncated);
     assert_eq!(text.runs.as_ref().map(Vec::len), Some(2));
 }
+
+/// GTK's native Collection omits the socket's remote child and includes a
+/// button deeper than the public locator's traversal budget.
+#[test]
+#[ignore]
+fn collection_discovery_preserves_logical_scope_and_order() {
+    let timeout = Duration::from_secs(5);
+    let app = App::find(timeout, |d| {
+        d.name.as_deref() == Some("xa11y-collection-host")
+    })
+    .expect("collection host");
+    app.locator(r#"button[name="Embedded button"]"#)
+        .wait_attached(timeout)
+        .expect("plug attached");
+    let buttons = app.locator("button, button");
+    assert_eq!(buttons.count().unwrap(), 3);
+    let actual = buttons.elements().unwrap();
+    let names: Vec<_> = actual.iter().map(|e| e.name.as_deref()).collect();
+    assert_eq!(
+        names,
+        [
+            Some("Before socket"),
+            Some("Embedded button"),
+            Some("After socket")
+        ]
+    );
+    assert_eq!(
+        app.locator(r#"button[name="Too deep"]"#).count().unwrap(),
+        0
+    );
+    assert_eq!(
+        app.locator(r#"[name="Midpoint"] button[name="Too deep"]"#)
+            .count()
+            .unwrap(),
+        1
+    );
+    app.locator(r#"button[name="After socket"]"#)
+        .press()
+        .unwrap();
+    let renamed = app.locator(r#"button[name="Renamed after socket"]"#);
+    renamed.wait_attached(timeout).expect("rename observed");
+    assert_eq!(renamed.count().unwrap(), 1);
+}

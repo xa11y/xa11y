@@ -3130,6 +3130,7 @@ dependencies = [
  "async-io",
  "evdev",
  "futures-lite",
+ "futures-util",
  "log",
  "nix 0.31.3",
  "png",
