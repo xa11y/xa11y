@@ -3827,7 +3827,9 @@ impl WindowQueryReads {
         };
         if is_synthetic_handle(parent.handle) {
             let windows = walk.provider.get_children(Some(parent))?;
-            if matches!(self, Self::Probe { .. }) && !windows.iter().all(packet_framework) {
+            // Qt benefits from switching after a short probe. WPF text-field
+            // reads are faster when they finish the original child walk.
+            if matches!(self, Self::Probe { .. }) && !windows.iter().all(qt_window) {
                 *self = Self::Children;
             }
             return Ok(windows);
@@ -3856,6 +3858,14 @@ impl WindowQueryReads {
             false
         }
     }
+}
+
+fn qt_window(window: &ElementData) -> bool {
+    window
+        .raw
+        .get("uia_framework_id")
+        .and_then(|value| value.as_str())
+        == Some("Qt")
 }
 
 fn packet_framework(window: &ElementData) -> bool {
@@ -5775,12 +5785,9 @@ impl Provider for WindowsProvider {
             .filter(|key| key.toolkit == "Qt")
             .map(|_| self.get_children(Some(root)))
             .transpose()?;
-        let qt_windows = windows.as_ref().is_some_and(|roots| {
-            !roots.is_empty()
-                && roots
-                    .iter()
-                    .all(|w| w.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("Qt"))
-        });
+        let qt_windows = windows
+            .as_ref()
+            .is_some_and(|roots| !roots.is_empty() && roots.iter().all(qt_window));
         let history = history.filter(|key| key.toolkit != "Qt" || qt_windows);
         let windows = std::cell::Cell::new(windows);
         let take_windows = |parent: Option<&ElementData>| {
