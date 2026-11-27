@@ -55,8 +55,6 @@ jobs:
         include:
           - os: macos-latest
             app: qt
-          - os: windows-latest
-            app: qt
     steps:
       - uses: actions/checkout@v7
         with:

@@ -2011,13 +2011,6 @@ impl<const N: usize> BatchAttrs<N> {
             }
         }
     }
-}
-
-impl BatchAttrs {
-    /// Read a value as a URL string (CFURL).
-    fn url(&self, idx: usize) -> Option<String> {
-        cf_url_string(self.vals[idx])
-    }
 
     /// Read a value as a bool (CFBoolean).
     fn boolean(&self, idx: usize) -> Option<bool> {
@@ -2032,6 +2025,13 @@ impl BatchAttrs {
                 None
             }
         }
+    }
+}
+
+impl BatchAttrs {
+    /// Read a value as a URL string (CFURL).
+    fn url(&self, idx: usize) -> Option<String> {
+        cf_url_string(self.vals[idx])
     }
 
     /// Read an integer-valued slot (a CFNumber).
