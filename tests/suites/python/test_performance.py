@@ -71,11 +71,30 @@ def test_locator_queries(app, measure):
     missing = app.locator('button[name="missing benchmark button"]')
     measure("exact name", ok.element, lambda node: node.name == "OK")
     measure("exists miss", missing.exists, lambda found: found is False)
+    if platform.system() == "Windows" and os.getenv("XA11Y_PERF_JSONL"):
+        measure("early named button exists", ok.exists, lambda found: found is True)
+        late = app.locator('button[name="Open Dialog"]')
+        measure("late named button exists", late.exists, lambda found: found is True)
+        # Open Dialog occurs well after OK. A bounded traversal that deferred a
+        # subtree must recover the first hit in tree order, in either clause order.
+        for selector in ('button[name="Open Dialog"], button[name="OK"]',
+                         'button[name="OK"], button[name="Open Dialog"]'):
+            union = app.locator(selector)
+            assert union.element().same_as(union.elements()[0])
     measure("first button", buttons.first().element, lambda node: node.role == "button")
     measure("count buttons", buttons.count, lambda count: count >= 3)
     measure("list buttons", buttons.elements, lambda nodes: len(nodes) >= 3)
     measure("state filter", app.locator('button[enabled="true"]').elements,
             lambda nodes: any(node.name == "OK" for node in nodes))
+    if os.getenv("XA11Y_PERF_JSONL"):
+        all_buttons = buttons.elements()
+        for enabled in (True, False):
+            expected = [node for node in all_buttons if node.enabled == enabled]
+            state = app.locator(f'button[enabled="{str(enabled).lower()}"]')
+            nodes = state.elements()
+            assert state.count() == len(nodes) == len(expected)
+            assert all(node.enabled == enabled and node.same_as(want)
+                       for node, want in zip(nodes, expected))
     measure("descendant selector", app.locator('[name="Buttons"] button[name="OK"]').element,
             lambda node: node.name == "OK")
     measure("selector union", app.locator('button[name="OK"], button[name="Cancel"]').elements,

@@ -1360,19 +1360,13 @@ impl WindowsProvider {
         }
     }
 
-    fn count_children(
+    fn query_children(
         &self,
-        parent: Option<&ElementData>,
-        request: &IUIAutomationCacheRequest,
+        parent: &ElementData,
+        properties: &QueryProperties,
         walk: &CanonicalWalk<'_>,
         batch_window: bool,
     ) -> Result<Vec<ElementData>> {
-        let Some(parent) = parent else {
-            return self.get_children(None);
-        };
-        if is_synthetic_handle(parent.handle) {
-            return self.get_children(Some(parent));
-        }
         let cached = walk.subtree.borrow().get(&parent.handle).cloned();
         let element = match cached.as_ref() {
             Some(native) => native.clone(),
@@ -1384,13 +1378,10 @@ impl WindowsProvider {
             cached
         } else if batch_window
             && matches!(parent.role, Role::Window | Role::Dialog)
-            && matches!(
-                parent.raw.get("uia_framework_id").and_then(|v| v.as_str()),
-                Some("WPF" | "Qt")
-            )
+            && packet_framework(parent)
             && cached_own_hwnd(&element)?.is_some()
         {
-            let tree = uia_call(|| unsafe { request.Clone() })?;
+            let tree = uia_call(|| unsafe { properties.request.Clone() })?;
             let view = uia_call(|| unsafe { self.automation.ControlViewCondition() })?;
             uia_call(|| unsafe {
                 tree.SetTreeFilter(&view)?;
@@ -1419,7 +1410,7 @@ impl WindowsProvider {
                 }
             }
         } else {
-            self.uia_children_requested(&element, request)
+            self.uia_children_requested(&element, &properties.request)
                 .map_err(|error| stale_if_gone(parent, error))?
         };
         let mut out = Vec::with_capacity(children.len());
@@ -1432,6 +1423,9 @@ impl WindowsProvider {
                     .filter(|value| !value.is_empty());
                 let mut data = ElementData::for_role(metadata.role);
                 data.name = xa11y_core::text::strip_bidi_opt(name);
+                if properties.enabled {
+                    data.states.enabled = cached_enabled(&child);
+                }
                 data.pid = parent.pid;
                 data.handle = if from_subtree {
                     Self::next_handle()
@@ -3779,6 +3773,111 @@ const QUERY_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_NamePropertyId,
 ];
 
+struct QueryProperties {
+    request: IUIAutomationCacheRequest,
+    enabled: bool,
+}
+
+impl QueryProperties {
+    fn new(automation: &IUIAutomation, group: &xa11y_core::SelectorGroup) -> Result<Self> {
+        let request = create_property_request(automation, QUERY_PROPERTIES)?;
+        let enabled = group.clauses.iter().any(|clause| {
+            clause.segments[0]
+                .simple
+                .filters
+                .iter()
+                .any(|filter| filter.attr == "enabled")
+        });
+        if enabled {
+            uia_call(|| unsafe { request.AddProperty(UIA_IsEnabledPropertyId) })?;
+        }
+        Ok(Self { request, enabled })
+    }
+}
+
+/// A bounded search starts with ordinary child reads. If it exhausts the
+/// prefix on a packet-capable window, restart in document order. Refresh the
+/// application roots as a wide first level can evict their provider handles.
+enum WindowQueryReads {
+    Children,
+    Packet,
+    Probe { remaining: usize },
+    Deferred,
+}
+
+impl WindowQueryReads {
+    fn new(batch: bool, probe: bool) -> Self {
+        if probe {
+            Self::Probe { remaining: 4 }
+        } else if batch {
+            Self::Packet
+        } else {
+            Self::Children
+        }
+    }
+
+    fn children(
+        &mut self,
+        walk: &CanonicalWalk<'_>,
+        parent: Option<&ElementData>,
+        properties: &QueryProperties,
+    ) -> Result<Vec<ElementData>> {
+        let Some(parent) = parent else {
+            return walk.provider.get_children(None);
+        };
+        if is_synthetic_handle(parent.handle) {
+            let windows = walk.provider.get_children(Some(parent))?;
+            // Qt benefits from switching after a short probe. WPF text-field
+            // reads are faster when they finish the original child walk.
+            if matches!(self, Self::Probe { .. }) && !windows.iter().all(qt_window) {
+                *self = Self::Children;
+            }
+            return Ok(windows);
+        }
+        let batch = match self {
+            Self::Probe { remaining: 0 } | Self::Deferred => {
+                *self = Self::Deferred;
+                return Ok(Vec::new());
+            }
+            Self::Probe { remaining } => {
+                *remaining -= 1;
+                false
+            }
+            Self::Children => false,
+            Self::Packet => true,
+        };
+        walk.provider
+            .query_children(parent, properties, walk, batch)
+    }
+
+    fn resume_with_packets(&mut self) -> bool {
+        if matches!(self, Self::Deferred) {
+            *self = Self::Packet;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn qt_window(window: &ElementData) -> bool {
+    window
+        .raw
+        .get("uia_framework_id")
+        .and_then(|value| value.as_str())
+        == Some("Qt")
+}
+
+fn packet_framework(window: &ElementData) -> bool {
+    matches!(
+        window
+            .raw
+            .get("uia_framework_id")
+            .and_then(|value| value.as_str()),
+        Some("Qt" | "WPF")
+    )
+}
+
 /// The hash only ranks legal plans; it never selects any elements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QueryFingerprint {
@@ -3808,6 +3907,10 @@ fn history_key(query: Query<'_>, root: u64, depth: Option<u32>) -> Option<QueryF
         role.hash(&mut hash);
         match segment.simple.filters.as_slice() {
             [] if depth.is_none() => {}
+            [filter] if depth.is_none() && filter.attr == "enabled" => {
+                filter.attr.hash(&mut hash);
+                (std::mem::discriminant(&filter.op), &filter.value).hash(&mut hash);
+            }
             [filter] if query.group.clauses.len() == 1 && filter.attr == "name" => {
                 toolkit = "WPF";
                 (std::mem::discriminant(&filter.op), &filter.value).hash(&mut hash);
@@ -3854,7 +3957,12 @@ impl QueryCosts {
 fn uia_query_plan(query: Query<'_>, application_root: bool) -> ExecutionPlan {
     let can_project = application_root
         && query.covered_by(
-            |attr| matches!(attr, "name" | "role" | "class_name" | "control_type_id"),
+            |attr| {
+                matches!(
+                    attr,
+                    "name" | "role" | "class_name" | "control_type_id" | "enabled"
+                )
+            },
             query.output == QueryOutput::Count,
         );
     plan_query(query, can_project.then_some(ReadStrategy::Projected))
@@ -5600,7 +5708,7 @@ impl Provider for WindowsProvider {
     ) -> Result<usize> {
         uia_gate("count_elements_group")?;
         group.validate()?;
-        // State, geometry, raw-property and compound selectors need the full
+        // Unprojected state, geometry, raw properties and compound selectors need the full
         // existing resolver; role/name-only selectors need no action payload.
         // HWND-rooted searches use the native subtree resolver's root and
         // identity ordering. Keep that contract until it has a projected
@@ -5617,16 +5725,32 @@ impl Provider for WindowsProvider {
                 .len());
         }
         let _dpi = crate::dpi::DpiScope::enter()?;
-        let request = create_property_request(&self.automation, QUERY_PROPERTIES)?;
-        let walk = CanonicalWalk::new(self);
-        let batch = limit.is_none() && max_depth.is_none();
-        xa11y_core::selector::count_elements_in_tree_group(
-            |parent| walk.canonicalize(self.count_children(parent, &request, &walk, batch)?),
-            Some(root),
-            group,
-            limit,
-            max_depth,
-        )
+        let request = QueryProperties::new(&self.automation, group)?;
+        let probe = limit == Some(1)
+            && max_depth.is_none()
+            && group
+                .clauses
+                .iter()
+                .all(|clause| clause.segments[0].simple.nth.is_none());
+        let mut reads = std::cell::RefCell::new(WindowQueryReads::new(
+            limit.is_none() && max_depth.is_none(),
+            probe,
+        ));
+        loop {
+            let walk = CanonicalWalk::new(self);
+            let count = xa11y_core::selector::count_elements_in_tree_group(
+                |parent| walk.canonicalize(reads.borrow_mut().children(&walk, parent, &request)?),
+                Some(root),
+                group,
+                limit,
+                max_depth,
+            )?;
+            // An existential hit is sufficient even if an earlier subtree
+            // was deferred. A miss needs the rest of the window.
+            if count != 0 || !reads.get_mut().resume_with_packets() {
+                return Ok(count);
+            }
+        }
     }
 
     fn find_elements_group(
@@ -5661,12 +5785,9 @@ impl Provider for WindowsProvider {
             .filter(|key| key.toolkit == "Qt")
             .map(|_| self.get_children(Some(root)))
             .transpose()?;
-        let qt_windows = windows.as_ref().is_some_and(|roots| {
-            !roots.is_empty()
-                && roots
-                    .iter()
-                    .all(|w| w.raw.get("uia_framework_id").and_then(|v| v.as_str()) == Some("Qt"))
-        });
+        let qt_windows = windows
+            .as_ref()
+            .is_some_and(|roots| !roots.is_empty() && roots.iter().all(qt_window));
         let history = history.filter(|key| key.toolkit != "Qt" || qt_windows);
         let windows = std::cell::Cell::new(windows);
         let take_windows = |parent: Option<&ElementData>| {
@@ -5697,18 +5818,28 @@ impl Provider for WindowsProvider {
                 // Every traversal and returned snapshot is fresh. Hydration reads
                 // ancestry explicitly so minimized hosts and scroll clipping
                 // retain the full walk's actionability semantics.
-                let request = create_property_request(&self.automation, QUERY_PROPERTIES)?;
+                let request = QueryProperties::new(&self.automation, group)?;
+                let named_first = limit == Some(1)
+                    && max_depth.is_none()
+                    && group.clauses.iter().all(|clause| {
+                        clause.segments[0].simple.filters.iter().any(|f| {
+                            f.attr == "name" && matches!(f.op, xa11y_core::selector::MatchOp::Exact)
+                        })
+                    });
+                let mut reads = std::cell::RefCell::new(WindowQueryReads::new(
+                    limit.is_none() && max_depth.is_none(),
+                    named_first,
+                ));
                 let mut walk_limit = limit;
                 loop {
                     let walk = CanonicalWalk::new(self);
                     let complete = std::cell::RefCell::new(HashSet::new());
                     let references = std::cell::RefCell::new(HashMap::new());
-                    let batch = limit.is_none() && max_depth.is_none();
                     let matches = xa11y_core::selector::find_elements_in_tree_group(
                         |parent| {
                             let children = match take_windows(parent) {
                                 Some(roots) => roots,
-                                None => self.count_children(parent, &request, &walk, batch)?,
+                                None => reads.borrow_mut().children(&walk, parent, &request)?,
                             };
                             let children = walk.canonicalize(children)?;
                             // A sparse unique query can visit more than the
@@ -5742,6 +5873,10 @@ impl Provider for WindowsProvider {
                         walk_limit,
                         max_depth,
                     )?;
+                    // A match following a deferred branch might not be first.
+                    if reads.get_mut().resume_with_packets() {
+                        continue;
+                    }
                     // On a cold role list the packet supplies the actual density.
                     // For a dense window the full walk costs less than fetching
                     // a new rich snapshot and ancestry for almost every node.
@@ -7453,9 +7588,7 @@ fn get_actions(
     let is_focusable = unsafe { element.CachedIsKeyboardFocusable() }
         .unwrap_or(BOOL(0))
         .as_bool();
-    let is_enabled = unsafe { element.CachedIsEnabled() }
-        .unwrap_or(BOOL(1))
-        .as_bool();
+    let is_enabled = cached_enabled(element);
     if is_focusable && is_enabled {
         actions.push("focus".to_string());
     }
@@ -7545,6 +7678,12 @@ fn hidden_reason(
     }
 }
 
+fn cached_enabled(element: &IUIAutomationElement) -> bool {
+    unsafe { element.CachedIsEnabled() }
+        .unwrap_or(BOOL(1))
+        .as_bool()
+}
+
 /// Parse UIA element properties into xa11y StateSet using pre-queried patterns.
 #[allow(non_upper_case_globals)]
 fn parse_states(
@@ -7555,9 +7694,7 @@ fn parse_states(
     hidden_by_ancestor: Option<HiddenReason>,
 ) -> Result<StateSet> {
     let role = site.role;
-    let enabled = unsafe { element.CachedIsEnabled() }
-        .unwrap_or(BOOL(1))
-        .as_bool();
+    let enabled = cached_enabled(element);
     let offscreen = unsafe { element.CachedIsOffscreen() }
         .unwrap_or(BOOL(0))
         .as_bool();
@@ -11311,7 +11448,7 @@ mod tests {
             (r#"[class_name="Edit"]"#, ReadStrategy::Projected),
             (r#"[control_type_id="50000"]"#, ReadStrategy::Projected),
             ("window button", ReadStrategy::ResolveElements),
-            (r#"button[enabled="true"]"#, ReadStrategy::ResolveElements),
+            (r#"button[enabled="true"]"#, ReadStrategy::Projected),
             (r#"button[visible="false"]"#, ReadStrategy::ResolveElements),
             (r#"[value="hello"]"#, ReadStrategy::ResolveElements),
             (r#"[stable_id="button"]"#, ReadStrategy::ResolveElements),

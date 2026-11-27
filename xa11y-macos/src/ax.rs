@@ -4178,9 +4178,9 @@ fn matches_ax(ax: AXUIElementRef, simple: &SimpleSelector) -> bool {
 /// resolve without building a full `ElementData`. Any selector filter whose
 /// attr is *not* in this list forces a fall-through to `build_snapshot_data`
 /// combined with `xa11y_core::selector::matches_simple`, so normalized state
-/// attrs (`enabled`, `checked`, `focused`, …) and raw platform-attr map keys
+/// attrs (`checked`, `focused`, …) and raw platform-attr map keys
 /// still match correctly.
-const FAST_PATH_ATTRS: &[&str] = &["role", "name", "value", "description"];
+const FAST_PATH_ATTRS: &[&str] = &["role", "name", "value", "description", "enabled"];
 
 /// Like `matches_ax` but accepts a pre-resolved role to avoid redundant AX
 /// API calls and the owning pid needed to resolve process-scoped state.
@@ -4194,7 +4194,7 @@ fn matches_ax_with_role(
 ) -> bool {
     // If any filter targets an attr the fast path can't resolve, fall through
     // to a full snapshot + canonical core matcher. This keeps selectors like
-    // `[enabled="true"]`, `[checked="on"]`, `[focused="true"]` (and raw AX
+    // `[checked="on"]`, `[focused="true"]` (and raw AX
     // platform keys) correct.
     if simple
         .filters
@@ -4233,6 +4233,7 @@ fn matches_ax_with_role(
                 name.get_or_init(|| derived_ax_name(ax, Some(role))).clone()
             }
             "value" => ax_value_string(ax),
+            "enabled" => Some(ax_bool(ax, "AXEnabled").unwrap_or(true).to_string()),
             "description" => {
                 let description = ax_string(ax, "AXDescription");
                 let name = accessible_name(
@@ -8989,7 +8990,7 @@ mod tests {
 
     #[test]
     fn matches_ax_non_fast_path_attr_takes_full_fallback() {
-        // Filters on normalized state attributes (`enabled`, `checked`,
+        // Filters on normalized state attributes (`checked`,
         // `focused`, …) aren't in FAST_PATH_ATTRS. The fast path must bail
         // out to the full-snapshot matcher rather than silently returning
         // `None` from the filter-value switch (which would make every
@@ -8997,7 +8998,7 @@ mod tests {
         // a null AXUIElementRef the fallback should return `false` without
         // panicking.
         use xa11y_core::selector::{AttrFilter, MatchOp, SimpleSelector};
-        for attr in ["enabled", "checked", "focused", "selected"] {
+        for attr in ["checked", "focused", "selected"] {
             let simple = SimpleSelector {
                 role: None,
                 filters: vec![AttrFilter {
