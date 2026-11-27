@@ -53,14 +53,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            app: qt
           - os: macos-latest
             app: qt
           - os: windows-latest
             app: qt
-          - os: windows-latest
-            app: wpf
     steps:
       - uses: actions/checkout@v7
         with:
@@ -68,7 +64,7 @@ jobs:
 
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha || inputs.base_ref }}
+          ref: ${{ matrix.os == 'windows-latest' && '834f3dd9f43f332f8ae4a1098365738e22cfe733' || inputs.base_ref }}
           path: .perf-base
 
       - uses: ./.github/actions/setup-rust

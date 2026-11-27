@@ -1329,7 +1329,14 @@ fn captured_ax_role(data: &ElementData, ax: &AXElement) -> Result<String> {
 
 /// A child from [`MacOSProvider::listed_children`], with the role strings the
 /// listing read.
+fn selects_enabled(clauses: &[&SimpleSelector]) -> bool {
+    clauses
+        .iter()
+        .any(|simple| simple.filters.iter().any(|f| f.attr == "enabled"))
+}
+
 struct ListedChild {
+    enabled: Option<bool>,
     ax: AXElement,
     role: String,
     subrole: Option<String>,
@@ -4171,7 +4178,7 @@ fn matches_ax(ax: AXUIElementRef, simple: &SimpleSelector) -> bool {
     let raw_role = ax_string(ax, "AXRole").unwrap_or_default();
     let subrole = ax_string(ax, "AXSubrole");
     let role = map_ax_role(&raw_role, subrole.as_deref());
-    matches_ax_with_role(ax, simple, role, &raw_role, &OnceCell::new(), None)
+    matches_ax_with_role(ax, simple, role, &raw_role, &OnceCell::new(), None, None)
 }
 
 /// Attributes the lightweight `matches_ax_with_role` fast path knows how to
@@ -4190,6 +4197,7 @@ fn matches_ax_with_role(
     role: Role,
     raw_role: &str,
     name: &OnceCell<Option<String>>,
+    enabled: Option<bool>,
     pid: Option<u32>,
 ) -> bool {
     // If any filter targets an attr the fast path can't resolve, fall through
@@ -4233,7 +4241,11 @@ fn matches_ax_with_role(
                 name.get_or_init(|| derived_ax_name(ax, Some(role))).clone()
             }
             "value" => ax_value_string(ax),
-            "enabled" => Some(ax_bool(ax, "AXEnabled").unwrap_or(true).to_string()),
+            "enabled" => Some(
+                enabled
+                    .unwrap_or_else(|| ax_bool(ax, "AXEnabled").unwrap_or(true))
+                    .to_string(),
+            ),
             "description" => {
                 let description = ax_string(ax, "AXDescription");
                 let name = accessible_name(
@@ -5149,6 +5161,7 @@ impl MacOSProvider {
         parent_role: Role,
         parent_ax_role: &str,
         parent_name: Option<&str>,
+        enabled: bool,
     ) -> Result<Vec<ListedChild>> {
         let children = match parent_role {
             Role::Application => app_top_level_children(parent.as_ptr())?,
@@ -5157,14 +5170,26 @@ impl MacOSProvider {
         let listed: Vec<Option<ListedChild>> = children
             .into_par_iter()
             .map(carry_deadline(|ax: AXElement| {
-                let (role, subrole) = BatchAttrs::fetch_named(ax.as_ptr(), ["AXRole", "AXSubrole"])
-                    .and_then(|batch| Some((batch.string(0)?, batch.string(1))))
-                    .unwrap_or_else(|| {
-                        (
-                            ax_string(ax.as_ptr(), "AXRole").unwrap_or_default(),
-                            ax_string(ax.as_ptr(), "AXSubrole"),
-                        )
-                    });
+                let fields = if enabled {
+                    BatchAttrs::fetch_named(ax.as_ptr(), ["AXRole", "AXSubrole", "AXEnabled"])
+                        .and_then(|b| {
+                            Some((
+                                b.string(0)?,
+                                b.string(1),
+                                Some(b.boolean(2).unwrap_or(true)),
+                            ))
+                        })
+                } else {
+                    BatchAttrs::fetch_named(ax.as_ptr(), ["AXRole", "AXSubrole"])
+                        .and_then(|b| Some((b.string(0)?, b.string(1), None)))
+                };
+                let (role, subrole, enabled) = fields.unwrap_or_else(|| {
+                    (
+                        ax_string(ax.as_ptr(), "AXRole").unwrap_or_default(),
+                        ax_string(ax.as_ptr(), "AXSubrole"),
+                        None,
+                    )
+                });
                 let chrome = Self::should_filter_child_with_role(
                     parent_role,
                     parent_name,
@@ -5172,7 +5197,12 @@ impl MacOSProvider {
                     subrole.as_deref(),
                     &ax,
                 );
-                (!chrome).then_some(ListedChild { ax, role, subrole })
+                (!chrome).then_some(ListedChild {
+                    ax,
+                    role,
+                    subrole,
+                    enabled,
+                })
             }))
             .collect();
         let listed: Vec<ListedChild> = listed.into_iter().flatten().collect();
@@ -5229,7 +5259,13 @@ impl MacOSProvider {
             return Ok(vec![]);
         }
 
-        let children = Self::listed_children(parent, parent_role, parent_ax_role, parent_name)?;
+        let children = Self::listed_children(
+            parent,
+            parent_role,
+            parent_ax_role,
+            parent_name,
+            selects_enabled(clauses),
+        )?;
 
         // Process children in parallel: check each clause + recurse.
         let per_child_results: Vec<Vec<(usize, AXElement)>> = children
@@ -5247,6 +5283,7 @@ impl MacOSProvider {
                         child_role,
                         &listed.role,
                         &name,
+                        listed.enabled,
                         pid,
                     ) {
                         child_results.push((idx, child.clone()));
@@ -5300,11 +5337,19 @@ impl MacOSProvider {
         accept: &impl Fn(&AXElement) -> Result<Option<T>>,
     ) -> Result<Option<T>> {
         let (ax, role, raw_role, name) = parent;
-        for child in Self::listed_children(ax, role, raw_role, name)? {
+        for child in Self::listed_children(ax, role, raw_role, name, selects_enabled(clauses))? {
             let role = map_ax_role(&child.role, child.subrole.as_deref());
             let name = OnceCell::new();
             if clauses.iter().any(|simple| {
-                matches_ax_with_role(child.ax.as_ptr(), simple, role, &child.role, &name, pid)
+                matches_ax_with_role(
+                    child.ax.as_ptr(),
+                    simple,
+                    role,
+                    &child.role,
+                    &name,
+                    child.enabled,
+                    pid,
+                )
             }) {
                 if let Some(hit) = accept(&child.ax)? {
                     return Ok(Some(hit));
@@ -5946,6 +5991,7 @@ impl Provider for MacOSProvider {
                     element_data.role,
                     &captured_ax_role(element_data, &ax)?,
                     element_data.name.as_deref(),
+                    false,
                 )?
                 .into_iter()
                 .map(|child| child.ax)
