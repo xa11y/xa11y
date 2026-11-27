@@ -71,11 +71,22 @@ def test_locator_queries(app, measure):
     missing = app.locator('button[name="missing benchmark button"]')
     measure("exact name", ok.element, lambda node: node.name == "OK")
     measure("exists miss", missing.exists, lambda found: found is False)
+    if platform.system() == "Windows":
+        measure("early named button exists", ok.exists, lambda found: found is True)
+        measure("late named button exists", app.locator('button[name="Open Dialog"]').exists,
+                lambda found: found is True)
     measure("first button", buttons.first().element, lambda node: node.role == "button")
     measure("count buttons", buttons.count, lambda count: count >= 3)
     measure("list buttons", buttons.elements, lambda nodes: len(nodes) >= 3)
-    measure("state filter", app.locator('button[enabled="true"]').elements,
-            lambda nodes: any(node.name == "OK" for node in nodes))
+    all_buttons = buttons.elements()
+    for enabled in (True, False):
+        expected = [node for node in all_buttons if node.enabled == enabled]
+        filtered = app.locator(f'button[enabled="{str(enabled).lower()}"]')
+        measure("state filter" if enabled else "disabled buttons", filtered.elements,
+                lambda nodes: len(nodes) == len(expected)
+                and all(node.enabled == enabled and node.same_as(want)
+                        for node, want in zip(nodes, expected)))
+        assert filtered.count() == len(expected)
     measure("descendant selector", app.locator('[name="Buttons"] button[name="OK"]').element,
             lambda node: node.name == "OK")
     measure("selector union", app.locator('button[name="OK"], button[name="Cancel"]').elements,
@@ -167,9 +178,15 @@ def test_dialog_latency(app, measure):
     opener = app.locator('button[name="Open Dialog"]')
     closer = app.locator('button[name="Close Dialog"]')
 
+    phases = []
     def open_dialog():
+        start = time.perf_counter()
         opener.press()
-        return closer.wait_visible(timeout=5.0)
+        pressed = time.perf_counter()
+        node = closer.wait_visible(timeout=5.0)
+        phases.append((round(1000 * (pressed - start), 1),
+                       round(1000 * (time.perf_counter() - pressed), 1)))
+        return node
 
     def close_dialog():
         closer.press()
@@ -177,6 +194,7 @@ def test_dialog_latency(app, measure):
 
     measure("press to visible dialog control", open_dialog,
             lambda node: node.name == "Close Dialog", close_dialog)
+    print("Ordinary dialog samples (press ms, wait visible ms)", phases)
 
 
 @pytest.mark.skipif(platform.system() != "Windows", reason="UIA root deduplication benchmark")
@@ -227,3 +245,52 @@ def test_dialog_latency_with_subscription(app, measure):
 
         measure("press to visible dialog control with existing subscription", open_dialog,
                 lambda node: node.name == "Close Dialog", close_dialog)
+
+@pytest.mark.skipif(platform.system() not in ("Windows", "Darwin") or not os.getenv("XA11Y_PERF_JSONL"),
+                    reason="native dialog notification experiment on desktop benchmark runners")
+def test_native_dialog_wakeup(app, measure):
+    opener = app.locator('button[name="Open Dialog"]')
+    closer = app.locator('button[name="Close Dialog"]')
+    phases = []
+
+    def close_dialog():
+        closer.press()
+        closer.wait_hidden(timeout=5.0)
+
+    with app.subscribe(kinds=["window_opened"], buffer=16) as sub:
+        def open_dialog():
+            while sub.try_recv() is not None:
+                pass
+            start = time.perf_counter()
+            wall = time.time()
+            opener.press()
+            pressed = time.perf_counter()
+            deadline = start + 5.0
+            checks = 0
+            event = None
+            while True:
+                checks += 1
+                # One fresh lookup, using wait_visible's first-match semantics.
+                observed = []
+                def observe(node):
+                    observed.append(node)
+                    return True
+                closer.wait_until(observe, timeout=0.0)
+                node = observed[0]
+                if node is not None and node.visible:
+                    if event is None:
+                        event = sub.try_recv()
+                    event_ms = None if event is None else round(1000 * (event.time - wall), 1)
+                    phases.append((round(1000 * (pressed - start), 1),
+                                   round(1000 * (time.perf_counter() - pressed), 1), checks, event_ms))
+                    return node
+                remaining = deadline - time.perf_counter()
+                assert remaining > 0, "dialog control did not become visible"
+                try:
+                    event = sub.recv(timeout=min(remaining, 0.1))
+                except xa11y.TimeoutError:
+                    pass
+
+        measure("press to visible with native wakeup", open_dialog,
+                lambda node: node.name == "Close Dialog", close_dialog)
+    print("Dialog samples (press ms, post-press ms, lookups, native event ms since press started)", phases)

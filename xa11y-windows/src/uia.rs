@@ -1363,7 +1363,7 @@ impl WindowsProvider {
     fn count_children(
         &self,
         parent: Option<&ElementData>,
-        request: &IUIAutomationCacheRequest,
+        properties: &QueryProperties,
         walk: &CanonicalWalk<'_>,
         batch_window: bool,
     ) -> Result<Vec<ElementData>> {
@@ -1390,7 +1390,7 @@ impl WindowsProvider {
             )
             && cached_own_hwnd(&element)?.is_some()
         {
-            let tree = uia_call(|| unsafe { request.Clone() })?;
+            let tree = uia_call(|| unsafe { properties.request.Clone() })?;
             let view = uia_call(|| unsafe { self.automation.ControlViewCondition() })?;
             uia_call(|| unsafe {
                 tree.SetTreeFilter(&view)?;
@@ -1419,7 +1419,7 @@ impl WindowsProvider {
                 }
             }
         } else {
-            self.uia_children_requested(&element, request)
+            self.uia_children_requested(&element, &properties.request)
                 .map_err(|error| stale_if_gone(parent, error))?
         };
         let mut out = Vec::with_capacity(children.len());
@@ -1432,6 +1432,9 @@ impl WindowsProvider {
                     .filter(|value| !value.is_empty());
                 let mut data = ElementData::for_role(metadata.role);
                 data.name = xa11y_core::text::strip_bidi_opt(name);
+                if properties.enabled {
+                    data.states.enabled = cached_enabled(&child);
+                }
                 data.pid = parent.pid;
                 data.handle = if from_subtree {
                     Self::next_handle()
@@ -3779,6 +3782,28 @@ const QUERY_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_NamePropertyId,
 ];
 
+struct QueryProperties {
+    request: IUIAutomationCacheRequest,
+    enabled: bool,
+}
+
+impl QueryProperties {
+    fn new(automation: &IUIAutomation, group: &xa11y_core::SelectorGroup) -> Result<Self> {
+        let request = create_property_request(automation, QUERY_PROPERTIES)?;
+        let enabled = group.clauses.iter().any(|clause| {
+            clause.segments[0]
+                .simple
+                .filters
+                .iter()
+                .any(|filter| filter.attr == "enabled")
+        });
+        if enabled {
+            uia_call(|| unsafe { request.AddProperty(UIA_IsEnabledPropertyId) })?;
+        }
+        Ok(Self { request, enabled })
+    }
+}
+
 /// The hash only ranks legal plans; it never selects any elements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QueryFingerprint {
@@ -3808,6 +3833,10 @@ fn history_key(query: Query<'_>, root: u64, depth: Option<u32>) -> Option<QueryF
         role.hash(&mut hash);
         match segment.simple.filters.as_slice() {
             [] if depth.is_none() => {}
+            [filter] if depth.is_none() && filter.attr == "enabled" => {
+                filter.attr.hash(&mut hash);
+                (std::mem::discriminant(&filter.op), &filter.value).hash(&mut hash);
+            }
             [filter] if query.group.clauses.len() == 1 && filter.attr == "name" => {
                 toolkit = "WPF";
                 (std::mem::discriminant(&filter.op), &filter.value).hash(&mut hash);
@@ -3854,7 +3883,12 @@ impl QueryCosts {
 fn uia_query_plan(query: Query<'_>, application_root: bool) -> ExecutionPlan {
     let can_project = application_root
         && query.covered_by(
-            |attr| matches!(attr, "name" | "role" | "class_name" | "control_type_id"),
+            |attr| {
+                matches!(
+                    attr,
+                    "name" | "role" | "class_name" | "control_type_id" | "enabled"
+                )
+            },
             query.output == QueryOutput::Count,
         );
     plan_query(query, can_project.then_some(ReadStrategy::Projected))
@@ -5600,7 +5634,7 @@ impl Provider for WindowsProvider {
     ) -> Result<usize> {
         uia_gate("count_elements_group")?;
         group.validate()?;
-        // State, geometry, raw-property and compound selectors need the full
+        // Unprojected state, geometry, raw properties and compound selectors need the full
         // existing resolver; role/name-only selectors need no action payload.
         // HWND-rooted searches use the native subtree resolver's root and
         // identity ordering. Keep that contract until it has a projected
@@ -5617,8 +5651,58 @@ impl Provider for WindowsProvider {
                 .len());
         }
         let _dpi = crate::dpi::DpiScope::enter()?;
-        let request = create_property_request(&self.automation, QUERY_PROPERTIES)?;
+        let request = QueryProperties::new(&self.automation, group)?;
         let walk = CanonicalWalk::new(self);
+        // A short prefix preserves the cheap early hit of exists(). On a Qt
+        // or WPF window a late hit or miss is cheaper in one metadata packet.
+        // Only an existential query can return a hit from a partial walk.
+        if limit == Some(1)
+            && max_depth.is_none()
+            && group
+                .clauses
+                .iter()
+                .all(|clause| clause.segments[0].simple.nth.is_none())
+        {
+            let windows = self.get_children(Some(root))?;
+            let eligible = !windows.is_empty()
+                && windows.iter().all(|window| {
+                    matches!(
+                        window
+                            .raw
+                            .get("uia_framework_id")
+                            .and_then(|value| value.as_str()),
+                        Some("Qt" | "WPF")
+                    )
+                });
+            let reads = std::cell::Cell::new(0);
+            let exhausted = std::cell::Cell::new(false);
+            let count = |walk: &CanonicalWalk<'_>, probe: bool| {
+                xa11y_core::selector::count_elements_in_tree_group(
+                    |parent| {
+                        if parent.is_some_and(|p| p.handle == root.handle) {
+                            return walk.canonicalize(windows.clone());
+                        }
+                        if eligible && probe {
+                            if reads.get() == 4 {
+                                exhausted.set(true);
+                                return Ok(Vec::new());
+                            }
+                            reads.set(reads.get() + 1);
+                        }
+                        walk.canonicalize(self.count_children(parent, &request, walk, !probe)?)
+                    },
+                    Some(root),
+                    group,
+                    limit,
+                    max_depth,
+                )
+            };
+            let first = count(&walk, true)?;
+            if first != 0 || !exhausted.get() {
+                return Ok(first);
+            }
+            return count(&CanonicalWalk::new(self), false);
+        }
         let batch = limit.is_none() && max_depth.is_none();
         xa11y_core::selector::count_elements_in_tree_group(
             |parent| walk.canonicalize(self.count_children(parent, &request, &walk, batch)?),
@@ -5697,7 +5781,7 @@ impl Provider for WindowsProvider {
                 // Every traversal and returned snapshot is fresh. Hydration reads
                 // ancestry explicitly so minimized hosts and scroll clipping
                 // retain the full walk's actionability semantics.
-                let request = create_property_request(&self.automation, QUERY_PROPERTIES)?;
+                let request = QueryProperties::new(&self.automation, group)?;
                 let mut walk_limit = limit;
                 loop {
                     let walk = CanonicalWalk::new(self);
@@ -7453,9 +7537,7 @@ fn get_actions(
     let is_focusable = unsafe { element.CachedIsKeyboardFocusable() }
         .unwrap_or(BOOL(0))
         .as_bool();
-    let is_enabled = unsafe { element.CachedIsEnabled() }
-        .unwrap_or(BOOL(1))
-        .as_bool();
+    let is_enabled = cached_enabled(element);
     if is_focusable && is_enabled {
         actions.push("focus".to_string());
     }
@@ -7545,6 +7627,12 @@ fn hidden_reason(
     }
 }
 
+fn cached_enabled(element: &IUIAutomationElement) -> bool {
+    unsafe { element.CachedIsEnabled() }
+        .unwrap_or(BOOL(1))
+        .as_bool()
+}
+
 /// Parse UIA element properties into xa11y StateSet using pre-queried patterns.
 #[allow(non_upper_case_globals)]
 fn parse_states(
@@ -7555,9 +7643,7 @@ fn parse_states(
     hidden_by_ancestor: Option<HiddenReason>,
 ) -> Result<StateSet> {
     let role = site.role;
-    let enabled = unsafe { element.CachedIsEnabled() }
-        .unwrap_or(BOOL(1))
-        .as_bool();
+    let enabled = cached_enabled(element);
     let offscreen = unsafe { element.CachedIsOffscreen() }
         .unwrap_or(BOOL(0))
         .as_bool();
@@ -11311,7 +11397,7 @@ mod tests {
             (r#"[class_name="Edit"]"#, ReadStrategy::Projected),
             (r#"[control_type_id="50000"]"#, ReadStrategy::Projected),
             ("window button", ReadStrategy::ResolveElements),
-            (r#"button[enabled="true"]"#, ReadStrategy::ResolveElements),
+            (r#"button[enabled="true"]"#, ReadStrategy::Projected),
             (r#"button[visible="false"]"#, ReadStrategy::ResolveElements),
             (r#"[value="hello"]"#, ReadStrategy::ResolveElements),
             (r#"[stable_id="button"]"#, ReadStrategy::ResolveElements),
