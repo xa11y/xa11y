@@ -1,0 +1,193 @@
+fixture,selector,operation,matches,strategy,samples,median_ms
+Chromium,"[name=""OK""]",count,1,current,9,73.092
+Chromium,"[name=""OK""]",count,1,native,9,9.1
+Chromium,"[name=""OK""]",count,1,native_depth,9,10.259
+Chromium,"[name=""OK""]",count,1,prefetch_walk,9,26.39
+Chromium,button,count,46,current,9,52.547
+Chromium,button,count,46,native,9,0.527
+Chromium,button,count,46,native_depth,9,2.566
+Chromium,button,count,46,prefetch_walk,9,17.687
+Chromium,button,exists,1,current,9,7.075
+Chromium,button,exists,1,native,9,0.246
+Chromium,button,exists,1,native_depth,9,0.907
+Chromium,button,exists,1,prefetch_walk,9,18.655
+Chromium,"button, check_box",count,47,current,9,60.415
+Chromium,"button, check_box",count,47,native,9,0.4
+Chromium,"button, check_box",count,47,native_depth,9,2.579
+Chromium,"button, check_box",count,47,prefetch_walk,9,24.002
+Chromium,"button[enabled=""true""]",count,17,current,9,64.986
+Chromium,"button[enabled=""true""]",count,17,native,9,1.077
+Chromium,"button[enabled=""true""]",count,17,native_depth,9,2.192
+Chromium,"button[enabled=""true""]",count,17,prefetch_walk,9,21.055
+Chromium,"button[name=""OK""]",count,1,current,9,62.822
+Chromium,"button[name=""OK""]",count,1,native,9,1.375
+Chromium,"button[name=""OK""]",count,1,native_depth,9,2.603
+Chromium,"button[name=""OK""]",count,1,prefetch_walk,9,19.325
+Chromium,"button[name=""missing benchmark button""]",count,0,current,9,53.434
+Chromium,"button[name=""missing benchmark button""]",count,0,native,9,1.371
+Chromium,"button[name=""missing benchmark button""]",count,0,native_depth,9,1.209
+Chromium,"button[name=""missing benchmark button""]",count,0,prefetch_walk,9,19.572
+Chromium,check_box,count,1,current,9,50.409
+Chromium,check_box,count,1,native,9,0.468
+Chromium,check_box,count,1,native_depth,9,1.961
+Chromium,check_box,count,1,prefetch_walk,9,21.498
+collection-host,"[name=""Embedded button""]",count,1,current,3,5.18
+collection-host,"[name=""Embedded button""]",count,1,prefetch_walk,3,1.084
+collection-host,button,count,2,current,3,3.79
+collection-host,button,count,2,prefetch_walk,3,0.956
+collection-host,button,exists,1,current,3,2.572
+collection-host,button,exists,1,prefetch_walk,3,1.006
+collection-host,"button, check_box",count,2,current,3,3.592
+collection-host,"button, check_box",count,2,prefetch_walk,3,0.942
+collection-host,"button[enabled=""true""]",count,2,current,3,3.861
+collection-host,"button[enabled=""true""]",count,2,prefetch_walk,3,1.095
+collection-host,"button[name=""Embedded button""]",count,1,current,3,3.71
+collection-host,"button[name=""Embedded button""]",count,1,prefetch_walk,3,1.043
+collection-host,"button[name=""missing benchmark button""]",count,0,current,3,3.785
+collection-host,"button[name=""missing benchmark button""]",count,0,prefetch_walk,3,1.085
+collection-host,check_box,count,0,current,3,3.739
+collection-host,check_box,count,0,prefetch_walk,3,0.949
+collection-mutation,"[name=""Deep control""]",count,0,current,9,41.053
+collection-mutation,"[name=""Deep control""]",count,0,prefetch_walk,9,5.73
+collection-mutation,button,count,6,current,9,28.396
+collection-mutation,button,count,6,prefetch_walk,9,4.898
+collection-mutation,button,exists,1,current,9,6.588
+collection-mutation,button,exists,1,prefetch_walk,9,4.126
+collection-mutation,"button, check_box",count,7,current,9,24.982
+collection-mutation,"button, check_box",count,7,prefetch_walk,9,4.221
+collection-mutation,"button[enabled=""true""]",count,6,current,9,22.634
+collection-mutation,"button[enabled=""true""]",count,6,prefetch_walk,9,5.203
+collection-mutation,"button[name=""Deep control""]",count,0,current,9,25.071
+collection-mutation,"button[name=""Deep control""]",count,0,prefetch_walk,9,5.778
+collection-mutation,"button[name=""missing benchmark button""]",count,0,current,9,27.686
+collection-mutation,"button[name=""missing benchmark button""]",count,0,prefetch_walk,9,5.863
+collection-mutation,check_box,count,1,current,9,25.33
+collection-mutation,check_box,count,1,prefetch_walk,9,4.029
+python3,"[name=""OK""]",count,2,current,9,31.957
+python3,"[name=""OK""]",count,2,prefetch_walk,9,18.87
+python3,button,count,8,current,9,22.505
+python3,button,count,8,prefetch_walk,9,9.848
+python3,button,exists,1,current,9,8.122
+python3,button,exists,1,prefetch_walk,9,10.633
+python3,"button, check_box",count,11,current,9,22.781
+python3,"button, check_box",count,11,prefetch_walk,9,10.457
+python3,"button[enabled=""true""]",count,7,current,9,25.935
+python3,"button[enabled=""true""]",count,7,prefetch_walk,9,13.353
+python3,"button[name=""OK""]",count,1,current,9,25.529
+python3,"button[name=""OK""]",count,1,prefetch_walk,9,13.74
+python3,"button[name=""missing benchmark button""]",count,0,current,9,25.645
+python3,"button[name=""missing benchmark button""]",count,0,prefetch_walk,9,14.055
+python3,check_box,count,3,current,9,23.998
+python3,check_box,count,3,prefetch_walk,9,11.287
+xa11y-512-button-probe,"[name=""Button 511""]",count,1,current,9,110.668
+xa11y-512-button-probe,"[name=""Button 511""]",count,1,native,9,15.01
+xa11y-512-button-probe,"[name=""Button 511""]",count,1,native_depth,9,15.309
+xa11y-512-button-probe,"[name=""Button 511""]",count,1,prefetch_walk,9,39.021
+xa11y-512-button-probe,button,count,512,current,9,74.619
+xa11y-512-button-probe,button,count,512,native,9,2.47
+xa11y-512-button-probe,button,count,512,native_depth,9,16.857
+xa11y-512-button-probe,button,count,512,prefetch_walk,9,30.404
+xa11y-512-button-probe,button,exists,1,current,9,3.995
+xa11y-512-button-probe,button,exists,1,native,9,0.349
+xa11y-512-button-probe,button,exists,1,native_depth,9,0.933
+xa11y-512-button-probe,button,exists,1,prefetch_walk,9,30.916
+xa11y-512-button-probe,"button, check_box",count,512,current,9,76.539
+xa11y-512-button-probe,"button, check_box",count,512,native,9,2.474
+xa11y-512-button-probe,"button, check_box",count,512,native_depth,9,16.654
+xa11y-512-button-probe,"button, check_box",count,512,prefetch_walk,9,33.722
+xa11y-512-button-probe,"button[enabled=""true""]",count,512,current,9,109.537
+xa11y-512-button-probe,"button[enabled=""true""]",count,512,native,9,2.466
+xa11y-512-button-probe,"button[enabled=""true""]",count,512,native_depth,9,13.59
+xa11y-512-button-probe,"button[enabled=""true""]",count,512,prefetch_walk,9,36.405
+xa11y-512-button-probe,"button[name=""Button 511""]",count,1,current,9,108.987
+xa11y-512-button-probe,"button[name=""Button 511""]",count,1,native,9,15.193
+xa11y-512-button-probe,"button[name=""Button 511""]",count,1,native_depth,9,16.167
+xa11y-512-button-probe,"button[name=""Button 511""]",count,1,prefetch_walk,9,43.123
+xa11y-512-button-probe,"button[name=""missing benchmark button""]",count,0,current,9,107.391
+xa11y-512-button-probe,"button[name=""missing benchmark button""]",count,0,native,9,14.113
+xa11y-512-button-probe,"button[name=""missing benchmark button""]",count,0,native_depth,9,14.177
+xa11y-512-button-probe,"button[name=""missing benchmark button""]",count,0,prefetch_walk,9,40.452
+xa11y-512-button-probe,check_box,count,0,current,9,78.609
+xa11y-512-button-probe,check_box,count,0,native,9,1.621
+xa11y-512-button-probe,check_box,count,0,native_depth,9,1.558
+xa11y-512-button-probe,check_box,count,0,prefetch_walk,9,31.38
+xa11y-qt-test-app,"[name=""OK""]",count,1,current,9,36.31
+xa11y-qt-test-app,"[name=""OK""]",count,1,native,9,4.807
+xa11y-qt-test-app,"[name=""OK""]",count,1,native_depth,9,6.088
+xa11y-qt-test-app,"[name=""OK""]",count,1,prefetch_walk,9,11.937
+xa11y-qt-test-app,button,count,16,current,9,24.251
+xa11y-qt-test-app,button,count,16,native,9,0.476
+xa11y-qt-test-app,button,count,16,native_depth,9,2.219
+xa11y-qt-test-app,button,count,16,prefetch_walk,9,9.883
+xa11y-qt-test-app,button,exists,1,current,9,9.237
+xa11y-qt-test-app,button,exists,1,native,9,0.359
+xa11y-qt-test-app,button,exists,1,native_depth,9,0.958
+xa11y-qt-test-app,button,exists,1,prefetch_walk,9,8.768
+xa11y-qt-test-app,"button, check_box",count,19,current,9,23.646
+xa11y-qt-test-app,"button, check_box",count,19,native,9,0.489
+xa11y-qt-test-app,"button, check_box",count,19,native_depth,9,2.294
+xa11y-qt-test-app,"button, check_box",count,19,prefetch_walk,9,9.052
+xa11y-qt-test-app,"button[enabled=""true""]",count,13,current,9,26.707
+xa11y-qt-test-app,"button[enabled=""true""]",count,13,native,9,0.515
+xa11y-qt-test-app,"button[enabled=""true""]",count,13,native_depth,9,2.055
+xa11y-qt-test-app,"button[enabled=""true""]",count,13,prefetch_walk,9,12.084
+xa11y-qt-test-app,"button[name=""OK""]",count,1,current,9,31.533
+xa11y-qt-test-app,"button[name=""OK""]",count,1,native,9,1.095
+xa11y-qt-test-app,"button[name=""OK""]",count,1,native_depth,9,2.296
+xa11y-qt-test-app,"button[name=""OK""]",count,1,prefetch_walk,9,12.316
+xa11y-qt-test-app,"button[name=""missing benchmark button""]",count,0,current,9,26.733
+xa11y-qt-test-app,"button[name=""missing benchmark button""]",count,0,native,9,1.039
+xa11y-qt-test-app,"button[name=""missing benchmark button""]",count,0,native_depth,9,0.97
+xa11y-qt-test-app,"button[name=""missing benchmark button""]",count,0,prefetch_walk,9,12.425
+xa11y-qt-test-app,check_box,count,3,current,9,25.497
+xa11y-qt-test-app,check_box,count,3,native,9,0.405
+xa11y-qt-test-app,check_box,count,3,native_depth,9,1.321
+xa11y-qt-test-app,check_box,count,3,prefetch_walk,9,9.82
+xa11y-rich-fixture,"[name=""OK""]",count,0,current,9,9.533
+xa11y-rich-fixture,"[name=""OK""]",count,0,native,9,1.135
+xa11y-rich-fixture,"[name=""OK""]",count,0,native_depth,9,1.056
+xa11y-rich-fixture,"[name=""OK""]",count,0,prefetch_walk,9,2.795
+xa11y-rich-fixture,button,count,1,current,9,7.875
+xa11y-rich-fixture,button,count,1,native,9,0.182
+xa11y-rich-fixture,button,count,1,native_depth,9,0.553
+xa11y-rich-fixture,button,count,1,prefetch_walk,9,1.641
+xa11y-rich-fixture,button,exists,1,current,9,7.532
+xa11y-rich-fixture,button,exists,1,native,9,0.225
+xa11y-rich-fixture,button,exists,1,native_depth,9,0.665
+xa11y-rich-fixture,button,exists,1,prefetch_walk,9,2.106
+xa11y-rich-fixture,"button, check_box",count,1,current,9,7.86
+xa11y-rich-fixture,"button, check_box",count,1,native,9,0.218
+xa11y-rich-fixture,"button, check_box",count,1,native_depth,9,0.688
+xa11y-rich-fixture,"button, check_box",count,1,prefetch_walk,9,2.072
+xa11y-rich-fixture,"button[enabled=""true""]",count,1,current,9,7.601
+xa11y-rich-fixture,"button[enabled=""true""]",count,1,native,9,0.229
+xa11y-rich-fixture,"button[enabled=""true""]",count,1,native_depth,9,0.705
+xa11y-rich-fixture,"button[enabled=""true""]",count,1,prefetch_walk,9,2.73
+xa11y-rich-fixture,"button[name=""OK""]",count,0,current,9,8.178
+xa11y-rich-fixture,"button[name=""OK""]",count,0,native,9,0.397
+xa11y-rich-fixture,"button[name=""OK""]",count,0,native_depth,9,0.32
+xa11y-rich-fixture,"button[name=""OK""]",count,0,prefetch_walk,9,2.83
+xa11y-rich-fixture,"button[name=""missing benchmark button""]",count,0,current,9,8.241
+xa11y-rich-fixture,"button[name=""missing benchmark button""]",count,0,native,9,0.464
+xa11y-rich-fixture,"button[name=""missing benchmark button""]",count,0,native_depth,9,0.354
+xa11y-rich-fixture,"button[name=""missing benchmark button""]",count,0,prefetch_walk,9,2.793
+xa11y-rich-fixture,check_box,count,0,current,9,7.952
+xa11y-rich-fixture,check_box,count,0,native,9,0.166
+xa11y-rich-fixture,check_box,count,0,native_depth,9,0.141
+xa11y-rich-fixture,check_box,count,0,prefetch_walk,9,1.566
+xa11y-test-app,"[name=""OK""]",count,0,current,9,60.88
+xa11y-test-app,"[name=""OK""]",count,0,prefetch_walk,9,36.698
+xa11y-test-app,button,count,13,current,9,46.895
+xa11y-test-app,button,count,13,prefetch_walk,9,27.212
+xa11y-test-app,button,exists,1,current,9,19.243
+xa11y-test-app,button,exists,1,prefetch_walk,9,27.659
+xa11y-test-app,"button, check_box",count,14,current,9,46.74
+xa11y-test-app,"button, check_box",count,14,prefetch_walk,9,27.628
+xa11y-test-app,"button[enabled=""true""]",count,12,current,9,45.972
+xa11y-test-app,"button[enabled=""true""]",count,12,prefetch_walk,9,39.951
+xa11y-test-app,"button[name=""OK""]",count,0,current,9,46.515
+xa11y-test-app,"button[name=""OK""]",count,0,prefetch_walk,9,43.324
+xa11y-test-app,"button[name=""missing benchmark button""]",count,0,current,9,50.474
+xa11y-test-app,"button[name=""missing benchmark button""]",count,0,prefetch_walk,9,43.779
+xa11y-test-app,check_box,count,1,current,9,46.506
+xa11y-test-app,check_box,count,1,prefetch_walk,9,27.363
