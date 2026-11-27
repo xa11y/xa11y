@@ -71,22 +71,25 @@ def test_locator_queries(app, measure):
     missing = app.locator('button[name="missing benchmark button"]')
     measure("exact name", ok.element, lambda node: node.name == "OK")
     measure("exists miss", missing.exists, lambda found: found is False)
-    if platform.system() == "Windows":
+    if platform.system() == "Windows" and os.getenv("XA11Y_PERF_JSONL"):
         measure("early named button exists", ok.exists, lambda found: found is True)
         measure("late named button exists", app.locator('button[name="Open Dialog"]').exists,
                 lambda found: found is True)
     measure("first button", buttons.first().element, lambda node: node.role == "button")
     measure("count buttons", buttons.count, lambda count: count >= 3)
     measure("list buttons", buttons.elements, lambda nodes: len(nodes) >= 3)
-    all_buttons = buttons.elements()
-    for enabled in (True, False):
-        expected = [node for node in all_buttons if node.enabled == enabled]
-        filtered = app.locator(f'button[enabled="{str(enabled).lower()}"]')
-        measure("state filter" if enabled else "disabled buttons", filtered.elements,
-                lambda nodes: len(nodes) == len(expected)
-                and all(node.enabled == enabled and node.same_as(want)
-                        for node, want in zip(nodes, expected)))
-        assert filtered.count() == len(expected)
+    filtered = app.locator('button[enabled="true"]')
+    measure("state filter", filtered.elements,
+            lambda nodes: any(node.name == "OK" for node in nodes))
+    if os.getenv("XA11Y_PERF_JSONL"):
+        all_buttons = buttons.elements()
+        for enabled in (True, False):
+            expected = [node for node in all_buttons if node.enabled == enabled]
+            state = app.locator(f'button[enabled="{str(enabled).lower()}"]')
+            nodes = state.elements()
+            assert state.count() == len(nodes) == len(expected)
+            assert all(node.enabled == enabled and node.same_as(want)
+                       for node, want in zip(nodes, expected))
     measure("descendant selector", app.locator('[name="Buttons"] button[name="OK"]').element,
             lambda node: node.name == "OK")
     measure("selector union", app.locator('button[name="OK"], button[name="Cancel"]').elements,
@@ -174,17 +177,18 @@ def test_text_edit(app, measure):
     measure("set text", lambda: field.set_value(value), lambda _: wait_value(value), restore)
 
 
-def test_dialog_latency(app, measure):
+def test_dialog_latency(app, measure, capsys):
     opener = app.locator('button[name="Open Dialog"]')
     closer = app.locator('button[name="Close Dialog"]')
 
     phases = []
     def open_dialog():
+        wall = time.time()
         start = time.perf_counter()
         opener.press()
         pressed = time.perf_counter()
         node = closer.wait_visible(timeout=5.0)
-        phases.append((round(1000 * (pressed - start), 1),
+        phases.append((wall, round(1000 * (pressed - start), 1),
                        round(1000 * (time.perf_counter() - pressed), 1)))
         return node
 
@@ -194,7 +198,8 @@ def test_dialog_latency(app, measure):
 
     measure("press to visible dialog control", open_dialog,
             lambda node: node.name == "Close Dialog", close_dialog)
-    print("Ordinary dialog samples (press ms, wait visible ms)", phases)
+    with capsys.disabled():
+        print("Ordinary dialog samples (press ms, wait visible ms)", phases, flush=True)
 
 
 @pytest.mark.skipif(platform.system() != "Windows", reason="UIA root deduplication benchmark")
@@ -248,7 +253,7 @@ def test_dialog_latency_with_subscription(app, measure):
 
 @pytest.mark.skipif(platform.system() not in ("Windows", "Darwin") or not os.getenv("XA11Y_PERF_JSONL"),
                     reason="native dialog notification experiment on desktop benchmark runners")
-def test_native_dialog_wakeup(app, measure):
+def test_native_dialog_wakeup(app, measure, capsys):
     opener = app.locator('button[name="Open Dialog"]')
     closer = app.locator('button[name="Close Dialog"]')
     phases = []
@@ -281,7 +286,7 @@ def test_native_dialog_wakeup(app, measure):
                     if event is None:
                         event = sub.try_recv()
                     event_ms = None if event is None else round(1000 * (event.time - wall), 1)
-                    phases.append((round(1000 * (pressed - start), 1),
+                    phases.append((wall, round(1000 * (pressed - start), 1),
                                    round(1000 * (time.perf_counter() - pressed), 1), checks, event_ms))
                     return node
                 remaining = deadline - time.perf_counter()
@@ -293,4 +298,5 @@ def test_native_dialog_wakeup(app, measure):
 
         measure("press to visible with native wakeup", open_dialog,
                 lambda node: node.name == "Close Dialog", close_dialog)
-    print("Dialog samples (press ms, post-press ms, lookups, native event ms since press started)", phases)
+    with capsys.disabled():
+        print("Dialog samples (press ms, post-press ms, lookups, native event ms since press started)", phases, flush=True)

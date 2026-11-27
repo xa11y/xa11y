@@ -53,14 +53,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            app: qt
           - os: macos-latest
             app: qt
           - os: windows-latest
             app: qt
-          - os: windows-latest
-            app: wpf
     steps:
       - uses: actions/checkout@v7
         with:

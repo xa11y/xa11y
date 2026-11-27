@@ -10,6 +10,8 @@ The optional --pid-file writes the PID so the test harness can kill it.
 from __future__ import annotations
 
 import argparse
+import os
+import time
 import sys
 
 from PySide6.QtCore import QPoint, Qt, QTimer
@@ -424,8 +426,12 @@ class TestWindow(QMainWindow):
         parent_layout.addWidget(grp)
 
     def _open_sample_dialog(self) -> None:
-        if not hasattr(self, "_sample_dialog"):
+        received = time.time()
+        fresh = os.getenv("XA11Y_FRESH_DIALOG") == "1"
+        if fresh or not hasattr(self, "_sample_dialog"):
             dlg = QDialog(self)
+            if fresh:
+                dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             dlg.setWindowTitle("Sample Dialog")
             dlg.setAccessibleName("Sample Dialog")
             layout = QVBoxLayout(dlg)
@@ -436,6 +442,10 @@ class TestWindow(QMainWindow):
             self._sample_dialog = dlg
         self._sample_dialog.show()
         self._sample_dialog.raise_()
+        if trace := os.getenv("XA11Y_DIALOG_TRACE"):
+            shown = time.time()
+            with open(trace, "a") as stream:
+                print(received, shown, file=stream)
 
 
     def _add_rich(self, parent_layout: QVBoxLayout) -> None:

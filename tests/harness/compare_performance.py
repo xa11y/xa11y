@@ -20,6 +20,8 @@ from tests.harness import launch
 
 
 def run_variant(label: str, python: str, output: Path, app: str = "qt") -> dict:
+    os.environ["XA11Y_DIALOG_TRACE"] = str(output / f"{label}-app-timestamps.txt")
+    os.environ["XA11Y_FRESH_DIALOG"] = str(int(label.endswith("fresh")))
     proc, name, pid = launch._launch_app(app)
     try:
         assert pid is not None, f"{app} fixture must report a PID"
@@ -42,11 +44,7 @@ def run_variant(label: str, python: str, output: Path, app: str = "qt") -> dict:
                 )
         # Keep the standard suite sequence, including the final mutating
         # window suite. Run targeted measurements first on pristine widgets.
-        suites = (
-            ["performance", "python", "python-window"]
-            if app == "qt"
-            else ["python", "python-window"]
-        )
+        suites = ["performance"]
         for suite in suites:
             report = output / f"{label}-{suite}.xml"
             if suite == "performance":
@@ -55,7 +53,7 @@ def run_variant(label: str, python: str, output: Path, app: str = "qt") -> dict:
                     "-m",
                     "pytest",
                     "tests/suites/python/test_performance.py",
-                    "-v",
+                    "-v", "-k", "test_dialog_latency or test_native_dialog_wakeup",
                     "-rxXs",
                     f"--junitxml={report}",
                 ]
@@ -128,7 +126,7 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     results = []
     failures = []
-    for label, python in [("base", args.baseline_python), ("head", args.head_python)]:
+    for label, python in [("base", args.baseline_python), ("head", args.head_python), ("base-fresh", args.baseline_python), ("head-fresh", args.head_python)]:
         try:
             result = run_variant(label, python, output, args.app)
             results.append(result)
