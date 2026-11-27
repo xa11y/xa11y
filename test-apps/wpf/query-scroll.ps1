@@ -30,4 +30,8 @@ $last.Add_Click({
 })
 $scroll.Content = $list
 $window.Content = $scroll
+$window.Add_ContentRendered({
+    [Console]::WriteLine('ready')
+    [Console]::Out.Flush()
+})
 [void]$window.ShowDialog()

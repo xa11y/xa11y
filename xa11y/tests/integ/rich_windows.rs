@@ -321,8 +321,10 @@ fn windows_rich_button_refuses_text() {
 #[test]
 #[ignore]
 fn wpf_repeated_queries_observe_scroll_reparenting_and_removal() {
+    use std::io::{BufRead, BufReader};
     use std::os::windows::process::CommandExt;
-    use std::process::{Child, Command};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc;
 
     struct Fixture(Child);
     impl Drop for Fixture {
@@ -335,15 +337,35 @@ fn wpf_repeated_queries_observe_scroll_reparenting_and_removal() {
 
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-apps/wpf/query-scroll.ps1");
-    let child = Fixture(
+    let mut child = Fixture(
         Command::new("powershell.exe")
             .args(["-NoProfile", "-STA", "-File"])
             .arg(script)
+            .stdout(Stdio::piped())
             .creation_flags(0x08000000) // CREATE_NO_WINDOW for the console host
             .spawn()
             .expect("launch WPF scrolling fixture"),
     );
     let timeout = Duration::from_secs(10);
+    // Wait until WPF pumps its dispatcher before asking UIA to connect.
+    // The UIA connection timeout can expire before the App::by_pid deadline.
+    let stdout = child.0.stdout.take().expect("fixture stdout is piped");
+    let (ready_tx, ready_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let ready = BufReader::new(stdout).read_line(&mut line);
+        // The test may have timed out and dropped its receiver.
+        let _ = ready_tx.send(ready.map(|_| line));
+    });
+    let ready = ready_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("WPF fixture did not report readiness")
+        .expect("read WPF fixture readiness");
+    assert_eq!(
+        ready.trim(),
+        "ready",
+        "WPF fixture exited or sent unexpected output"
+    );
     let app = App::by_pid(child.0.id(), timeout).expect("attach to WPF");
     let first = app.locator("button[name='Probe 0']");
     let last = app.locator("button[name='Probe 31']");
