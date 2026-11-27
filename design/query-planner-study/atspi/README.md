@@ -4,6 +4,12 @@ At xa11y revision `41fb1fc`, the Linux planner evaluates flat selectors
 during a live tree walk. A local D-Bus experiment compared that path with
 `Collection.GetMatches` and a batched walk on the same live applications.
 
+The production Linux planner now requests a bounded wildcard collection for
+exhaustive searches at the default depth. It pipelines child lists, roles and
+requested names for the returned addresses, then resolves the selector through
+the normal child-link walk. Each resolution owns its reads. Early exits,
+deadline-bound operations and scopes without Collection use the live walk.
+
 ## How much of a query fits
 
 | Query | Shortest candidate plan | Work left in xa11y |
@@ -112,35 +118,12 @@ work for virtualized trees, the real selector matcher, and diagnostics on the
 reachable path. The fixture walker deliberately exercises only the role codes
 and exact nonempty names in its benchmark cases.
 
-## Reproduce
+## Reproduction and production coverage
 
-Use an AT-SPI-enabled Linux session with the release binding built from the
-revision above. Install dbus-fast in the probe interpreter. For the synthetic
-Qt fixtures, install PySide6. For the embedded fixture, use an X11 session
-and a Python interpreter with GTK 3 PyGObject. Start the fixture and run the
-probe from another terminal on the same accessibility bus.
+The historical benchmark driver and synthetic wide Qt form are archived with
+the original study. The Linux integration harness now exercises the production
+planner against a GTK host with a foreign embedded button, an unrelated window
+in the embedded process, and a control beyond the logical depth limit. Run
+`cargo xtask test-integ` to exercise these cases.
 
-```sh
-python qt_fixture.py
-python probe.py xa11y-512-button-probe --name "Button 511" > wide.csv
-```
-
-```sh
-python qt_fixture.py --deep
-python probe.py xa11y-deep-probe --name Deep --walk-only > deep.csv
-```
-
-```sh
-# Start the host, then the plug after the host has written the socket ID.
-python3 gtk_embed.py host /tmp/xa11y-collection.xid
-python3 gtk_embed.py plug /tmp/xa11y-collection.xid
-python probe.py collection-host --name "Embedded button" --walk-only > embed.csv
-```
-
-Running the deep or embedded test without `--walk-only` makes the probe
-report the raw strategy's identity mismatch. The packaged medians also
-cover the repository's Qt, GTK 3 rich, GTK 4 and AccessKit fixtures, plus
-Chromium with renderer accessibility enabled on the Electron fixture HTML
-served over localhost.
-
-[AT-SPI Collection wire specification](https://github.com/GNOME/at-spi2-core/blob/main/xml/Collection.xml) · [xa11y Linux executor at the measured revision](https://github.com/xa11y/xa11y/blob/41fb1fc688e6053aeb631eb596bc53ad5271295a/xa11y-linux/src/atspi.rs#L3029) · [Per-fixture medians](medians.csv)
+[Original probe and fixtures](https://github.com/xa11y/xa11y/tree/8a19740a35783ace0e23be7b3a76381fba6b6cef/design/query-planner-study/atspi) · [Per-fixture study medians](medians.csv)

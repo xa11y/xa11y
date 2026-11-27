@@ -21,6 +21,8 @@ use zbus::DBusError;
 use crate::window::{ActiveWindow, WindowManager};
 
 mod bounded;
+mod collection;
+use collection::QueryPrefetch;
 #[cfg(test)]
 mod bus_daemon_tests;
 mod rich;
@@ -107,10 +109,19 @@ struct Gtk4Geometry {
 const GTK4_TOPLEVEL_CACHE_LIMIT: usize = 4096;
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AccessibleRef {
     pub(crate) bus_name: String,
     pub(crate) path: String,
+}
+
+impl From<(String, zbus::zvariant::OwnedObjectPath)> for AccessibleRef {
+    fn from((bus_name, path): (String, zbus::zvariant::OwnedObjectPath)) -> Self {
+        Self {
+            bus_name,
+            path: path.to_string(),
+        }
+    }
 }
 
 impl AccessibleRef {
@@ -147,6 +158,7 @@ struct QuerySnapshot {
 }
 
 struct QueryWalk<'a> {
+    prefetch: QueryPrefetch,
     clauses: &'a [&'a SimpleSelector],
     max_depth: u32,
     limit: Option<usize>,
@@ -164,6 +176,7 @@ struct QueryWalk<'a> {
 /// (issue #465 for Text/Value; GTK TreeView cell renderers for Component).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Interfaces {
+    collection: bool,
     pub(crate) component: bool,
     pub(crate) text: bool,
     pub(crate) value: bool,
@@ -177,6 +190,7 @@ impl Interfaces {
     pub(crate) fn from_names<S: AsRef<str>>(names: &[S]) -> Self {
         let has = |iface: &str| names.iter().any(|n| n.as_ref() == iface);
         Self {
+            collection: has("org.a11y.atspi.Collection"),
             component: has("org.a11y.atspi.Component"),
             text: has("org.a11y.atspi.Text"),
             value: has("org.a11y.atspi.Value"),
@@ -750,13 +764,7 @@ impl LinuxProvider {
                 Error::platform(-1, format!("GetChildren deserialize failed: {}", e))
             })?;
         Ok(Some(
-            children
-                .into_iter()
-                .map(|(bus_name, path)| AccessibleRef {
-                    bus_name,
-                    path: path.to_string(),
-                })
-                .collect(),
+            children.into_iter().map(AccessibleRef::from).collect(),
         ))
     }
 
@@ -851,13 +859,7 @@ impl LinuxProvider {
             reply.body().deserialize().map_err(|e| {
                 Error::platform(-1, format!("GetChildren deserialize failed: {}", e))
             })?;
-        Ok(children
-            .into_iter()
-            .map(|(bus_name, path)| AccessibleRef {
-                bus_name,
-                path: path.to_string(),
-            })
-            .collect())
+        Ok(children.into_iter().map(AccessibleRef::from).collect())
     }
 
     /// Read a live subtree, distinguishing a destroyed object from an empty
@@ -3041,7 +3043,8 @@ impl LinuxProvider {
             .map(|c| &c.segments[0].simple)
             .collect();
         let start = self.get_cached(root.handle)?;
-        let walk = QueryWalk {
+        let mut walk = QueryWalk {
+            prefetch: QueryPrefetch::default(),
             clauses: &clauses,
             max_depth,
             limit: first_stage_limit,
@@ -3054,6 +3057,7 @@ impl LinuxProvider {
                 .into_iter()
                 .collect());
         }
+        walk.prefetch = self.query_prefetch(&start, &walk);
         let hits = self.collect_matching_refs_group(&start, 0, &walk)?;
         let mut positions = vec![0; clauses.len()];
         let mut seen = HashSet::new();
@@ -3158,6 +3162,7 @@ impl LinuxProvider {
         &self,
         child: AccessibleRef,
         registry: bool,
+        prefetch: &QueryPrefetch,
         mut visit: impl FnMut(AccessibleRef, Option<u32>) -> Result<Option<T>>,
     ) -> Result<Option<T>> {
         if child.is_null() {
@@ -3166,14 +3171,19 @@ impl LinuxProvider {
         let role = if registry {
             None
         } else {
-            self.get_role_number(&child).ok()
+            prefetch.role(self, &child)
         };
         if role != Some(ATSPI_ROLE_APPLICATION) {
             return visit(child, role);
         }
-        for grandchild in self.get_atspi_children(&child).unwrap_or_default() {
+        // As in the live walk, a nested application with unreadable children
+        // contributes no grandchildren.
+        let Ok(Some(grandchildren)) = prefetch.children(self, &child) else {
+            return Ok(None);
+        };
+        for grandchild in grandchildren {
             if !grandchild.is_null() {
-                let role = self.get_role_number(&grandchild).ok();
+                let role = prefetch.role(self, &grandchild);
                 if role != Some(ATSPI_ROLE_APPLICATION) {
                     if let Some(hit) = visit(grandchild, role)? {
                         return Ok(Some(hit));
@@ -3201,31 +3211,36 @@ impl LinuxProvider {
         let registry = parent.bus_name == "org.a11y.atspi.Registry";
         let saw_child = std::sync::atomic::AtomicBool::new(false);
         let search = |child: &AccessibleRef| {
-            self.visit_query_child(child.clone(), registry, |child, role_number| {
-                saw_child.store(true, Ordering::Relaxed);
-                let mut reads = QueryReads {
-                    role_number,
-                    ..Default::default()
-                };
-                if walk
-                    .clauses
-                    .iter()
-                    .any(|simple| self.matches_ref(&child, simple, walk.pid, &mut reads))
-                {
-                    return Ok(Some(QueryMatch {
-                        aref: child,
-                        role_number: reads.role_number,
-                        snapshot: reads.snapshot.filter(|snapshot| {
-                            walk.output == QueryOutput::Elements
-                                && handle_is_reusable(snapshot.data.role)
-                        }),
-                    }));
-                }
-                match self.first_query_match(&child, depth + 1, walk) {
-                    hit @ (Ok(_) | Err(Error::AccessibilityNotEnabled { .. })) => hit,
-                    Err(_) => Ok(None),
-                }
-            })
+            self.visit_query_child(
+                child.clone(),
+                registry,
+                &walk.prefetch,
+                |child, role_number| {
+                    saw_child.store(true, Ordering::Relaxed);
+                    let mut reads = QueryReads {
+                        role_number,
+                        ..Default::default()
+                    };
+                    if walk
+                        .clauses
+                        .iter()
+                        .any(|simple| self.matches_ref(&child, simple, walk.pid, &mut reads))
+                    {
+                        return Ok(Some(QueryMatch {
+                            aref: child,
+                            role_number: reads.role_number,
+                            snapshot: reads.snapshot.filter(|snapshot| {
+                                walk.output == QueryOutput::Elements
+                                    && handle_is_reusable(snapshot.data.role)
+                            }),
+                        }));
+                    }
+                    match self.first_query_match(&child, depth + 1, walk) {
+                        hit @ (Ok(_) | Err(Error::AccessibilityNotEnabled { .. })) => hit,
+                        Err(_) => Ok(None),
+                    }
+                },
+            )
         };
         let search_parallel = carry_deadline(|child: &AccessibleRef| search(child).transpose());
         // Selective existence probes often miss. Keep siblings concurrent so a
@@ -3273,13 +3288,13 @@ impl LinuxProvider {
             return Ok(vec![]);
         }
 
-        let Some(children) = self.live_atspi_children(parent)? else {
+        let Some(children) = walk.prefetch.children(self, parent)? else {
             return Ok(Vec::new());
         };
         let registry = parent.bus_name == "org.a11y.atspi.Registry";
         let mut to_search = Vec::new();
         for child in children {
-            self.visit_query_child(child, registry, |child, role| {
+            self.visit_query_child(child, registry, &walk.prefetch, |child, role| {
                 to_search.push((child, role));
                 Ok(None::<()>)
             })?;
@@ -3310,6 +3325,7 @@ impl LinuxProvider {
                     let mut child_results: Vec<(usize, QueryMatch)> = Vec::new();
                     let mut reads = QueryReads {
                         role_number: *number,
+                        name: walk.prefetch.name(child),
                         ..Default::default()
                     };
                     for (idx, simple) in walk.clauses.iter().enumerate() {
@@ -3543,17 +3559,16 @@ impl Provider for LinuxProvider {
             .collect();
         let start_ref = self.get_cached(root.handle)?;
         let pid_from_root = root.pid;
-        let phase1: Vec<(usize, QueryMatch)> = self.collect_matching_refs_group(
-            &start_ref,
-            0,
-            &QueryWalk {
-                clauses: &firsts,
-                max_depth: max_depth_val,
-                limit: plan.first_stage_limit,
-                pid: pid_from_root,
-                output: QueryOutput::Elements,
-            },
-        )?;
+        let mut walk = QueryWalk {
+            prefetch: QueryPrefetch::default(),
+            clauses: &firsts,
+            max_depth: max_depth_val,
+            limit: plan.first_stage_limit,
+            pid: pid_from_root,
+            output: QueryOutput::Elements,
+        };
+        walk.prefetch = self.query_prefetch(&start_ref, &walk);
+        let phase1 = self.collect_matching_refs_group(&start_ref, 0, &walk)?;
 
         // Bucket phase-1 hits by clause so each clause's tail can narrow
         // independently. `walk_pos` preserves the doc-order rank from the
@@ -8322,7 +8337,49 @@ mod tests {
         slider: std::sync::Arc<InterfaceProbes>,
     }
 
+    type TestMatchRule = (
+        Vec<i32>,
+        i32,
+        HashMap<String, String>,
+        i32,
+        Vec<i32>,
+        i32,
+        Vec<String>,
+        i32,
+        bool,
+    );
+
+    struct IncompleteCollection(Arc<AtomicU64>);
+
+    #[zbus::interface(name = "org.a11y.atspi.Collection")]
+    impl IncompleteCollection {
+        fn get_matches(
+            &self,
+            _rule: TestMatchRule,
+            _sort: u32,
+            count: i32,
+            traverse: bool,
+        ) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            assert!(count > 0 && traverse);
+            self.0.fetch_add(1, Ordering::SeqCst);
+            // Reordered and incomplete, including a reference that went stale.
+            ["/slider", "/gone", "/plain"]
+                .into_iter()
+                .map(|path| {
+                    (
+                        "org.test.Ifaces".into(),
+                        path.try_into().expect("valid path"),
+                    )
+                })
+                .collect()
+        }
+    }
+
     fn interface_peer() -> InterfaceFixture {
+        interface_peer_with_collection(None)
+    }
+
+    fn interface_peer_with_collection(collection: Option<Arc<AtomicU64>>) -> InterfaceFixture {
         const ACC: &str = "org.a11y.atspi.Accessible";
         const TEXT: &str = "org.a11y.atspi.Text";
         const VALUE: &str = "org.a11y.atspi.Value";
@@ -8372,11 +8429,20 @@ mod tests {
                             name: "App",
                             role: "application",
                             children: vec!["/plain", "/entry", "/slider"],
-                            interfaces: vec![ACC],
+                            interfaces: if collection.is_some() {
+                                vec![ACC, "org.a11y.atspi.Collection"]
+                            } else {
+                                vec![ACC]
+                            },
                             probes: Default::default(),
                         },
                     )
                     .expect("root interface");
+            if let Some(probes) = collection {
+                builder = builder
+                    .serve_at("/root", IncompleteCollection(probes))
+                    .expect("collection interface");
+            }
             for (path, role, name, interfaces, text, value, probes) in objects {
                 builder = builder
                     .serve_at(
@@ -8430,6 +8496,28 @@ mod tests {
             entry,
             slider,
         }
+    }
+
+    #[test]
+    fn collection_is_only_a_discovery_hint_for_exhaustive_queries() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let fx = interface_peer_with_collection(Some(calls.clone()));
+        let app = xa11y_core::App::from_data(fx.provider.clone(), fx.root.clone());
+        assert!(app.locator("button").exists().unwrap());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "early exit uses the live walk"
+        );
+        let names: Vec<_> = app
+            .locator("*")
+            .elements()
+            .unwrap()
+            .into_iter()
+            .map(|element| element.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["OK", "Entry", "Volume"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     /// Issue #465: atk-bridge answers Text / Value reads on every object and
