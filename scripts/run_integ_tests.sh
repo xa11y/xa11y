@@ -219,7 +219,8 @@ fi
 
 # The host embeds a second accessibility bus peer at a GtkSocket. Its test
 # waits for the plug to attach before checking ordered results.
-"$PANEL_PY" test-apps/collection/embedded.py > target/xa11y-test-collection.log 2>&1 &
+COLLECTION_LOG="target/xa11y-test-collection.log"
+"$PANEL_PY" test-apps/collection/embedded.py > "$COLLECTION_LOG" 2>&1 &
 CLEANUP_PIDS+=($!)
 
 # 5. Launch the test application (run binary directly, not via cargo run,
@@ -246,6 +247,10 @@ else
     cargo test ${CARGO_PROFILE_ARG:+"$CARGO_PROFILE_ARG"} -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 $NOCAPTURE_ARG 2>&1
 fi
 TEST_EXIT=$?
+if [ "$TEST_EXIT" -ne 0 ] && [ -s "$COLLECTION_LOG" ]; then
+    echo "--- $COLLECTION_LOG ---" >&2
+    cat "$COLLECTION_LOG" >&2
+fi
 if [ -z "$TEST_FILTER" ]; then
     # The xa11y-linux X11 window tests start their own isolated Xvfb with no
     # window manager, which the fluxbox display above cannot provide: native
