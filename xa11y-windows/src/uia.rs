@@ -3796,14 +3796,9 @@ impl QueryProperties {
 }
 
 /// A bounded search starts with ordinary child reads. If it exhausts the
-/// prefix on a packet-capable window, retry in document order from the same
-/// application roots. UIA subtree packets must start at an HWND.
-struct WindowQueryReads {
-    mode: WindowReadMode,
-    windows: Option<Vec<ElementData>>,
-}
-
-enum WindowReadMode {
+/// prefix on a packet-capable window, restart in document order. Refresh the
+/// application roots as a wide first level can evict their provider handles.
+enum WindowQueryReads {
     Children,
     Packet,
     Probe { remaining: usize },
@@ -3812,16 +3807,12 @@ enum WindowReadMode {
 
 impl WindowQueryReads {
     fn new(batch: bool, probe: bool) -> Self {
-        let mode = if probe {
-            WindowReadMode::Probe { remaining: 4 }
+        if probe {
+            Self::Probe { remaining: 4 }
         } else if batch {
-            WindowReadMode::Packet
+            Self::Packet
         } else {
-            WindowReadMode::Children
-        };
-        Self {
-            mode,
-            windows: None,
+            Self::Children
         }
     }
 
@@ -3835,38 +3826,31 @@ impl WindowQueryReads {
             return walk.provider.get_children(None);
         };
         if is_synthetic_handle(parent.handle) {
-            if let Some(windows) = self.windows.take() {
-                return Ok(windows);
-            }
             let windows = walk.provider.get_children(Some(parent))?;
-            if matches!(self.mode, WindowReadMode::Probe { .. }) {
-                if !windows.is_empty() && windows.iter().all(packet_framework) {
-                    self.windows = Some(windows.clone());
-                } else {
-                    self.mode = WindowReadMode::Children;
-                }
+            if matches!(self, Self::Probe { .. }) && !windows.iter().all(packet_framework) {
+                *self = Self::Children;
             }
             return Ok(windows);
         }
-        let batch = match &mut self.mode {
-            WindowReadMode::Probe { remaining: 0 } | WindowReadMode::Deferred => {
-                self.mode = WindowReadMode::Deferred;
+        let batch = match self {
+            Self::Probe { remaining: 0 } | Self::Deferred => {
+                *self = Self::Deferred;
                 return Ok(Vec::new());
             }
-            WindowReadMode::Probe { remaining } => {
+            Self::Probe { remaining } => {
                 *remaining -= 1;
                 false
             }
-            WindowReadMode::Children => false,
-            WindowReadMode::Packet => true,
+            Self::Children => false,
+            Self::Packet => true,
         };
         walk.provider
             .query_children(parent, properties, walk, batch)
     }
 
     fn resume_with_packets(&mut self) -> bool {
-        if matches!(self.mode, WindowReadMode::Deferred) {
-            self.mode = WindowReadMode::Packet;
+        if matches!(self, Self::Deferred) {
+            *self = Self::Packet;
             true
         } else {
             false
